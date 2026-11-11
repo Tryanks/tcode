@@ -447,11 +447,11 @@ fn can_swipe(row: &CompactThreadRow, renaming: Option<&ThreadKey>) -> bool {
     renaming != Some(&row.state.thread)
 }
 
-/// The long-press menu's rule for enabling Settle / Unsettle.
+/// What the swipe does: settle unless the host refuses to now.
 fn action(row: &CompactThreadRow) -> Option<DragAction> {
     if row.meta.is_settled() {
         Some(DragAction::Unsettle)
-    } else if row.working || row.state.waiting() {
+    } else if row.state.settle_blocked {
         None
     } else {
         Some(DragAction::Settle)

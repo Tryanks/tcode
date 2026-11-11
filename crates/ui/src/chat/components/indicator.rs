@@ -158,7 +158,7 @@ pub(crate) fn working_indicator(
     let label = crate::tr!("chat.working");
     // A turn whose start is not known has no time to show.
     let timer = started_at.map(|start| {
-        let elapsed = format_elapsed(now_millis().saturating_sub(start));
+        let elapsed = format_elapsed(now_millis(cx).saturating_sub(start));
         // The timer is moved onto the label's baseline.
         let theme = cx.theme();
         let typography = &theme.tokens.typography;

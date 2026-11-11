@@ -55,7 +55,7 @@ struct Line {
 }
 
 impl Line {
-    fn of(link: &ThreadPullRequestLink, watched: &[u64]) -> Self {
+    fn of(link: &ThreadPullRequestLink, watched: &[PullRequestKey]) -> Self {
         let snapshot = link.snapshot.as_ref();
         let open = snapshot.filter(|snapshot| snapshot.state == PullRequestState::Open);
         Self {
@@ -66,7 +66,7 @@ impl Line {
             state: PullRequestBadgeState::of(snapshot),
             checks: open.and_then(|snapshot| snapshot.checks_state),
             review: open.and_then(|snapshot| snapshot.review_decision),
-            watched: watched.contains(&link.key.number),
+            watched: watched.contains(&link.key),
         }
     }
 
@@ -278,4 +278,30 @@ fn glyph(
         ))
         .with_tooltip(move |_, _| Tooltip::new(crate::tr!(word)))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tcode_core::pull_request::{PullRequestSource, PullRequestStackState};
+
+    /// Two repositories can each have a pull request of the same number; a watch on one says
+    /// nothing of the other.
+    #[test]
+    fn a_watch_marks_only_the_pull_request_it_follows() {
+        let link = |repository: &str| ThreadPullRequestLink {
+            key: PullRequestKey::new("example.test", repository, 7),
+            source: PullRequestSource::Manual,
+            url: String::new(),
+            linked_at: None,
+            snapshot: None,
+            stack: PullRequestStackState::Unknown,
+            sync_error: None,
+            watch: None,
+        };
+        let (watched, other) = (link("team/app"), link("team/docs"));
+        let watches = [watched.key.clone()];
+        assert!(Line::of(&watched, &watches).watched);
+        assert!(!Line::of(&other, &watches).watched);
+    }
 }

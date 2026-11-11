@@ -228,9 +228,9 @@ fn decode_summary(raw: &Value) -> Option<Summary> {
                 login,
                 avatar_url: string(&raw["author"], "avatarUrl"),
             }),
-            additions: Some(raw["additions"].as_u64().unwrap_or(0)),
-            deletions: Some(raw["deletions"].as_u64().unwrap_or(0)),
-            changed_files: Some(raw["changedFiles"].as_u64().unwrap_or(0)),
+            additions: raw["additions"].as_u64(),
+            deletions: raw["deletions"].as_u64(),
+            changed_files: raw["changedFiles"].as_u64(),
             review_decision: review_decision(raw),
             checks_state: checks,
             mergeability: match raw["mergeable"].as_str() {
@@ -244,41 +244,11 @@ fn decode_summary(raw: &Value) -> Option<Summary> {
         stack_number: raw.get("stack").map(|stack| stack["number"].as_u64()),
     })
 }
-/// Each of `count` summaries a batched answer holds, alias `s{index}` for the index-th: the pull
-/// request its `data` names, or the errors whose `path` begins at that alias, and any that
-/// name no path. A field under the alias that failed fails the alias: its `null` would read as
-/// an answer. GitHub types an error `NOT_FOUND` for a repository or pull request the
-/// credential cannot see.
+/// Each of `count` summaries a batched answer holds, alias `s{index}` for the index-th.
 fn summaries(response: &Value, count: usize) -> Vec<Result<Summary, GitHubError>> {
-    let errors = response["errors"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    (0..count)
-        .map(|index| {
-            let alias = format!("s{index}");
-            let own: Vec<_> = errors
-                .iter()
-                .filter(|error| {
-                    error.get("path").is_none_or(Value::is_null)
-                        || error["path"][0].as_str() == Some(alias.as_str())
-                })
-                .collect();
-            if own.is_empty() {
-                return decode_summary(&response["data"][&alias]["pullRequest"])
-                    .ok_or(GitHubError::InvalidResponse);
-            }
-            if own.iter().all(|error| error["type"] == "NOT_FOUND") {
-                return Err(GitHubError::NotFound);
-            }
-            Err(GitHubError::Response {
-                status: 200,
-                messages: own
-                    .iter()
-                    .filter_map(|error| error["message"].as_str().map(str::to_owned))
-                    .collect(),
-            })
-        })
+    graphql::aliased(response, "s", count)
+        .into_iter()
+        .map(|data| decode_summary(&data?["pullRequest"]).ok_or(GitHubError::InvalidResponse))
         .collect()
 }
 
@@ -301,9 +271,6 @@ pub(super) fn decode_stack(raw: &Value, repository: &Repository) -> Option<PullR
     Some(PullRequestStack {
         id,
         number,
-        // GitHub's stack has only `url`, its API address, and no page of its own
-        // (REST "Stacks" schema).
-        url: None,
         base,
         layers: layers?,
     })
@@ -480,7 +447,6 @@ mod tests {
         let stack = decode_stack(&stack, &repository).expect("a documented stack");
         assert_eq!((stack.id.as_str(), stack.number), ("4021", 3));
         assert_eq!(stack.base, "main");
-        assert_eq!(stack.url, None, "its url is the API's, no page to open");
         assert_eq!(
             stack
                 .layers

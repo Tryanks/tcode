@@ -60,7 +60,7 @@ impl AppState {
                     })
                     .await;
                 host.enqueue(move |state, cx| state.read_dev_servers(listeners, threads, cx));
-                smol::Timer::after(REFRESH).await;
+                host.clock().timer(REFRESH).await;
             }
         });
     }

@@ -119,7 +119,7 @@ fn a_body_that_holds_the_column_measures_no_row_again(cx: &mut TestAppContext) {
     let (shell, host, cx) = mount_thread_with(cx, turns.collect());
     let store = store_of(&shell, cx);
     resize(cx, 2200.);
-    draw_until(&shell, cx, &host, "chat-composer", None);
+    draw_until(cx, &host, "chat-composer", None);
     crate::test_frames::draw_settled(cx);
     // Rows fill the list: the last drawn says how wide the list is, and how
     // tall the row was measured.
@@ -340,7 +340,7 @@ fn a_docked_page_fills_its_slot_and_keeps_its_size_as_it_slides(cx: &mut TestApp
     store.update(cx, |store, cx| {
         store.toggle_tab_panel_for("thread-1", RightTab::Preview, cx)
     });
-    render_preview_here(&host, &store, "thread-1", cx);
+    render_preview_here(&host, "thread-1", cx);
     draw(cx);
     let mut widths = Vec::new();
     for _ in 0..60 {

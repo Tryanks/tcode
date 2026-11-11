@@ -19,7 +19,7 @@ use crate::thread_index::IndexedLog;
 /// The rules entries are extracted by. A change to them, or to what the fold
 /// settles an entry to show, must change this so every thread is extracted
 /// again.
-const EXTRACTION_VERSION: u32 = 3;
+const EXTRACTION_VERSION: u32 = 6;
 
 /// The kind of entry a search hit comes from, as a filter names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -570,6 +570,7 @@ mod tests {
                     input: json!({"path":"auth.rs"}),
                     output: Some("DO_NOT_INDEX output".into()),
                     status: ItemStatus::Completed,
+                    family: None,
                 },
             )
             .event,
@@ -792,6 +793,7 @@ mod tests {
                     input: json!({"path": "auth.rs"}),
                     output: Some("auth.rs output".into()),
                     status: ItemStatus::Completed,
+                    family: None,
                 },
             )
             .event,

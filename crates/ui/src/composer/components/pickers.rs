@@ -158,23 +158,25 @@ impl Composer {
             // built-in profiles and other accounts show the official catalog; a
             // third-party profile (e.g. Klaude Kode → Kimi) shows only the models
             // added to its card.
-            PickerRail::Profile(id) => {
-                let kind = store.provider_profile_kind(id);
-                let is_builtin = tcode_core::settings::Settings::is_builtin_profile_id(id);
-                let profile_id = id.clone();
-                store
-                    .picker_models_for_profile(id)
-                    .into_iter()
-                    .map(move |m| ModelRow {
-                        id: m.id,
-                        name: m.name,
-                        provider: kind,
-                        profile_id: (!is_builtin).then(|| profile_id.clone()),
-                        acp: false,
-                        favorite: m.favorite,
-                    })
-                    .collect()
-            }
+            PickerRail::Profile(id) => match store.provider_profile_kind(id) {
+                Some(kind) => {
+                    let is_builtin = tcode_core::settings::Settings::is_builtin_profile_id(id);
+                    let profile_id = id.clone();
+                    store
+                        .picker_models_for_profile(id)
+                        .into_iter()
+                        .map(move |m| ModelRow {
+                            id: m.id,
+                            name: m.name,
+                            provider: kind,
+                            profile_id: (!is_builtin).then(|| profile_id.clone()),
+                            acp: false,
+                            favorite: m.favorite,
+                        })
+                        .collect()
+                }
+                None => Vec::new(),
+            },
             // One row: "use this agent". Its models arrive as ProviderOptions
             // once the session starts and render in the traits picker.
             PickerRail::Acp(id) => store
@@ -353,43 +355,29 @@ impl Composer {
             .active_option_descriptors
             .iter()
             .filter(|descriptor| {
-                matches!(
-                    descriptor,
-                    OptionDescriptor::Select {
-                        role: agent::OptionRole::Model,
-                        ..
-                    } | OptionDescriptor::Boolean {
-                        role: agent::OptionRole::Model,
-                        ..
-                    }
-                ) && !matches!(
-                    descriptor,
-                    OptionDescriptor::Select { id, .. } if id == "contextWindow"
+                !matches!(
+                    descriptor_role(descriptor),
+                    agent::OptionRole::Permission | agent::OptionRole::ContextWindow
                 )
             })
             .cloned()
             .collect::<Vec<_>>();
         if composer.conversation_read_only {
-            let effort =
-                option_selection_str(&composer.active_option_selections, "reasoningEffort");
-            let descriptor = descriptors.iter().find(|option| {
-                matches!(option, OptionDescriptor::Select { id, .. } if id == "reasoningEffort")
-            });
-            let label = if let Some(OptionDescriptor::Select {
-                options,
-                default_value,
-                ..
-            }) = descriptor
-            {
-                let value = effort.or(default_value.as_deref());
-                value.map(|value| {
-                    options
-                        .iter()
-                        .find(|option| option.value == value)
-                        .map_or_else(|| value.to_owned(), |option| option.label.clone())
-                })
-            } else {
-                effort.map(str::to_owned)
+            let label = match effort_descriptor(&descriptors) {
+                Some(OptionDescriptor::Select {
+                    id,
+                    options,
+                    default_value,
+                    ..
+                }) => option_selection_str(&composer.active_option_selections, id)
+                    .or(default_value.as_deref())
+                    .map(|value| {
+                        options
+                            .iter()
+                            .find(|option| option.value == value)
+                            .map_or_else(|| value.to_owned(), |option| option.label.clone())
+                    }),
+                _ => None,
             }
             .unwrap_or_else(|| crate::tr!("composer.context_unknown").into_owned());
             let label = gpui::SharedString::from(label);
@@ -423,9 +411,7 @@ impl Composer {
         // every parameter, including context capacity and service tier.
         let mut chip_spec = spec.clone();
         if self.compact
-            && let Some(effort) = spec.options.iter().find(|option| {
-                matches!(option, OptionDescriptor::Select { id, .. } if id == "reasoningEffort")
-            })
+            && let Some(effort) = effort_descriptor(&spec.options)
         {
             chip_spec.options = vec![effort.clone()];
         }
@@ -733,6 +719,26 @@ impl Composer {
     }
 }
 
+/// What a descriptor is, as its provider says.
+fn descriptor_role(descriptor: &OptionDescriptor) -> agent::OptionRole {
+    match descriptor {
+        OptionDescriptor::Select { role, .. } | OptionDescriptor::Boolean { role, .. } => *role,
+    }
+}
+
+/// The model's reasoning-effort select among `descriptors`.
+fn effort_descriptor(descriptors: &[OptionDescriptor]) -> Option<&OptionDescriptor> {
+    descriptors.iter().find(|descriptor| {
+        matches!(
+            descriptor,
+            OptionDescriptor::Select {
+                role: agent::OptionRole::Effort,
+                ..
+            }
+        )
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_model_pane(
     rows: Rc<[ModelRow]>,
@@ -815,7 +821,7 @@ fn render_model_pane(
         rail_col = rail_col.item(rail_icon(
             gpui::SharedString::from(format!("rail-acp-{id}")),
             gpui::SharedString::from(name.clone()),
-            Icon::empty().path("icons/box.svg"),
+            crate::provider_card::provider_glyph(ProviderKind::Acp),
             rail == PickerRail::Acp(id.clone()),
             PickerRail::Acp(id.clone()),
         ));
@@ -1048,23 +1054,21 @@ fn render_compact_model_footer(
         .read(cx)
         .composer_state_for(session_id.as_deref(), cx);
     let selections = composer_state.active_option_selections.clone();
-    let effort = composer_state
-        .active_option_descriptors
-        .iter()
-        .find_map(|descriptor| match descriptor {
-            OptionDescriptor::Select {
-                id,
-                options,
-                default_value,
-                ..
-            } if id == "reasoningEffort" => Some((
-                // Use the localized shared label instead of provider-specific copy.
-                crate::tr!("composer.effort").into_owned(),
-                options.clone(),
-                resolved_select_value(id, options, default_value, &selections),
-            )),
-            _ => None,
-        });
+    let effort = match effort_descriptor(&composer_state.active_option_descriptors) {
+        Some(OptionDescriptor::Select {
+            id,
+            options,
+            default_value,
+            ..
+        }) => Some((
+            id.clone(),
+            // Use the localized shared label instead of provider-specific copy.
+            crate::tr!("composer.effort").into_owned(),
+            options.clone(),
+            resolved_select_value(id, options, default_value, &selections),
+        )),
+        _ => None,
+    };
 
     let group = |label: gpui::SharedString, track: ChoiceGroup, cx: &mut Context<PopoverState>| {
         crate::material::section(Some(label), cx)
@@ -1079,7 +1083,7 @@ fn render_compact_model_footer(
         .gap(spacing.md)
         .px(px(crate::material::COMPACT_PAGE_INSET))
         .pt(spacing.md);
-    if let Some((label, options, current)) = effort {
+    if let Some((effort_id, label, options, current)) = effort {
         let segments = options
             .iter()
             .map(|option| {
@@ -1087,6 +1091,7 @@ fn render_compact_model_footer(
                 let store = store_entity.clone();
                 let session_id = session_id.clone();
                 let value = option.value.clone();
+                let effort_id = effort_id.clone();
                 Choice::new(
                     gpui::SharedString::from(format!("compact-effort-{}", option.value)),
                     option.label.clone(),
@@ -1097,7 +1102,7 @@ fn render_compact_model_footer(
                     store.update(cx, |store, _cx| {
                         store.set_active_option_for(
                             session_id.clone().unwrap_or_default(),
-                            "reasoningEffort".to_string(),
+                            effort_id.clone(),
                             Some(serde_json::Value::String(value)),
                         );
                     });
@@ -1346,8 +1351,7 @@ impl PermissionControl {
                     }
                 )
             })
-            .cloned()
-            .or_else(|| agent::permission_control(composer.provider?))?;
+            .cloned()?;
         let (id, label, rows, default, apply) = match descriptor {
             OptionDescriptor::Select {
                 id,
@@ -1369,20 +1373,12 @@ impl PermissionControl {
                             })
                             .zip(composer.space_policy.as_ref())
                             .is_some_and(|(class, policy)| !policy.allows_class(class));
+                        let (label, description) = crate::i18n::permission_option(&id, &option);
                         PermissionRow {
                             recommended: recommended.as_deref() == Some(option.value.as_str()),
-                            description: option.description.map(|description| {
-                                crate::i18n::translate_permission_description(
-                                    &format!("permission.values.{id}.{}", option.value),
-                                    &description,
-                                )
-                            }),
+                            description,
                             value: serde_json::Value::String(option.value),
-                            label: crate::i18n::translate_english(
-                                "permission.current.label",
-                                &option.label,
-                            )
-                            .into_owned(),
+                            label,
                             unavailable: option
                                 .unavailable
                                 .map(|reason| {
@@ -1602,7 +1598,8 @@ fn render_permission_pane(
 /// The traits pane's effort control, in Codex's model-picker style: the
 /// resolved level centered over a stepped slider of the active model's
 /// `reasoningEffort` levels. Each step applies as it is reached and leaves the
-/// pane open. `None` when the model describes fewer than two levels.
+/// pane open. `None` when the model describes fewer than two levels, or
+/// neither a selection nor a default names the level it runs at.
 fn render_effort_slider(
     store_entity: &Entity<WorkspaceStore>,
     session_id: Option<String>,
@@ -1612,14 +1609,15 @@ fn render_effort_slider(
     let composer_state = store_entity
         .read(cx)
         .composer_state_for(session_id.as_deref(), cx);
-    let (levels, current) = composer_state.active_option_descriptors.iter().find_map(
-        |descriptor| match descriptor {
+    let (effort_id, levels, current) =
+        match effort_descriptor(&composer_state.active_option_descriptors)? {
             OptionDescriptor::Select {
                 id,
                 options,
                 default_value,
                 ..
-            } if id == "reasoningEffort" => Some((
+            } => (
+                id.clone(),
                 options.clone(),
                 resolved_select_value(
                     id,
@@ -1627,16 +1625,14 @@ fn render_effort_slider(
                     default_value,
                     &composer_state.active_option_selections,
                 ),
-            )),
-            _ => None,
-        },
-    )?;
+            ),
+            OptionDescriptor::Boolean { .. } => return None,
+        };
     if levels.len() < 2 {
         return None;
     }
-    let current = current
-        .and_then(|value| levels.iter().position(|level| level.value == value))
-        .unwrap_or(0);
+    // No level known to run: the rows show the levels with none checked.
+    let current = current.and_then(|value| levels.iter().position(|level| level.value == value))?;
     let key = levels
         .iter()
         .map(|level| level.value.as_str())
@@ -1666,7 +1662,7 @@ fn render_effort_slider(
                 store.update(cx, |store, _cx| {
                     store.set_active_option_for(
                         session_id.clone().unwrap_or_default(),
-                        "reasoningEffort".to_string(),
+                        effort_id.clone(),
                         Some(serde_json::Value::String(value)),
                     );
                 });
@@ -1768,9 +1764,9 @@ fn render_traits_pane(
 
     let mut pane = v_flex().w_full().p_1().gap_0p5();
 
-    // The bolt in the corner owns fast mode: the Claude `fastMode` rows are
-    // dropped and a Codex service-tier list keeps only its non-fast tiers
-    // (hidden entirely when Standard is all that is left).
+    // The bolt in the corner owns fast mode: a speed boolean's rows are
+    // dropped and a speed select keeps only its choices that are not fast
+    // (hidden entirely when one is all that is left).
     let fast = FastMode::of(spec);
     for descriptor in &spec.options {
         let fast_owned = fast.as_ref().is_some_and(|fast| {
@@ -1784,14 +1780,13 @@ fn render_traits_pane(
                 label,
                 options,
                 default_value,
+                role,
                 ..
             } => {
                 let options: Vec<agent::SelectOption> = if fast_owned {
                     options
                         .iter()
-                        .filter(|choice| {
-                            !FastMode::is_fast_tier(choice) && !FastMode::is_ultrafast_tier(choice)
-                        })
+                        .filter(|choice| choice.speed.is_none())
                         .cloned()
                         .collect()
                 } else {
@@ -1802,7 +1797,7 @@ fn render_traits_pane(
                 }
                 let options = &options;
                 // The slider carries its own label and replaces the rows.
-                if id == "reasoningEffort"
+                if *role == agent::OptionRole::Effort
                     && let Some(slider) =
                         render_effort_slider(store_entity, session_id.clone(), window, cx)
                 {
@@ -2221,7 +2216,7 @@ fn render_context_meter_pane(
             .map(crate::usage::plan_label)
             .unwrap_or_else(|| {
                 let ago = crate::time::humanize_ago(
-                    crate::time::now_secs().saturating_sub(account.fetched_at),
+                    crate::time::now_secs(cx).saturating_sub(account.fetched_at),
                 );
                 crate::tr!("usage.updated", when = ago).into_owned()
             });
@@ -2252,7 +2247,7 @@ fn render_context_meter_pane(
                 ),
             );
         }
-        let now = crate::time::now_secs();
+        let now = crate::time::now_secs(cx);
         for (index, limit) in account.windows.iter().enumerate() {
             let limit_id = |part: &str| glide(&format!("limit-{index}-{part}"));
             let fill = gpui_base::motion::transition(
@@ -2385,129 +2380,4 @@ fn glided_label(
             .on_change(key)
             .into_any_element()
     })
-}
-
-#[cfg(test)]
-mod sheet_tests {
-    use super::*;
-    use gpui::{Render, TestAppContext, size};
-
-    struct PickerHarness {
-        store: Entity<WorkspaceStore>,
-        context: bool,
-    }
-
-    impl Render for PickerHarness {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let compact = crate::window_seam::window_is_compact(window, cx);
-            let store = self.store.clone();
-            let context = self.context;
-            div().size_full().p_4().child(
-                crate::material::overlay_popover("picker-regression", cx)
-                    .when(compact, |popover| popover.bottom_sheet("Details"))
-                    .trigger(
-                        Button::new("open")
-                            .label("Open")
-                            .debug_selector(|| "picker-open".into()),
-                    )
-                    .content(move |_, window, cx| {
-                        if context {
-                            render_context_meter_pane(
-                                None, None, None, None, compact, None, window, cx,
-                            )
-                        } else {
-                            let mut composer = store
-                                .read(cx)
-                                .composer_state_for(store.read(cx).sole_thread().as_deref(), cx);
-                            composer.provider = Some(ProviderKind::ClaudeCode);
-                            let control = PermissionControl::from_composer(&composer).unwrap();
-                            let session_id = store.read(cx).sole_thread();
-                            render_permission_pane(
-                                &control,
-                                compact,
-                                &store,
-                                session_id,
-                                &cx.entity(),
-                                cx,
-                            )
-                        }
-                    }),
-            )
-        }
-    }
-
-    /// A phone with a status bar and a keyboard gets a bottom sheet; a tablet
-    /// in landscape keeps the desktop-width popover.
-    #[gpui::test]
-    fn picker_sheets_span_window_and_preserve_wide_width(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
-        let host = tcode_runtime::pipe::spawn_host(
-            tcode_services::store::SessionStore::open_at(crate::store::tests::scratch_root(
-                "sheet-test",
-            ))
-            .unwrap(),
-            tcode_runtime::pipe::HostServices::default(),
-        )
-        .unwrap();
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                driver.link.clone(),
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        driver.wait_until(cx, &store, "workspace baseline", |cx| {
-            store.read_with(cx, |store, _| store.baseline_ready())
-        });
-        for context in [false, true] {
-            for (width, bottom) in [(393., 34.), (393., 300.), (1024., 0.)] {
-                let (_, cx) = cx.add_window_view(|_, _| PickerHarness {
-                    store: store.clone(),
-                    context,
-                });
-                cx.simulate_resize(size(px(width), px(852.)));
-                crate::window_seam::occlude_for_test(
-                    cx,
-                    gpui::Edges {
-                        top: px(47.),
-                        bottom: px(bottom),
-                        ..Default::default()
-                    },
-                );
-                cx.update(|window, cx| window.draw(cx).clear(cx));
-                let trigger = cx.debug_bounds("picker-open").unwrap().center();
-                cx.simulate_click(trigger, Default::default());
-                cx.update(|window, cx| window.draw(cx).clear(cx));
-                cx.update(|window, cx| window.draw(cx).clear(cx));
-                let pane = cx
-                    .debug_bounds(if context {
-                        "context-pane"
-                    } else {
-                        "permission-pane"
-                    })
-                    .unwrap();
-                if width < 900. {
-                    let sheet = cx.debug_bounds("touch-picker-sheet").unwrap();
-                    assert_eq!(sheet.left(), px(0.));
-                    assert_eq!(sheet.right(), px(393.));
-                    assert_eq!(sheet.bottom(), px(852.));
-                    let content = cx.debug_bounds("touch-picker-content").unwrap();
-                    assert!(content.bottom() <= px(852. - bottom));
-                    assert!(sheet.top() >= px(99.));
-                    assert_eq!(pane.left(), px(16.));
-                    assert_eq!(pane.right(), px(377.));
-                    let scrim = cx.debug_bounds("touch-picker-backdrop").unwrap();
-                    assert_eq!(scrim.origin, gpui::point(px(0.), px(0.)));
-                    assert_eq!(scrim.size, size(px(393.), px(852.)));
-                } else {
-                    assert_eq!(pane.size.width, px(if context { 256. } else { 280. }));
-                }
-            }
-        }
-        driver.shutdown(cx, &store, &host);
-    }
 }

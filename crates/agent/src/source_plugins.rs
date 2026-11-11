@@ -30,17 +30,15 @@ use crate::{
 };
 
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
-/// Installs download packages.
-const MUTATION_TIMEOUT: Duration = Duration::from_secs(300);
 
 async fn run_cli(
     provider: ProviderKind,
     default: &str,
     context: &PluginContext,
     args: &[String],
-    timeout: Duration,
+    bound: Option<Duration>,
 ) -> Result<String, AgentError> {
-    cli_stdout(cli_output(provider, default, context, args, timeout).await?)
+    cli_stdout(cli_output(provider, default, context, args, bound).await?)
 }
 
 async fn cli_output(
@@ -48,7 +46,7 @@ async fn cli_output(
     default: &str,
     context: &PluginContext,
     args: &[String],
-    timeout: Duration,
+    bound: Option<Duration>,
 ) -> Result<Output, AgentError> {
     let display = format!("{default} {}", args.join(" "));
     let binary = crate::resolve_binary(context.binary_path.as_deref(), default)?;
@@ -57,16 +55,18 @@ async fn cli_output(
     for (key, value) in context.launch_env.pairs(provider) {
         command.env(key, value);
     }
-    let mut command = smol::process::Command::from(command);
-    // `output()` gives the child a null stdin, so a prompt can never wait on
-    // input, and dropping it on timeout kills the child.
-    command.kill_on_drop(true);
-    smol::future::or(async { Some(command.output().await) }, async {
-        smol::Timer::after(timeout).await;
-        None
-    })
-    .await
-    .ok_or_else(|| AgentError::Provider(format!("`{display}` timed out")))?
+    // A listing, which no one can stop, is bounded; a change runs until it
+    // ends or the user cancels it, which drops this and stops the command.
+    let output = crate::process::tree_output(command);
+    match bound {
+        Some(bound) => smol::future::or(async { Some(output.await) }, async {
+            smol::Timer::after(bound).await;
+            None
+        })
+        .await
+        .ok_or_else(|| AgentError::Provider(format!("`{display}` timed out")))?,
+        None => output.await,
+    }
     .map_err(|error| AgentError::Spawn(format!("spawning `{display}`: {error}")))
 }
 
@@ -195,7 +195,14 @@ pub(crate) async fn list_pi(context: &PluginContext) -> Result<PluginListing, Ag
     if context.project {
         list_args.push("--approve".to_string());
     }
-    let stdout = run_cli(ProviderKind::Pi, "pi", context, &list_args, LIST_TIMEOUT).await?;
+    let stdout = run_cli(
+        ProviderKind::Pi,
+        "pi",
+        context,
+        &list_args,
+        Some(LIST_TIMEOUT),
+    )
+    .await?;
     Ok(PluginListing {
         entries: pi_entries(&stdout, context.project),
         marketplaces: Vec::new(),
@@ -246,15 +253,9 @@ pub(crate) async fn run_pi(
     context: &PluginContext,
     op: &PluginOp,
 ) -> Result<PluginOpOutcome, AgentError> {
-    run_cli(
-        ProviderKind::Pi,
-        "pi",
-        context,
-        &pi::op_args(op)?,
-        MUTATION_TIMEOUT,
-    )
-    .await
-    .map(done)
+    run_cli(ProviderKind::Pi, "pi", context, &pi::op_args(op)?, None)
+        .await
+        .map(done)
 }
 
 #[derive(Deserialize)]
@@ -297,7 +298,7 @@ pub(crate) async fn opencode_global_config(
                 "opencode",
                 context,
                 &args,
-                LIST_TIMEOUT,
+                Some(LIST_TIMEOUT),
             )
             .await
         }
@@ -380,7 +381,7 @@ pub(crate) async fn list_opencode(context: &PluginContext) -> Result<PluginListi
                 "opencode",
                 context,
                 &args,
-                LIST_TIMEOUT,
+                Some(LIST_TIMEOUT),
             )
             .await
         }
@@ -461,7 +462,7 @@ pub(crate) async fn run_opencode(
         "opencode",
         context,
         &opencode::op_args(op)?,
-        MUTATION_TIMEOUT,
+        None,
     )
     .await
     .map(done)

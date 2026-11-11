@@ -71,7 +71,7 @@ use tcode_services::import::{
 use tcode_services::provider_probe::{probe_provider, run_capture_env};
 use tcode_services::session_search::SessionSearch;
 use tcode_services::settings::SettingsStore;
-use tcode_services::store::{CommandsCacheKey, SessionStore, now_millis, now_secs};
+use tcode_services::store::{CommandsCacheKey, SessionStore};
 use tcode_services::user_files;
 use tcode_services::version_check::provider_updates::{
     self, CheckInput as ProviderCheckInput, Installation,
@@ -123,6 +123,13 @@ impl Default for ProviderLauncher {
 }
 
 /// Test-controlled provider adapter paired with its launcher.
+///
+/// Not a stand-in for a harness: it sits where every adapter's
+/// [`SessionHandle`] meets the host, so the host runs its real launch,
+/// command and event paths, and the test plays the adapter's half of the
+/// canonical stream (`AgentEvent` in, `SessionCommand` out), as a fixture
+/// fed to an actor plays a harness's lines. What a harness itself sends is
+/// proven in `crates/agent`, not through this.
 #[cfg(any(test, feature = "test-support"))]
 pub struct ScriptedProvider {
     pub launcher: ProviderLauncher,
@@ -424,7 +431,6 @@ pub struct AppState {
     /// Invalidates detached scheduled-wake tasks whenever the earliest deadline
     /// changes; stale timers must never fire or reschedule superseded work.
     scheduler_generation: u64,
-    resident_idle_grace: Duration,
     /// Kept off in unit tests so dispatching a synthetic turn never launches a
     /// real provider process. Production titles are generated in the background.
     ai_title_generation_enabled: bool,
@@ -562,10 +568,7 @@ impl AppState {
         let releases = Arc::new(ReleaseFeed::new(tcode_services::github::GitHubApi::host(
             tcode_services::github::Credentials::new(settings_store.clone(), []),
         )));
-        // An unreadable secrets.json refuses every write and is reported by
-        // whatever reads a secret, so no secret is shown as saved.
-        let provider_secret_names =
-            provider_secret_names(&settings, &settings_store).unwrap_or_default();
+        let provider_secret_names = provider_secret_names(&settings, &settings_store);
         // Push the loaded computer-use config to the (already-running) MCP layer
         // so the tools honor the persisted image-mode / allow-input choices from
         // the first call, not just after a settings change.
@@ -666,7 +669,6 @@ impl AppState {
             pending_terminal_spawns: HashMap::new(),
             next_start_generation: 0,
             scheduler_generation: 0,
-            resident_idle_grace: RESIDENT_IDLE_GRACE,
             ai_title_generation_enabled,
             title_generating: Default::default(),
             provider_launcher: ProviderLauncher::default(),
@@ -715,6 +717,7 @@ impl AppState {
                 self.store.clone(),
                 self.settings_store.clone(),
                 self.store_write_failures.clone(),
+                cx.clock().clone(),
             );
             // Its own thread: every commit blocks on the database's fsync.
             match std::thread::Builder::new()

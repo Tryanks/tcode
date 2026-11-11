@@ -308,10 +308,9 @@ fn a_changed_root_waits_for_a_live_provider() {
 
     let (result, _) = acked(&state, cx, 1, send("first"));
     assert_eq!(result, Ok(CommandResponse::Unit));
-    cx.run_until(|_| !scripted.commands.is_empty());
     assert!(matches!(
-        scripted.commands.try_recv(),
-        Ok(SessionCommand::SendTurn { .. })
+        cx.run_until_recv(&scripted.commands),
+        SessionCommand::SendTurn { .. }
     ));
     assert_eq!(launched.try_recv().unwrap().cwd, original);
 
@@ -370,6 +369,7 @@ fn an_import_that_fails_names_the_thread_and_why() {
         external_id: "gone".into(),
         title_hint: None,
         last_active_ms: 1,
+        profile_id: None,
     };
     state.dispatch_command(
         cx,
@@ -456,4 +456,54 @@ fn a_host_without_its_mcp_servers_says_so_when_the_first_thread_starts() {
         })
         .collect();
     assert_eq!(told, ["address in use"]);
+}
+
+/// Claude Code's history is looked for where each profile's CLI keeps it:
+/// the built-in profile's in the config directory its Harness's variables
+/// name, an account's in its own config directory, a profile's whose own
+/// variables name one there; each with the profile its threads resume on.
+#[test]
+fn each_profile_history_is_looked_for_where_its_cli_keeps_it() {
+    use tcode_core::settings::{EnvVar, ProviderProfile, ProviderSettings, Settings};
+    let config_dir = |value: &str| EnvVar {
+        name: "CLAUDE_CONFIG_DIR".into(),
+        value: value.into(),
+        sensitive: false,
+    };
+    let mut settings = Settings::default();
+    settings.provider_mut(ProviderKind::ClaudeCode).shared_env = vec![config_dir("/configured")];
+    for (id, profile) in [
+        (
+            "work",
+            ProviderSettings {
+                home_path: Some("/profile-homes/work".into()),
+                ..ProviderSettings::default()
+            },
+        ),
+        (
+            "kimi",
+            ProviderSettings {
+                env: vec![config_dir("/elsewhere")],
+                ..ProviderSettings::default()
+            },
+        ),
+    ] {
+        settings.profiles.insert(
+            id.into(),
+            ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: profile,
+            },
+        );
+    }
+    let mut dirs = super::history_dirs(&settings, ProviderKind::ClaudeCode);
+    dirs.sort();
+    assert_eq!(
+        dirs,
+        [
+            (None, PathBuf::from("/configured")),
+            (Some("kimi".into()), PathBuf::from("/elsewhere")),
+            (Some("work".into()), PathBuf::from("/profile-homes/work")),
+        ]
+    );
 }

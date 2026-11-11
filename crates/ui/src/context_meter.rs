@@ -2,8 +2,7 @@
 
 use agent::TokenUsage;
 
-/// The used tokens a meter reflects: the provider's reported total-in-use, else
-/// the input-token count.
+/// The used tokens a meter reflects: the provider's reported total-in-use.
 pub fn used_tokens(usage: &TokenUsage) -> Option<u64> {
     if matches!(
         usage.freshness,
@@ -11,7 +10,7 @@ pub fn used_tokens(usage: &TokenUsage) -> Option<u64> {
     ) {
         return None;
     }
-    usage.used_tokens.or(usage.input_tokens)
+    usage.used_tokens
 }
 
 /// Used-percentage of the context window (0..=100), or `None` when either the
@@ -81,14 +80,6 @@ mod tests {
                 Some(200_000),
                 Some(100_000),
                 Some(50.0),
-            ),
-            (
-                ContextFreshness::Current,
-                None,
-                Some(50),
-                Some(200),
-                Some(50),
-                Some(25.0),
             ),
             (
                 ContextFreshness::Current,

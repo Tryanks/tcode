@@ -4,19 +4,12 @@
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext as _, BackgroundExecutor, Context, ElementId, Entity, IntoElement,
-    ParentElement as _, Render, RenderOnce, SharedString, Task, Window, div,
+    App, AppContext as _, Context, ElementId, Entity, IntoElement, ParentElement as _, Render,
+    RenderOnce, SharedString, Task, Window, div,
 };
 
 /// How far a moment is from now, in milliseconds, written for the reader.
 pub(crate) type ClockText = fn(u64) -> SharedString;
-
-/// Now, in unix milliseconds, by the clock the executor's timers run on:
-/// the system's in the app, the one a test advances in a test.
-fn now_ms(executor: &BackgroundExecutor) -> u64 {
-    let now = executor.scheduler_executor().scheduler().clock().utc_now();
-    u64::try_from(now.timestamp_millis()).unwrap_or(0)
-}
 
 /// The time since a moment, or until one, redrawn as its second changes.
 ///
@@ -85,7 +78,7 @@ impl Ticks {
     fn new(at_ms: u64, until: bool, text: ClockText, cx: &mut Context<Self>) -> Self {
         let tick = cx.spawn(async move |this, cx| {
             loop {
-                let now = now_ms(cx.background_executor());
+                let now = crate::time::executor_millis(cx.background_executor());
                 if until && now >= at_ms {
                     break;
                 }
@@ -111,7 +104,7 @@ impl Ticks {
 
 impl Render for Ticks {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let now = now_ms(cx.background_executor());
+        let now = crate::time::now_millis(cx);
         let distance = if self.until {
             // Rounded up, as whole seconds left of a deadline on the second
             // are: the last one shows until the deadline itself.
@@ -159,7 +152,7 @@ mod tests {
     /// each second of it passes.
     #[gpui::test]
     fn a_clock_counts_the_seconds_the_executor_passes(cx: &mut TestAppContext) {
-        let started = cx.update(|cx| now_ms(cx.background_executor())) - 5_000;
+        let started = cx.update(|cx| crate::time::now_millis(cx)) - 5_000;
         let (_, cx) = cx.add_window_view(|_, _| Since(started));
         assert_eq!(draw(cx), Some(5_000));
         cx.executor().advance_clock(Duration::from_secs(1));

@@ -45,12 +45,12 @@ impl AppState {
             id: uuid::Uuid::new_v4().to_string(),
             grant,
             reason,
-            requested_at: now_secs(),
+            requested_at: cx.clock().unix_secs(),
         };
         let response = pending(&request);
         let detail = request.reason.clone();
         meta.control_grant_requests.push(request);
-        meta.updated_at = now_secs();
+        meta.updated_at = cx.clock().unix_secs();
         self.store_meta(meta, cx);
         self.audit(
             caller,
@@ -110,7 +110,7 @@ impl AppState {
                 self.caller_grant(&meta).0.describe()
             )
         };
-        meta.updated_at = now_secs();
+        meta.updated_at = cx.clock().unix_secs();
         self.store_meta(meta, cx);
         self.refresh_control_grants();
         self.deliver_orchestrate_callback_to_parent(session_id, text, cx);

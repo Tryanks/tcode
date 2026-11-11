@@ -106,6 +106,7 @@ fn turn_ids(events: &[StoredEvent]) -> Vec<(Option<u64>, String)> {
                     status: TurnStatus::Completed,
                     ..
                 } => format!("completed {turn_id}"),
+                AgentEvent::UnreadableRecord { line } => format!("unreadable {line}"),
                 other => format!("{other:?}"),
             };
             (stored.ts, id)
@@ -139,14 +140,52 @@ fn assert_fixture_migrated(store: &SessionStore, root: &Path) {
     assert_eq!(store.read_event_log("mixed").unwrap(), MIXED_LOG);
     assert_eq!(store.read_event_log("orphan").unwrap(), ORPHAN_LOG);
     assert!(store.read_event_log("empty").unwrap().is_empty());
+    // A row this build cannot read is read as it is stored, in its place.
+    let mixed = store.read_events("mixed").unwrap();
     assert_eq!(
-        turn_ids(&store.read_events("mixed").unwrap()),
+        turn_ids(&mixed),
         [
             (None, "started legacy".to_owned()),
             (Some(2000), "completed legacy".to_owned()),
+            (None, "unreadable {not valid json}".to_owned()),
+            (
+                None,
+                "unreadable \u{FFFD}\u{FFFD}{\"type\":\"turn_started\",\"turn_id\":\"not-utf8\"}"
+                    .to_owned()
+            ),
             (Some(2500), "started second".to_owned()),
+            (None, "unreadable {\"type\":\"turn_started".to_owned()),
         ]
     );
+    let timeline = tcode_core::session::Timeline::fold_events(mixed);
+    let shown: Vec<(usize, &str)> = timeline
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.content {
+            tcode_core::session::EntryContent::Unreadable { line } => {
+                Some((entry.turn, line.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (0, "{not valid json}"),
+            (
+                0,
+                "\u{FFFD}\u{FFFD}{\"type\":\"turn_started\",\"turn_id\":\"not-utf8\"}"
+            ),
+            (1, "{\"type\":\"turn_started"),
+        ]
+    );
+    let markdown = crate::export::render_thread(
+        store,
+        &file.sessions[0],
+        tcode_protocol::ThreadExportFormat::Markdown,
+    )
+    .unwrap();
+    assert!(String::from_utf8(markdown).unwrap().contains("Mixed"));
     assert_eq!(
         turn_ids(&store.read_events("orphan").unwrap()),
         [(Some(1), "started orphan".to_owned())]
@@ -1241,10 +1280,10 @@ fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
     let expected = TurnIndex {
         turns: 2,
         // The turns the fold holds: the divider's of the rewind at row 60
-        // (to before the first turn) and of the one at row 70; a rewind's
+        // (to before the first turn) and of the one at row 68; a rewind's
         // row opens the turn its divider stands in, and the turns it took
         // out leave their starts behind.
-        starts: vec![60, 70],
+        starts: vec![60, 68],
     };
     assert_eq!(store.turn_index("thread").unwrap(), Some(expected.clone()));
     store
@@ -1268,7 +1307,7 @@ fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
         ])
         .unwrap();
     let source = rows(&store, "thread");
-    for (id, end, starts) in [("before", 70, vec![60, 66]), ("through", 71, vec![60, 70])] {
+    for (id, end, starts) in [("before", 68, vec![60, 64]), ("through", 69, vec![60, 68])] {
         assert_eq!(rows(&store, id), source[..end], "{id}");
         assert_eq!(
             store.turn_index(id).unwrap(),
@@ -1337,7 +1376,6 @@ fn item_rows_recorded_before_canonical_items_are_read() {
         .collect();
 
     let log = store.read_log("legacy").unwrap();
-    assert_eq!(log.undecodable, 0);
     let read: Vec<&str> = log
         .records
         .iter()
@@ -1578,8 +1616,10 @@ fn storage_pass(store: &SessionStore, limit: usize) -> usize {
             }
         }
     }
+    // A blob's age is its file's modification time; like the host's grace
+    // period, this cutoff keeps every blob the test has just written.
     for step in store
-        .prepare_sweep(std::time::SystemTime::now() - Duration::from_secs(3600))
+        .prepare_sweep(std::time::SystemTime::UNIX_EPOCH)
         .unwrap()
     {
         if commit(step).is_none() {
@@ -1855,8 +1895,11 @@ fn a_thread_written_while_it_moves_loses_nothing() {
             .count()
     };
     let named = files();
+    // A blob's age is its file's modification time: this cutoff is after
+    // every blob the test writes.
+    let after_every_blob = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(u32::MAX.into());
     let swept: usize = store
-        .prepare_sweep(std::time::SystemTime::now() + Duration::from_secs(1))
+        .prepare_sweep(after_every_blob)
         .unwrap()
         .into_iter()
         .map(|step| match store.commit_storage_step(step).unwrap() {
@@ -1873,7 +1916,7 @@ fn a_thread_written_while_it_moves_loses_nothing() {
         .apply(&[Mutation::remove_session("appended")])
         .unwrap();
     let swept: usize = store
-        .prepare_sweep(std::time::SystemTime::now() + Duration::from_secs(1))
+        .prepare_sweep(after_every_blob)
         .unwrap()
         .into_iter()
         .map(|step| match store.commit_storage_step(step).unwrap() {

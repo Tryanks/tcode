@@ -84,7 +84,7 @@ pub(crate) fn error_card(
                     .map(|button| match retry_at {
                         Some(retry_at) => button
                             .aria_label(retry_countdown(
-                                retry_at.saturating_sub(crate::time::now_secs()) * 1000,
+                                retry_at.saturating_sub(crate::time::now_secs(cx)) * 1000,
                             ))
                             .child(Clock::until(
                                 SharedString::from(format!("retry-countdown:{id}")),

@@ -255,7 +255,7 @@ impl AppState {
         } else {
             message
         };
-        meta.expectation = Some(ChildExpectation::opened(now_secs()));
+        meta.expectation = Some(ChildExpectation::opened(cx.clock().unix_secs()));
         self.install_background_thread(meta, message, attachments, cx)
     }
 
@@ -316,9 +316,9 @@ impl AppState {
         let Some(mut meta) = self.find_meta(thread_id) else {
             return;
         };
-        meta.cancelled_at = Some(now_secs());
+        meta.cancelled_at = Some(cx.clock().unix_secs());
         meta.expectation = None;
-        meta.updated_at = now_secs();
+        meta.updated_at = cx.clock().unix_secs();
         if let Some(child) = self.resident_mut(thread_id) {
             child.meta = meta.clone();
         }
@@ -415,7 +415,7 @@ impl AppState {
             return;
         }
         meta.expectation = expectation;
-        meta.updated_at = now_secs();
+        meta.updated_at = cx.clock().unix_secs();
         if let Some(child) = self.resident_mut(thread_id) {
             child.meta = meta.clone();
         }
@@ -806,14 +806,14 @@ impl AppState {
     /// A report the user dropped from the lead's queue: the next start owes
     /// it nothing.
     pub(super) fn reports_dropped(&mut self, reports: &[ReportHandover], cx: &mut HostCx) {
-        for meta in self.settle_reports(reports) {
+        for meta in self.settle_reports(reports, cx.clock().unix_secs()) {
             self.persist_meta(&meta, cx);
         }
     }
 
     /// The metas of the children that owe `reports` no more, for the caller
     /// to save.
-    pub(super) fn settle_reports(&self, reports: &[ReportHandover]) -> Vec<SessionMeta> {
+    pub(super) fn settle_reports(&self, reports: &[ReportHandover], now: u64) -> Vec<SessionMeta> {
         let mut settled: Vec<SessionMeta> = Vec::new();
         for report in reports {
             if settled.iter().any(|meta| meta.id == report.child) {
@@ -830,7 +830,7 @@ impl AppState {
                 continue;
             };
             expectation.undelivered = None;
-            meta.updated_at = now_secs();
+            meta.updated_at = now;
             settled.push(meta);
         }
         settled

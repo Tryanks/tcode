@@ -116,20 +116,15 @@ fn attach(machine: &Machine) -> Device {
     }
 }
 
-/// The next message on `channel`, or `None` once `deadline` passes, which
-/// only a failing test reaches.
-fn next<T>(channel: &async_channel::Receiver<T>, deadline: Instant) -> Option<T> {
-    tcode_traverse::block_on(async {
-        tokio::time::timeout_at(deadline.into(), channel.recv()).await
-    })
-    .ok()?
-    .ok()
+/// The next message on `channel`, or `None` once it has closed. A message
+/// that never comes is ended by the test runner.
+fn next<T>(channel: &async_channel::Receiver<T>) -> Option<T> {
+    channel.recv_blocking().ok()
 }
 
 fn wait_state(transport: &Transport, wanted: impl Fn(&ConnectionState) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
     let mut seen = Vec::new();
-    while let Some(state) = next(&transport.state, deadline) {
+    while let Some(state) = next(&transport.state) {
         if wanted(&state) {
             return;
         }
@@ -174,9 +169,6 @@ fn tunnel_carries_bytes_both_ways_and_preserves_half_close_in_each_direction() {
     let port = service.local_addr().unwrap().port();
     let service = std::thread::spawn(move || {
         let (mut stream, _) = service.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
         let mut request = Vec::new();
         stream.read_to_end(&mut request).unwrap();
         assert_eq!(request, b"request\0\xff");
@@ -196,9 +188,6 @@ fn tunnel_carries_bytes_both_ways_and_preserves_half_close_in_each_direction() {
     let port = service.local_addr().unwrap().port();
     let service = std::thread::spawn(move || {
         let (mut stream, _) = service.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
         stream.write_all(b"response first").unwrap();
         stream.shutdown(std::net::Shutdown::Write).unwrap();
         let mut request = String::new();

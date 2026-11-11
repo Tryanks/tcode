@@ -77,20 +77,21 @@ impl AppState {
 
     /// Duplicate a stored transcript and arrange for its next provider start to
     /// fork the source's native session. The fork stays idle until its first
-    /// user turn, exactly like a cold-opened stored thread.
-    pub fn fork_thread(&mut self, id: &str, cx: &mut HostCx) -> Option<String> {
+    /// user turn, exactly like a cold-opened stored thread. A thread that
+    /// cannot be forked now answers why.
+    pub fn fork_thread(&mut self, id: &str, cx: &mut HostCx) -> Result<String, &'static str> {
         let resident = self.resident(id);
         let source = resident
             .map(|session| &session.meta)
-            .or_else(|| self.sessions.iter().find(|meta| meta.id == id))?;
+            .or_else(|| self.sessions.iter().find(|meta| meta.id == id))
+            .ok_or("This thread is no longer available.")?;
         if let Some(error) = fork_refusal(Self::session_fork_availability(source, resident)) {
-            self.report_error(RuntimeError::External(error.into()), cx);
-            return None;
+            return Err(error);
         }
         let source = source.clone();
         // A fork not started yet still names the point it was made from.
         let point = source.pending_fork.clone().unwrap_or(ForkPoint::Tail);
-        Some(self.make_fork(
+        Ok(self.make_fork(
             &source,
             ForkPlan {
                 point,

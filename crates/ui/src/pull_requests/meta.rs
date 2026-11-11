@@ -229,7 +229,15 @@ impl PullRequestView {
             PickerKind::Labels => PullRequestRead::LabelCandidates,
             PickerKind::Reviewers => PullRequestRead::ReviewerCandidates,
         };
-        self.read(read, cx, move |page, result| {
+        let answer = move |response: PullRequestReadResponse| match kind {
+            PickerKind::Labels => response
+                .label_candidates()
+                .map(|labels| (labels.complete, label_rows(labels))),
+            PickerKind::Reviewers => response
+                .reviewer_candidates()
+                .map(|reviewers| (reviewers.complete, reviewer_rows(reviewers))),
+        };
+        self.read(read, answer, cx, move |page, result, _| {
             let Some(picker) = page
                 .writes
                 .picker
@@ -239,15 +247,10 @@ impl PullRequestView {
                 return;
             };
             match result {
-                Ok((PullRequestReadResponse::LabelCandidates(labels), _)) => {
-                    picker.complete = labels.complete;
-                    picker.rows = Some(label_rows(labels));
+                Ok(((complete, rows), _)) => {
+                    picker.complete = complete;
+                    picker.rows = Some(rows);
                 }
-                Ok((PullRequestReadResponse::ReviewerCandidates(reviewers), _)) => {
-                    picker.complete = reviewers.complete;
-                    picker.rows = Some(reviewer_rows(reviewers));
-                }
-                Ok(_) => {}
                 Err(error) => picker.error = Some(error),
             }
         });
@@ -387,16 +390,7 @@ impl PullRequestView {
                     ),
                 };
                 let team = state.reviewer.kind == PullRequestReviewerKind::Team;
-                let name = if team {
-                    let owner = self
-                        .current
-                        .as_ref()
-                        .and_then(|(_, key)| key.repository.split('/').next().map(str::to_owned))
-                        .unwrap_or_default();
-                    format!("@{owner}/{}", state.reviewer.login)
-                } else {
-                    state.reviewer.login.clone()
-                };
+                let name = state.reviewer.login.clone();
                 let tooltip = crate::tr!(
                     "pull_requests.meta.reviewer_state",
                     login = name.clone(),

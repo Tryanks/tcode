@@ -11,7 +11,7 @@ use turso::Connection;
 
 use super::codec::Mode;
 use super::rows::{self, Stored, Thread};
-use super::{EventLog, SessionStore, TurnIndex, blob, decode_row, invalid_data};
+use super::{EventLog, SessionStore, TurnIndex, blob, decode_row, invalid_data, read_row};
 
 #[derive(Default, Deserialize)]
 struct EventAddress {
@@ -194,9 +194,8 @@ impl LogRead {
                     }
                 }
                 let line = st.decode(&mut decoder, &row, Mode::Full)?.bytes;
-                let record = match decode_row(&line) {
-                    Ok(Some(record)) => record,
-                    _ => return Ok(true),
+                let Some(record) = read_row(&line) else {
+                    return Ok(true);
                 };
                 let record = match project(&record) {
                     Cow::Borrowed(_) => record,

@@ -172,7 +172,9 @@ impl Reader<'_> {
         let revisions = Revisions {
             base: sha("base")?,
             head: sha("head")?,
-            changed_files: raw["changed_files"].as_u64().unwrap_or(0),
+            changed_files: raw["changed_files"]
+                .as_u64()
+                .ok_or(GitHubError::InvalidResponse)?,
             node_id: raw["node_id"]
                 .as_str()
                 .ok_or(GitHubError::InvalidResponse)?
@@ -268,7 +270,7 @@ impl Reader<'_> {
     fn conversation(&self) -> Result<(PullRequestConversation, Duration), GitHubError> {
         let comment = format!("id body createdAt lastEditedAt url {ACTOR} {REACTIONS} {VIEWER}");
         let query = format!(
-            "query PullRequestConversation($owner: String!, $name: String!, $number: Int!, $head: Boolean!, $withComments: Boolean!, $commentsAfter: String, $withReviews: Boolean!, $reviewsAfter: String) {{ repository(owner: $owner, name: $name) {{ viewerPermission @include(if: $head) pullRequest(number: $number) {{ ... on PullRequest @include(if: $head) {{ {comment} mergedAt viewerDidAuthor labels(first: 100) {{ nodes {{ name color description }} }} reviewRequests(first: 100) {{ nodes {{ requestedReviewer {{ ... on User {{ login avatarUrl(size: 64) }} ... on Bot {{ login avatarUrl(size: 64) }} ... on Team {{ slug }} }} }} }} latestReviews(first: 100) {{ nodes {{ state {ACTOR} }} }} }} comments(first: 100, after: $commentsAfter) @include(if: $withComments) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ {comment} }} }} reviews(first: 100, after: $reviewsAfter) @include(if: $withReviews) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ {comment} state submittedAt }} }} }} }} }}"
+            "query PullRequestConversation($owner: String!, $name: String!, $number: Int!, $head: Boolean!, $withComments: Boolean!, $commentsAfter: String, $withReviews: Boolean!, $reviewsAfter: String) {{ repository(owner: $owner, name: $name) {{ viewerPermission @include(if: $head) pullRequest(number: $number) {{ ... on PullRequest @include(if: $head) {{ {comment} mergedAt viewerDidAuthor labels(first: 100) {{ nodes {{ name color description }} }} reviewRequests(first: 100) {{ nodes {{ requestedReviewer {{ ... on User {{ login avatarUrl(size: 64) }} ... on Bot {{ login avatarUrl(size: 64) }} ... on Team {{ slug combinedSlug }} }} }} }} latestReviews(first: 100) {{ nodes {{ state {ACTOR} }} }} }} comments(first: 100, after: $commentsAfter) @include(if: $withComments) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ {comment} }} }} reviews(first: 100, after: $reviewsAfter) @include(if: $withReviews) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ {comment} state submittedAt }} }} }} }} }}"
         );
         let mut description = None;
         let mut merged = false;
@@ -495,7 +497,7 @@ impl Reader<'_> {
     fn reviewer_candidates(&self) -> Result<PullRequestReviewerCandidates, GitHubError> {
         let response = self.query(
             "PullRequestReviewerCandidates",
-            "query PullRequestReviewerCandidates($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { assignableUsers(first: 100) { pageInfo { hasNextPage } nodes { login name avatarUrl } } pullRequest(number: $number) { author { login } reviewRequests(first: 100) { nodes { requestedReviewer { ... on User { login name avatarUrl } ... on Team { slug name avatarUrl } ... on Bot { login avatarUrl } } } } } } }".to_owned(),
+            "query PullRequestReviewerCandidates($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { assignableUsers(first: 100) { pageInfo { hasNextPage } nodes { login name avatarUrl } } pullRequest(number: $number) { author { login } reviewRequests(first: 100) { nodes { requestedReviewer { ... on User { login name avatarUrl } ... on Team { slug combinedSlug name avatarUrl } ... on Bot { login avatarUrl } } } } } } }".to_owned(),
             [],
         )?;
         let repository = &response["data"]["repository"];
@@ -513,10 +515,9 @@ impl Reader<'_> {
             } else {
                 node
             };
-            let reviewer = match (text(raw, "slug"), text(raw, "login")) {
-                (Some(slug), _) => reviewer(slug, PullRequestReviewerKind::Team),
-                (None, Some(login)) => reviewer(login, PullRequestReviewerKind::User),
-                (None, None) => continue,
+            let reviewer = match read_reviewer(raw) {
+                Some(reviewer) => reviewer,
+                None => continue,
             };
             if (!requested && Some(&reviewer.login) == author.as_ref())
                 || reviewers.iter().any(|known| known.reviewer == reviewer)
@@ -886,6 +887,19 @@ fn reviewer(login: String, kind: PullRequestReviewerKind) -> PullRequestReviewer
     }
 }
 
+/// A requested reviewer: a user or bot by login, or a team by its slug, shown as GitHub
+/// mentions it, `@organization/team`.
+fn read_reviewer(raw: &Value) -> Option<PullRequestReviewer> {
+    match text(raw, "slug") {
+        Some(id) => Some(PullRequestReviewer {
+            id,
+            login: format!("@{}", text(raw, "combinedSlug")?),
+            kind: PullRequestReviewerKind::Team,
+        }),
+        None => text(raw, "login").map(|login| reviewer(login, PullRequestReviewerKind::User)),
+    }
+}
+
 pub(super) fn is_revision(value: &str) -> bool {
     matches!(value.len(), 40 | 64)
         && value
@@ -1058,7 +1072,7 @@ fn thread_from(raw: &Value) -> Option<PullRequestReviewThread> {
             .into_iter()
             .filter_map(|raw| comment_from(raw, None))
             .collect(),
-        total_comments: raw["comments"]["totalCount"].as_u64().unwrap_or(0),
+        total_comments: raw["comments"]["totalCount"].as_u64()?,
         replies_after: next_cursor(&raw["comments"]),
         viewer_can_reply: raw["viewerCanReply"].as_bool() == Some(true),
         viewer_can_resolve: raw[if raw["isResolved"].as_bool() == Some(true) {
@@ -1077,10 +1091,9 @@ fn reviewer_states(pr: &Value) -> Vec<PullRequestReviewerState> {
     let mut reviewers: Vec<PullRequestReviewerState> = Vec::new();
     for node in nodes(&pr["reviewRequests"]) {
         let raw = &node["requestedReviewer"];
-        let reviewer = match (text(raw, "slug"), text(raw, "login")) {
-            (Some(slug), _) => reviewer(slug, PullRequestReviewerKind::Team),
-            (None, Some(login)) => reviewer(login, PullRequestReviewerKind::User),
-            (None, None) => continue,
+        let reviewer = match read_reviewer(raw) {
+            Some(reviewer) => reviewer,
+            None => continue,
         };
         reviewers.push(PullRequestReviewerState {
             reviewer,
@@ -1120,8 +1133,8 @@ fn listed_file(row: &Value) -> Option<PullRequestFile> {
         "renamed" => FileChangeKind::Rename,
         _ => FileChangeKind::Modify,
     };
-    let additions = row["additions"].as_u64().unwrap_or(0);
-    let deletions = row["deletions"].as_u64().unwrap_or(0);
+    let additions = row["additions"].as_u64()?;
+    let deletions = row["deletions"].as_u64()?;
     // The files API gives no reason for a missing patch: changed lines without one were
     // withheld for size. A file with neither is empty, renamed alone, binary, or past GitHub's
     // diff limits, and only the first two can be told apart here.
@@ -1142,6 +1155,7 @@ fn listed_file(row: &Value) -> Option<PullRequestFile> {
         additions,
         deletions,
         patch,
+        url: None,
     })
 }
 
@@ -1185,6 +1199,7 @@ pub(crate) fn diff_files(diff: &str) -> Option<Vec<PullRequestFile>> {
                 } else {
                     PullRequestPatch::Hunks(hunks.to_owned())
                 },
+                url: None,
             })
         })
         .collect()
@@ -1193,6 +1208,35 @@ pub(crate) fn diff_files(diff: &str) -> Option<Vec<PullRequestFile>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pull request's review requests as the conversation query reads them. Shape: GitHub's
+    /// GraphQL schema, `ReviewRequest.requestedReviewer` a `User`, `Bot` or `Team`, a team with
+    /// `slug` and `combinedSlug` (the organization's and the team's). Content is invented.
+    #[test]
+    fn a_team_reviewer_is_named_as_github_mentions_it_and_requested_by_slug() {
+        let pr = json!({
+            "reviewRequests": { "nodes": [
+                { "requestedReviewer": { "slug": "web", "combinedSlug": "acme/web" } },
+                { "requestedReviewer": { "login": "octo", "avatarUrl": null } }
+            ] },
+            "latestReviews": { "nodes": [] }
+        });
+        let reviewers: Vec<_> = reviewer_states(&pr)
+            .into_iter()
+            .map(|state| state.reviewer)
+            .collect();
+        assert_eq!(
+            reviewers,
+            [
+                PullRequestReviewer {
+                    id: "web".into(),
+                    login: "@acme/web".into(),
+                    kind: PullRequestReviewerKind::Team,
+                },
+                reviewer("octo".into(), PullRequestReviewerKind::User),
+            ]
+        );
+    }
 
     /// Rows of GitHub's REST "List pull requests files" answer. Shape: the diff entry schema of
     /// docs.github.com/en/rest/pulls/pulls (`filename`, `status` one of added, removed,

@@ -1344,6 +1344,75 @@ fn reset_settings_clears_preferences_but_keeps_credentials_installs_and_unknown_
     });
 }
 
+/// A secrets.json this build cannot read at start: the host runs, clients
+/// are told the saved secrets could not be read rather than shown none,
+/// saving a secret says why it is refused, and the file is left as it is.
+#[test]
+fn unreadable_secrets_are_reported_and_never_written_over() {
+    let test_store = TestStore::new("tcode-secrets-unreadable");
+    std::fs::create_dir_all(test_store.root()).unwrap();
+    let torn = r#"{"version":1,"profiles":{"codex":"#;
+    std::fs::write(test_store.root().join("secrets.json"), torn).unwrap();
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    state.deliver(
+        cx,
+        1000,
+        tcode_protocol::ClientPayload::Subscribe(Subscription {
+            topic: Topic::Providers,
+            after: None,
+            known_index: None,
+        }),
+    );
+    cx.run_until_parked();
+    let unreadable = cx
+        .drain_outgoing()
+        .into_iter()
+        .find_map(|message| match message {
+            HostMessage::Event(EventEnvelope {
+                event: ServerEvent::ProvidersReplaced(status),
+                ..
+            }) => Some(status.secrets_unreadable),
+            _ => None,
+        });
+    assert!(
+        unreadable
+            .flatten()
+            .is_some_and(|error| error.contains("secrets.json")),
+        "the providers status says the secrets could not be read"
+    );
+    state.dispatch_command(
+        cx,
+        43,
+        Command::SetProfileSecret {
+            profile_id: "codex".into(),
+            name: "OPENAI_API_KEY".into(),
+            value: Some("typed-again".into()),
+        },
+    );
+    cx.run_until_parked();
+    let outgoing = cx.drain_outgoing();
+    assert!(outgoing.iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            event: ServerEvent::Runtime(RuntimeEvent::Error(RuntimeError::FileUnreadable { error })),
+            ..
+        }) if error.contains("secrets.json")
+    )));
+    assert!(!outgoing.iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            event: ServerEvent::ProvidersReplaced(status),
+            ..
+        }) if status.secret_names.get("codex").is_some_and(|names| !names.is_empty())
+    )));
+    state.update(cx, |state, _| state.close_store().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(test_store.root().join("secrets.json")).unwrap(),
+        torn
+    );
+}
+
 #[test]
 fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
     let cx = &mut TestAppContext::default();
@@ -2272,8 +2341,7 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
                 },
             );
         }
-        cx.run_until(|_| !scripted.commands.is_empty());
-        let prompt = match scripted.commands.try_recv().unwrap() {
+        let prompt = match cx.run_until_recv(&scripted.commands) {
             SessionCommand::SendTurn {
                 text, attachments, ..
             } => {
@@ -3829,6 +3897,7 @@ fn report_result_event(id: &str, text: &str) -> AgentEvent {
             input: serde_json::json!({ "text": text }),
             output: Some("{\"ok\":true}".into()),
             status: ItemStatus::Completed,
+            family: None,
         },
     })
 }
@@ -3964,7 +4033,8 @@ fn a_follow_up_to_an_unloaded_subagent_is_not_answered_by_its_earlier_report() {
         ..ChildExpectation::opened(1)
     });
     store.upsert_meta(&child).unwrap();
-    let earlier = now_millis() - 60_000;
+    let earlier = cx.now_millis();
+    cx.clock.advance(Duration::from_secs(60));
     for event in [
         AgentEvent::TurnStarted {
             turn_id: "turn-1".into(),
@@ -4068,10 +4138,9 @@ fn send_to_child_whose_cwd_was_removed_reports_the_start_failure() {
         state.on_event("child", report_result_event("rep-1", "old report"), cx);
         state.on_event("child", completed_turn("turn-1"), cx);
     });
-    cx.run_until(|_| !parent_receiver.is_empty());
     assert!(matches!(
-        parent_receiver.try_recv(),
-        Ok(SessionCommand::Steer { text, .. }) if text.ends_with("\nold report")
+        cx.run_until_recv(&parent_receiver),
+        SessionCommand::Steer { text, .. } if text.ends_with("\nold report")
     ));
 
     state.update(cx, |state, cx| {
@@ -4295,7 +4364,6 @@ fn control_calls_in_a_members_turn_stay_inside_the_space() {
         let push = control_mcp::ControlOp::Git(control_mcp::GitParams {
             thread_id: "same".into(),
             op: control_mcp::GitOp::Push,
-            request_id: None,
         });
         let settings =
             || control_mcp::ControlOp::GetSettings(control_mcp::GetSettingsParams { keys: None });
@@ -4411,7 +4479,6 @@ fn child_questions_reach_the_lead_and_respond_input_answers_them() {
                     thread_id: "child".into(),
                     question_id: question.map(str::to_string),
                     answers,
-                    request_id: None,
                 }),
             )
         };
@@ -4952,7 +5019,7 @@ fn moved_queue_entries_dispatch_in_their_new_order() {
     active.move_queued(first, None);
 
     let mut sent = Vec::new();
-    while active.dispatch_next_pending() == Ok(true) {
+    while active.dispatch_next_pending(test_start()) == Ok(true) {
         let Ok(SessionCommand::SendTurn {
             delivery_id, text, ..
         }) = receiver.try_recv()
@@ -4973,11 +5040,11 @@ fn future_scheduled_head_does_not_block_ordinary_dispatch_or_acceptance() {
     let scheduled_id = active.push_scheduled(
         "later".into(),
         Vec::new(),
-        SystemTime::now() + Duration::from_secs(3_600),
+        test_start() + Duration::from_secs(3_600),
     );
     let ordinary_id = active.push_queued("now".into(), Vec::new());
 
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(test_start()), Ok(true));
     assert!(matches!(
         receiver.try_recv(),
         Ok(SessionCommand::SendTurn {
@@ -4999,7 +5066,7 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
     let store = (*test_store).clone();
     let state = cx.new_entity(TestClientState::new(store));
     let (commands, receiver) = smol::channel::unbounded();
-    let fire_at = now_secs() + 3_600;
+    let fire_at = cx.now_secs() + 3_600;
 
     state.update(cx, |state, cx| {
         let mut active = live_session(ProviderKind::Codex, commands);
@@ -5040,7 +5107,7 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
         let drop_id = active.push_scheduled(
             "drop me".into(),
             Vec::new(),
-            SystemTime::now() + Duration::from_secs(7_200),
+            cx.clock().wall() + Duration::from_secs(7_200),
         );
         state.drop_queued("scheduled-active", drop_id, cx);
         assert!(state.selected_session().unwrap().queue.is_empty());
@@ -5070,7 +5137,7 @@ fn native_retry_keeps_queue_waiting_and_cancellation_releases_it() {
             );
             let retry = agent::TurnRetry {
                 turn_id: "failed".into(),
-                retry_at: automatic.then(|| now_secs() + 10),
+                retry_at: automatic.then(|| cx.clock().unix_secs() + 10),
             };
             state.on_event(
                 "retry",
@@ -5141,7 +5208,7 @@ fn usage_limit_event_schedules_resume_when_enabled_only() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-usage-limit-resume-test");
     let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let resets_at = now_secs() + 3_600;
+    let resets_at = cx.now_secs() + 3_600;
 
     state.update(cx, |state, cx| {
         let (commands, _) = smol::channel::unbounded();
@@ -5190,7 +5257,7 @@ fn due_scheduled_message_reenters_the_ordinary_send_path() {
         active.push_scheduled(
             "due now".into(),
             Vec::new(),
-            SystemTime::now() - Duration::from_secs(1),
+            cx.clock().wall() - Duration::from_secs(1),
         );
         state.install_selected(active);
 
@@ -5329,7 +5396,7 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
             "mid-turn-relay",
             "check the logs".into(),
             Vec::new(),
-            now_secs(),
+            cx.clock().unix_secs(),
             cx,
         );
 
@@ -6667,7 +6734,7 @@ fn effort_changes_use_per_turn_overrides_or_require_provider_restart() {
         assert_eq!(active.options_changed_while_live(), restart, "{provider:?}");
         if !restart {
             active.push_queued("next turn".into(), Vec::new());
-            assert_eq!(active.dispatch_next_pending(), Ok(true));
+            assert_eq!(active.dispatch_next_pending(test_start()), Ok(true));
             let SessionCommand::SendTurn {
                 options: Some(options),
                 ..
@@ -6710,7 +6777,7 @@ fn queued_message_stamps_live_context_window_change() {
     assert_eq!(active.queue[1].context_window_changed, None);
 
     active.runtime = Runtime::Idle;
-    active.push_scheduled("idle".into(), Vec::new(), SystemTime::now());
+    active.push_scheduled("idle".into(), Vec::new(), test_start());
     active.stamp_context_window_change(Some(1_000_000));
     assert_eq!(active.queue[2].context_window_changed, None);
 }
@@ -6840,7 +6907,7 @@ fn image_only_message_gets_placeholder_on_the_wire_only() {
     };
     active.push_queued(String::new(), vec![attachment.clone()]);
 
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(test_start()), Ok(true));
     let delivery_id = match receiver.try_recv() {
         Ok(SessionCommand::SendTurn {
             delivery_id,
@@ -6886,7 +6953,7 @@ fn relay_context_rides_only_with_the_first_handoff_message() {
     active.queue[0].relay_transcript = Some("# prior work".into());
     active.push_queued("follow up".into(), Vec::new());
 
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(test_start()), Ok(true));
     let first = receiver.try_recv().unwrap();
     let SessionCommand::SendTurn {
         delivery_id, text, ..
@@ -6897,7 +6964,7 @@ fn relay_context_rides_only_with_the_first_handoff_message() {
     assert!(text.starts_with(tcode_core::relay::RELAY_PREAMBLE));
     assert!(text.contains("<conversation-transcript>\n# prior work\n</conversation-transcript>"));
     assert!(text.contains("<new-user-message>\ncontinue here\n</new-user-message>"));
-    assert_eq!(active.dispatch_next_pending(), Ok(false));
+    assert_eq!(active.dispatch_next_pending(test_start()), Ok(false));
     assert!(receiver.try_recv().is_err());
     assert_eq!(active.queue.len(), 2, "an unaccepted head stays queued");
 
@@ -6906,7 +6973,7 @@ fn relay_context_rides_only_with_the_first_handoff_message() {
         "continue here"
     );
     active.turn_in_flight = false;
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(test_start()), Ok(true));
     assert!(matches!(
         receiver.try_recv(),
         Ok(SessionCommand::SendTurn { text, .. }) if text == "follow up"
@@ -6936,15 +7003,13 @@ fn startup_generation_rejects_stale_same_session_attempt() {
             state.select_session("same-session", cx);
             state.send_turn("same-session", "obsolete attempt".into(), Vec::new(), cx);
         });
-        cx.run_until(|_| !started.is_empty());
-        let first = started.try_recv().unwrap();
+        let first = cx.run_until_recv(&started);
         state.update(cx, |state, cx| {
             state.shutdown_active("same-session", cx);
             state.host.select_session("same-session", cx);
             state.send_turn("same-session", "current attempt".into(), Vec::new(), cx);
         });
-        cx.run_until(|_| !started.is_empty());
-        let second = started.try_recv().unwrap();
+        let second = cx.run_until_recv(&started);
         let (stale_commands, stale_actor) = smol::channel::unbounded();
         let (_stale_events, stale_events_rx) = smol::channel::unbounded();
         let stale_handle = SessionHandle {
@@ -7204,7 +7269,9 @@ fn select_session_readopts_idle_resident_without_changing_recency_or_shutdown() 
     let (commands, actor) = smol::channel::unbounded();
     let mut session = live_session(ProviderKind::ClaudeCode, commands);
     session.meta.id = "idle-resident".into();
-    let updated_at = now_secs() - 3600;
+    // The thread was last active an hour ago.
+    let updated_at = cx.now_secs();
+    cx.clock.advance(Duration::from_secs(3600));
     session.meta.updated_at = updated_at;
     let meta = session.meta.clone();
     test_store.upsert_meta(&meta).unwrap();
@@ -7265,12 +7332,11 @@ fn resident_idle_reaper_shuts_down_untouched_provider() {
     session.meta.id = "idle-resident".into();
 
     state.update(cx, |state, cx| {
-        state.resident_idle_grace = Duration::from_millis(1);
         state.install_selected(session);
         state.park_active(cx);
     });
-    // The grace timer runs on the background executor, so wait for its
-    // completion to land rather than for the mailbox to look idle.
+    cx.clock.advance(RESIDENT_IDLE_GRACE);
+    // The grace timer's completion lands through the mailbox.
     cx.run_until(|state| !state.residents.parked.contains_key("idle-resident"));
 
     assert!(matches!(actor.try_recv(), Ok(SessionCommand::Shutdown)));
@@ -7305,10 +7371,12 @@ fn idle_grace_runs_from_the_last_turn_end_whether_viewed_or_parked() {
         state.residents.live["idle-resident"].idle_since.unwrap()
     };
 
+    let clock = cx.clock.clone();
     state.update(cx, |state, cx| {
         state.sessions.push(meta);
         state.install_selected(session);
         let first_turn_end = complete_turn(state, "first", cx);
+        clock.advance(Duration::from_secs(60));
         state.park_active(cx);
         assert_eq!(
             state.residents.parked["idle-resident"].idle_since,
@@ -7336,7 +7404,7 @@ fn resident_idle_lru_evicts_only_oldest_provider() {
     let test_store = TestStore::new("tcode-idle-resident-lru-test");
     let store = (*test_store).clone();
     let state = cx.new_entity(TestClientState::new(store));
-    let base = Instant::now();
+    let base = cx.clock.host_clock().now();
     let mut actors = Vec::new();
 
     state.update(cx, |state, cx| {
@@ -7850,6 +7918,88 @@ fn force_terminate_kills_a_harness_that_does_not_answer_a_stop() {
     });
 }
 
+/// A provider still starting has no turn to interrupt: Stop kills it, which
+/// ends the start it was waiting on, and the message waits in the queue. The
+/// provider is an ACP agent that reads its stdin and never answers
+/// `initialize` (cline 3.0.39 does the same).
+#[test]
+fn a_stop_while_the_provider_starts_kills_it_and_keeps_the_message() {
+    const ROLE: &str = "TCODE_TEST_SILENT_AGENT";
+    const NAME: &str =
+        "app::tests::a_stop_while_the_provider_starts_kills_it_and_keeps_the_message";
+    if std::env::var_os(ROLE).is_some() {
+        let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+        return;
+    }
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-stop-while-starting-test");
+    let cwd = test_store.root().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let project = Project::from_root(cwd.clone());
+    test_store.upsert_project(&project).unwrap();
+    let (ended_tx, ended) = smol::channel::unbounded();
+    let launcher = ProviderLauncher(Arc::new(move |_, mut options: SessionOptions| {
+        options.acp = Some(agent::AcpAgent {
+            id: "silent".into(),
+            name: "Silent".into(),
+            launch: agent::AcpLaunch::Binary {
+                command: std::env::current_exe().unwrap(),
+                args: vec!["--exact".into(), NAME.into(), "--quiet".into()],
+                env: vec![(ROLE.into(), "1".into())],
+            },
+        });
+        let ended = ended_tx.clone();
+        Box::pin(async move {
+            let started = agent::start_session(ProviderKind::Acp, options).await;
+            let _ = ended.send(started.is_err()).await;
+            started
+        })
+    }));
+    let state = cx.new_entity({
+        let mut state = TestClientState::new((*test_store).clone());
+        state.set_provider_launcher_for_test(launcher);
+        state
+    });
+    state.dispatch_command(
+        cx,
+        1,
+        Command::StartDraft {
+            project_id: project.id.clone(),
+            cwd,
+        },
+    );
+    let session_id = state.read(|state| state.residents.live.keys().next().unwrap().clone());
+    state.update(cx, |state, cx| state.select_session(&session_id, cx));
+    state.dispatch_command(
+        cx,
+        2,
+        Command::SendTurn {
+            session_id: session_id.clone(),
+            text: "start".into(),
+            attachment_paths: Vec::new(),
+        },
+    );
+    cx.run_until(|state| {
+        state
+            .session_status_snapshot(&session_id)
+            .is_some_and(|status| status.preparing_turn)
+    });
+
+    state.dispatch_command(
+        cx,
+        3,
+        Command::Interrupt {
+            session_id: session_id.clone(),
+        },
+    );
+    assert_eq!(ended.recv_blocking(), Ok(true));
+    state.read(|state| {
+        let status = state.session_status_snapshot(&session_id).unwrap();
+        assert!(!status.preparing_turn && !status.activity.working);
+        assert_eq!(status.queued_messages.len(), 1);
+    });
+}
+
 /// Background work takes no interrupt: Claude Code acknowledges one and the
 /// task runs on, so a thread with nothing else running must not read as stopping.
 #[test]
@@ -8153,6 +8303,7 @@ fn a_report_the_lead_took_is_saved_as_taken_with_the_record_of_it() {
             (*test_store).clone(),
             SettingsStore::new(test_store.root().clone()),
             failures,
+            cx.clock.host_clock(),
         );
         let (saved, queue) = smol::channel::unbounded();
         for write in held.into_iter().take(record + 1) {
@@ -8368,7 +8519,7 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
             state.index_snapshot().summary.activity[&source.id].fork,
             ForkAvailability::Running
         );
-        assert!(state.host.fork_thread(&source.id, cx).is_none());
+        assert!(state.host.fork_thread(&source.id, cx).is_err());
         state.selected_session_mut().unwrap().turn_in_flight = false;
         state.selected_session_mut().unwrap().background_task_count = 1;
         assert_eq!(
@@ -8558,7 +8709,9 @@ fn deleting_a_project_ends_the_terminal_its_draft_left_running() {
         }
     });
 
-    state.update(cx, |state, cx| state.host.delete_project("doomed", cx));
+    state.update(cx, |state, cx| {
+        state.host.delete_project("doomed", cx).detach()
+    });
     cx.run_until(|state| {
         terminals.iter().all(|&terminal| {
             state
@@ -9182,11 +9335,14 @@ fn an_accepted_user_message_moves_the_thread_updated_time() {
         };
         assert_eq!(state.find_meta(&id).unwrap().updated_at, 100);
         state.on_event(&id, AgentEvent::TurnAccepted { delivery_id }, cx);
-        assert!(state.find_meta(&id).unwrap().updated_at >= now_secs() - 60);
+        assert_eq!(
+            state.find_meta(&id).unwrap().updated_at,
+            cx.clock().unix_secs()
+        );
     });
     cx.run_until_parked();
     let persisted = test_store.load_index().unwrap();
-    assert!(persisted[0].updated_at >= now_secs() - 60);
+    assert_eq!(persisted[0].updated_at, cx.now_secs());
 
     let _ = std::fs::remove_dir_all(&cwd);
 }
@@ -10070,13 +10226,10 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
             after: None,
         })
         .unwrap();
-        let window = smol::block_on(smol::future::race(
-            async { link.events().recv().await.unwrap() },
-            async {
-                smol::Timer::after(Duration::from_secs(5)).await;
-                panic!("the subscription was not answered")
-            },
-        ));
+        let window = link
+            .events()
+            .recv_blocking()
+            .expect("the subscription is answered before the link closes");
         assert!(matches!(window.event, ServerEvent::SessionSnapshot { .. }));
         id
     };
@@ -10095,13 +10248,9 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
         .unwrap();
     }
     let receive_turn = |commands: &smol::channel::Receiver<SessionCommand>, expected: &str| {
-        let command = smol::block_on(smol::future::race(
-            async { commands.recv().await.unwrap() },
-            async {
-                smol::Timer::after(Duration::from_secs(5)).await;
-                panic!("provider did not receive turn")
-            },
-        ));
+        let command = commands
+            .recv_blocking()
+            .expect("the provider receives the turn before its channel closes");
         let SessionCommand::SendTurn { text, .. } = command else {
             panic!("expected send")
         };
@@ -10215,7 +10364,7 @@ fn archived_revision_invalidates_sharing_facts_when_another_thread_or_draft_leav
     state.update(cx, |state, cx| {
         let before = state.archived_sessions();
         assert!(before.worktree_shared.contains("owner"));
-        state.delete_session("fork", false, cx);
+        state.delete_session("fork", false, cx).detach();
         let after = state.archived_sessions();
         assert!(after.revision > before.revision);
         assert!(!after.worktree_shared.contains("owner"));
@@ -10451,9 +10600,7 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
                 from,
                 end,
                 truncated,
-            } = state.event_records["large"]
-                .history_page(before, 200, None)
-                .unwrap()
+            } = state.event_records["large"].history_page(before, 200, None)
             else {
                 panic!("page")
             };
@@ -10577,9 +10724,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
             end,
             records: page,
             truncated,
-        } = state.event_records["streamed"]
-            .history_page(from, 200, None)
-            .unwrap()
+        } = state.event_records["streamed"].history_page(from, 200, None)
         else {
             panic!("page")
         };
@@ -11117,6 +11262,7 @@ fn tool_call(id: &str, output: String) -> StoredEvent {
                 input: serde_json::json!({}),
                 output: Some(output),
                 status: ItemStatus::Completed,
+                family: None,
             },
         }),
         elided: None,
@@ -11388,9 +11534,7 @@ fn superseded_turn_changes_cross_without_diffs() {
             .event_records
             .insert("changes".into(), session_log(records.clone()));
         let QueryResponse::SessionHistoryPage { records: sent, .. } =
-            state.event_records["changes"]
-                .history_page(4, 200, None)
-                .unwrap()
+            state.event_records["changes"].history_page(4, 200, None)
         else {
             panic!("page")
         };
@@ -11811,7 +11955,8 @@ fn a_completion_drops_the_deltas_it_repeats_in_the_same_commit() {
 }
 
 /// A thread opens with about half a megabyte of history however long its
-/// records are, and a single record larger than that still arrives alone.
+/// records are, a single record larger than that still arrives alone, and one
+/// larger than the client's line arrives as its size.
 #[test]
 fn history_windows_are_byte_budgeted() {
     let cx = &mut TestAppContext::default();
@@ -11864,28 +12009,52 @@ fn history_windows_are_byte_budgeted() {
         huge[199].event = AgentEvent::Warning {
             message: "w".repeat(2 * tcode_protocol::SESSION_WINDOW_BYTES),
         };
-        state.event_records.insert("wide".into(), session_log(huge));
+        state
+            .event_records
+            .insert("wide".into(), session_log(huge.clone()));
         let QueryResponse::SessionHistoryPage {
             from,
             records: sent,
             ..
-        } = state.event_records["wide"]
-            .history_page(200, 200, Some(tcode_protocol::MAX_LINE_BYTES))
-            .unwrap()
+        } = state.event_records["wide"].history_page(
+            200,
+            200,
+            Some(tcode_protocol::MAX_LINE_BYTES),
+        )
         else {
             panic!("page")
         };
         assert_eq!((from, sent.len()), (199, 1));
 
-        // A record whose reply is longer than the connection's line is refused
-        // by name; the client says so.
+        // A record whose reply is longer than the connection's line is sent
+        // as its size, and the records around it as they are.
+        let huge_len = serde_json::to_vec(&state.event_records["wide"].records()[199])
+            .unwrap()
+            .len() as u64;
+        let QueryResponse::SessionHistoryPage {
+            from,
+            records: sent,
+            ..
+        } = state.event_records["wide"].history_page(
+            200,
+            200,
+            Some(2 * tcode_protocol::SESSION_WINDOW_BYTES),
+        )
+        else {
+            panic!("page")
+        };
+        assert!(sent.len() > 40, "the rest of the page is sent");
         assert_eq!(
-            state.event_records["wide"]
-                .history_page(200, 1, Some(2 * tcode_protocol::SESSION_WINDOW_BYTES))
-                .unwrap_err()
-                .code,
-            "history_record_too_large"
+            sent.last().unwrap(),
+            &StoredEvent {
+                origin: None,
+                author: None,
+                ts: Some(199),
+                event: AgentEvent::RecordWithheld { bytes: huge_len },
+                elided: None,
+            }
         );
+        assert_eq!(sent[..sent.len() - 1], huge[from as usize..199]);
     });
 }
 
@@ -11896,10 +12065,12 @@ fn history_windows_are_byte_budgeted() {
 fn store_writer_commits_a_waiting_delta_on_its_own_and_at_shutdown() {
     let store = TestStore::new("tcode-delta-window");
     let (failures, _failures) = smol::channel::unbounded();
+    let clock = test_clock();
     let writer = StoreWriter::new(
         (*store).clone(),
         SettingsStore::new(store.root().clone()),
         failures,
+        clock.host_clock(),
     );
     let (writes, queue) = smol::channel::unbounded();
     let writer = std::thread::spawn(move || writer.run(queue));
@@ -11929,16 +12100,13 @@ fn store_writer_commits_a_waiting_delta_on_its_own_and_at_shutdown() {
     };
 
     writes.send_blocking(delta("first")).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while texts().is_empty() {
-        assert!(
-            Instant::now() < deadline,
-            "a lone delta was never committed"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-
+    smol::block_on(clock.advance_to_next_timer());
+    // The writer opens a window for the next delta only once the last one is
+    // committed, so the window it opens is the moment to read the store.
     writes.send_blocking(delta(" second")).unwrap();
+    smol::block_on(clock.next_timer());
+    assert_eq!(texts(), ["first"]);
+
     drop(writes);
     writer.join().unwrap();
     assert_eq!(texts(), ["first", " second"]);
@@ -11952,7 +12120,6 @@ fn session_log(records: impl IntoIterator<Item = StoredEvent>) -> SessionLog {
         next_row: records.len() as u64,
         records,
         rows,
-        undecodable: 0,
     })
 }
 
@@ -12152,35 +12319,33 @@ fn clients_opening_a_cold_thread_through_the_mux_get_each_record_once() {
     for link in &clients {
         let mut received = Vec::new();
         let events = link.events();
-        smol::block_on(smol::future::race(
-            async {
-                let mut has_window = false;
-                while received.len() < persisted.len() + 1 {
-                    let event = events.recv().await.unwrap().event;
-                    if let Some(window) = window_of(&event) {
-                        assert!(!has_window, "one baseline per client");
-                        assert_eq!(window.from, 0);
-                        received.extend(window.records);
-                        has_window = true;
-                    } else if let ServerEvent::SessionEvent(record) = event {
-                        assert!(has_window, "baseline precedes live records");
-                        received.push(record);
-                    } else {
-                        panic!("unexpected {event:?}");
-                    }
+        smol::block_on(async {
+            let mut has_window = false;
+            while received.len() < persisted.len() + 1 {
+                let event = events
+                    .recv()
+                    .await
+                    .expect("the host delivers the thread before the link closes")
+                    .event;
+                if let Some(window) = window_of(&event) {
+                    assert!(!has_window, "one baseline per client");
+                    assert_eq!(window.from, 0);
+                    received.extend(window.records);
+                    has_window = true;
+                } else if let ServerEvent::SessionEvent(record) = event {
+                    assert!(has_window, "baseline precedes live records");
+                    received.push(record);
+                } else {
+                    panic!("unexpected {event:?}");
                 }
-                // A FIFO reply proves all preceding records have reached the pump.
-                link.query(tcode_protocol::Query::Ping).await.unwrap();
-                assert!(
-                    events.try_recv().is_err(),
-                    "no duplicate records after the tail"
-                );
-            },
-            async {
-                smol::Timer::after(Duration::from_secs(5)).await;
-                panic!("the host stopped delivering the thread");
-            },
-        ));
+            }
+            // A FIFO reply proves all preceding records have reached the pump.
+            link.query(tcode_protocol::Query::Ping).await.unwrap();
+            assert!(
+                events.try_recv().is_err(),
+                "no duplicate records after the tail"
+            );
+        });
         assert_eq!(&received[..persisted.len()], persisted.as_slice());
         assert!(
             matches!(&received.last().unwrap().event, AgentEvent::Warning { message } if message == "first live")
@@ -12460,7 +12625,7 @@ fn an_unindexed_cold_thread_opens_through_hydration() {
         &through_pipe(&state, cx, 2, history_page("legacy", window.end)),
         2,
     );
-    assert_eq!(page, whole.history_page(window.end, 200, None).unwrap());
+    assert_eq!(page, whole.history_page(window.end, 200, None));
     assert!(store.turn_index("legacy").unwrap().is_none());
 }
 
@@ -12578,20 +12743,23 @@ fn message_origins_survive_queue_acknowledgement_and_callback_steering() {
 }
 
 fn next_host_event(events: &async_channel::Receiver<EventEnvelope>) -> EventEnvelope {
-    smol::block_on(smol::future::race(
-        async { events.recv().await.unwrap() },
-        async {
-            smol::Timer::after(Duration::from_secs(5)).await;
-            panic!("host did not publish the expected lifecycle change")
-        },
-    ))
+    events
+        .recv_blocking()
+        .expect("the host publishes the lifecycle change before it stops")
 }
 
 #[test]
 fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename() {
     use crate::pipe::{HostServices, spawn_host};
     let store = TestStore::new("cold-settlement");
-    let stamp = now_millis() - 10 * 86_400_000;
+    // The threads' activity was ten days before the host starts.
+    let clock = test_clock();
+    let stamp = clock.host_clock().unix_millis();
+    clock.advance(Duration::from_secs(10 * 86_400));
+    let services = || HostServices {
+        clock: clock.host_clock(),
+        ..HostServices::default()
+    };
     for id in ["inherit", "never"] {
         let mut project = Project::from_root(store.root().join(id));
         project.id = id.into();
@@ -12637,7 +12805,7 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     }"#,
     )
     .unwrap();
-    let host = spawn_host((*store).clone(), HostServices::default()).unwrap();
+    let host = spawn_host((*store).clone(), services()).unwrap();
     let link = host.link();
     let events = crate::pipe::p4b_tests::observed_events(&link);
     link.subscribe(Subscription {
@@ -12687,7 +12855,7 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     host.stopped.recv_blocking().unwrap();
     let restarted = spawn_host(
         SessionStore::open_at(store.root().clone()).unwrap(),
-        HostServices::default(),
+        services(),
     )
     .unwrap();
     let link = restarted.link();
@@ -12744,7 +12912,10 @@ fn first_index_snapshot_includes_persisted_child_runs_and_human_resume_status() 
 
     let store = TestStore::new("startup-human-clock");
     let hour = 3_600_000;
-    let created = now_millis() - 10 * hour;
+    // The thread was created ten hours before the host starts.
+    let clock = test_clock();
+    let created = clock.host_clock().unix_millis();
+    clock.advance(Duration::from_secs(10 * 3_600));
     let merged = created + 2 * hour;
     let resumed = created + 4 * hour;
     let completed = created + 5 * hour;
@@ -12842,8 +13013,14 @@ fn first_index_snapshot_includes_persisted_child_runs_and_human_resume_status() 
         store.apply(&mutations).unwrap();
     }
 
-    let host =
-        crate::pipe::spawn_host((*store).clone(), crate::pipe::HostServices::default()).unwrap();
+    let host = crate::pipe::spawn_host(
+        (*store).clone(),
+        crate::pipe::HostServices {
+            clock: clock.host_clock(),
+            ..crate::pipe::HostServices::default()
+        },
+    )
+    .unwrap();
     let link = host.link();
     let events = crate::pipe::p4b_tests::observed_events(&link);
     link.subscribe(Subscription {
@@ -12879,6 +13056,119 @@ fn first_index_snapshot_includes_persisted_child_runs_and_human_resume_status() 
     link.shutdown_blocking().unwrap();
     host.to_host.close();
     host.stopped.recv_blocking().unwrap();
+}
+
+#[test]
+fn a_thread_the_host_will_not_settle_says_so_in_its_activity() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("settle-blocked");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (commands, _received) = smol::channel::unbounded();
+    state.update(cx, |state, _| {
+        let mut session = live_session(ProviderKind::Codex, commands);
+        session.meta.id = "background".into();
+        session.background_task_count = 1;
+        state.sessions.push(session.meta.clone());
+        state.install_selected(session);
+    });
+    let activity =
+        state.read(|state| state.index_snapshot().summary.activity["background"].clone());
+    assert!(!activity.working);
+    assert!(activity.settle_blocked);
+    let refused = through_pipe(
+        &state,
+        cx,
+        1,
+        tcode_protocol::ClientPayload::Command(Command::SettleSession {
+            session_id: "background".into(),
+        }),
+    );
+    assert!(refused.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack { id: 1, result: Err(error) } if error.code == "thread_busy"
+    )));
+}
+
+#[test]
+fn forking_a_thread_that_cannot_be_forked_is_refused_with_the_reason() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("fork-refused");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let mut empty = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+    empty.id = "empty".into();
+    store.upsert_meta(&empty).unwrap();
+    state.update(cx, |state, _| state.sessions.push(empty.clone()));
+    let answered = through_pipe(
+        &state,
+        cx,
+        1,
+        tcode_protocol::ClientPayload::Command(Command::ForkThread {
+            id: "empty".into(),
+            at: None,
+        }),
+    );
+    let refusal = super::sessions::fork_refusal(ForkAvailability::Empty).unwrap();
+    assert!(answered.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack { id: 1, result: Err(error) }
+            if error.code == "fork_unavailable" && error.message == refusal
+    )));
+}
+
+#[test]
+fn a_relaunch_marker_the_host_cannot_write_is_refused_with_the_reason() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("relaunch-unwritable");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    // A directory where the marker goes: the write fails as a full or
+    // read-only disk would.
+    std::fs::create_dir_all(store.root().join("relaunch.json")).unwrap();
+    let answered = through_pipe(
+        &state,
+        cx,
+        1,
+        tcode_protocol::ClientPayload::Command(Command::WriteRelaunchMarker {
+            session_id: None,
+            reopen_settings: "computer_use".into(),
+        }),
+    );
+    assert!(answered.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack { id: 1, result: Err(error) } if error.code == "relaunch_marker"
+    )));
+}
+
+#[test]
+fn archiving_a_thread_with_a_turn_in_flight_is_refused() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("archive-busy");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (commands, _received) = smol::channel::unbounded();
+    state.update(cx, |state, _| {
+        let mut session = live_session(ProviderKind::Codex, commands);
+        session.meta.id = "busy".into();
+        session.turn_in_flight = true;
+        state.sessions.push(session.meta.clone());
+        state.install_selected(session);
+    });
+    let answered = through_pipe(
+        &state,
+        cx,
+        1,
+        tcode_protocol::ClientPayload::Command(Command::ArchiveSession {
+            session_id: "busy".into(),
+        }),
+    );
+    assert!(answered.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack { id: 1, result: Err(error) } if error.code == "thread_busy"
+    )));
+    assert!(state.read(|state| {
+        state
+            .sessions
+            .iter()
+            .all(|meta| meta.id != "busy" || meta.archived_at.is_none())
+    }));
 }
 
 #[test]
@@ -12922,7 +13212,7 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
             session_id: "parent".into(),
             text: "human later".into(),
             attachment_paths: vec![],
-            fire_at_unix_secs: now_secs() + 3600,
+            fire_at_unix_secs: cx.now_secs() + 3600,
         }),
     );
     let denied = through_pipe(
@@ -13227,9 +13517,8 @@ fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one()
             }
         });
         if case == "valid" || case == "renamed" {
-            cx.run_until(|_| !parent_received.is_empty());
             assert!(
-                matches!(parent_received.try_recv().unwrap(), SessionCommand::SendTurn { text, .. } if text.contains("completion evidence"))
+                matches!(cx.run_until_recv(&parent_received), SessionCommand::SendTurn { text, .. } if text.contains("completion evidence"))
             );
             state.read(|state| assert!(!state.find_meta(&parent_id).unwrap().is_settled()));
         } else {
@@ -13306,7 +13595,8 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
 
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("agent-delivery");
-    let stamp = now_millis() - 10 * 86_400_000;
+    let stamp = cx.now_millis();
+    cx.clock.advance(Duration::from_secs(10 * 86_400));
     // A removed directory makes the reopened child's provider start fail
     // instead of spawning a real CLI.
     let gone = std::env::temp_dir().join(format!("tcode-removed-{}", uuid::Uuid::new_v4()));
@@ -13344,8 +13634,7 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
         state.update(cx, |state, cx| {
             state.handle_control_op("lead".into(), op, reply, cx)
         });
-        cx.run_until(|_| !response.is_empty());
-        response.try_recv().unwrap()
+        cx.run_until_recv(&response)
     };
     let applied = |answer: Result<serde_json::Value, String>| {
         let answer = answer.unwrap();
@@ -13431,7 +13720,6 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
                 expect: None,
             }],
             dry_run: None,
-            request_id: None,
         }),
     ));
     assert_eq!(
@@ -13480,7 +13768,8 @@ fn an_agent_archived_before_settle_stays_not_delivered_when_restored() {
 
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("agent-archived-before-settle");
-    let stamp = now_millis() - 60_000;
+    let stamp = cx.now_millis();
+    cx.clock.advance(Duration::from_secs(60));
     for (id, parent) in [("lead", None), ("worker", Some("lead"))] {
         let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
         meta.id = id.into();
@@ -13541,7 +13830,8 @@ fn an_agent_archived_before_settle_stays_not_delivered_when_restored() {
 fn settling_detaches_only_its_own_provider_and_releases_its_parent() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("settlement-own-provider");
-    let stamp = now_millis() - 10 * 86_400_000;
+    let stamp = cx.now_millis();
+    cx.clock.advance(Duration::from_secs(10 * 86_400));
     let mut lead = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
     lead.id = "lead".into();
     lead.created_at = stamp / 1000;
@@ -13679,7 +13969,8 @@ fn pinning_promotes_and_exempts_until_a_settle_unpins() {
     use tcode_core::project::SettledOverride;
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("pinned-threads");
-    let stamp = now_millis() - 10 * 86_400_000;
+    let stamp = cx.now_millis();
+    cx.clock.advance(Duration::from_secs(10 * 86_400));
     for (id, settled) in [("parked", true), ("idle", false), ("arranged", false)] {
         let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
         meta.id = id.into();
@@ -14215,7 +14506,10 @@ fn an_old_profiles_activity_backfills_and_updates_the_index() {
 #[test]
 fn deleting_the_last_child_releases_its_leads_automatic_settlement() {
     let store = TestStore::new("deleted-child-settlement");
-    let stamp = now_millis() - 10 * 86_400_000;
+    // The child finished ten days before the host starts.
+    let clock = test_clock();
+    let stamp = clock.host_clock().unix_millis();
+    clock.advance(Duration::from_secs(10 * 86_400));
     for (id, parent) in [("lead", None), ("worker", Some("lead"))] {
         let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
         meta.id = id.into();
@@ -14233,8 +14527,14 @@ fn deleting_the_last_child_releases_its_leads_automatic_settlement() {
             )
             .unwrap();
     }
-    let host =
-        crate::pipe::spawn_host((*store).clone(), crate::pipe::HostServices::default()).unwrap();
+    let host = crate::pipe::spawn_host(
+        (*store).clone(),
+        crate::pipe::HostServices {
+            clock: clock.host_clock(),
+            ..crate::pipe::HostServices::default()
+        },
+    )
+    .unwrap();
     let link = host.link();
     let events = crate::pipe::p4b_tests::observed_events(&link);
     link.subscribe(Subscription {
@@ -14395,7 +14695,7 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
         }),
     ];
     // The host stopped an hour before the thread was opened again.
-    let stopped = now_millis() - 3_600_000;
+    let stopped = test_clock().host_clock().unix_millis();
     if restarted {
         let mut cx = TestAppContext::default();
         let state = cx.new_entity(TestClientState::new((*test_store).clone()));
@@ -14417,6 +14717,7 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
     let scripted = scripted_provider(ProviderKind::ClaudeCode);
     let commands = scripted.commands.clone();
     let mut cx = TestAppContext::default();
+    cx.clock.advance(Duration::from_secs(3_600));
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
         state.set_provider_launcher_for_test(scripted.launcher);

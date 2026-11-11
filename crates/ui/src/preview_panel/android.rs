@@ -10,7 +10,7 @@ use gpui::{
 };
 use gpui_android::webview::{Browser, Event as JniEvent, Reply};
 use preview_mcp::page::ConsoleEntry;
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{cell::RefCell, rc::Rc};
 
 /// `PreviewHost`'s event numbers past the page events `events::android_event`
 /// reads: a console message, and a page agent message.
@@ -74,12 +74,9 @@ impl RawWebView {
     }
     pub(super) fn evaluate_json<T: 'static>(&self, script: &str, reply: ReplyTx, cx: &Context<T>) {
         let request = self.browser.request("evaluate", script);
-        cx.spawn(async move |_, cx| {
-            let result = futures::future::select(
-                Box::pin(request),
-                Box::pin(cx.background_executor().timer(Duration::from_secs(10))),
-            )
-            .await;
+        cx.spawn(async move |_, _| {
+            // The page's answer is waited for until the caller stops waiting.
+            let result = futures::future::select(Box::pin(request), Box::pin(reply.closed())).await;
             let result = match result {
                 futures::future::Either::Left((Ok(Reply::Json(raw)), _)) => Ok(
                     tcode_protocol::PreviewResponse::Json(preview_mcp::page::parse_result(&raw)),
@@ -88,7 +85,7 @@ impl RawWebView {
                 futures::future::Either::Left((Ok(Reply::Png(_)), _)) => {
                     Err("preview returned an image for JavaScript".into())
                 }
-                futures::future::Either::Right(_) => Err("preview JavaScript timed out".into()),
+                futures::future::Either::Right(_) => return,
             };
             let _ = reply.try_send(result);
         })

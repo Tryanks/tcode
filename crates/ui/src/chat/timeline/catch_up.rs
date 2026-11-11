@@ -125,7 +125,7 @@ impl Workspace {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         let workspace = Self {
@@ -229,18 +229,14 @@ fn a_thread_come_back_to_is_at_its_latest_at_once(cx: &mut TestAppContext) {
         let (first, second) = (workspace.first.clone(), workspace.second.clone());
         workspace.show(&chat, &first, cx);
         let store = workspace.store.clone();
-        workspace
-            .driver
-            .wait_until(cx, &store, "the first thread", |cx| {
-                workspace_last(&store, &first, cx).as_deref() == Some("answer-2")
-            });
+        workspace.driver.wait_until(cx, "the first thread", |cx| {
+            workspace_last(&store, &first, cx).as_deref() == Some("answer-2")
+        });
         draw_settled(cx);
         workspace.show(&chat, &second, cx);
-        workspace
-            .driver
-            .wait_until(cx, &store, "the second thread", |cx| {
-                store.read_with(cx, |store, cx| !store.chat_loading_for(Some(&second), cx))
-            });
+        workspace.driver.wait_until(cx, "the second thread", |cx| {
+            store.read_with(cx, |store, cx| !store.chat_loading_for(Some(&second), cx))
+        });
         draw_settled(cx);
 
         workspace.provider(&first, long_run(3, count));
@@ -248,7 +244,7 @@ fn a_thread_come_back_to_is_at_its_latest_at_once(cx: &mut TestAppContext) {
         workspace.show(&chat, &first, cx);
         workspace
             .driver
-            .wait_until(cx, &store, "the first thread's window", |cx| {
+            .wait_until(cx, "the first thread's window", |cx| {
                 workspace_last(&store, &first, cx).as_deref() == Some("finished")
             });
         let asked = workspace.events_subscriptions(&first);
@@ -293,11 +289,9 @@ fn a_thread_come_back_to_is_at_its_latest_at_once(cx: &mut TestAppContext) {
                 answer_event("answer-4", &"Here is what comes next.\n\n".repeat(5)),
             ],
         );
-        workspace
-            .driver
-            .wait_until(cx, &store, "the live answer", |cx| {
-                workspace_last(&store, &first, cx).as_deref() == Some("answer-4")
-            });
+        workspace.driver.wait_until(cx, "the live answer", |cx| {
+            workspace_last(&store, &first, cx).as_deref() == Some("answer-4")
+        });
         draw(cx);
         let arrived = chat
             .read_with(cx, |chat, _| chat.timeline())
@@ -316,7 +310,7 @@ fn a_thread_come_back_to_is_at_its_latest_at_once(cx: &mut TestAppContext) {
             heights.windows(2).any(|pair| pair[0] < pair[1]),
             "{count}: the live answer did not rise in: {heights:?}"
         );
-        workspace.driver.shutdown(cx, &store, &workspace.host);
+        workspace.driver.shutdown(cx, &workspace.host);
     }
 }
 

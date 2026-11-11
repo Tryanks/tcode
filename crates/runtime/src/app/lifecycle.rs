@@ -49,6 +49,8 @@ impl AppState {
             active.meta.pending_fork = None;
         }
         active.runtime = Runtime::Starting { generation };
+        active.provider_processes = agent::SessionProcesses::default();
+        let processes = active.provider_processes.clone();
         active.mcp_servers_attached = true;
         active.idle_since = None;
         active.live_model = active.meta.model.clone();
@@ -140,6 +142,7 @@ impl AppState {
                 );
                 opts.mcp_servers.extend(pull_request_registration);
                 opts.instructions = instructions;
+                opts.processes = processes.clone();
                 if transfer_failed.is_some() {
                     opts.resume = None;
                     opts.fork = None;
@@ -168,6 +171,7 @@ impl AppState {
                         if !matches_active && !matches_parked {
                             // Superseded by a newer start, or the session is gone.
                             let _ = handle.commands.try_send(SessionCommand::Shutdown);
+                            processes.stop();
                             return;
                         }
                         let commands = handle.commands.clone();
@@ -427,9 +431,7 @@ impl AppState {
             if active.draft && self.archived_sharing_affected(&active.meta) {
                 self.archived_revision += 1;
             }
-            if let Runtime::Live(commands) = active.runtime {
-                let _ = commands.try_send(SessionCommand::Shutdown);
-            }
+            active.stop_provider();
         }
         self.release_stale_session_logs(cx);
     }
@@ -451,9 +453,7 @@ impl AppState {
             self.shutdown_active(&id, cx);
         }
         for (_, parked) in self.residents.parked.drain() {
-            if let Runtime::Live(commands) = parked.runtime {
-                let _ = commands.try_send(SessionCommand::Shutdown);
-            }
+            parked.stop_provider();
         }
         // Drop every conversation-owned PTY, including those parked while an
         // idle thread was off screen.
@@ -513,7 +513,7 @@ impl AppState {
         let armed = session
             .idle_since
             .filter(|_| matches!(session.runtime, Runtime::Live(_)));
-        let idle_since = armed.unwrap_or_else(Instant::now);
+        let idle_since = armed.unwrap_or_else(|| cx.clock().now());
         session.idle_since = Some(idle_since);
 
         let mut residents: Vec<_> = self
@@ -567,10 +567,10 @@ impl AppState {
             return;
         }
         let session_id = session_id.to_string();
-        let deadline = idle_since + self.resident_idle_grace;
+        let grace = cx.clock().timer_at(idle_since + RESIDENT_IDLE_GRACE);
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            smol::Timer::at(deadline).await;
+            grace.await;
             host_cx.enqueue(move |state, cx| state.reap_idle_resident(&session_id, idle_since, cx));
         });
     }
@@ -606,10 +606,8 @@ impl AppState {
         self.revoke_computer_use_registration(session_id);
         self.clear_approvals(session_id);
         self.drop_rewind_requests(session_id);
-        if let Some(parked) = self.residents.evict(session_id)
-            && let Runtime::Live(commands) = parked.runtime
-        {
-            let _ = commands.try_send(SessionCommand::Shutdown);
+        if let Some(parked) = self.residents.evict(session_id) {
+            parked.stop_provider();
         }
         self.release_stale_session_logs(cx);
         self.reschedule_scheduled_wake(cx);

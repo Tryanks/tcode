@@ -355,7 +355,6 @@ mod tests {
     struct Fixture {
         host: tcode_runtime::pipe::SpawnedHost,
         driver: crate::store::tests::LocalHostDriver,
-        store: Entity<WorkspaceStore>,
         composer: Entity<Composer>,
         sink: Rc<RefCell<Option<async_channel::Sender<PlatformEvent>>>>,
     }
@@ -371,10 +370,8 @@ mod tests {
             tcode_runtime::pipe::HostServices::default(),
         )
         .unwrap();
-        let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
-            let id = state.start_draft("dictation".into(), std::env::temp_dir(), cx);
-            let timeline = state.residents.live[&id].timeline.clone();
-            (id, timeline)
+        let session_id = smol::block_on(host.update_state_for_test(|state, cx| {
+            state.start_draft("dictation".into(), std::env::temp_dir(), cx)
         }))
         .unwrap();
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
@@ -387,18 +384,15 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        driver.wait_until(cx, &store, "selected conversation", |cx| {
+        driver.wait_until(cx, "selected conversation", |cx| {
             store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
-        });
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         let sink = Rc::new(RefCell::new(None::<async_channel::Sender<PlatformEvent>>));
         let (composer, cx) = cx.add_window_view(|window, cx| {
@@ -414,7 +408,6 @@ mod tests {
             Fixture {
                 host,
                 driver,
-                store,
                 composer,
                 sink,
             },
@@ -431,7 +424,6 @@ mod tests {
             Fixture {
                 host,
                 mut driver,
-                store,
                 composer,
                 sink,
             },
@@ -549,7 +541,7 @@ mod tests {
         );
 
         cx.update(|window, cx| {
-            crate::window_seam::override_mobile_for_test(cx, true);
+            crate::window_seam::force_mobile_layout(cx);
             window.blur(cx);
         });
         composer.update_in(cx, |composer, _, cx| {
@@ -570,7 +562,7 @@ mod tests {
             );
             assert_eq!(composer.draft(cx), "no keyboard");
         });
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
     }
 
     /// A long session, Latin and CJK, as the recognizer reports it: each
@@ -584,7 +576,6 @@ mod tests {
             Fixture {
                 host,
                 mut driver,
-                store,
                 composer,
                 sink,
             },
@@ -682,6 +673,6 @@ mod tests {
             assert_eq!(composer.input.read(cx).cursor(), "前".len() + settled.len());
             assert_eq!(composer.voice.state.read(cx).status(), SpeechStatus::Idle);
         });
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
     }
 }

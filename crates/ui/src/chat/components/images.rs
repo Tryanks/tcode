@@ -40,11 +40,10 @@ pub(crate) fn image_tiles(
             let images: Vec<(String, Option<PathBuf>)> = match item {
                 ItemContent::ImageRead { path, .. } => {
                     let path = cwd.join(path);
-                    let title = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned();
+                    let title = path.file_name().map_or_else(
+                        || path.display().to_string(),
+                        |name| name.to_string_lossy().into_owned(),
+                    );
                     vec![(title, Some(path))]
                 }
                 ItemContent::ToolCall {

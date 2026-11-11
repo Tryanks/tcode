@@ -65,9 +65,10 @@ impl Shot {
     }
 
     /// How long ago it was taken.
-    fn ago(&self) -> Option<String> {
-        self.taken_ms
-            .map(|ms| crate::time::humanize_ago(crate::time::now_secs().saturating_sub(ms / 1000)))
+    fn ago(&self, cx: &App) -> Option<String> {
+        self.taken_ms.map(|ms| {
+            crate::time::humanize_ago(crate::time::now_secs(cx).saturating_sub(ms / 1000))
+        })
     }
 }
 
@@ -240,7 +241,7 @@ pub(super) fn body(
         window,
         cx,
         |shot, _, cx| {
-            let ago = shot.ago();
+            let ago = shot.ago(cx);
             h_flex()
                 .w_full()
                 .gap(cx.theme().tokens.spacing.sm)

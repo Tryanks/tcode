@@ -26,7 +26,6 @@ use gpui_base::{h_flex, v_flex};
 use agent::ProviderKind;
 use tcode_core::provider_status::{AuthStatus, ProviderProbeDiagnostic, ProviderStatusKind};
 use tcode_core::settings::{ResolvedProfile, builtin_provider_color};
-use tcode_protocol::HarnessDescription;
 
 /// What is wrong with a harness, as its row's chip says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,16 +34,18 @@ pub(crate) enum Trouble {
     Failed,
     SignedOut,
     NeedsAttention,
+    /// Older than the oldest release Tcode supports.
+    Outdated,
 }
 
 /// A harness row's second line and its chip, from the host's description
 /// of the harness and what was probed of each of its profiles.
 pub(crate) fn row_summary(
-    description: &HarnessDescription,
+    harness: &HarnessId,
     profiles: &[(ResolvedProfile, Option<ProviderSnapshot>)],
     enabled: bool,
 ) -> (String, Option<Trouble>) {
-    if description.acp_agent_id.is_some() {
+    if matches!(harness, HarnessId::Acp(_)) {
         let line = if enabled {
             "ACP".to_owned()
         } else {
@@ -80,6 +81,12 @@ pub(crate) fn row_summary(
                 }
                 _ => None,
             })
+            .or_else(|| {
+                builtin
+                    .supported_from
+                    .is_some()
+                    .then_some(Trouble::Outdated)
+            })
     };
     let line = if !enabled {
         crate::tr!("providers.status.disabled").into_owned()
@@ -104,7 +111,6 @@ pub(crate) fn harness_row(
     cx: &App,
 ) -> AnyElement {
     let state = store.read(cx);
-    let description = describe(state, harness);
     let name = harness_name(state, harness);
     let profiles: Vec<(ResolvedProfile, Option<ProviderSnapshot>)> =
         harness_profiles(state, harness)
@@ -131,11 +137,12 @@ pub(crate) fn harness_row(
             (
                 agent.as_ref().is_some_and(|agent| agent.enabled),
                 agent.map(|agent| agent.version).filter(|v| !v.is_empty()),
-                description.registry_update.is_some(),
+                describe(state, harness)
+                    .is_some_and(|description| description.registry_update.is_some()),
             )
         }
     };
-    let (line, trouble) = row_summary(&description, &profiles, enabled);
+    let (line, trouble) = row_summary(harness, &profiles, enabled);
     let glyph = provider_glyph(harness.kind());
     let key = harness.key();
     let chip = trouble.map(|trouble| {
@@ -158,6 +165,11 @@ pub(crate) fn harness_row(
             ),
             Trouble::NeedsAttention => (
                 "providers.status.needs_attention",
+                theme.warning,
+                theme.warning_foreground,
+            ),
+            Trouble::Outdated => (
+                "providers.harness.outdated",
                 theme.warning,
                 theme.warning_foreground,
             ),
@@ -282,4 +294,54 @@ pub fn profile_glyph(
     let profile_id =
         profile_id.unwrap_or_else(|| tcode_core::settings::Settings::builtin_profile_id(provider));
     provider_glyph(provider).text_color(rgb(store.provider_profile_color(profile_id)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tcode_core::provider_status::ProviderAuth;
+
+    /// A harness whose CLI is older than Tcode supports says so on its row
+    /// when nothing more pressing is wrong; a signed-out account still is.
+    #[test]
+    fn an_older_cli_marks_its_row_unless_something_else_is_wrong() {
+        let settings = tcode_core::settings::Settings::default();
+        let profile = settings
+            .resolved_profile(tcode_core::settings::Settings::builtin_profile_id(
+                ProviderKind::Codex,
+            ))
+            .unwrap();
+        let probed = |auth: AuthStatus| ProviderSnapshot {
+            checked_at: Some(1),
+            installed: true,
+            version: Some("0.140.2".into()),
+            status: Some(ProviderStatusKind::Ready),
+            auth: Some(ProviderAuth {
+                status: auth,
+                label: None,
+                email: None,
+            }),
+            supported_from: Some("0.148.0".into()),
+            ..ProviderSnapshot::default()
+        };
+        let trouble = |snapshot: ProviderSnapshot| {
+            row_summary(
+                &HarnessId::Native(ProviderKind::Codex),
+                &[(profile.clone(), Some(snapshot))],
+                true,
+            )
+            .1
+        };
+        assert_eq!(
+            trouble(probed(AuthStatus::Authenticated)),
+            Some(Trouble::Outdated)
+        );
+        assert_eq!(
+            trouble(ProviderSnapshot {
+                diagnostic: Some(ProviderProbeDiagnostic::Unauthenticated),
+                ..probed(AuthStatus::Unauthenticated)
+            }),
+            Some(Trouble::SignedOut)
+        );
+    }
 }

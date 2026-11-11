@@ -126,6 +126,20 @@ impl Forgejo {
         Ok((!response.truncated).then(|| String::from_utf8_lossy(&response.body).into_owned()))
     }
 
+    /// The whole diff's files, whose hunks place a comment's lines. Past the read limit the
+    /// listing withholds every file's hunks, so no line can be placed.
+    fn diff_files(&self, key: &PullRequestKey) -> Result<PullRequestFiles, ForgeError> {
+        let files = self.files(key, None)?;
+        if files
+            .files
+            .iter()
+            .any(|file| file.patch == PullRequestPatch::Withheld)
+        {
+            return Err(error(ForgeErrorKind::TooLarge, "Forgejo diff too large"));
+        }
+        Ok(files)
+    }
+
     /// `page` is the page and the size the first page came back with, which a later one is
     /// full at.
     fn files(
@@ -139,7 +153,7 @@ impl Forgejo {
         let base = text(&pr, "merge_base")
             .or_else(|| text(&pr["base"], "sha"))
             .unwrap_or_default();
-        let changed_files = pr["changed_files"].as_u64().unwrap_or(0);
+        let changed_files = pr["changed_files"].as_u64();
         if page.is_none()
             && let Some(diff) = self.diff(key)?
         {
@@ -169,8 +183,9 @@ impl Forgejo {
             .unwrap_or_default();
         let size = page.map_or(rows.len(), |(_, size)| size);
         let listed = (page_number as u64 - 1) * size as u64 + rows.len() as u64;
-        let next = (api::page_full(rows.len(), &size) && listed < changed_files)
-            .then_some((page_number + 1, size));
+        let next = (api::page_full(rows.len(), &size)
+            && changed_files.is_none_or(|count| listed < count))
+        .then_some((page_number + 1, size));
         Ok(PullRequestFiles {
             base,
             head,
@@ -188,14 +203,15 @@ impl Forgejo {
                             "renamed" => agent::FileChangeKind::Rename,
                             _ => agent::FileChangeKind::Modify,
                         },
-                        additions: row["additions"].as_u64().unwrap_or(0),
-                        deletions: row["deletions"].as_u64().unwrap_or(0),
+                        additions: row["additions"].as_u64()?,
+                        deletions: row["deletions"].as_u64()?,
                         patch: PullRequestPatch::Withheld,
+                        url: None,
                     })
                 })
                 .collect(),
             next_cursor: next.map(|(page, size)| format!("{page}:{size}")),
-            complete: next.is_none() && listed >= changed_files,
+            complete: next.is_none() && changed_files.is_none_or(|count| listed >= count),
             changed_files,
         })
     }
@@ -792,6 +808,10 @@ impl Forge for Forgejo {
         Some(repository::url(key))
     }
 
+    fn file_url(&self, key: &PullRequestKey, revision: &str, path: &str) -> Option<String> {
+        Some(repository::file_url(key, revision, path))
+    }
+
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {
         let pull = self.pull(key);
         let pr = pull.pull()?;
@@ -949,7 +969,7 @@ impl Forge for Forgejo {
         lines: (u32, u32),
     ) -> Result<Anchoring, ForgeError> {
         Ok(crate::forge::anchors::anchoring(
-            &self.files(key, None)?,
+            &self.diff_files(key)?,
             head,
             path,
             side,
@@ -962,7 +982,7 @@ impl Forge for Forgejo {
         key: &PullRequestKey,
         comments: &[PullRequestReviewDraftComment],
     ) -> Result<(String, Vec<Moved>), ForgeError> {
-        crate::forge::anchors::reanchor(self.files(key, None)?, comments, |revision, path| {
+        crate::forge::anchors::reanchor(self.diff_files(key)?, comments, |revision, path| {
             self.file_text(key, revision, path)
         })
     }

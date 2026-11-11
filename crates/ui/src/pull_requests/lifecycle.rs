@@ -658,19 +658,28 @@ impl Target {
                             self.session.clone(),
                             self.offer.key.clone(),
                             PullRequestRead::ActionState,
+                            PullRequestReadResponse::action_state,
                             cx,
                         )
                     });
                     window
                         .spawn(cx, async move |cx| {
-                            let reopen = match task.await {
-                                Ok((PullRequestReadResponse::ActionState(state), _)) => {
-                                    Some(state.capabilities.reopen)
-                                }
-                                _ => None,
-                            };
-                            let _ = cx
-                                .update(|window, cx| self.confirm_close(reopen, kind, window, cx));
+                            let read = task.await;
+                            let _ = cx.update(|window, cx| {
+                                let reopen = match read {
+                                    Ok((state, _)) => Some(state.capabilities.reopen),
+                                    // The confirmation still says it does not know; the
+                                    // reason is the host's.
+                                    Err(error) => {
+                                        window.push_notification(
+                                            Notification::error(super::detail::reason(&error)),
+                                            cx,
+                                        );
+                                        None
+                                    }
+                                };
+                                self.confirm_close(reopen, kind, window, cx)
+                            });
                         })
                         .detach();
                 }
@@ -1130,6 +1139,7 @@ impl MergeDialog {
                 self.target.session.clone(),
                 self.target.offer.key.clone(),
                 PullRequestRead::ActionState,
+                PullRequestReadResponse::action_state,
                 cx,
             )
         });
@@ -1137,7 +1147,7 @@ impl MergeDialog {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.state = Some(match result {
-                    Ok((PullRequestReadResponse::ActionState(state), _)) => {
+                    Ok((state, _)) => {
                         this.method = merge_method(
                             &state.merge_methods,
                             this.target.offer.method,
@@ -1145,7 +1155,6 @@ impl MergeDialog {
                         );
                         Ok(state)
                     }
-                    Ok(_) => Err(String::new()),
                     Err(error) => Err(super::detail::reason(&error)),
                 });
                 cx.notify();

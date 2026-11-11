@@ -2,7 +2,7 @@
 use std::net::IpAddr;
 
 use gpui::{App, AppContext as _, Entity, Window};
-use tcode_client::pairing::{PairInvite, PairedHost, parse_pair_url};
+use tcode_client::pairing::{PairError, PairInvite, PairedHost, parse_pair_url};
 
 use crate::widgets::input::InputState;
 
@@ -140,7 +140,7 @@ impl PairForm {
     pub fn finish_pair(
         &mut self,
         generation: u64,
-        result: Result<PairedHost, String>,
+        result: Result<PairedHost, PairError>,
     ) -> Option<PairedHost> {
         if generation != self.generation {
             return None;
@@ -151,7 +151,7 @@ impl PairForm {
                 self.unreachable = None;
                 Some(host)
             }
-            Err(error) if no_path(&error) => {
+            Err(PairError::Unreachable(_)) => {
                 self.unreachable = self.attempted.clone();
                 self.address_error = self.attempted_address.map(|address| {
                     crate::tr!("hosts.pair.address_unreachable", address = address).into_owned()
@@ -211,30 +211,24 @@ pub fn joined_message(host: &PairedHost) -> Option<String> {
         .map(|space| crate::tr!("member.joined", space = space, machine = &host.name).into_owned())
 }
 
-/// `PairError::Unreachable`'s `Display` in `crates/traverse/src/client.rs`:
-/// no path to the machine opened, and the secret was never sent.
-const UNREACHABLE: &str = "could not connect to the machine";
-
-fn no_path(error: &str) -> bool {
-    error.to_ascii_lowercase().starts_with(UNREACHABLE)
-}
-
-/// Interpret the transport's pairing failures here, where the recovery
-/// advice can be localized. The wording is `PairError`'s `Display` in
-/// `crates/traverse/src/client.rs`; anything else is shown as it is. A
+/// A pairing failure in the user's language, with what to do about it. A
 /// failure that found no path never gets here: the address prompt reports
 /// it.
-pub fn pair_error(error: &str) -> String {
-    let lower = error.to_ascii_lowercase();
-    match lower.trim() {
-        "invalid or expired invitation" => crate::tr!("hosts.pair.rejected").into_owned(),
-        "already_member" => crate::tr!("member.already_member").into_owned(),
-        "space_unavailable" => crate::tr!("member.space_unavailable").into_owned(),
-        "pairing_disabled" => crate::tr!("hosts.pair.disabled").into_owned(),
-        _ if lower.starts_with("invalid pairing response") => {
-            crate::tr!("hosts.pair.unconfirmed").into_owned()
+pub fn pair_error(error: &PairError) -> String {
+    match error {
+        PairError::Invalid => crate::tr!("hosts.pair.rejected").into_owned(),
+        PairError::AlreadyMember => crate::tr!("member.already_member").into_owned(),
+        PairError::SpaceUnavailable => crate::tr!("member.space_unavailable").into_owned(),
+        PairError::Disabled => crate::tr!("hosts.pair.disabled").into_owned(),
+        PairError::Protocol(_) => crate::tr!("hosts.pair.unconfirmed").into_owned(),
+        PairError::Busy => crate::tr!("hosts.pair.busy").into_owned(),
+        PairError::Lost(reason) => crate::tr!("hosts.pair.lost", reason = reason).into_owned(),
+        PairError::Unreachable(reason) | PairError::Device(reason) => {
+            crate::tr!("hosts.pair.failed", reason = reason).into_owned()
         }
-        _ => crate::tr!("hosts.pair.failed", reason = error).into_owned(),
+        PairError::Unsupported => {
+            crate::tr!("hosts.pair.failed", reason = error.to_string()).into_owned()
+        }
     }
 }
 
@@ -243,33 +237,6 @@ mod tests {
     use gpui::TestAppContext;
 
     use super::*;
-
-    #[test]
-    fn pairing_failures_preserve_the_recovery_action_instead_of_exposing_transport_wording() {
-        for (error, key) in [
-            ("invalid or expired invitation", "hosts.pair.rejected"),
-            ("pairing_disabled", "hosts.pair.disabled"),
-            (
-                "invalid pairing response: unexpected reply Refused",
-                "hosts.pair.unconfirmed",
-            ),
-        ] {
-            assert_eq!(
-                pair_error(error),
-                crate::tr!(key).into_owned(),
-                "wrong recovery advice for {error}",
-            );
-        }
-        assert_eq!(
-            pair_error("the machine could not record the pairing; try again"),
-            crate::tr!(
-                "hosts.pair.failed",
-                reason = "the machine could not record the pairing; try again"
-            )
-            .into_owned(),
-            "an unfamiliar reason is shown as it is"
-        );
-    }
 
     fn invite() -> PairInvite {
         PairInvite {
@@ -307,14 +274,12 @@ mod tests {
         form.update(cx, |holder, cx| {
             let (_, address, generation) = holder.0.begin_pair(cx).expect("a request");
             assert_eq!(address, None);
-            holder
-                .0
-                .finish_pair(generation, Err("invalid or expired invitation".into()));
+            holder.0.finish_pair(generation, Err(PairError::Invalid));
             assert!(!holder.0.needs_address(cx), "the machine answered");
             let (_, _, generation) = holder.0.begin_pair(cx).expect("a retry");
             holder.0.finish_pair(
                 generation,
-                Err("could not connect to the machine: connection timed out".into()),
+                Err(PairError::Unreachable("connection timed out".into())),
             );
             assert!(holder.0.needs_address(cx));
             assert_eq!(holder.0.error, None, "the prompt is the whole report");
@@ -346,7 +311,7 @@ mod tests {
             assert_eq!(address, Some("fd00::2".parse().unwrap()));
             holder.0.finish_pair(
                 generation,
-                Err("could not connect to the machine: connection timed out".into()),
+                Err(PairError::Unreachable("connection timed out".into())),
             );
             assert_eq!(holder.0.error, None);
             assert_eq!(
@@ -368,10 +333,9 @@ mod tests {
         // typed for.
         form.update(cx, |holder, cx| {
             let (_, _, generation) = holder.0.begin_pair(cx).unwrap();
-            holder.0.finish_pair(
-                generation,
-                Err("could not connect to the machine: x".into()),
-            );
+            holder
+                .0
+                .finish_pair(generation, Err(PairError::Unreachable("x".into())));
             assert!(holder.0.needs_address(cx));
         });
         let other = tcode_client::pairing::pair_url(&PairInvite {
@@ -415,7 +379,7 @@ mod tests {
             assert!(
                 holder
                     .0
-                    .finish_pair(generation, Err("pairing_disabled".into()))
+                    .finish_pair(generation, Err(PairError::Disabled))
                     .is_none()
             );
             assert!(!holder.0.busy);

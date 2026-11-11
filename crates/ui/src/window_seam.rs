@@ -159,16 +159,14 @@ pub(crate) fn keyboard_covers_window(window: &Window) -> bool {
 /// layout rule has a compact half. This is a property of the build, not a
 /// width: a wide iPad still types on glass, and a desktop window dragged
 /// narrow still has a hardware Enter key. Forwards to [`gpui_base::is_mobile`]
-/// (compiled for iOS or Android) unless this app installed an override:
-/// [`force_mobile_layout`] for a desktop preview, or the test override that
-/// exercises both branches on a desktop.
+/// (compiled for iOS or Android) unless this app called
+/// [`force_mobile_layout`].
 pub(crate) fn is_mobile(cx: &App) -> bool {
-    cx.try_global::<MobileOverride>()
-        .map_or_else(gpui_base::is_mobile, |override_| override_.0)
+    cx.has_global::<MobileOverride>() || gpui_base::is_mobile()
 }
 
-/// The app-wide answer [`is_mobile`] gives instead of the build's own.
-struct MobileOverride(bool);
+/// Set by [`force_mobile_layout`]: [`is_mobile`] answers yes.
+struct MobileOverride;
 
 impl Global for MobileOverride {}
 
@@ -178,13 +176,7 @@ impl Global for MobileOverride {}
 /// nothing in the product does, and [`gpui_base::is_mobile`] itself — what the
 /// platform layer actually compiled for — is never overridden.
 pub fn force_mobile_layout(cx: &mut App) {
-    cx.set_global(MobileOverride(true));
-}
-
-/// Override the build kind inside one isolated GPUI test app.
-#[cfg(test)]
-pub(crate) fn override_mobile_for_test(cx: &mut App, value: bool) {
-    cx.set_global(MobileOverride(value));
+    cx.set_global(MobileOverride);
 }
 
 /// Occlude a test window the way a phone would: the visual viewport shrinks
@@ -232,7 +224,7 @@ mod tests {
     #[gpui::test]
     fn seam_follows_the_window_fully_visible_bounds(cx: &mut TestAppContext) {
         let (_, cx) = cx.add_window_view(|_, _| Probe);
-        cx.update(|_, cx| override_mobile_for_test(cx, true));
+        cx.update(|_, cx| force_mobile_layout(cx));
         cx.simulate_resize(size(px(918.), px(420.)));
         cx.update(|window, cx| {
             assert_eq!(content_insets(window), Edges::default());

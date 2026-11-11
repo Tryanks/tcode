@@ -3,12 +3,12 @@
 
 use std::path::Path;
 
+use agent::{ToolFamily, WebLink};
 use gpui::{
     AnyElement, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use gpui_base::{h_flex, v_flex};
-use serde::Deserialize;
 
 use super::window::{Argument, Chip, Header, Verb, section};
 use super::{Bound, Call, ToolCtx, ToolView, bounded_text, copy, output_section};
@@ -18,35 +18,18 @@ use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText, OpenUrl};
 
-const FETCH: &[&str] = &["webfetch", "web_fetch", "fetch", "fetch_url"];
-const SEARCH: &[&str] = &["websearch", "web_search", "search_web"];
-
-#[derive(Deserialize)]
-struct FetchInput<'a> {
-    #[serde(borrow)]
-    url: &'a str,
-    #[serde(default, borrow)]
-    prompt: Option<&'a str>,
-}
-
-#[derive(Deserialize)]
-struct SearchInput<'a> {
-    #[serde(borrow, alias = "searchTerm")]
-    query: &'a str,
-}
-
 pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView + 'a>> {
-    if call.named(FETCH)
-        && let Some(input) = call.input::<FetchInput<'a>>()
-    {
-        return Some(Box::new(Fetch { input }));
+    match call.family? {
+        ToolFamily::Fetch { url, prompt } => Some(Box::new(Fetch {
+            url,
+            prompt: prompt.as_deref(),
+        })),
+        ToolFamily::WebSearch { query, links } => Some(Box::new(Search {
+            query,
+            links: links.as_deref().unwrap_or_default(),
+        })),
+        _ => None,
     }
-    if call.named(SEARCH)
-        && let Some(input) = call.input::<SearchInput<'a>>()
-    {
-        return Some(Box::new(Search { input }));
-    }
-    None
 }
 
 /// A web search item: its query, when the harness said it.
@@ -55,17 +38,17 @@ pub(in crate::chat) fn search_item_header(query: &str) -> Header {
 }
 
 struct Fetch<'a> {
-    input: FetchInput<'a>,
+    url: &'a str,
+    prompt: Option<&'a str>,
 }
 
 impl ToolView for Fetch<'_> {
     fn header(&self, _call: &Call<'_>, _cwd: &Path) -> Header {
-        Header::new(IconName::Globe, Verb("fetch")).argument(Argument::plain(self.input.url))
+        Header::new(IconName::Globe, Verb("fetch")).argument(Argument::plain(self.url))
     }
 
     fn body(&self, call: &Call<'_>, ctx: &mut ToolCtx<'_, '_>) -> AnyElement {
         let prompt = self
-            .input
             .prompt
             .filter(|prompt| !prompt.is_empty())
             .map(|prompt| {
@@ -78,7 +61,7 @@ impl ToolView for Fetch<'_> {
 
     fn copy_items(&self, call: &Call<'_>) -> Vec<(String, String)> {
         let mut items = Vec::new();
-        copy(&mut items, "tools.copy_url", self.input.url);
+        copy(&mut items, "tools.copy_url", self.url);
         copy(
             &mut items,
             "chat.copy_output",
@@ -89,52 +72,25 @@ impl ToolView for Fetch<'_> {
 }
 
 struct Search<'a> {
-    input: SearchInput<'a>,
-}
-
-#[derive(Deserialize)]
-struct Link {
-    #[serde(default)]
-    title: String,
-    url: String,
-}
-
-/// What a search returned: the links it lists on a `Links: [...]` line, as
-/// Claude Code's WebSearch does, and the text around them.
-fn links(output: &str) -> (Vec<Link>, String) {
-    let mut links = Vec::new();
-    let mut prose = Vec::new();
-    for line in output.lines() {
-        match line
-            .strip_prefix("Links: ")
-            .and_then(|json| serde_json::from_str::<Vec<Link>>(json).ok())
-        {
-            Some(found) => links.extend(found),
-            None => prose.push(line),
-        }
-    }
-    (links, prose.join("\n").trim().to_owned())
+    query: &'a str,
+    links: &'a [WebLink],
 }
 
 impl ToolView for Search<'_> {
-    fn header(&self, call: &Call<'_>, _cwd: &Path) -> Header {
-        let count = call
-            .output
-            .map(|output| links(output).0.len())
-            .filter(|count| *count > 0)
-            .map(|count| Chip::Count(crate::tr!("tools.links", count = count).into_owned()));
-        search_item_header(self.input.query).chip(count)
+    fn header(&self, _call: &Call<'_>, _cwd: &Path) -> Header {
+        let count = (!self.links.is_empty())
+            .then(|| Chip::Count(crate::tr!("tools.links", count = self.links.len()).into_owned()));
+        search_item_header(self.query).chip(count)
     }
 
     fn body(&self, call: &Call<'_>, ctx: &mut ToolCtx<'_, '_>) -> AnyElement {
-        let (links, prose) = links(call.output.unwrap_or_default());
-        if call.status == agent::ItemStatus::Failed || links.is_empty() {
+        if call.status == agent::ItemStatus::Failed || self.links.is_empty() {
             return super::body(output_section(call, Bound::HEAD, ctx));
         }
         let cx = ctx.app();
         let theme = cx.theme();
         let accent = theme.accent;
-        let rows = links.iter().enumerate().map(|(index, link)| {
+        let rows = self.links.iter().enumerate().map(|(index, link)| {
             let selector = format!("tool-link-{}-{index}", call.id());
             let url = link.url.clone();
             let menu_url = link.url.clone();
@@ -194,14 +150,17 @@ impl ToolView for Search<'_> {
             })
             .children(rows)
             .into_any_element();
-        let prose = (!prose.is_empty())
-            .then(|| bounded_text(call.entry, "output", &prose, false, Bound::HEAD, ctx));
-        super::body(std::iter::once(list).chain(prose))
+        // The harness's own words around the links.
+        let raw = call
+            .output
+            .filter(|output| !output.trim().is_empty())
+            .map(|output| super::raw_section(call, output, ctx));
+        super::body(std::iter::once(list).chain(raw))
     }
 
     fn copy_items(&self, call: &Call<'_>) -> Vec<(String, String)> {
         let mut items = Vec::new();
-        copy(&mut items, "tools.copy_query", self.input.query);
+        copy(&mut items, "tools.copy_query", self.query);
         copy(
             &mut items,
             "chat.copy_output",

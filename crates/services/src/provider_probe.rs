@@ -138,9 +138,7 @@ pub async fn probe_provider(
             };
         }
     };
-    let version = crate::version_check::provider_updates::parse_version(&raw_version)
-        .map(|(a, b, c)| format!("{a}.{b}.{c}"))
-        .or(Some(raw_version));
+    let (version, supported_from) = read_version(provider, raw_version);
 
     let auth = match provider {
         // `claude auth status` exits 1 when signed out.
@@ -187,7 +185,22 @@ pub async fn probe_provider(
 
     ProviderSnapshot {
         binary: Some(program),
-        ..finalize_probe(checked_at, version, auth)
+        supported_from,
+        ..finalize_probe(checked_at, Some(version), auth)
+    }
+}
+
+/// What `--version` printed, as the version it names, and the oldest release
+/// Tcode supports when that version is older. A version that cannot be read
+/// is kept as printed and is not taken for an old one.
+fn read_version(provider: ProviderKind, printed: String) -> (String, Option<String>) {
+    let format = |(major, minor, patch): (u32, u32, u32)| format!("{major}.{minor}.{patch}");
+    match crate::version_check::provider_updates::parse_version(&printed) {
+        Some(installed) => (
+            format(installed),
+            provider.harness().unsupported(installed).map(format),
+        ),
+        None => (printed, None),
     }
 }
 
@@ -276,6 +289,7 @@ fn finalize_probe(
         checking: false,
         login: None,
         binary: None,
+        supported_from: None,
     }
 }
 
@@ -326,6 +340,66 @@ mod tests {
                 diagnostic(&env),
                 Some(ProviderProbeDiagnostic::IndeterminateAuth),
                 "a key or token signs Cursor in without a stored login"
+            );
+        }
+    }
+
+    /// A CLI older than its harness's oldest supported release says which
+    /// release that is; a current one, a harness with none named, and output
+    /// no version can be read from say nothing. Each line has the shape that
+    /// CLI's `--version` prints: Claude Code 2.1.322 `<v> (Claude Code)`,
+    /// codex-cli 0.167.0 `codex-cli <v>`, OpenCode 2.2.7 `opencode v<v>`,
+    /// pi 1.5.2 `<v>`, Grok `grok <v> (<build>)`
+    /// (`agent/tests/fixtures/grok/README.md`) and Cursor `<date>-<build>`
+    /// (`agent/tests/fixtures/cursor/PROVENANCE.md`); the numbers are made up.
+    #[test]
+    fn an_older_cli_names_the_oldest_supported_release() {
+        for (provider, printed, version, supported_from) in [
+            (
+                ProviderKind::ClaudeCode,
+                "2.1.290 (Claude Code)",
+                "2.1.290",
+                Some("2.1.318"),
+            ),
+            (
+                ProviderKind::ClaudeCode,
+                "2.1.330 (Claude Code)",
+                "2.1.330",
+                None,
+            ),
+            (
+                ProviderKind::Codex,
+                "codex-cli 0.140.2",
+                "0.140.2",
+                Some("0.148.0"),
+            ),
+            (ProviderKind::Codex, "codex-cli 0.148.0", "0.148.0", None),
+            (
+                ProviderKind::OpenCode,
+                "opencode v1.19.5",
+                "1.19.5",
+                Some("2.0.6"),
+            ),
+            (ProviderKind::OpenCode, "opencode v2.1.0", "2.1.0", None),
+            (ProviderKind::Pi, "0.40.0", "0.40.0", None),
+            (
+                ProviderKind::Grok,
+                "grok 0.9.1 (0123456789ab)",
+                "0.9.1",
+                None,
+            ),
+            (ProviderKind::Cursor, "2025.01.02-abc1234", "2025.1.2", None),
+            (
+                ProviderKind::Codex,
+                "codex-cli (dev build)",
+                "codex-cli (dev build)",
+                None,
+            ),
+        ] {
+            assert_eq!(
+                read_version(provider, printed.to_owned()),
+                (version.to_owned(), supported_from.map(str::to_owned)),
+                "{printed}"
             );
         }
     }

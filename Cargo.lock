@@ -1928,6 +1928,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tcode-core",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -12176,6 +12178,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
+ "tcode-core",
  "tcode-protocol",
  "url",
  "uuid",

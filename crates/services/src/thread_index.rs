@@ -485,7 +485,9 @@ impl Activity {
             | EntryContent::ContextWindowChanged { .. }
             | EntryContent::SettingsKept
             | EntryContent::SessionMoved { .. }
-            | EntryContent::Worktree { .. } => {}
+            | EntryContent::Worktree { .. }
+            | EntryContent::Unreadable { .. }
+            | EntryContent::Withheld { .. } => {}
         }
     }
 
@@ -1308,6 +1310,8 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
             ("context_window_changed", format!("context window {window}"))
         }
         EntryContent::SettingsKept => ("settings_kept", "settings kept".to_owned()),
+        EntryContent::Unreadable { line } => ("unreadable_record", line.clone()),
+        EntryContent::Withheld { bytes } => ("record_withheld", format!("{bytes} bytes")),
         EntryContent::SessionMoved { from, to } => (
             "session_moved",
             format!("{} → {}", from.display(), to.display()),
@@ -1722,6 +1726,7 @@ mod tests {
             } else {
                 ItemStatus::InProgress
             },
+            family: None,
         }
     }
 

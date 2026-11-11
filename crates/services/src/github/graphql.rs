@@ -60,6 +60,46 @@ pub fn aliases(
     })
 }
 
+/// Each of `count` aliases of a batched answer, `{prefix}{index}` for the index-th: what its
+/// `data` holds, or the errors whose `path` begins at that alias, and any that name no path. A
+/// field under the alias that failed fails the alias: its `null` would read as an answer.
+/// GitHub types an error `NOT_FOUND` for a repository or pull request the credential cannot see.
+pub fn aliased<'a>(
+    response: &'a Value,
+    prefix: &str,
+    count: usize,
+) -> Vec<Result<&'a Value, super::GitHubError>> {
+    let errors = response["errors"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    (0..count)
+        .map(|index| {
+            let alias = format!("{prefix}{index}");
+            let own: Vec<_> = errors
+                .iter()
+                .filter(|error| {
+                    error.get("path").is_none_or(Value::is_null)
+                        || error["path"][0].as_str() == Some(alias.as_str())
+                })
+                .collect();
+            if own.is_empty() {
+                return Ok(&response["data"][&alias]);
+            }
+            if own.iter().all(|error| error["type"] == "NOT_FOUND") {
+                return Err(super::GitHubError::NotFound);
+            }
+            Err(super::GitHubError::Response {
+                status: 200,
+                messages: own
+                    .iter()
+                    .filter_map(|error| error["message"].as_str().map(str::to_owned))
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 pub struct Pages<T> {
     pub pages: Vec<T>,

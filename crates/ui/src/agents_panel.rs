@@ -305,13 +305,10 @@ impl Agents {
             let status = (!archived).then(|| store.agent_status(&meta.id)).flatten();
             let (execution, delivery) = match status {
                 Some(status) => (Some(status.execution), status.delivery),
-                // Nor does a settled one; an unsettled agent is running
-                // until the host reports it.
-                None => {
-                    let delivery = AgentDelivery::of(meta, AgentExecution::Working);
-                    let running = matches!(delivery, AgentDelivery::Running);
-                    (running.then_some(AgentExecution::Working), delivery)
-                }
+                // Nor does a settled one. An unsettled one is listed with
+                // the running agents, its state unknown until the host
+                // reports it.
+                None => (None, AgentDelivery::of(meta, AgentExecution::Working)),
             };
             let row = AgentRow {
                 key: meta.id.clone(),
@@ -1772,6 +1769,7 @@ mod tests {
                 wakes: Default::default(),
                 waiting_for_approval: true,
                 waiting_for_input: false,
+                settle_blocked: false,
                 failed: false,
                 unread: false,
                 fork: tcode_protocol::ForkAvailability::Available,
@@ -1786,7 +1784,7 @@ mod tests {
         .unwrap();
         crate::store::tests::seed_full_scope(&store, &incoming, vec![index], cx);
         let mut driver = crate::store::tests::LocalHostDriver::from_link(link.clone());
-        driver.wait_until(cx, &store, "child status", |cx| {
+        driver.wait_until(cx, "child status", |cx| {
             store.read_with(cx, |store, _| store.agent_status("asking").is_some())
         });
 
@@ -1848,6 +1846,7 @@ mod tests {
                 wakes: Default::default(),
                 waiting_for_approval: false,
                 waiting_for_input: false,
+                settle_blocked: false,
                 failed: false,
                 unread: false,
                 fork: tcode_protocol::ForkAvailability::Available,
@@ -1898,7 +1897,7 @@ mod tests {
             cx,
         );
         let mut driver = crate::store::tests::LocalHostDriver::from_link(link.clone());
-        driver.wait_until(cx, &store, "child status", |cx| {
+        driver.wait_until(cx, "child status", |cx| {
             store.read_with(cx, |store, _| store.agent_status("worker").is_some())
         });
         store.update(cx, |store, cx| store.show_alone("lead".into(), cx));
@@ -1948,7 +1947,7 @@ mod tests {
             };
             [line("worker"), line("spawn")]
         };
-        driver.wait_until(cx, &store, "the lead's transcript", |cx| {
+        driver.wait_until(cx, "the lead's transcript", |cx| {
             store.read_with(cx, |store, cx| {
                 lines_of(store, cx)[1].0 == Some(LatestActivity::Thinking)
             })
@@ -2022,7 +2021,7 @@ mod tests {
         ] {
             incoming.try_send(message).unwrap();
         }
-        driver.wait_until(cx, &store, "the agents to settle", |cx| {
+        driver.wait_until(cx, "the agents to settle", |cx| {
             store.read_with(cx, |store, cx| lines_of(store, cx)[0].1.is_some())
         });
         assert_eq!(
@@ -2095,6 +2094,7 @@ mod tests {
                 wakes: Default::default(),
                 waiting_for_approval: false,
                 waiting_for_input: false,
+                settle_blocked: false,
                 failed: false,
                 unread: false,
                 fork: tcode_protocol::ForkAvailability::Available,
@@ -2109,7 +2109,7 @@ mod tests {
         .unwrap();
         crate::store::tests::seed_full_scope(&store, &incoming, vec![index], cx);
         let mut driver = crate::store::tests::LocalHostDriver::from_link(link.clone());
-        driver.wait_until(cx, &store, "child status", |cx| {
+        driver.wait_until(cx, "child status", |cx| {
             store.read_with(cx, |store, _| store.agent_status("finished").is_some())
         });
         store.update(cx, |store, cx| store.show_alone("lead".into(), cx));
@@ -2127,7 +2127,7 @@ mod tests {
             .expect("settle-all button is drawn");
         cx.simulate_click(button.center(), gpui::Modifiers::default());
         let mut commands = Vec::new();
-        driver.wait_until(cx, &store, "settle-all command", |_| {
+        driver.wait_until(cx, "settle-all command", |_| {
             while let Ok(line) = outgoing.try_recv() {
                 if let ClientPayload::Command(command) = decode_client_line(&line).unwrap().payload
                 {
@@ -2208,13 +2208,13 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "the lead's agents", |cx| {
+        driver.wait_until(cx, "the lead's agents", |cx| {
             store.read_with(cx, |store, _| {
                 store.baseline_ready() && store.thread_meta("child-b").is_some()
             })
         });
         store.update(cx, |store, cx| store.show_alone("lead".into(), cx));
-        driver.wait_until(cx, &store, "the lead", |cx| {
+        driver.wait_until(cx, "the lead", |cx| {
             store.read_with(cx, |store, cx| !store.chat_loading_for(Some("lead"), cx))
         });
 
@@ -2258,7 +2258,7 @@ mod tests {
                     store.make_session_active(id.into());
                 }
             });
-            driver.wait_until(cx, &store, "the agent's settlement", |cx| {
+            driver.wait_until(cx, "the agent's settlement", |cx| {
                 store.read_with(cx, |store, _| {
                     store
                         .thread_meta(id)
@@ -2280,7 +2280,7 @@ mod tests {
 
         set(cx, "child-a", false);
         assert_eq!(shown(chat, &rail), [true, true, false]);
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         std::fs::remove_dir_all(root).ok();
     }
 }

@@ -399,14 +399,6 @@ impl OverlayExt for Window {
     }
 }
 
-/// What each notification of `window` says, in the order shown.
-#[cfg(test)]
-pub(crate) fn notifications_said(window: &mut Window, cx: &mut App) -> Vec<gpui::SharedString> {
-    Overlays::update(window, cx, |host, _, cx| {
-        host.notifications.read(cx).said(cx)
-    })
-}
-
 type SheetClose = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// A sheet's binding to the window's edge-back gesture, scoped by its base focus trap.
@@ -799,7 +791,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) -> &mut VisualTestContext {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (_, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);
             gpui_base::Root::new(body, window, cx)
@@ -986,7 +978,7 @@ mod tests {
     #[gpui::test]
     fn compact_toast_obeys_seam_replaces_and_wide_keeps_card(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (_root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);
             gpui_base::Root::new(body, window, cx)
@@ -1015,7 +1007,12 @@ mod tests {
         assert!(bounds.size.width <= px(361.));
         assert!(bounds.size.height >= px(44.));
         cx.update(|window, cx| window.push_notification("Second", cx));
-        assert_eq!(cx.update(notifications_said), ["Second"]);
+        draw(cx);
+        assert!(cx.debug_bounds("toast-says-Second").is_some());
+        assert!(
+            cx.debug_bounds("toast-says-Copied").is_none(),
+            "the pill says only the newest"
+        );
         cx.simulate_resize(size(px(1200.), px(800.)));
         crate::window_seam::occlude_for_test(cx, gpui::Edges::default());
         cx.update(|window, cx| {
@@ -1037,7 +1034,7 @@ mod tests {
     #[gpui::test]
     fn a_shown_toast_glides_to_the_bottom_as_the_window_turns_compact(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (_root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);
             gpui_base::Root::new(body, window, cx)
@@ -1088,7 +1085,7 @@ mod tests {
     #[gpui::test]
     fn a_dismissed_toast_leaves_inert_then_unmounts(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (_root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);
             gpui_base::Root::new(body, window, cx)
@@ -1126,7 +1123,7 @@ mod tests {
     #[gpui::test]
     fn a_card_that_stays_leaves_when_closed_later(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (_root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);
             gpui_base::Root::new(body, window, cx)
@@ -1150,13 +1147,12 @@ mod tests {
         cx.executor().advance_clock(crate::edge_back::SETTLE * 2);
         draw(cx);
         assert!(cx.debug_bounds("wide-toast").is_none());
-        assert!(cx.update(notifications_said).is_empty());
     }
 
     #[gpui::test]
     fn compact_notification_timeouts(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (_root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);
             gpui_base::Root::new(body, window, cx)

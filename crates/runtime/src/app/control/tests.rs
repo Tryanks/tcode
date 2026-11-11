@@ -220,13 +220,11 @@ fn control_calls_outside_the_grant_are_refused_with_the_reason() {
             expect: None,
         }],
         dry_run: None,
-        request_id: None,
     });
     let delete = ControlOp::DeleteThreads(DeleteThreadsParams {
         thread_ids: vec!["same".into()],
         remove_worktree: None,
         dry_run: None,
-        request_id: None,
     });
     let get = |id: &str| {
         ControlOp::GetThread(GetThreadParams {
@@ -284,7 +282,6 @@ fn control_calls_outside_the_grant_are_refused_with_the_reason() {
         let push = ControlOp::Git(GitParams {
             thread_id: "same".into(),
             op: GitOp::Push,
-            request_id: None,
         });
         assert_eq!(
             state.authorize_control(&caller("a", ControlGrant::default_grant()), &push),
@@ -361,7 +358,6 @@ fn control_calls_outside_the_grant_are_refused_with_the_reason() {
         ] {
             let op = ControlOp::PatchSettings(PatchSettingsParams {
                 patch: serde_json::to_value(&patch).unwrap(),
-                request_id: None,
             });
             let refusal = state
                 .authorize_control(&caller("a", every_category.clone()), &op)
@@ -373,7 +369,6 @@ fn control_calls_outside_the_grant_are_refused_with_the_reason() {
         }
         let allowed = ControlOp::PatchSettings(PatchSettingsParams {
             patch: serde_json::to_value(SettingsPatch::WordWrapDiffs(true)).unwrap(),
-            request_id: None,
         });
         assert_eq!(
             state.authorize_control(&caller("a", every_category.clone()), &allowed),
@@ -897,7 +892,6 @@ fn respond_input_answers_only_the_pending_question_with_the_category() {
                 answers: [("which".to_owned(), serde_json::json!("main"))]
                     .into_iter()
                     .collect(),
-                request_id: None,
             })
         };
 
@@ -981,7 +975,6 @@ fn terminal_input_cannot_reach_an_out_of_scope_threads_terminal() {
                     terminal_id,
                     text: "echo forbidden\n".into(),
                 },
-                request_id: None,
             })
         };
         assert_eq!(
@@ -1018,7 +1011,6 @@ fn delete_threads_previews_then_deletes_the_tree() {
                 thread_ids: vec!["lead".into(), "gone".into()],
                 remove_worktree: None,
                 dry_run: Some(dry_run),
-                request_id: None,
             })
         };
 
@@ -1066,7 +1058,6 @@ fn patch_settings_applies_allowed_patches_only() {
         let patch = |patch: SettingsPatch| {
             ControlOp::PatchSettings(PatchSettingsParams {
                 patch: serde_json::to_value(patch).unwrap(),
-                request_id: None,
             })
         };
         for refused in [
@@ -1143,7 +1134,6 @@ fn a_child_may_not_read_or_act_on_its_parent() {
                 expect: None,
             }],
             dry_run: None,
-            request_id: None,
         });
         assert_eq!(
             call(state, "caller", settle, cx).unwrap()["results"][0]["reason"],

@@ -45,7 +45,7 @@ enum Kind {
 }
 
 pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView + 'a>> {
-    let control = |names: &[&str]| call.served(CONTROL, names, false);
+    let control = |names: &[&str]| call.served(CONTROL, names);
     let kind = if control(&["outline"]) {
         Kind::Outline
     } else if control(&["read"]) {

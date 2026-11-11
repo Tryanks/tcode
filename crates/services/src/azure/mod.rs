@@ -290,7 +290,7 @@ impl Azure {
             files,
             next_cursor: more.then(|| format!("{}:{next}", iteration.id)),
             complete: !more && whole,
-            changed_files: all.len() as u64,
+            changed_files: Some(all.len() as u64),
         })
     }
 
@@ -309,7 +309,7 @@ impl Azure {
                 files: self.built(key, &iteration, &wanted)?,
                 next_cursor: None,
                 complete: changes.1,
-                changed_files: changes.0.len() as u64,
+                changed_files: Some(changes.0.len() as u64),
                 base: iteration.base,
                 head: iteration.head,
             },
@@ -374,7 +374,14 @@ impl Azure {
         };
         let url = repository::url(key);
         let conversation =
-            reads::conversation(&read, &threads, &iterations, viewer.as_deref(), &url);
+            reads::conversation(&read, &threads, &iterations, viewer.as_deref(), &url).ok_or_else(
+                || {
+                    error(
+                        ForgeErrorKind::Uncertain,
+                        "Azure DevOps conversation unreadable",
+                    )
+                },
+            )?;
         Ok(PullRequestConversation {
             description: conversation.description,
             comments: conversation.comments,
@@ -756,6 +763,10 @@ impl Forge for Azure {
 
     fn url(&self, key: &PullRequestKey) -> Option<String> {
         Some(repository::url(key))
+    }
+
+    fn file_url(&self, key: &PullRequestKey, revision: &str, path: &str) -> Option<String> {
+        Some(repository::file_url(key, revision, path))
     }
 
     /// The pull request with its statuses and policy evaluations.

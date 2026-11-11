@@ -56,7 +56,7 @@ pub(crate) fn run(
     cx: &mut App,
     store: SessionStore,
     window_options: WindowOptions,
-    appearance: Option<String>,
+    appearance: Option<tcode_ui::settings::ThemeMode>,
     start: impl FnOnce(&mut App) -> std::io::Result<()> + 'static,
 ) {
     let cancel = Arc::new(AtomicBool::new(false));
@@ -110,10 +110,14 @@ pub(crate) fn run(
     let _ = window.update(cx, |_, window, cx| {
         // The host's theme setting is unknown until its kernel starts; this
         // client's own choice is not.
-        match appearance.as_deref() {
-            Some("light") => theme::change_mode(ThemeMode::Light, Some(window), cx),
-            Some("dark") => theme::change_mode(ThemeMode::Dark, Some(window), cx),
-            _ => {}
+        match appearance {
+            Some(tcode_ui::settings::ThemeMode::Light) => {
+                theme::change_mode(ThemeMode::Light, Some(window), cx)
+            }
+            Some(tcode_ui::settings::ThemeMode::Dark) => {
+                theme::change_mode(ThemeMode::Dark, Some(window), cx)
+            }
+            Some(tcode_ui::settings::ThemeMode::System) | None => {}
         }
         window.on_window_should_close(cx, |_, cx| {
             quit(cx);

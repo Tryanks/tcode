@@ -446,7 +446,7 @@ impl AppState {
             );
         }
         if let Some(meta) = self.meta_mut(session_id) {
-            meta.updated_at = now_secs();
+            meta.updated_at = cx.clock().unix_secs();
             let meta = meta.clone();
             self.persist_meta(&meta, cx);
         }

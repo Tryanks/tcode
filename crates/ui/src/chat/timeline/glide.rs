@@ -762,6 +762,7 @@ mod tests {
                 output: Some("found".into()),
                 status: agent::ItemStatus::Completed,
                 image_reads: Vec::new(),
+                family: None,
             },
         })
     }
@@ -857,6 +858,7 @@ mod tests {
                     output: Some("captured".into()),
                     status,
                     image_reads,
+                    family: None,
                 },
             })
         };
@@ -1129,6 +1131,7 @@ mod tests {
                     output: Some("@r1 window app=\"Notes\"".into()),
                     status: agent::ItemStatus::Completed,
                     image_reads: Vec::new(),
+                    family: None,
                 },
             })
         };

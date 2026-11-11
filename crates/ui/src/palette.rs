@@ -949,9 +949,9 @@ impl CommandPalette {
                 self.close(cx);
             }
             Action::ToggleTerminal => {
-                if let Some((store, session_id)) = self.current(cx) {
+                if let Some((store, Some(session_id))) = self.current(cx) {
                     store.update(cx, |store, cx| {
-                        store.toggle_terminal_panel_for(session_id.unwrap_or_default(), cx)
+                        store.toggle_terminal_panel_for(session_id, cx)
                     });
                 }
                 self.close(cx);
@@ -1153,7 +1153,7 @@ impl CommandPalette {
                                 .items_center()
                                 .text_secondary(compact, cx)
                                 .when_some(item.updated_at, |this, at| {
-                                    let ago = now_secs().saturating_sub(at);
+                                    let ago = now_secs(cx).saturating_sub(at);
                                     this.child(div().child(humanize_ago(ago)))
                                 })
                                 .child(profile_glyph(
@@ -1278,7 +1278,7 @@ impl CommandPalette {
                         div()
                             .flex_none()
                             .text_secondary(compact, cx)
-                            .child(humanize_ago(now_secs().saturating_sub(at))),
+                            .child(humanize_ago(now_secs(cx).saturating_sub(at))),
                     )
                 })
                 .child(div().flex_none().w(px(16.)).when(item.current, |mark| {
@@ -1732,7 +1732,7 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             workspace_store.read_with(cx, |store, _| store.baseline_ready())
         });
         let palette_store = workspace_store.clone();
@@ -1790,7 +1790,7 @@ mod tests {
         });
 
         drop(palette);
-        driver.shutdown(cx, &workspace_store, &host);
+        driver.shutdown(cx, &host);
         drop(workspace_store);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1978,7 +1978,7 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             workspace_store.read_with(cx, |store, _| store.baseline_ready())
         });
         let palette_store = workspace_store.clone();
@@ -2048,7 +2048,7 @@ mod tests {
         assert!(cx.debug_bounds("palette-card").is_none());
 
         drop(palette);
-        driver.shutdown(cx, &workspace_store, &host);
+        driver.shutdown(cx, &host);
         drop(workspace_store);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2201,7 +2201,7 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             workspace_store.read_with(cx, |store, _| store.baseline_ready())
         });
         let palette_store = workspace_store.clone();
@@ -2264,7 +2264,7 @@ mod tests {
         });
 
         drop(palette);
-        driver.shutdown(cx, &workspace_store, &host);
+        driver.shutdown(cx, &host);
         drop(workspace_store);
         let _ = std::fs::remove_dir_all(root);
     }

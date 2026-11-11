@@ -20,6 +20,10 @@ use model::*;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::rc::Rc;
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 
 use std::path::PathBuf;
 
@@ -226,7 +230,8 @@ pub struct Composer {
     menu_dismissed: bool,
     /// Cached workspace listing for the active session cwd (for `@`-mentions),
     /// loaded lazily in the background the first time a mention trigger opens.
-    workspace: Option<(PathBuf, Vec<PathEntry>)>,
+    /// The `@` menu's listing of a cwd, or why the host could not give it.
+    workspace: Option<(PathBuf, Result<Vec<PathEntry>, String>)>,
     workspace_loading: bool,
     /// Pending image attachments for the active session, validated + persisted to
     /// disk. Cleared on send and whenever the active session changes.
@@ -243,8 +248,8 @@ pub struct Composer {
     queued_refill: Option<(String, u64, String)>,
     queue_drag: Option<components::queue_strip::QueueDrag>,
     /// Redraws the composer when an unanswered stop has waited long enough to
-    /// offer the force terminate, keyed by when that stop went out.
-    stop_wait: Option<(u64, gpui::Task<()>)>,
+    /// offer the force terminate, keyed by when this client first saw it.
+    stop_wait: Option<(Instant, gpui::Task<()>)>,
     queue_scroll: gpui::ScrollHandle,
     /// A touch on the compact Queue button that has not lifted yet.
     steer_gesture: Option<SteerGesture>,
@@ -1024,7 +1029,7 @@ impl Composer {
         let interactive = self.interactive(cx);
         let has_text = interactive && self.draft_has_text;
         let composer_state = self.composer_state(cx);
-        let stopping = turn_running && !has_text;
+        let stopping = (turn_running || composer_state.preparing_turn) && !has_text;
         let stop_pending = composer_state.stopping;
         let steerable = turn_running && has_text && composer_state.steering_supported;
         let armed = self.steer_gesture.as_ref().is_some_and(SteerGesture::armed);
@@ -1207,6 +1212,10 @@ impl Composer {
             } else {
                 &[DesktopAction::Spinner, DesktopAction::Stop]
             }
+        } else if composer_state.preparing_turn {
+            // The provider the next turn waits on can be stopped before it
+            // runs one.
+            &[DesktopAction::Spinner, DesktopAction::Stop]
         } else if composer_state.preparing_worktree {
             // First-send worktree preparation holds the send control.
             &[DesktopAction::Spinner, DesktopAction::Preparing]
@@ -2007,9 +2016,7 @@ impl Composer {
                         if !this.interactive(cx) {
                             return;
                         }
-                        for path in paths {
-                            this.add_path(path, window, cx);
-                        }
+                        this.add_paths(paths, window, cx);
                     });
                 },
             )
@@ -3098,11 +3105,11 @@ mod replica_tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        driver.wait_until(cx, &store, "the draft's status", |cx| {
+        driver.wait_until(cx, "the draft's status", |cx| {
             store.read_with(cx, |store, cx| {
                 store
                     .composer_state_for(Some(&session_id), cx)
@@ -3159,7 +3166,7 @@ mod replica_tests {
         show_rail(&composer, PickerRail::Profile("second-account".into()), cx);
         cx.simulate_keystrokes("secondary-2");
         draw_settled(cx);
-        driver.wait_until(cx, &store, "the pick to reach the thread", |cx| {
+        driver.wait_until(cx, "the pick to reach the thread", |cx| {
             store.read_with(cx, |store, cx| {
                 store
                     .composer_state_for(Some(&session_id), cx)
@@ -3188,7 +3195,7 @@ mod replica_tests {
         store.update(cx, |store, _| {
             store.send_turn_for(session_id.clone(), "hello".into(), Vec::new())
         });
-        driver.wait_until(cx, &store, "the provider launch", |_| !launches.is_empty());
+        driver.wait_until(cx, "the provider launch", |_| !launches.is_empty());
         let launch = launches.try_recv().unwrap();
         assert_eq!(launch.model.as_deref(), Some("shared-model"));
         assert!(
@@ -3201,7 +3208,7 @@ mod replica_tests {
                 )),
             "the thread launches on the second account"
         );
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3232,7 +3239,7 @@ mod replica_tests {
             .debug_bounds("model-fav-1")
             .expect("the second row's star");
         cx.simulate_click(star.center(), Modifiers::default());
-        driver.wait_until(cx, &store, "the star to reach the host", |cx| {
+        driver.wait_until(cx, "the star to reach the host", |cx| {
             store.read_with(cx, |store, _| !store.settings().favorite_models.is_empty())
         });
         draw_settled(cx);
@@ -3262,7 +3269,7 @@ mod replica_tests {
             search.focus(window, cx);
         });
         cx.simulate_keystrokes("secondary-1");
-        driver.wait_until(cx, &store, "the favourite's pick", |cx| {
+        driver.wait_until(cx, "the favourite's pick", |cx| {
             store.read_with(cx, |store, cx| {
                 store
                     .composer_state_for(Some(&session_id), cx)
@@ -3273,7 +3280,7 @@ mod replica_tests {
                     })
             })
         });
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3585,21 +3592,23 @@ mod replica_tests {
     }
 
     /// A stop the harness has not answered for a while offers to kill its
-    /// process; a fresh one does not, and the offer itself only asks.
+    /// process, counted by this client's clock from when it first saw the
+    /// stop: the host's stamp names the stop, and the host's clock is not
+    /// this one. The offer itself only asks.
     #[gpui::test]
     fn an_unanswered_stop_offers_force_terminate_behind_a_confirmation(cx: &mut TestAppContext) {
         let (store, incoming, outgoing, mut status) = attach(cx);
         let session_id = Some(status.session_id.clone());
-        let topic = Topic::SessionStatus {
-            session_id: status.session_id.clone(),
-        };
         status.activity.turn_running = true;
         status.stopping = true;
-        status.stopping_since = Some(chrono::Utc::now().timestamp_millis() as u64);
+        // Stamped by a host whose clock is far behind this one.
+        status.stopping_since = Some(1);
         replace(
             &incoming,
-            topic.clone(),
-            ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
+            Topic::SessionStatus {
+                session_id: status.session_id.clone(),
+            },
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
         );
         cx.run_until_parked();
         cx.run_until_parked();
@@ -3611,15 +3620,12 @@ mod replica_tests {
         cx.simulate_resize(gpui::size(px(1024.), px(768.)));
         cx.update(|_, cx| cx.set_reduce_motion(true));
         cx.update(|window, cx| _ = window.draw(cx));
-        assert!(cx.debug_bounds("force-terminate").is_none());
-
-        status.stopping_since = Some(1);
-        replace(
-            &incoming,
-            topic,
-            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        assert!(
+            cx.debug_bounds("force-terminate").is_none(),
+            "a stop just seen is not offered"
         );
-        cx.run_until_parked();
+
+        cx.executor().advance_clock(crate::composer::UNANSWERED);
         cx.run_until_parked();
         cx.update(|window, cx| _ = window.draw(cx));
         while outgoing.try_recv().is_ok() {}
@@ -3637,6 +3643,42 @@ mod replica_tests {
                 )
             )),
             "the process is killed only once the user confirms"
+        );
+    }
+
+    /// A provider the next turn waits on, which runs no turn yet, can be
+    /// stopped from the composer.
+    #[gpui::test]
+    fn a_turn_still_being_prepared_offers_stop(cx: &mut TestAppContext) {
+        let (store, incoming, outgoing, mut status) = attach(cx);
+        let session_id = Some(status.session_id.clone());
+        status.preparing_turn = true;
+        replace(
+            &incoming,
+            Topic::SessionStatus {
+                session_id: status.session_id.clone(),
+            },
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        );
+        cx.run_until_parked();
+        cx.run_until_parked();
+        let (_root, cx) = cx.add_window_view(|window, cx| {
+            let composer =
+                cx.new(|cx| Composer::new(store.clone(), session_id.clone(), window, cx));
+            gpui_base::Root::new(composer, window, cx)
+        });
+        cx.simulate_resize(gpui::size(px(1024.), px(768.)));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        cx.update(|window, cx| _ = window.draw(cx));
+        while outgoing.try_recv().is_ok() {}
+        let stop = cx.debug_bounds("stop-turn").expect("Stop is offered");
+        cx.simulate_click(stop.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            std::iter::from_fn(|| outgoing.try_recv().ok()).any(|line| matches!(
+                tcode_protocol::decode_client_line(&line).unwrap().payload,
+                tcode_protocol::ClientPayload::Command(tcode_protocol::Command::Interrupt { .. })
+            ))
         );
     }
 

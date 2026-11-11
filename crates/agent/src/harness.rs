@@ -35,6 +35,17 @@ pub struct HarnessFacts {
     /// The file its user-level MCP servers are configured in, where that
     /// file is a documented format Tcode has checked against the CLI.
     pub native_mcp: Option<NativeMcpConfig>,
+    /// The oldest release that has everything the adapter relies on. An older
+    /// CLI still runs; it is not guaranteed to work. `None` where no release
+    /// can be named.
+    pub min_version: Option<(u32, u32, u32)>,
+}
+
+impl HarnessFacts {
+    /// The oldest supported release, when `installed` is older than it.
+    pub fn unsupported(&self, installed: (u32, u32, u32)) -> Option<(u32, u32, u32)> {
+        self.min_version.filter(|min| installed < *min)
+    }
 }
 
 /// The format of a harness's MCP configuration (`native_mcp::servers`).
@@ -137,6 +148,7 @@ impl ProviderKind {
             endpoint: None,
             toggles: &[],
             native_mcp: None,
+            min_version: None,
         };
         match self {
             ProviderKind::ClaudeCode => HarnessFacts {
@@ -155,6 +167,11 @@ impl ProviderKind {
                 endpoint: Some(CLAUDE_ENDPOINT),
                 toggles: &[],
                 native_mcp: Some(NativeMcpConfig::McpServersJson),
+                // The release whose `rewind_files` `dry_run` was read to
+                // restore nothing, the newest behaviour the adapter relies
+                // on; every control request, flag and variable it sends is in
+                // that build.
+                min_version: Some((2, 1, 318)),
             },
             ProviderKind::Codex => HarnessFacts {
                 binary_name: "codex",
@@ -170,6 +187,10 @@ impl ProviderKind {
                 endpoint: Some(CODEX_ENDPOINT),
                 toggles: &[],
                 native_mcp: Some(NativeMcpConfig::CodexToml),
+                // `thread/revert` and `thread/reverted`, the newest app-server
+                // methods the adapter uses, first appear in codex-cli 0.148.0
+                // (`app-server-protocol/src/protocol/common.rs`).
+                min_version: Some((0, 148, 0)),
             },
             ProviderKind::Pi => HarnessFacts {
                 binary_name: "pi",
@@ -189,6 +210,10 @@ impl ProviderKind {
                 }),
                 sign_in_command: Some("opencode auth login"),
                 native_mcp: Some(NativeMcpConfig::OpenCodeResolved),
+                // The adapter waits for the server's `/api/info`, which 2.0.6
+                // is the first release to serve (2.0.0–2.0.5 never answer it);
+                // every other route and event it reads is in 2.0.6's binary.
+                min_version: Some((2, 0, 6)),
                 ..none
             },
             ProviderKind::Cursor => HarnessFacts {

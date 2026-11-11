@@ -13,7 +13,7 @@ use gpui::{
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_core::pull_request::{
-    self as core_pr, GITHUB, PullRequestKey, PullRequestMergeMethod, PullRequestStackOperation,
+    self as core_pr, PullRequestKey, PullRequestMergeMethod, PullRequestStackOperation,
     PullRequestState, StackBlocker, StackLayerCondition, StackLayerRole, StackMap,
     StackOperationKind, StackRebaseFailure, StackRebaseGitStep, StackRebaseStep,
     ThreadPullRequestLink,
@@ -414,18 +414,8 @@ pub(super) fn operation_chip(
                     .into_any_element()
             }))
     };
-    let (StackOperationKind::Merging {
-        id,
-        target: merged,
-        layers,
-        ..
-    }
-    | StackOperationKind::MergeUnconfirmed {
-        id,
-        target: merged,
-        layers,
-        ..
-    }) = &operation.kind
+    let (StackOperationKind::Merging { id, layers, .. }
+    | StackOperationKind::MergeUnconfirmed { id, layers, .. }) = &operation.kind
     else {
         return match target {
             Some(target) => Button::new(SharedString::from(format!(
@@ -445,11 +435,6 @@ pub(super) fn operation_chip(
         };
     };
     let id = id.clone();
-    let url = core_pr::stack_map(
-        links,
-        &PullRequestKey::new(&operation.host, &operation.repository, *merged),
-    )
-    .and_then(|map| map.stack.url.clone());
     let titles: Vec<(u64, String)> = layers
         .iter()
         .map(|&number| {
@@ -547,17 +532,6 @@ pub(super) fn operation_chip(
                                 }),
                         ),
                 )
-                .children(url.clone().map(|url| {
-                    Button::new("pr-stack-operation-open")
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::ExternalLink)
-                        .label(crate::tr!(
-                            "pull_requests.open_on_host",
-                            host_name = tcode_core::pull_request::GITHUB.name
-                        ))
-                        .on_click(move |_, _, cx| cx.open_url(&url))
-                }))
         })
         .into_any_element()
 }
@@ -567,7 +541,7 @@ pub(super) fn chip_words(
     operation: &PullRequestStackOperation,
     cx: &App,
 ) -> (IconName, Hsla, String, String) {
-    let ago = super::detail::ago(operation.started_at);
+    let ago = super::detail::ago(operation.started_at, cx);
     match &operation.kind {
         StackOperationKind::Merging {
             layers, adopted, ..
@@ -1164,6 +1138,8 @@ pub(super) struct Answer<'a> {
     pub(super) base: &'a str,
     /// Each layer's head branch, for the words that name one.
     pub(super) branches: Vec<(u64, String)>,
+    /// The stack's host as a person reads it.
+    pub(super) host_name: String,
     pub(super) url: Option<String>,
     pub(super) rebase: bool,
     pub(super) late: bool,
@@ -1177,17 +1153,21 @@ pub(super) fn answer_toast(
 ) -> Option<Notification> {
     let number = answer.target.to_string();
     let count = answer.layers.len().max(1);
+    let host_name = answer.host_name.as_str();
     let open = |note: Notification| match answer.url.clone() {
-        Some(url) => note.action(move |_, _, _| {
-            let url = url.clone();
-            Button::new("pr-stack-result-open")
-                .ghost()
-                .xsmall()
-                .label(crate::tr!(
-                    "pull_requests.open_on_host",
-                    host_name = tcode_core::pull_request::GITHUB.name
-                ))
-                .on_click(move |_, _, cx| cx.open_url(&url))
+        Some(url) => note.action({
+            let host_name = host_name.to_owned();
+            move |_, _, _| {
+                let url = url.clone();
+                Button::new("pr-stack-result-open")
+                    .ghost()
+                    .xsmall()
+                    .label(crate::tr!(
+                        "pull_requests.open_on_host",
+                        host_name = &host_name
+                    ))
+                    .on_click(move |_, _, cx| cx.open_url(&url))
+            }
         }),
         None => note,
     };
@@ -1315,7 +1295,7 @@ pub(super) fn answer_toast(
             not(
                 tr_with(
                     "result_not_rebased",
-                    &[("reason", rejection_reason(rejection, GITHUB.name))],
+                    &[("reason", rejection_reason(rejection, host_name))],
                 ),
                 tr("nothing_changed"),
             )
@@ -1391,10 +1371,7 @@ pub(super) fn answer_toast(
                     };
                     not(tr("result_refused"), body)
                 }
-                rejection => titled(
-                    tr("result_refused"),
-                    rejection_reason(rejection, GITHUB.name),
-                ),
+                rejection => titled(tr("result_refused"), rejection_reason(rejection, host_name)),
             }
         }
         PullRequestActionResult::Uncertain => open(
@@ -1402,7 +1379,7 @@ pub(super) fn answer_toast(
                 crate::tr!(
                     "pull_requests.result.uncertain_body",
                     message = crate::tr!("pull_requests.result.connection_lost").into_owned(),
-                    host_name = GITHUB.name
+                    host_name = host_name
                 )
                 .into_owned(),
             )
@@ -1480,6 +1457,7 @@ pub fn present_result(
         layers,
         base,
         branches: branches(links, target),
+        host_name: super::host_name(store.read(cx), &target.host),
         url: super::page_url(links, target),
         rebase,
         late,
@@ -1713,6 +1691,7 @@ impl MergeStackDialog {
                 self.target.session.clone(),
                 self.target.offer.key.clone(),
                 PullRequestRead::StackState { rebase: false },
+                PullRequestReadResponse::stack_state,
                 cx,
             )
         });
@@ -1720,7 +1699,7 @@ impl MergeStackDialog {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.state = Some(match result {
-                    Ok((PullRequestReadResponse::StackState(state), _)) => {
+                    Ok((state, _)) => {
                         this.method = super::lifecycle::merge_method(
                             &state.merge_methods,
                             this.target.offer.method,
@@ -1728,7 +1707,6 @@ impl MergeStackDialog {
                         );
                         Ok(state)
                     }
-                    Ok(_) => Err(String::new()),
                     Err(error) => Err(super::detail::reason(&error)),
                 });
                 cx.notify();
@@ -1837,6 +1815,7 @@ impl MergeStackDialog {
                         target.store.read(cx).pull_requests(&target.session),
                         &target.offer.key,
                     ),
+                    host_name: super::host_name(target.store.read(cx), &target.offer.key.host),
                     url: Some(target.offer.url.clone()).filter(|url| !url.is_empty()),
                     rebase: false,
                     late: false,
@@ -2215,7 +2194,7 @@ impl Render for MergeStackDialog {
                             theme.warning,
                             tr_with(
                                 "previous_unconfirmed",
-                                &[("ago", super::detail::ago(*started_at))],
+                                &[("ago", super::detail::ago(*started_at, cx))],
                             ),
                         ),
                     ));
@@ -2379,6 +2358,7 @@ impl RebaseStackDialog {
                 self.target.session.clone(),
                 self.target.offer.key.clone(),
                 PullRequestRead::StackState { rebase: true },
+                PullRequestReadResponse::stack_state,
                 cx,
             )
         });
@@ -2386,8 +2366,7 @@ impl RebaseStackDialog {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.state = Some(match result {
-                    Ok((PullRequestReadResponse::StackState(state), _)) => Ok(state),
-                    Ok(_) => Err(String::new()),
+                    Ok((state, _)) => Ok(state),
                     Err(error) => Err(super::detail::reason(&error)),
                 });
                 cx.notify();
@@ -2488,6 +2467,7 @@ impl RebaseStackDialog {
                             target.store.read(cx).pull_requests(&target.session),
                             &target.offer.key,
                         ),
+                        host_name: super::host_name(target.store.read(cx), &target.offer.key.host),
                         url: Some(target.offer.url.clone()).filter(|url| !url.is_empty()),
                         rebase: true,
                         late: false,
@@ -2919,7 +2899,10 @@ fn progress_view(
     if let Some(started) = started_at {
         body = body.child(div().text_secondary(false, cx).child(tr_with(
             "progress_started",
-            &[("ago", super::detail::ago(started)), ("machine", machine)],
+            &[
+                ("ago", super::detail::ago(started, cx)),
+                ("machine", machine),
+            ],
         )));
     }
     let stopped = last.iter().find_map(|layer| match &layer.step {

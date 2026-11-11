@@ -892,14 +892,17 @@ impl SettingsPage {
                     }
                 }
             }));
-        page._subscriptions.push(cx.subscribe(
+        page._subscriptions.push(cx.subscribe_in(
             &remote_attachment_limit_input,
-            |this, input, event, cx| {
+            window,
+            |this, input, event, window, cx| {
                 if matches!(event, InputEvent::Change) {
-                    let value = input.read(cx).value().to_string();
-                    if this.remote_attachment_limit_input.is_user_edit(&value) {
-                        this.commit_remote_attachment_limit(cx);
-                    }
+                    this.remote_attachment_limit_input
+                        .is_user_edit(input.read(cx).value().as_ref());
+                } else if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. })
+                    && this.remote_attachment_limit_input.dirty
+                {
+                    this.commit_remote_attachment_limit(window, cx);
                 }
             },
         ));
@@ -968,8 +971,8 @@ impl SettingsPage {
         }
     }
 
-    /// Ask the host where its home is, until it answers: listing `~` answers
-    /// with it. A failed ask is made again the next time the rows are drawn.
+    /// Ask the host where its home is, once: listing `~` answers with it. A
+    /// failed ask says why, and the rows keep `~`.
     pub(super) fn fetch_host_home(&mut self, cx: &mut Context<Self>) {
         if self.host_home_requested || !self.store.read(cx).can_manage_host() {
             return;
@@ -987,7 +990,13 @@ impl SettingsPage {
                         .map(|home| home.to_string_lossy().into_owned().into());
                     cx.notify();
                 }
-                Err(_) => page.host_home_requested = false,
+                Err(error) => page.store.update(cx, |_, cx| {
+                    cx.emit(tcode_protocol::RuntimeNotification::Error(
+                        tcode_protocol::RuntimeError::External(
+                            crate::tr!("sidebar.folders_failed", reason = error).into_owned(),
+                        ),
+                    ))
+                }),
             });
         })
         .detach();
@@ -1017,19 +1026,24 @@ impl SettingsPage {
         DevicePreferences::set_device_name(name, cx);
     }
 
-    fn commit_remote_attachment_limit(&self, cx: &mut Context<Self>) {
-        let Some(limit) = self
+    /// Take what the field holds once the user leaves it, which the field
+    /// has brought within its range. What is not a number of MiB is not
+    /// taken, and the field shows the limit in effect again.
+    fn commit_remote_attachment_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self
             .remote_attachment_limit_input
             .state
             .read(cx)
             .value()
             .trim()
             .parse::<u32>()
-            .ok()
-        else {
-            return;
-        };
-        DevicePreferences::set_remote_attachment_limit_mib(Some(limit), cx);
+            .ok();
+        if let Some(limit) = typed {
+            DevicePreferences::set_remote_attachment_limit_mib(Some(limit), cx);
+        }
+        self.remote_attachment_limit_input.dirty = false;
+        let limit = remote_attachment_limit_value(cx);
+        self.remote_attachment_limit_input.push(limit, window, cx);
     }
 
     /// Open a harness's settings: a dialog on a wide window, a page of the
@@ -2089,7 +2103,7 @@ impl SettingsPage {
                     .child(crate::tr!("settings.providers_section")),
             );
         let checked = checked_at.map(|checked_at| {
-            let ago = humanize_ago(now_secs().saturating_sub(checked_at));
+            let ago = humanize_ago(now_secs(cx).saturating_sub(checked_at));
             crate::tr!("providers.checked", when = ago).into_owned()
         });
         if let Some(checked) = crate::motion::shown("providers-checked", checked, SHOW, window, cx)
@@ -2299,7 +2313,7 @@ impl SettingsPage {
                 .child(crate::tr!("usage.section")),
         );
         let updated = updated_at.map(|updated_at| {
-            let ago = humanize_ago(now_secs().saturating_sub(updated_at));
+            let ago = humanize_ago(now_secs(cx).saturating_sub(updated_at));
             crate::tr!("usage.updated", when = ago).into_owned()
         });
         if let Some(updated) = crate::motion::shown("usage-updated", updated, SHOW, window, cx) {
@@ -2430,7 +2444,7 @@ impl SettingsPage {
                         }
                         None => div().into_any_element(),
                     };
-                    let now = now_secs();
+                    let now = now_secs(cx);
                     let windows = reported
                         .into_iter()
                         .flat_map(|usage| usage.windows.iter())
@@ -2654,7 +2668,7 @@ impl SettingsPage {
         let (page, start, end) = page_bounds(total, self.archived_page, ARCHIVED_PER_PAGE);
         self.archived_page = page;
 
-        let now = now_secs();
+        let now = now_secs(cx);
         // Each part below the controls carries the gap above it, so a project
         // whose last archived thread goes takes its gap with it.
         let gap = crate::material::section_gap(cx);
@@ -3672,6 +3686,7 @@ mod tests {
         send(None, None);
         assert!(!shown(cx), "the card leaves once the move is done");
 
+        cx.update(|window, _| window.activate_window());
         page.update(cx, |page, cx| page.select_section(Section::General, cx));
         cx.run_until_parked();
         assert!(
@@ -3885,7 +3900,7 @@ mod tests {
             assert!(custom.right() <= body.right());
             assert!(body.bottom() < px(height));
         }
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4033,7 +4048,7 @@ mod tests {
             crate::window_state::Destination::Settings
         );
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4189,7 +4204,7 @@ mod tests {
             );
         });
 
-        driver.wait_until(cx, &store, "the page to hydrate", |cx| {
+        driver.wait_until(cx, "the page to hydrate", |cx| {
             page.read_with(cx, |page, _| page.hydrated)
         });
 
@@ -4219,13 +4234,12 @@ mod tests {
         driver
             .await_with_events(
                 cx,
-                &store,
                 link.command(tcode_protocol::Command::PatchSettings {
                     patch: SettingsPatch::BrowserHomeUrl(Some("https://elsewhere.example".into())),
                 }),
             )
             .expect("patch settings");
-        driver.wait_until(cx, &store, "the later settings snapshot", |cx| {
+        driver.wait_until(cx, "the later settings snapshot", |cx| {
             store.read_with(cx, |store, _| {
                 store.settings().browser.home_url.as_deref() == Some("https://elsewhere.example")
             })
@@ -4239,19 +4253,16 @@ mod tests {
             );
         });
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
     /// The new project folder's placeholder is written under the host's
-    /// home, which the page asks the host for; a failed ask is asked again
-    /// when the page is next drawn, rather than leaving `~` for good.
+    /// home, which the page asks the host for; a failed ask says why and is
+    /// not made again with every drawing.
     #[gpui::test]
-    fn the_host_home_is_asked_again_after_a_failed_ask(cx: &mut TestAppContext) {
-        use tcode_protocol::{
-            ClientPayload, DirectoryListing, HostMessage, Query, QueryResponse, decode_client_line,
-            encode_line,
-        };
+    fn a_failed_ask_for_the_host_home_says_why_once(cx: &mut TestAppContext) {
+        use tcode_protocol::{ClientPayload, HostMessage, Query, decode_client_line, encode_line};
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
         let (store, outgoing, incoming, _pump) = scripted_store(WorkspaceAttachment::Local, cx);
@@ -4263,6 +4274,17 @@ mod tests {
             gpui_base::Root::new(view, window, cx)
         });
         let page = page.unwrap();
+        let reported = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|_, cx| {
+            let reported = reported.clone();
+            cx.subscribe(
+                &store,
+                move |_, event: &tcode_protocol::RuntimeNotification, _| {
+                    reported.borrow_mut().push(event.clone());
+                },
+            )
+            .detach();
+        });
         let asked_home = |outgoing: &async_channel::Receiver<String>| {
             std::iter::from_fn(|| outgoing.try_recv().ok())
                 .filter_map(|line| {
@@ -4308,21 +4330,87 @@ mod tests {
             }),
         );
         assert_eq!(drawn(cx), "~/TcodeProjects");
-
-        let [again] = asked_home(&outgoing)[..] else {
-            panic!("the next drawing asks again");
-        };
-        answer(
-            again,
-            Ok(QueryResponse::Directories(DirectoryListing {
-                directory: "/host/home".into(),
-                parent: Some("/host".into()),
-                home: Some("/host/home".into()),
-                entries: vec![],
-            })),
+        assert_eq!(drawn(cx), "~/TcodeProjects");
+        assert!(
+            asked_home(&outgoing).is_empty(),
+            "drawing does not ask again"
         );
-        assert_eq!(drawn(cx), "/host/home/TcodeProjects");
-        assert!(asked_home(&outgoing).is_empty(), "an answer is kept");
+        assert_eq!(
+            reported.borrow().as_slice(),
+            [tcode_protocol::RuntimeNotification::Error(
+                tcode_protocol::RuntimeError::External(
+                    crate::tr!("sidebar.folders_failed", reason = "The host went away.")
+                        .into_owned()
+                )
+            )]
+        );
+    }
+
+    /// The attachment limit is taken when the user leaves the field. A value
+    /// it cannot take is not saved, and the field shows the limit in effect
+    /// rather than what was typed.
+    #[gpui::test]
+    fn an_attachment_limit_the_field_cannot_take_shows_the_one_in_effect(cx: &mut TestAppContext) {
+        use tcode_client::host::ClientHost as _;
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(crate::theme::init);
+        let root = crate::store::tests::scratch_root("attachment-limit-field");
+        std::fs::create_dir_all(&root).unwrap();
+        let device = std::rc::Rc::new(tcode_traverse::NativeClientHost::new(root.clone(), "phone"));
+        cx.update(|cx| DevicePreferences::install(device.clone(), cx));
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, cx)
+        });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        let window_state = cx.new(|_| WindowState::default());
+        let mut page = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
+            page = Some(view.clone());
+            gpui_base::Root::new(view, window, cx)
+        });
+        let page = page.unwrap();
+        cx.update(|window, _| window.activate_window());
+        page.update(cx, |page, cx| page.select_section(Section::General, cx));
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            cx.debug_bounds("settings-remote-attachment-limit-row")
+                .is_some()
+        );
+        let in_effect = cx.update(|_, cx| remote_attachment_limit_value(cx));
+        let field = page.read_with(cx, |page, _| {
+            page.remote_attachment_limit_input.state.clone()
+        });
+        // What the user types after clearing the field, then leaving it.
+        let type_and_leave = |typed: &str, cx: &mut gpui::VisualTestContext| {
+            let row = cx
+                .debug_bounds("settings-remote-attachment-limit-row")
+                .expect("the limit's row is drawn");
+            cx.simulate_click(
+                gpui::point(row.right() - gpui::px(40.), row.center().y),
+                gpui::Modifiers::default(),
+            );
+            crate::test_frames::draw(cx);
+            cx.simulate_keystrokes("end backspace backspace backspace");
+            cx.simulate_input(typed);
+            crate::test_frames::draw(cx);
+            cx.update(|window, cx| window.blur(cx));
+            crate::test_frames::draw_settled(cx);
+            (
+                device
+                    .load_preferences()
+                    .unwrap()
+                    .remote_attachment_limit_mib,
+                cx.update(|_, cx| field.read(cx).value().to_string()),
+            )
+        };
+        assert_eq!(type_and_leave("", cx), (None, in_effect));
+        assert_eq!(type_and_leave("12", cx), (Some(12), "12".to_owned()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[gpui::test]

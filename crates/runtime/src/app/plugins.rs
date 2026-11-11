@@ -65,6 +65,8 @@ struct PluginOperation {
     generation: u64,
     started: bool,
     challenge: Option<PluginChallenge>,
+    /// The harness's command while it runs; dropping it stops the command.
+    running: Option<HostTask<()>>,
 }
 
 fn error(code: &str, message: &str) -> ProtocolError {
@@ -410,6 +412,7 @@ impl AppState {
             generation: catalog.generation,
             started: false,
             challenge,
+            running: None,
         });
         if !wait {
             self.execute_plugin_operation(&key, cx);
@@ -440,17 +443,55 @@ impl AppState {
         let op = operation.op.clone();
         let cwd = operation.cwd.clone();
         let context = self.plugin_context(profile_id, cwd, cx);
-        let key = key.clone();
+        let finished = key.clone();
         let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
+        let running = cx.spawn_background(async move {
             let result = match context.await {
                 Ok(context) => run_plugin_op(provider, &context, &op).await,
                 Err(error) => Err(error),
             };
             host_cx.enqueue(move |state, cx| {
-                state.finish_plugin_operation(&key, id, result, cx);
+                state.finish_plugin_operation(&finished, id, result, cx);
             });
         });
+        if let Some(operation) = self
+            .plugin_catalogs
+            .get_mut(key)
+            .and_then(|catalog| catalog.operation.as_mut())
+        {
+            operation.running = Some(running);
+        }
+    }
+
+    /// Stop the profile's running change: its command and what that started
+    /// are killed, and the catalogs it touched are listed again, since the
+    /// harness may have changed part of what it was asked.
+    pub(crate) fn cancel_plugin_operation(&mut self, profile_id: &str, cx: &mut HostCx) {
+        let Some((key, operation)) = self.plugin_catalogs.iter_mut().find_map(|(key, catalog)| {
+            (key.profile_id == profile_id)
+                .then(|| {
+                    catalog
+                        .operation
+                        .take_if(|operation| operation.running.is_some())
+                })
+                .flatten()
+                .map(|operation| (key.clone(), operation))
+        }) else {
+            return;
+        };
+        let shared = shared_scope(&operation.op)
+            .then(|| operation.cwd.clone())
+            .flatten();
+        drop(operation.running);
+        emit_runtime(
+            cx,
+            RuntimeEvent::Toast(RuntimeToast::PluginOperationCancelled {
+                operation: operation.id,
+                profile_id: profile_id.to_string(),
+                target: operation.target,
+            }),
+        );
+        self.after_plugin_change(&key, shared, cx);
     }
 
     fn finish_plugin_operation(
@@ -490,6 +531,7 @@ impl AppState {
                     },
                     native_text: Some(acceptance.native_text),
                 });
+                operation.running = None;
                 catalog.operation = Some(operation);
                 return;
             }

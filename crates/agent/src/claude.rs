@@ -41,12 +41,13 @@ use crate::claude_goal::GoalTranscript;
 use crate::claude_manifest::{CatalogModel, ClaudeCatalog};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
-    ApprovalRequest, Attachment, CatalogRefresh, DeltaKind, FileChange, FileChangeKind, GoalStatus,
-    ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep,
-    PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, RewindMode,
-    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, ToolOutput, TurnStatus,
-    UserInputDelivery, UserInputOption, UserInputQuestion, WorktreeAnswer, WorktreeRequest,
-    selection_bool, selection_str,
+    ApprovalRequest, AskedQuestion, Attachment, CatalogRefresh, DeltaKind, FileChange,
+    FileChangeKind, GoalStatus, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
+    OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
+    ResumeCursor, RewindMode, SearchHit, SearchScope, SessionCommand, SessionHandle,
+    SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput, TurnStatus, UserInputDelivery,
+    UserInputOption, UserInputQuestion, WebLink, WorktreeAnswer, WorktreeRequest, selection_bool,
+    selection_str,
 };
 
 /// The hook callbacks `initialize` registers. With `onFailure: "block"` an error
@@ -405,10 +406,11 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     }
 
     crate::process::refuse_batch_line_breaks(cmd.get_program(), cmd.get_args())?;
-    let mut child = crate::process::ProcessTree::new(
-        cmd.spawn()
-            .map_err(|e| AgentError::Spawn(format!("spawning `{binary}`: {e}")))?,
-    );
+    let mut child = opts
+        .processes
+        .hold(crate::process::ProcessTree::new(cmd.spawn().map_err(
+            |e| AgentError::Spawn(format!("spawning `{binary}`: {e}")),
+        )?));
 
     let stdin = child
         .stdin
@@ -858,12 +860,7 @@ struct PendingSettings {
     request_id: String,
     target: ClaudeLaunchOptions,
     flags: Option<Value>,
-    deadline: std::time::Instant,
 }
-
-/// How long the CLI gets to answer before the change takes a restart instead:
-/// the queue is held meanwhile.
-const LIVE_SETTINGS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Per-session config threaded into the actor loop / mapper.
 struct SessionConfig {
@@ -979,42 +976,24 @@ async fn actor_loop(
         // Race a UI command against the next stdout line. `or` biases toward the
         // command channel, which is fine: both channels make independent progress.
         let next_goal_read = goal_poll.map(|(next, _)| next);
-        let settings_deadline = mapper
-            .pending_settings
-            .as_ref()
-            .map(|pending| pending.deadline);
-        let timer = |at: Option<std::time::Instant>, sel: Sel| async move {
-            match at {
-                Some(at) => {
-                    smol::Timer::at(at).await;
-                    sel
-                }
-                None => std::future::pending().await,
-            }
-        };
         let sel = smol::future::or(
             async { Sel::Cmd(cmd_rx.recv().await.ok()) },
             smol::future::or(
                 async { Sel::Line(line_rx.recv().await.ok()) },
-                smol::future::or(
-                    async { Sel::Tail(tail_rx.recv().await.ok()) },
-                    smol::future::or(
-                        timer(next_goal_read, Sel::GoalRead),
-                        timer(settings_deadline, Sel::SettingsDeadline),
-                    ),
-                ),
+                smol::future::or(async { Sel::Tail(tail_rx.recv().await.ok()) }, async {
+                    match next_goal_read {
+                        Some(at) => {
+                            smol::Timer::at(at).await;
+                            Sel::GoalRead
+                        }
+                        None => std::future::pending().await,
+                    }
+                }),
             ),
         )
         .await;
 
         match sel {
-            Sel::SettingsDeadline => {
-                log::warn!("claude: no answer to a live settings change");
-                mapper.pending_settings = None;
-                let _ = event_tx
-                    .send(AgentEvent::SettingsApplied { applied: false })
-                    .await;
-            }
             Sel::GoalRead => {
                 if let Some(mut reader) = goal.take() {
                     let (reader, changed) = crate::process::unblock(move || {
@@ -1158,7 +1137,6 @@ async fn actor_loop(
 
 enum Sel {
     GoalRead,
-    SettingsDeadline,
     Cmd(Option<SessionCommand>),
     Line(Option<String>),
     Tail(Option<SubagentTailNotice>),
@@ -1821,11 +1799,19 @@ pub(crate) enum ToolItem {
 }
 
 impl ToolItem {
-    /// The in-progress item for a call that is not an `Agent` spawn,
-    /// `TodoWrite` or `ExitPlanMode`, and the state its result completes.
-    /// Calls made at the top level and inside a subagent map alike.
+    /// The in-progress item for a call that is not an `Agent` spawn or a
+    /// `TodoWrite`, and the state its result completes. Calls made at the
+    /// top level and inside a subagent map alike.
     pub(crate) fn started(name: String, input: Value) -> (Self, ItemContent) {
-        if name == "Bash" {
+        if name == EXIT_PLAN_MODE {
+            let markdown = plan_markdown(&input);
+            (
+                ToolItem::Plan {
+                    markdown: markdown.clone(),
+                },
+                ItemContent::Plan { markdown },
+            )
+        } else if is_command_tool(&name) {
             let command = input
                 .get("command")
                 .and_then(Value::as_str)
@@ -1855,6 +1841,7 @@ impl ToolItem {
                 },
             )
         } else {
+            let family = tool_family(&name, &input, None).0;
             (
                 ToolItem::Tool {
                     name: name.clone(),
@@ -1866,6 +1853,7 @@ impl ToolItem {
                     input,
                     output: None,
                     status: ItemStatus::InProgress,
+                    family: family.map(Box::new),
                 },
             )
         }
@@ -1886,12 +1874,18 @@ impl ToolItem {
         let ToolOutput { text, images } =
             ToolOutput::from_content(block.get("content").unwrap_or(&Value::Null));
         match self {
-            ToolItem::Command { command, .. } => ItemContent::CommandExecution {
-                command,
-                output: text,
-                exit_code: Some(i32::from(is_error)),
-                status,
-            },
+            ToolItem::Command { command, .. } => {
+                let (output, exit_code) = match is_error.then(|| exited(&text)).flatten() {
+                    Some((code, rest)) => (rest.to_owned(), Some(code)),
+                    None => (text, None),
+                };
+                ItemContent::CommandExecution {
+                    command,
+                    output,
+                    exit_code,
+                    status,
+                }
+            }
             ToolItem::File { mut changes } => {
                 if let Some(structured_patch) =
                     tool_use_result.and_then(|result| result.get("structuredPatch"))
@@ -1913,13 +1907,17 @@ impl ToolItem {
                 }
                 ItemContent::FileChange { changes, status }
             }
-            ToolItem::Tool { name, input } => ItemContent::ToolCall {
-                image_reads: images,
-                name,
-                input,
-                output: Some(text),
-                status,
-            },
+            ToolItem::Tool { name, input } => {
+                let (family, output) = tool_family(&name, &input, Some((text, tool_use_result)));
+                ItemContent::ToolCall {
+                    image_reads: images,
+                    name,
+                    input,
+                    output,
+                    status,
+                    family: family.map(Box::new),
+                }
+            }
             ToolItem::Plan { markdown } => ItemContent::Plan { markdown },
             ToolItem::Subagent {
                 agent_type,
@@ -1960,6 +1958,26 @@ impl ToolItem {
             effort: effort.clone(),
             parent_item_id,
         })
+    }
+}
+
+/// A call a transcript records, mapped as a live session maps the same call:
+/// a command as a command, an edit as a file change, a proposed plan as the
+/// plan, anything else as the tool call it is. The importer reads
+/// transcripts through this.
+pub struct TranscriptCall(ToolItem);
+
+impl TranscriptCall {
+    /// The call as it starts, and its item until its result arrives.
+    pub fn start(name: String, input: Value) -> (Self, ItemContent) {
+        let (item, content) = ToolItem::started(name, input);
+        (Self(item), content)
+    }
+
+    /// The finished item, from the `tool_result` block and the line's
+    /// `toolUseResult`.
+    pub fn finish(self, block: &Value, tool_use_result: Option<&Value>) -> ItemContent {
+        self.0.finished(block, tool_use_result)
     }
 }
 
@@ -2397,7 +2415,6 @@ impl Mapper {
                 .to_owned(),
             target,
             flags,
-            deadline: std::time::Instant::now() + LIVE_SETTINGS_TIMEOUT,
         });
         Ok(Some(message))
     }
@@ -2419,7 +2436,6 @@ impl Mapper {
                 .as_str()
                 .unwrap_or_default()
                 .to_owned();
-            pending.deadline = std::time::Instant::now() + LIVE_SETTINGS_TIMEOUT;
             self.outgoing.push(message);
             self.pending_settings = Some(pending);
             return Vec::new();
@@ -2704,6 +2720,8 @@ impl Mapper {
                     } else {
                         "Reported by Claude".into()
                     }),
+                    speed: None,
+                    summary: None,
                 });
             }
         }
@@ -3578,7 +3596,7 @@ impl Mapper {
 
         // TodoWrite drives the structured plan/task sidebar, not the timeline.
         if is_todo_tool(&name) {
-            if let Some(steps) = extract_plan_steps_from_todo(&input) {
+            if let Some(steps) = todo_plan(&name, &input) {
                 return vec![AgentEvent::PlanUpdated {
                     turn_id: self.current_turn_id.clone(),
                     explanation: None,
@@ -3592,14 +3610,6 @@ impl Mapper {
             let content = spawned_subagent(&input);
             let item = ToolItem::subagent(&content, None).expect("a spawn snapshot is a Subagent");
             (item, content)
-        } else if name == EXIT_PLAN_MODE {
-            let markdown = plan_markdown(&input);
-            (
-                ToolItem::Plan {
-                    markdown: markdown.clone(),
-                },
-                ItemContent::Plan { markdown },
-            )
         } else {
             ToolItem::started(name, input)
         };
@@ -4410,8 +4420,322 @@ fn api_retry_notice(msg: &Value) -> AgentEvent {
     }
 }
 
+/// What Claude Code's own tool `name` is, from its input and, once it has
+/// finished, its result text and `tool_use_result` (the tool's output
+/// object; a string when the call failed). Returns the family, and the
+/// output the call shows: the result text, or the part of it the family
+/// leaves once its fields are read out. Shapes are 2.1.322's
+/// (`sdk-tools.d.ts` of `@anthropic-ai/claude-agent-sdk` 0.3.322).
+fn tool_family(
+    name: &str,
+    input: &Value,
+    result: Option<(String, Option<&Value>)>,
+) -> (Option<ToolFamily>, Option<String>) {
+    let text = |key: &str| input.get(key).and_then(Value::as_str);
+    let (output, structured) = match result {
+        Some((text, structured)) => (Some(text), structured.filter(|value| value.is_object())),
+        None => (None, None),
+    };
+    let family = match name {
+        // `FileReadOutput`: a text read is `{type: "text", file: {filePath,
+        // content, startLine, ..}}`, the content without the `N\t` numbers
+        // the tool result puts before each line.
+        "Read" => {
+            let Some(path) = text("file_path") else {
+                return (None, output);
+            };
+            let file = structured
+                .filter(|result| result.get("type").and_then(Value::as_str) == Some("text"))
+                .and_then(|result| result.get("file"));
+            if let Some(file) = file
+                && let Some(content) = file.get("content").and_then(Value::as_str)
+            {
+                // An empty read's result is only Claude Code's warning that
+                // the file is empty or shorter than the offset.
+                return (
+                    Some(ToolFamily::Read {
+                        path: path.to_owned(),
+                        first_line: file.get("startLine").and_then(Value::as_u64),
+                        note: output.filter(|text| content.is_empty() && !text.trim().is_empty()),
+                    }),
+                    Some(content.to_owned()),
+                );
+            }
+            // A subagent's transcript can leave the output object out; its
+            // tool result numbers the lines it read.
+            if structured.is_none()
+                && let Some((first_line, content)) = output.as_deref().and_then(numbered_read)
+            {
+                return (
+                    Some(ToolFamily::Read {
+                        path: path.to_owned(),
+                        first_line: Some(first_line),
+                        note: None,
+                    }),
+                    Some(content),
+                );
+            }
+            ToolFamily::Read {
+                path: path.to_owned(),
+                first_line: None,
+                note: None,
+            }
+        }
+        // `GrepOutput`: `filenames` in `files_with_matches` mode (relative
+        // to the working directory), `content` in `content` mode, rg's
+        // `path:N:text` lines (`N:text` when it searched one file).
+        "Grep" => {
+            let path = text("path").map(str::to_owned);
+            let hits = structured.and_then(|result| {
+                match text("output_mode").unwrap_or("files_with_matches") {
+                    "files_with_matches" => filenames(result),
+                    "content" => result
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .map(|content| grep_lines(content, path.as_deref())),
+                    _ => None,
+                }
+            });
+            ToolFamily::Search {
+                scope: SearchScope::Content,
+                pattern: text("pattern").map(str::to_owned),
+                path,
+                glob: text("glob").map(str::to_owned),
+                hits,
+            }
+        }
+        // `GlobOutput`: the files it found, as `filenames`.
+        "Glob" => ToolFamily::Search {
+            scope: SearchScope::Files,
+            pattern: text("pattern").map(str::to_owned),
+            path: text("path").map(str::to_owned),
+            glob: None,
+            hits: structured.and_then(filenames),
+        },
+        "WebFetch" => {
+            let Some(url) = text("url") else {
+                return (None, output);
+            };
+            ToolFamily::Fetch {
+                url: url.to_owned(),
+                prompt: text("prompt").map(str::to_owned),
+            }
+        }
+        // `WebSearchOutput.results`: the model's own words, or a search's
+        // `{tool_use_id, content: [{title, url}]}`.
+        "WebSearch" => {
+            let Some(query) = text("query") else {
+                return (None, output);
+            };
+            ToolFamily::WebSearch {
+                query: query.to_owned(),
+                links: structured
+                    .and_then(|result| result.get("results"))
+                    .and_then(Value::as_array)
+                    .map(|results| {
+                        results
+                            .iter()
+                            .filter_map(|result| result.get("content")?.as_array())
+                            .flatten()
+                            .filter_map(|link| {
+                                Some(WebLink {
+                                    title: link
+                                        .get("title")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                    url: link.get("url")?.as_str()?.to_owned(),
+                                })
+                            })
+                            .collect()
+                    }),
+            }
+        }
+        // Not in `sdk-tools.d.ts`; 2.1.322's own schema: `{query}`, and
+        // `{matches, query, total_deferred_tools}` once it loaded them.
+        "ToolSearch" => {
+            let Some(query) = text("query") else {
+                return (None, output);
+            };
+            ToolFamily::LoadTools {
+                query: query.to_owned(),
+                tools: structured
+                    .and_then(|result| result.get("matches"))
+                    .and_then(Value::as_array)
+                    .map(|matches| {
+                        matches
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    }),
+            }
+        }
+        // 2.1.322's own schema: `{skill, args?}`.
+        "Skill" => match text("skill") {
+            Some(name) => ToolFamily::Skill {
+                name: name.to_owned(),
+            },
+            None => return (None, output),
+        },
+        // `AskUserQuestionInput`'s questions, and `AskUserQuestionOutput`'s
+        // `answers`, keyed by question text: one string, a multi-select's
+        // labels joined with ", " (a record written before 2.1.3xx joined
+        // them holds the list).
+        "AskUserQuestion" => {
+            let Some(asked) = input.get("questions").and_then(Value::as_array) else {
+                return (None, output);
+            };
+            let answers = structured.and_then(|result| result.get("answers"));
+            ToolFamily::Question {
+                questions: asked
+                    .iter()
+                    .filter_map(|question| {
+                        let text = question.get("question")?.as_str()?;
+                        let options: Vec<UserInputOption> = question
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|option| {
+                                Some(UserInputOption {
+                                    label: option.get("label")?.as_str()?.to_owned(),
+                                    description: option
+                                        .get("description")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                })
+                            })
+                            .collect();
+                        let answers = match answers.and_then(|answers| answers.get(text)) {
+                            Some(Value::String(answer)) => chosen(answer, &options),
+                            Some(Value::Array(answers)) => answers
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect(),
+                            _ => Vec::new(),
+                        };
+                        Some(AskedQuestion {
+                            question: text.to_owned(),
+                            options,
+                            answers,
+                        })
+                    })
+                    .collect(),
+            }
+        }
+        _ => return (None, output),
+    };
+    (Some(family), output)
+}
+
+/// The options an AskUserQuestion answer names, in order. Claude Code joins
+/// a multi-select's labels with ", " (JSON-quoting a label that holds ", "
+/// or a quote when its own picker joined them), so the answer is read as
+/// the options it is made of rather than split at every comma; what no
+/// option begins is the user's own words.
+fn chosen(answer: &str, options: &[UserInputOption]) -> Vec<String> {
+    let mut picked = Vec::new();
+    let mut rest = answer;
+    while !rest.is_empty() {
+        let next = options
+            .iter()
+            .flat_map(|option| {
+                let quoted = serde_json::to_string(&option.label).unwrap_or_default();
+                [option.label.len(), quoted.len()]
+                    .into_iter()
+                    .zip([option.label.clone(), quoted])
+                    .map(move |(length, token)| (length, token, option.label.clone()))
+            })
+            .filter(|(length, token, _)| {
+                rest.starts_with(token.as_str())
+                    && (rest.len() == *length || rest[*length..].starts_with(", "))
+            })
+            .max_by_key(|(length, _, _)| *length);
+        let Some((length, _, label)) = next else {
+            picked.push(rest.to_owned());
+            break;
+        };
+        picked.push(label);
+        rest = rest[length..].strip_prefix(", ").unwrap_or_default();
+    }
+    picked
+}
+
+/// A Grep or Glob output's `filenames`, each a file it found.
+fn filenames(result: &Value) -> Option<Vec<SearchHit>> {
+    let names = result.get("filenames")?.as_array()?;
+    Some(
+        names
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|path| SearchHit {
+                path: path.to_owned(),
+                line: None,
+                text: None,
+            })
+            .collect(),
+    )
+}
+
+/// The matches among a content-mode Grep's lines: `path:N:text`, or `N:text`
+/// when it searched the one file `searched`. Context lines (`path-N-text`)
+/// and group separators (`--`) are not matches.
+fn grep_lines(content: &str, searched: Option<&str>) -> Vec<SearchHit> {
+    fn numbered(text: &str) -> Option<(u64, &str)> {
+        let (number, rest) = text.split_once(':')?;
+        Some((number.parse().ok()?, rest))
+    }
+    content
+        .lines()
+        .filter_map(|line| {
+            let (path, (number, text)) = match numbered(line) {
+                Some(found) => (searched?, found),
+                None => line
+                    .match_indices(':')
+                    .find_map(|(at, _)| Some((&line[..at], numbered(&line[at + 1..])?)))?,
+            };
+            Some(SearchHit {
+                path: path.to_owned(),
+                line: Some(number),
+                text: Some(text.to_owned()),
+            })
+        })
+        .collect()
+}
+
+/// A Read tool result's numbered lines (`N\t` before each, 2.1.322's
+/// format) as the first line's number and the lines without their numbers.
+fn numbered_read(text: &str) -> Option<(u64, String)> {
+    let mut first = None;
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let (number, rest) = line.split_once('\t')?;
+        let number: u64 = number.trim_start().parse().ok()?;
+        first.get_or_insert(number);
+        lines.push(rest);
+    }
+    Some((first?, lines.join("\n")))
+}
+
 fn is_file_tool(name: &str) -> bool {
     matches!(name, "Write" | "Edit" | "NotebookEdit")
+}
+
+fn is_command_tool(name: &str) -> bool {
+    matches!(name, "Bash" | "PowerShell")
+}
+
+/// A command's error result as Claude Code 2.1.322 words it (its tool error
+/// formatter starts with `Exit code ${code}` for a command that exited
+/// non-zero): the code, and what follows it. Any other error is not an
+/// exit, and a success says no code.
+fn exited(text: &str) -> Option<(i32, &str)> {
+    let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
+    let code = first.strip_prefix("Exit code ")?.trim().parse().ok()?;
+    Some((code, rest))
 }
 
 pub(crate) fn one_line_summary(text: &str) -> String {
@@ -4769,6 +5093,15 @@ fn parse_provider_commands(init: &Value) -> Vec<ProviderCommand> {
     push("slash_commands", ProviderCommandKind::Command);
     push("skills", ProviderCommandKind::Skill);
     out
+}
+
+/// The plan a call of `name` sets, when it is a `TodoWrite`: a session
+/// shows it as the plan, not as a call. The importer reads a transcript's
+/// calls through this.
+pub fn todo_plan(name: &str, input: &Value) -> Option<Vec<PlanStep>> {
+    is_todo_tool(name)
+        .then(|| extract_plan_steps_from_todo(input))
+        .flatten()
 }
 
 fn is_todo_tool(name: &str) -> bool {
@@ -6379,6 +6712,11 @@ mod tests {
                 input: json!({"file_path": "blue.png"}),
                 output: Some(String::new()),
                 status: ItemStatus::Completed,
+                family: Some(Box::new(ToolFamily::Read {
+                    path: "blue.png".into(),
+                    first_line: None,
+                    note: None,
+                })),
             }
         );
         let child = |id: &str| {
@@ -6394,7 +6732,7 @@ mod tests {
             &ItemContent::CommandExecution {
                 command: "echo hi".into(),
                 output: "hi".into(),
-                exit_code: Some(0),
+                exit_code: None,
                 status: ItemStatus::Completed,
             }
         );
@@ -6409,11 +6747,270 @@ mod tests {
                 status: ItemStatus::Completed,
             }
         );
+        // A subagent's tool result comes without the output object, so its
+        // read is told by the lines the result numbers.
         assert!(matches!(
             child("toolu_010000000000000000000017"),
-            ItemContent::ToolCall { name, output: Some(output), .. }
-                if name == "Read" && output == "1\thello\n2\tworld\n3\t"
+            ItemContent::ToolCall { name, output: Some(output), family: Some(family), .. }
+                if name == "Read" && output == "hello\nworld\n" && matches!(&**family, ToolFamily::Read { path, first_line: Some(1), .. } if path == "/home/user/project/a.txt")
         ));
+    }
+
+    /// A command is a command whichever shell runs it, and one that exited
+    /// non-zero carries the code Claude Code wrote before its output
+    /// (2.1.322's tool error formatter: `Exit code ${code}`, then what the
+    /// command printed); the lines are stream-json `assistant` and `user`
+    /// messages with Anthropic `tool_use` and `tool_result` blocks, content
+    /// invented.
+    #[test]
+    fn a_command_carries_the_code_it_exited_with() {
+        let mut mapper = Mapper::new();
+        let started = feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg_ps","content":[{"type":"tool_use","id":"toolu_ps","name":"PowerShell","input":{"command":"Get-ChildItem build"}}]}}"#,
+        );
+        assert!(
+            matches!(
+                started.as_slice(),
+                [AgentEvent::ItemStarted(ThreadItem { content: ItemContent::CommandExecution { command, .. }, .. })]
+                    if command == "Get-ChildItem build"
+            ),
+            "{started:?}"
+        );
+        let completed = feed(
+            &mut mapper,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_ps","is_error":true,"content":"Exit code 2\nGet-ChildItem: Cannot find path 'build'."}]}}"#,
+        );
+        let [AgentEvent::ItemCompleted(item)] = completed.as_slice() else {
+            panic!("{completed:?}");
+        };
+        assert_eq!(
+            item.content,
+            ItemContent::CommandExecution {
+                command: "Get-ChildItem build".into(),
+                output: "Get-ChildItem: Cannot find path 'build'.".into(),
+                exit_code: Some(2),
+                status: ItemStatus::Failed,
+            }
+        );
+    }
+
+    /// A Read is a read of the file it names: its lines as the output object
+    /// gives them, without the `N\t` numbers of the tool result, from the
+    /// line the read began at (`FileReadOutput` of `sdk-tools.d.ts` in
+    /// `@anthropic-ai/claude-agent-sdk` 0.3.322, for Claude Code 2.1.322;
+    /// content invented).
+    #[test]
+    fn a_read_is_the_lines_it_read_from_where_it_began() {
+        let mut mapper = Mapper::new();
+        let started = feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg_read","content":[{"type":"tool_use","id":"toolu_read","name":"Read","input":{"file_path":"/work/src/lib.rs","offset":40,"limit":2}}]}}"#,
+        );
+        assert!(
+            matches!(
+                started.as_slice(),
+                [AgentEvent::ItemStarted(ThreadItem { content: ItemContent::ToolCall { family: Some(family), .. }, .. })]
+                    if matches!(&**family, ToolFamily::Read { path, first_line: None, .. } if path == "/work/src/lib.rs")
+            ),
+            "{started:?}"
+        );
+        let completed = feed(
+            &mut mapper,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_read","content":"40\tfn main() {\n41\t}"}]},"tool_use_result":{"type":"text","file":{"filePath":"/work/src/lib.rs","content":"fn main() {\n}","numLines":2,"startLine":40,"totalLines":90}}}"#,
+        );
+        let [AgentEvent::ItemCompleted(item)] = completed.as_slice() else {
+            panic!("{completed:?}");
+        };
+        let ItemContent::ToolCall { output, family, .. } = &item.content else {
+            panic!("{item:?}");
+        };
+        assert_eq!(output.as_deref(), Some("fn main() {\n}"));
+        assert_eq!(
+            family.as_deref(),
+            Some(&ToolFamily::Read {
+                path: "/work/src/lib.rs".into(),
+                first_line: Some(40),
+                note: None,
+            })
+        );
+    }
+
+    /// A Grep is a search of what its output object found: in content mode
+    /// rg's `path:N:text` lines, context lines left out; a Glob the files in
+    /// its `filenames` (`GrepOutput`, `GlobOutput` of `sdk-tools.d.ts` in
+    /// `@anthropic-ai/claude-agent-sdk` 0.3.322; content invented).
+    #[test]
+    fn a_search_is_what_its_output_object_found() {
+        let mut mapper = Mapper::new();
+        feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg_grep","content":[{"type":"tool_use","id":"toolu_grep","name":"Grep","input":{"pattern":"TODO","path":"src","output_mode":"content","-C":1}},{"type":"tool_use","id":"toolu_glob","name":"Glob","input":{"pattern":"**/*.rs"}}]}}"#,
+        );
+        let completed = feed(
+            &mut mapper,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_grep","content":"src/a.rs-2-fn a() {\nsrc/a.rs:3:    // TODO: one\n--\nsrc/b.rs:7:// TODO: two"}]},"tool_use_result":{"mode":"content","numFiles":0,"filenames":[],"content":"src/a.rs-2-fn a() {\nsrc/a.rs:3:    // TODO: one\n--\nsrc/b.rs:7:// TODO: two","numLines":4}}"#,
+        );
+        let [AgentEvent::ItemCompleted(grep)] = completed.as_slice() else {
+            panic!("{completed:?}");
+        };
+        let ItemContent::ToolCall { family, .. } = &grep.content else {
+            panic!("{grep:?}");
+        };
+        let hit = |path: &str, line, text: &str| SearchHit {
+            path: path.into(),
+            line: Some(line),
+            text: Some(text.into()),
+        };
+        assert_eq!(
+            family.as_deref(),
+            Some(&ToolFamily::Search {
+                scope: SearchScope::Content,
+                pattern: Some("TODO".into()),
+                path: Some("src".into()),
+                glob: None,
+                hits: Some(vec![
+                    hit("src/a.rs", 3, "    // TODO: one"),
+                    hit("src/b.rs", 7, "// TODO: two"),
+                ]),
+            })
+        );
+        let completed = feed(
+            &mut mapper,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_glob","content":"src/a.rs\nsrc/b.rs"}]},"tool_use_result":{"filenames":["src/a.rs","src/b.rs"],"durationMs":3,"numFiles":2,"truncated":false}}"#,
+        );
+        let [AgentEvent::ItemCompleted(glob)] = completed.as_slice() else {
+            panic!("{completed:?}");
+        };
+        let ItemContent::ToolCall { family, .. } = &glob.content else {
+            panic!("{glob:?}");
+        };
+        let Some(ToolFamily::Search { scope, hits, .. }) = family.as_deref() else {
+            panic!("{family:?}");
+        };
+        assert_eq!(*scope, SearchScope::Files);
+        assert_eq!(
+            hits.as_deref()
+                .map(|hits| hits.iter().map(|hit| hit.path.as_str()).collect::<Vec<_>>()),
+            Some(vec!["src/a.rs", "src/b.rs"])
+        );
+    }
+
+    /// An AskUserQuestion is the questions it asked and the options each
+    /// answer names: Claude Code joins a multi-select's labels with ", ",
+    /// so a label holding ", " stays whole, and words no option begins are
+    /// the user's own (`AskUserQuestionInput`, `AskUserQuestionOutput` of
+    /// `sdk-tools.d.ts` in `@anthropic-ai/claude-agent-sdk` 0.3.322; content
+    /// invented).
+    #[test]
+    fn a_question_is_what_it_asked_and_the_options_each_answer_names() {
+        let mut mapper = Mapper::new();
+        feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg_ask","content":[{"type":"tool_use","id":"toolu_ask","name":"AskUserQuestion","input":{"questions":[{"question":"Which colours?","header":"Colours","multiSelect":true,"options":[{"label":"Red, green","description":"Warm and cool"},{"label":"Blue","description":"Cool"}]},{"question":"Why?","header":"Why","multiSelect":false,"options":[{"label":"Taste","description":""},{"label":"Brand","description":""}]}]}}]}}"#,
+        );
+        let completed = feed(
+            &mut mapper,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_ask","content":"Your questions have been answered: \"Which colours?\"=\"Red, green, Blue\", \"Why?\"=\"It matches the logo\". You can now continue with these answers in mind."}]},"tool_use_result":{"questions":[],"answers":{"Which colours?":"Red, green, Blue","Why?":"It matches the logo"}}}"#,
+        );
+        let [AgentEvent::ItemCompleted(item)] = completed.as_slice() else {
+            panic!("{completed:?}");
+        };
+        let ItemContent::ToolCall { family, .. } = &item.content else {
+            panic!("{item:?}");
+        };
+        let Some(ToolFamily::Question { questions }) = family.as_deref() else {
+            panic!("{family:?}");
+        };
+        let answers: Vec<_> = questions
+            .iter()
+            .map(|question| question.answers.clone())
+            .collect();
+        assert_eq!(
+            answers,
+            [
+                vec!["Red, green".to_owned(), "Blue".to_owned()],
+                vec!["It matches the logo".to_owned()],
+            ]
+        );
+    }
+
+    /// A WebSearch is the pages its output object's searches found, past
+    /// the model's own words among them; a WebFetch the page and the prompt
+    /// it was read with (`WebSearchOutput`, `WebFetchInput` of
+    /// `sdk-tools.d.ts` in `@anthropic-ai/claude-agent-sdk` 0.3.322; content
+    /// invented).
+    #[test]
+    fn a_web_call_is_the_page_or_the_pages_it_found() {
+        let mut mapper = Mapper::new();
+        let started = feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg_web","content":[{"type":"tool_use","id":"toolu_search","name":"WebSearch","input":{"query":"cors preflight"}},{"type":"tool_use","id":"toolu_fetch","name":"WebFetch","input":{"url":"https://example.com/cors","prompt":"How long is it cached?"}}]}}"#,
+        );
+        assert!(
+            matches!(
+                &started[1],
+                AgentEvent::ItemStarted(ThreadItem { content: ItemContent::ToolCall { family: Some(family), .. }, .. })
+                    if **family == ToolFamily::Fetch { url: "https://example.com/cors".into(), prompt: Some("How long is it cached?".into()) }
+            ),
+            "{started:?}"
+        );
+        let completed = feed(
+            &mut mapper,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_search","content":"Web search results for query: \"cors preflight\"\n\nLinks: [{\"title\":\"CORS\",\"url\":\"https://example.com/cors\"}]\n\nREMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks."}]},"tool_use_result":{"query":"cors preflight","results":["Searching for the cache header.",{"tool_use_id":"srvtoolu_1","content":[{"title":"CORS","url":"https://example.com/cors"}]}],"durationSeconds":1.5}}"#,
+        );
+        let [AgentEvent::ItemCompleted(item)] = completed.as_slice() else {
+            panic!("{completed:?}");
+        };
+        let ItemContent::ToolCall { family, .. } = &item.content else {
+            panic!("{item:?}");
+        };
+        assert_eq!(
+            family.as_deref(),
+            Some(&ToolFamily::WebSearch {
+                query: "cors preflight".into(),
+                links: Some(vec![WebLink {
+                    title: "CORS".into(),
+                    url: "https://example.com/cors".into(),
+                }]),
+            })
+        );
+    }
+
+    /// A ToolSearch is the tools its output object says it loaded
+    /// (`matches`), a Skill the skill it names (2.1.322's own schemas, not
+    /// in `sdk-tools.d.ts`; content invented).
+    #[test]
+    fn a_tool_search_is_the_tools_it_loaded_and_a_skill_its_name() {
+        let mut mapper = Mapper::new();
+        feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg_tools","content":[{"type":"tool_use","id":"toolu_tools","name":"ToolSearch","input":{"query":"select:Monitor","max_results":1}},{"type":"tool_use","id":"toolu_skill","name":"Skill","input":{"skill":"pr"}}]}}"#,
+        );
+        let completed = feed(
+            &mut mapper,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_tools","content":[{"type":"tool_reference","tool_name":"Monitor"}]},{"type":"tool_result","tool_use_id":"toolu_skill","content":"Launching skill: pr"}]},"tool_use_result":{"matches":["Monitor"],"query":"select:Monitor","total_deferred_tools":12}}"#,
+        );
+        let families: Vec<_> = completed
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ItemCompleted(ThreadItem {
+                    content: ItemContent::ToolCall { family, .. },
+                    ..
+                }) => family.as_deref().cloned(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            families,
+            [
+                ToolFamily::LoadTools {
+                    query: "select:Monitor".into(),
+                    tools: Some(vec!["Monitor".into()]),
+                },
+                ToolFamily::Skill { name: "pr".into() },
+            ]
+        );
     }
 
     /// A message sent to a resumed session whose background command did not

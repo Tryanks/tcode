@@ -52,7 +52,9 @@ fn is_provider_work(content: &EntryContent) -> bool {
         | EntryContent::ControlAction(_)
         | EntryContent::Rewound(_)
         | EntryContent::RewindFailed { .. }
-        | EntryContent::ModelChanged { .. } => false,
+        | EntryContent::ModelChanged { .. }
+        | EntryContent::Unreadable { .. }
+        | EntryContent::Withheld { .. } => false,
     }
 }
 
@@ -330,7 +332,9 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
             EntryContent::ModelChanged { .. }
             | EntryContent::SettingsKept
             | EntryContent::Rewound(_)
-            | EntryContent::RewindFailed { .. } => {}
+            | EntryContent::RewindFailed { .. }
+            | EntryContent::Unreadable { .. }
+            | EntryContent::Withheld { .. } => {}
             EntryContent::ControlAction(action) => activity(
                 &mut body,
                 "control",
@@ -511,6 +515,7 @@ mod tests {
                     input: serde_json::json!({"path": "src/main.rs"}),
                     output: Some("line one\nline two".into()),
                     status: ItemStatus::Completed,
+                    family: None,
                 },
             ),
             item(
@@ -521,6 +526,7 @@ mod tests {
                     input: serde_json::json!({"target": "workspace"}),
                     output: Some("compiler error\nmore detail".into()),
                     status: ItemStatus::Failed,
+                    family: None,
                 },
             ),
             completed("t1"),

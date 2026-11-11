@@ -167,12 +167,12 @@ fn open_panel<'a>(
         });
         gpui_base::Root::new(panel, window, cx)
     });
-    draw(remote, cx);
+    draw(cx);
     cx
 }
 
 /// Lets what the machine sent land and what it started play out, as frames do in the app.
-fn draw(_remote: &Remote, cx: &mut VisualTestContext) {
+fn draw(cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.update(|window, cx| {
         window.refresh();
@@ -192,12 +192,12 @@ fn drawn(cx: &mut VisualTestContext, selector: String) -> bool {
         .is_some()
 }
 
-fn click(selector: &'static str, remote: &Remote, cx: &mut VisualTestContext) {
+fn click(selector: &'static str, cx: &mut VisualTestContext) {
     let bounds = cx
         .debug_bounds(selector)
         .unwrap_or_else(|| panic!("{selector} is drawn"));
     cx.simulate_click(bounds.center(), gpui::Modifiers::default());
-    draw(remote, cx);
+    draw(cx);
 }
 
 /// Each platform's row says where it stands from what the machine reports, and offers one
@@ -249,15 +249,15 @@ fn connecting_verifies_the_token_before_the_machine_saves_it(cx: &mut TestAppCon
     let remote = Remote::attach(reported(), cx);
     let cx = open_panel(&remote, false, cx);
     remote.commands();
-    click("source-control-connect-gitlab.com", &remote, cx);
+    click("source-control-connect-gitlab.com", cx);
     assert!(
         cx.debug_bounds("source-control-command").is_some(),
         "the glab sign-in is offered beside the token"
     );
     cx.simulate_input("glpat-typed");
-    draw(&remote, cx);
+    draw(cx);
     let verify = |remote: &Remote, cx: &mut VisualTestContext, answer: TokenCheck| {
-        click("source-control-verify", remote, cx);
+        click("source-control-verify", cx);
         let sent = remote.commands();
         let [(id, command)] = sent.as_slice() else {
             panic!("one command per check: {sent:?}");
@@ -271,7 +271,7 @@ fn connecting_verifies_the_token_before_the_machine_saves_it(cx: &mut TestAppCon
             }
         );
         remote.answer(*id, CommandResponse::TokenCheck(answer));
-        draw(remote, cx);
+        draw(cx);
     };
     verify(&remote, cx, TokenCheck::Rejected { status: 401 });
     assert!(cx.debug_bounds("source-control-check-rejected").is_some());
@@ -281,7 +281,7 @@ fn connecting_verifies_the_token_before_the_machine_saves_it(cx: &mut TestAppCon
         cx.debug_bounds("source-control-check-unreachable")
             .is_some()
     );
-    click("source-control-save-anyway", &remote, cx);
+    click("source-control-save-anyway", cx);
     assert_eq!(
         remote
             .commands()
@@ -299,9 +299,9 @@ fn connecting_verifies_the_token_before_the_machine_saves_it(cx: &mut TestAppCon
         "saving closes the dialog"
     );
 
-    click("source-control-connect-gitlab.com", &remote, cx);
+    click("source-control-connect-gitlab.com", cx);
     cx.simulate_input("glpat-typed");
-    draw(&remote, cx);
+    draw(cx);
     verify(
         &remote,
         cx,
@@ -329,23 +329,23 @@ fn managing_chooses_an_account_and_disconnects_after_confirming(cx: &mut TestApp
     let remote = Remote::attach(reported(), cx);
     let cx = open_panel(&remote, false, cx);
     remote.commands();
-    click("source-control-manage-github.com", &remote, cx);
+    click("source-control-manage-github.com", cx);
     assert!(
         cx.debug_bounds("source-control-disconnect").is_none(),
         "a gh login is not Tcode's to disconnect"
     );
-    click("source-control-account-lin-work", &remote, cx);
+    click("source-control-account-lin-work", cx);
     assert!(remote.commands().iter().any(|(_, command)| matches!(
         command,
         Command::PatchSettings {
             patch: SettingsPatch::SourceControlHost { host, account: Some(Some(account)), .. }
         } if host == "github.com" && account == "lin-work"
     )));
-    click("source-control-done", &remote, cx);
+    click("source-control-done", cx);
 
-    click("source-control-manage-git.example.dev", &remote, cx);
+    click("source-control-manage-git.example.dev", cx);
     assert!(cx.debug_bounds("source-control-problem-rejected").is_some());
-    click("source-control-disconnect", &remote, cx);
+    click("source-control-disconnect", cx);
     assert!(
         remote.commands().is_empty(),
         "nothing is deleted before confirming"
@@ -356,7 +356,7 @@ fn managing_chooses_an_account_and_disconnects_after_confirming(cx: &mut TestApp
             cx,
         )
     });
-    draw(&remote, cx);
+    draw(cx);
     assert_eq!(
         remote
             .commands()
@@ -384,19 +384,19 @@ fn adding_a_platform_goes_on_to_connect_it(cx: &mut TestAppContext) {
         "ctrl-a backspace"
     };
     remote.commands();
-    click("source-control-add-host", &remote, cx);
-    click("source-control-kind-forgejo", &remote, cx);
+    click("source-control-add-host", cx);
+    click("source-control-kind-forgejo", cx);
     cx.simulate_keystrokes(clear);
     cx.simulate_input("git.example.dev");
-    click("source-control-add-confirm", &remote, cx);
+    click("source-control-add-confirm", cx);
     assert!(
         remote.commands().is_empty(),
         "an address already listed is not added"
     );
-    click("source-control-address", &remote, cx);
+    click("source-control-address", cx);
     cx.simulate_keystrokes(clear);
     cx.simulate_input("git.example.org");
-    click("source-control-add-confirm", &remote, cx);
+    click("source-control-add-confirm", cx);
     assert_eq!(
         remote
             .commands()

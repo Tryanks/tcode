@@ -50,6 +50,10 @@ pub struct ProviderSnapshot {
     /// The CLI the probe ran, as the host resolved it.
     #[serde(default)]
     pub binary: Option<String>,
+    /// The oldest release Tcode supports, present when `version` is older.
+    /// The CLI still runs; it may not work correctly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_from: Option<String>,
 }
 
 /// Where a sign-in the host runs through the provider CLI stands.

@@ -285,12 +285,6 @@ impl TurnBoundaries {
                     self.users.remove(request_id);
                 }
             }
-            AgentEvent::ProposedPlan { item_id, .. } => {
-                if let Some(user) = self.users.get_mut(item_id) {
-                    user.pending = false;
-                    change.changed = true;
-                }
-            }
             AgentEvent::TokenUsage(usage) => {
                 self.compacting = usage.freshness == ContextFreshness::Compacting;
             }
@@ -338,13 +332,13 @@ impl TurnBoundaries {
             | AgentEvent::Error { .. }
             | AgentEvent::SessionClosed { reason: Some(_) }
             | AgentEvent::Delta { .. }
-            | AgentEvent::ProposedPlanDelta { .. }
-            | AgentEvent::ProposedPlan { .. }
             | AgentEvent::ContextWindowChanged { .. }
             | AgentEvent::SettingsKept
             | AgentEvent::SessionMoved { .. }
             | AgentEvent::WorktreeResolved { .. }
-            | AgentEvent::ControlAction(_) => self.is_empty(),
+            | AgentEvent::ControlAction(_)
+            | AgentEvent::UnreadableRecord { .. }
+            | AgentEvent::RecordWithheld { .. } => self.is_empty(),
             AgentEvent::ContextCompacted(compaction) => {
                 !(compaction.in_progress && self.compacting) && self.is_empty()
             }
@@ -356,13 +350,11 @@ impl TurnBoundaries {
             | AgentEvent::SteerRejected { .. }
             | AgentEvent::TurnRetry { .. }
             | AgentEvent::TurnAccepted { .. }
-            | AgentEvent::TurnBlocked { .. }
             | AgentEvent::McpServersNotAttached
             | AgentEvent::BackgroundTasksChanged { .. }
             | AgentEvent::SettingsApplied { .. }
             | AgentEvent::BackgroundTaskList { .. }
             | AgentEvent::ItemBackgrounded { .. }
-            | AgentEvent::ModelFallbackDetected { .. }
             | AgentEvent::RewindCompleted { .. }
             | AgentEvent::RewindFailed { .. }
             | AgentEvent::RewindUndone { .. }
@@ -378,7 +370,6 @@ impl TurnBoundaries {
             | AgentEvent::UserInputRequested { .. }
             | AgentEvent::UserInputResolved { .. }
             | AgentEvent::Warning { .. }
-            | AgentEvent::PlanResolved { .. }
             | AgentEvent::PlanUpdated { .. }
             | AgentEvent::GoalUpdated { .. }
             | AgentEvent::UsageLimitReached { .. }

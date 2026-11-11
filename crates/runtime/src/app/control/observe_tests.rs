@@ -64,7 +64,7 @@ fn list_threads_honours_scope_hides_children_and_archived_and_pages() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-control-list-threads");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let now = now_millis();
+    let now = cx.now_millis();
     state.update(cx, |state, _| {
         add(state, thread("caller", "a"), Some(now - 5 * HOUR_MS));
         add(state, thread("newest", "a"), Some(now - HOUR_MS));
@@ -165,7 +165,8 @@ fn get_thread_explains_why_an_unsettled_thread_was_not_auto_settled() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-control-settlement-explanation");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let idle_since = now_millis() - 24 * HOUR_MS;
+    let idle_since = cx.now_millis();
+    cx.clock.advance(Duration::from_millis(24 * HOUR_MS));
     state.update(cx, |state, _| {
         add(state, thread("caller", "a"), Some(idle_since));
         add(state, thread("idle", "a"), Some(idle_since));
@@ -296,7 +297,7 @@ fn review_candidates_changes_no_state_and_reports_coverage() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-control-review");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let now = now_millis();
+    let now = cx.now_millis();
     let old = now - 40 * 24 * HOUR_MS;
     let reply = AgentEvent::ItemCompleted(ThreadItem {
         id: "reply".into(),

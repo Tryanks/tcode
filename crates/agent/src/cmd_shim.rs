@@ -510,6 +510,7 @@ mod tests {
                     extra_args,
                     acp: None,
                     instructions: None,
+                    processes: Default::default(),
                 },
             ))
         };

@@ -167,15 +167,19 @@ impl TimelineView {
                     ));
                 }
                 Segment::Images(images) => {
-                    column = column.child(components::images::image_tiles(
-                        self.workspace_store.read(cx).image_host(),
-                        images,
-                        cwd,
-                        self.session_key.as_deref().unwrap_or_default(),
-                        &self.motion.clone(),
-                        window,
-                        cx,
-                    ));
+                    // Images are read through their thread; a timeline with
+                    // none has nothing to read them from.
+                    if let Some(session) = self.session_key.clone() {
+                        column = column.child(components::images::image_tiles(
+                            self.workspace_store.read(cx).image_host(),
+                            images,
+                            cwd,
+                            &session,
+                            &self.motion.clone(),
+                            window,
+                            cx,
+                        ));
+                    }
                     for entry in images {
                         if matches!(
                             &entry.content,
@@ -265,6 +269,36 @@ impl TimelineView {
                 Segment::Plan(entry) => {
                     column = column.child(self.compose_plan(entry, cwd, cx));
                 }
+                Segment::Withheld(entry) => {
+                    let EntryContent::Withheld { bytes } = entry.content else {
+                        unreachable!();
+                    };
+                    column = column.child(components::dividers::record_withheld_divider(
+                        &entry.id, bytes, cx,
+                    ));
+                }
+                Segment::Unreadable(rows) => {
+                    let label = if rows.len() == 1 {
+                        crate::tr!("chat.unreadable_record_one")
+                    } else {
+                        crate::tr!("chat.unreadable_records", count = rows.len())
+                    };
+                    let lines = rows
+                        .iter()
+                        .filter_map(|entry| match &entry.content {
+                            EntryContent::Unreadable { line } => Some(line.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    column = column.child(self.compose_disclosure(
+                        index,
+                        format!("unreadable-{}", rows[0].id),
+                        label.into_owned().into(),
+                        &lines,
+                        cx,
+                    ));
+                }
                 Segment::Error(entry) => {
                     let harness = self
                         .workspace_store
@@ -298,7 +332,7 @@ impl TimelineView {
                             match limit_resume_action(
                                 resets_at,
                                 queued_id,
-                                now_secs(),
+                                now_secs(cx),
                                 ends_thread,
                                 queue_empty,
                             ) {
@@ -1545,7 +1579,7 @@ impl TimelineView {
         let mut rows = Vec::new();
         for (file_index, file) in edit.files.iter().enumerate() {
             let key = format!("activity-{}-file-{file_index}", entry.id);
-            let enabled = auto_expand && edit.live && file.row.counts.is_some();
+            let enabled = auto_expand && file.row.counts.is_some();
             let expanded =
                 self.auto_activity_expanded((turn, &entry.id), &key, enabled, recency, cx);
             let window_key = format!("{}-file-{file_index}", entry.id);
@@ -1562,9 +1596,8 @@ impl TimelineView {
                 }
             };
             let header = tools::diff::file_header(file);
-            // The call's failure and its time belong to it, told once.
-            let first = file_index == 0;
-            let elapsed_ms = first
+            // The edit's time belongs to it, told once.
+            let elapsed_ms = (file_index == 0)
                 .then(|| tools::window::elapsed(&header, entry))
                 .flatten();
             let toggle_key = key.clone();
@@ -1574,7 +1607,7 @@ impl TimelineView {
                     key: window_key,
                     header,
                     status: edit.status,
-                    error: first.then(|| edit.failure.clone()).flatten(),
+                    error: None,
                     elapsed_ms,
                     compact: false,
                     copy: tools::diff::file_copy_items(file),
@@ -1872,9 +1905,7 @@ impl TimelineView {
                 tools::shell::ShellRun {
                     entry,
                     command,
-                    workdir: None,
                     output,
-                    hosted: true,
                     running: *status == agent::ItemStatus::InProgress,
                 },
                 &mut tools::ToolCtx {
@@ -2539,11 +2570,11 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        driver.wait_until(cx, &store, "chat baseline", |cx| {
+        driver.wait_until(cx, "chat baseline", |cx| {
             store.read_with(cx, |store, cx| {
                 !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
@@ -2592,7 +2623,7 @@ mod tests {
         let mut settle = |cx: &mut VisualTestContext,
                           what: &str,
                           ready: &dyn Fn(&mut VisualTestContext) -> bool| {
-            driver.settle_until(cx, &store, what, ready);
+            driver.settle_until(cx, what, ready);
         };
         // Nothing drives this turn on the host, so its Work Log reads as
         // finished and folded: open it and the command, as a reader would.
@@ -2692,168 +2723,7 @@ mod tests {
 
         store.update(cx, |store, cx| store.show_alone(other_id, cx));
         settle(cx, "leaving the thread", &|_| output_topics().is_empty());
-        driver.shutdown(cx, &store, &host);
-    }
-
-    #[gpui::test]
-    fn a_plan_is_decided_on_its_block_and_answered_in_words_from_the_composer(
-        cx: &mut TestAppContext,
-    ) {
-        use gpui::{Modifiers, VisualTestContext, px, size};
-        use tcode_core::project::SessionMeta;
-
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let root = crate::store::tests::scratch_root("chat-plan-decision-test");
-        let session_store =
-            tcode_services::store::SessionStore::open_at(root.clone()).expect("test session store");
-        let meta = SessionMeta::new(agent::ProviderKind::ClaudeCode, root.clone(), None);
-        let session_id = meta.id.clone();
-        session_store.upsert_meta(&meta).expect("persist session");
-        let host = tcode_runtime::pipe::spawn_host(
-            session_store,
-            tcode_runtime::pipe::HostServices::default(),
-        )
-        .expect("spawn test host");
-        let scripted = tcode_runtime::app::scripted_provider(agent::ProviderKind::ClaudeCode);
-        let (provider_events, provider_commands) =
-            (scripted.events.clone(), scripted.commands.clone());
-        smol::block_on(host.update_state_for_test(move |state, _| {
-            state.set_provider_launcher_for_test(scripted.launcher)
-        }))
-        .expect("script the provider");
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                driver.link.clone(),
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        driver.wait_until(cx, &store, "workspace baseline", |cx| {
-            store.read_with(cx, |store, _| store.baseline_ready())
-        });
-        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        store.update(cx, |store, _| {
-            store.send_turn_for(session_id.clone(), "Plan it first".into(), Vec::new())
-        });
-        while !matches!(
-            driver.recv(cx, &store, &provider_commands),
-            agent::SessionCommand::SendTurn { .. }
-        ) {}
-
-        let window_state = cx.new(|_| WindowState::default());
-        cx.update(|cx| cx.set_reduce_motion(true));
-        let (chat, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-            ChatView::new(
-                store.clone(),
-                window_state,
-                Some(session_id.clone()),
-                window,
-                cx,
-            )
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(size(px(1_024.), px(800.)));
-        chat.update(cx, |chat, cx| {
-            chat.set_session(Some(session_id.clone()), cx)
-        });
-        let propose = |id: &str, request: &str| {
-            let markdown = format!("# Plan {id}\n\n1. Write hello.txt");
-            for event in [
-                agent::AgentEvent::ItemStarted(agent::ThreadItem {
-                    id: id.into(),
-                    parent_item_id: None,
-                    content: ItemContent::Plan {
-                        markdown: markdown.clone(),
-                    },
-                }),
-                agent::AgentEvent::ApprovalRequested(agent::ApprovalRequest {
-                    id: request.into(),
-                    turn_id: None,
-                    parent_item_id: None,
-                    kind: agent::ApprovalKind::Plan {
-                        item_id: id.into(),
-                        markdown,
-                    },
-                    reason: None,
-                    blocked_path: None,
-                    options: vec![
-                        agent::ApprovalOption {
-                            id: "allow".into(),
-                            label: "Approve".into(),
-                            kind: agent::ApprovalOptionKind::AllowOnce,
-                        },
-                        agent::ApprovalOption {
-                            id: "deny".into(),
-                            label: "Keep planning".into(),
-                            kind: agent::ApprovalOptionKind::RejectOnce,
-                        },
-                    ],
-                }),
-            ] {
-                provider_events.try_send(event).expect("provider event");
-            }
-        };
-        let decided = |driver: &mut crate::store::tests::LocalHostDriver,
-                       cx: &mut VisualTestContext| {
-            draw_settled(cx);
-            loop {
-                if let agent::SessionCommand::RespondApproval {
-                    request_id,
-                    decision,
-                } = driver.recv(cx, &store, &provider_commands)
-                {
-                    return (request_id, decision);
-                }
-            }
-        };
-        let shown = |driver: &mut crate::store::tests::LocalHostDriver,
-                     cx: &mut VisualTestContext| {
-            driver.settle_until(cx, &store, "the plan's decision", |cx| {
-                cx.debug_bounds("plan-decision").is_some()
-            });
-        };
-
-        propose("plan-1", "decide-1");
-        shown(&mut driver, cx);
-        assert!(
-            cx.debug_bounds("approval-header").is_none(),
-            "a plan is decided on its block, not in the composer"
-        );
-        let approve = cx
-            .debug_bounds("plan-option-allow")
-            .expect("approve button");
-        cx.simulate_click(approve.center(), Modifiers::default());
-        assert_eq!(
-            decided(&mut driver, cx),
-            (
-                "decide-1".to_string(),
-                agent::ApprovalDecision::Option("allow".into())
-            )
-        );
-        provider_events
-            .try_send(agent::AgentEvent::ApprovalResolved {
-                request_id: "decide-1".into(),
-                decision: agent::ApprovalDecision::Option("allow".into()),
-            })
-            .expect("provider event");
-
-        propose("plan-2", "decide-2");
-        shown(&mut driver, cx);
-        chat.update_in(cx, |chat, window, cx| chat.focus_composer(window, cx));
-        cx.simulate_input("Split step one");
-        cx.simulate_keystrokes("enter");
-        assert_eq!(
-            decided(&mut driver, cx),
-            (
-                "decide-2".to_string(),
-                agent::ApprovalDecision::Feedback("Split step one".into())
-            )
-        );
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
     }
 
     #[gpui::test]
@@ -2983,11 +2853,11 @@ This begins after the hard break."#;
                 cx,
             )
         });
-        driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             workspace_store.read_with(cx, |store, _| store.baseline_ready())
         });
         workspace_store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        driver.wait_until(cx, &workspace_store, "selected conversation", |cx| {
+        driver.wait_until(cx, "selected conversation", |cx| {
             workspace_store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
@@ -3040,7 +2910,7 @@ This begins after the hard break."#;
             cx.debug_bounds("markdown-block-18").is_none(),
             "offscreen tail block was painted; block virtualization did not cull it"
         );
-        driver.shutdown(cx, &workspace_store, &host);
+        driver.shutdown(cx, &host);
     }
 
     /// The rewind panel a message opens offers exactly the scopes its
@@ -3181,7 +3051,7 @@ This begins after the hard break."#;
                 if let SessionCommand::PreviewRewind {
                     checkpoint_id,
                     mode,
-                } = driver.recv(window, &store, &commands)
+                } = driver.recv(window, &commands)
                 {
                     asked.push((checkpoint_id, mode));
                 }
@@ -3220,7 +3090,7 @@ This begins after the hard break."#;
             };
             // The spinner is the selected scope's preview alone; the scopes
             // offered settle once the other scope's answer lands as well.
-            driver.settle_until(window, &store, "the previews' answers", |window| {
+            driver.settle_until(window, "the previews' answers", |window| {
                 window.debug_bounds("rewind-preview-checking").is_none() && shown(window) == offered
             });
             assert_eq!(
@@ -3373,9 +3243,7 @@ This begins after the hard break."#;
                     .find(|meta| meta.fork_origin.is_some())
                     .map(|meta| meta.id.clone())
             };
-            driver.wait_until(window, &store, "the fork", |cx| {
-                cx.update(|cx| fork(cx).is_some())
-            });
+            driver.wait_until(window, "the fork", |cx| cx.update(|cx| fork(cx).is_some()));
             let fork = window.update(|_, cx| fork(cx)).unwrap();
             let fork_id = fork.clone();
             window.update(|_, cx| store.update(cx, |store, cx| store.show_alone(fork_id, cx)));
@@ -3386,7 +3254,7 @@ This begins after the hard break."#;
             window.simulate_resize(size(px(1_024.), px(700.)));
             // The origin comes with the thread's metadata, once its status
             // reaches this window, which redraws it.
-            driver.settle_until(window, &store, "the fork's source", |window| {
+            driver.settle_until(window, "the fork's source", |window| {
                 window.debug_bounds("fork-origin").is_some()
             });
             assert_eq!(

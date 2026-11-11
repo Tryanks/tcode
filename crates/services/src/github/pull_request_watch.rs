@@ -79,7 +79,7 @@ pub fn fingerprints(
             for (position, index) in chunk.iter().enumerate() {
                 for index in &positions[&keys[*index]] {
                     results[*index] = match &read {
-                        Ok(rows) => Ok(rows.get(&position).cloned()),
+                        Ok(rows) => rows[position].clone(),
                         Err(error) => Err(error.clone()),
                     };
                 }
@@ -89,11 +89,12 @@ pub fn fingerprints(
     results
 }
 
+/// One answer per key: a pull request the batch could not read fails alone.
 fn read_fingerprints<'a>(
     api: &GitHubApi,
     host: &str,
     keys: impl Iterator<Item = &'a PullRequestKey>,
-) -> Result<HashMap<usize, Fingerprint>, GitHubError> {
+) -> Result<Vec<Result<Option<Fingerprint>, GitHubError>>, GitHubError> {
     let items: Option<Vec<_>> = keys
         .enumerate()
         .map(|(index, key)| {
@@ -135,22 +136,23 @@ fn read_fingerprints<'a>(
         ));
     }
     let response: Value = api
-        .graphql(
+        .graphql_partial(
             host,
             &document,
             &options(api, host, "PullRequestWatchFingerprints")?,
         )?
         .json()?;
-    let data = response["data"]
-        .as_object()
-        .ok_or(GitHubError::InvalidResponse)?;
-    Ok(data
-        .iter()
-        .filter_map(|(alias, value)| {
-            let index = alias.strip_prefix('w')?.parse().ok()?;
-            Some((index, decode_fingerprint(&value["pullRequest"])?))
-        })
-        .collect())
+    Ok(decode_fingerprints(&response, items.len()))
+}
+
+fn decode_fingerprints(
+    response: &Value,
+    count: usize,
+) -> Vec<Result<Option<Fingerprint>, GitHubError>> {
+    graphql::aliased(response, "w", count)
+        .into_iter()
+        .map(|data| Ok(decode_fingerprint(&data?["pullRequest"])))
+        .collect()
 }
 
 fn decode_fingerprint(pr: &Value) -> Option<Fingerprint> {
@@ -625,12 +627,15 @@ pub fn activity(
             .flatten()
             .filter_map(|raw| remark(raw, path))
             .collect();
-        let count = thread["comments"]["totalCount"].as_u64().unwrap_or(0);
         remarks.extend(first_page.iter().cloned());
         let Some(cursor) = next_cursor(&thread["comments"]) else {
             continue;
         };
         live.insert(id.to_owned());
+        let Some(count) = thread["comments"]["totalCount"].as_u64() else {
+            complete = false;
+            continue;
+        };
         let cached = tails.get(id).filter(|tail| tail.count == count);
         let tail = match cached {
             Some(tail) => tail.comments.clone(),
@@ -703,6 +708,28 @@ fn read_tail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A batch in which GitHub could not resolve one pull request: GraphQL answers the others'
+    /// aliases beside an error whose `path` names the missing one (GitHub's GraphQL
+    /// documentation, "Errors": `type` `NOT_FOUND`, `path` from the alias). Content is invented.
+    #[test]
+    fn a_pull_request_a_watch_batch_cannot_read_fails_alone() {
+        let pr = json!({
+            "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc",
+            "comments": { "totalCount": 1, "nodes": [{ "lastEditedAt": null }] },
+            "reviews": { "totalCount": 0, "nodes": [] },
+            "reviewThreads": { "totalCount": 0 },
+            "commits": { "nodes": [] }
+        });
+        let response = json!({
+            "data": { "w0": { "pullRequest": null }, "w1": { "pullRequest": pr } },
+            "errors": [{ "type": "NOT_FOUND", "path": ["w0", "pullRequest"],
+                         "message": "Could not resolve to a PullRequest with the number of 9." }]
+        });
+        let read = decode_fingerprints(&response, 2);
+        assert!(matches!(read[0], Err(GitHubError::NotFound)));
+        assert!(matches!(read[1], Ok(Some(_))));
+    }
 
     /// Status check rollup contexts as GitHub's GraphQL API returns them for the detail
     /// selection. Shape: the `CheckRun` and `StatusContext` objects and the `CheckStatusState`,

@@ -849,8 +849,34 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let device = DevicePreferences::entity(cx);
+        let preferences_failures = cx.subscribe_in(
+            &device,
+            window,
+            |_, _, failure: &crate::device::PreferencesFailure, window, cx| {
+                let message = match failure {
+                    crate::device::PreferencesFailure::Unreadable(error) => {
+                        crate::tr!("errors.file_unreadable", error = error.to_string())
+                    }
+                    crate::device::PreferencesFailure::Unsaved(error) => crate::tr!(
+                        "errors.device_preferences_unsaved",
+                        error = error.to_string()
+                    ),
+                };
+                window.push_notification(Notification::error(message.into_owned()), cx);
+            },
+        );
         if let Some(client) = setup.client_host.clone() {
-            DevicePreferences::install(client, cx);
+            DevicePreferences::install(client.clone(), cx);
+            // The window lists no saved machines while they cannot be read.
+            // Said once the window holds its overlays.
+            if let Err(error) = client.load_hosts() {
+                let message =
+                    crate::tr!("errors.file_unreadable", error = error.to_string()).into_owned();
+                cx.defer_in(window, move |_, window, cx| {
+                    window.push_notification(Notification::error(message), cx);
+                });
+            }
         }
         if let Some(settings) = &setup.local_settings
             && DevicePreferences::adopt(settings, cx)
@@ -886,6 +912,7 @@ impl AppShell {
                     if let Some(saved) = setup.client_host.as_ref().and_then(|client| {
                         client
                             .load_hosts()
+                            .ok()?
                             .into_iter()
                             .find(|saved| saved.host_id == *host_id)
                     }) {
@@ -894,12 +921,13 @@ impl AppShell {
                 }
             }
         }
+        // A host whose outbox cannot be read opens first too: opening it
+        // says why.
         if let Some(host) = setup.client_host.as_ref().and_then(|client| {
-            client.load_hosts().into_iter().find(|host| {
-                client
-                    .outbox_storage(&host.host_id)
-                    .and_then(|storage| storage.load().ok())
-                    .is_some_and(|entries| !entries.is_empty())
+            client.load_hosts().ok()?.into_iter().find(|host| {
+                client.outbox_storage(&host.host_id).is_some_and(|storage| {
+                    storage.load().map_or(true, |entries| !entries.is_empty())
+                })
             })
         }) {
             setup.initial = Some(AttachmentTarget::Remote(Box::new(host)));
@@ -913,6 +941,7 @@ impl AppShell {
             state.set_compact(compact, cx);
         });
         let subscriptions = vec![
+            preferences_failures,
             // The one place navigation reaches the stack: whoever moved the
             // history — a nav bar, the sidebar, the palette, Android Back —
             // gets the same push or pop out of it.
@@ -1224,7 +1253,9 @@ impl AppShell {
                 .into_iter()
                 .collect();
         };
-        let saved = client.load_hosts();
+        // Saved machines that cannot be read are none; opening the window
+        // said why.
+        let saved = client.load_hosts().unwrap_or_default();
         let preference = DevicePreferences::workspace(cx);
         let last_host_id = client.last_host_id();
         let local_machine_id = client.local_machine_id();
@@ -1245,6 +1276,13 @@ impl AppShell {
         change: impl FnOnce(&mut tcode_client::host::WorkspacePreference),
         cx: &mut App,
     ) {
+        // Arranged from saved machines that cannot be read, the workspace
+        // would lose every one of them.
+        if let Some(client) = &self.setup.client_host
+            && client.load_hosts().is_err()
+        {
+            return;
+        }
         let members: Vec<HostKey> = self.members(cx).iter().map(AttachmentTarget::key).collect();
         DevicePreferences::arrange_workspace(cx, |workspace| {
             let mut arranged = crate::workspace::arranged(workspace.as_ref(), &members);
@@ -1768,16 +1806,29 @@ impl AppShell {
             let preview = preview.clone();
             let store = store.downgrade();
             cx.spawn_in(window, async move |_, cx| {
+                // The requests still waited for, closed when the host cancels one.
+                let waiting =
+                    std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::<
+                        u64,
+                        async_channel::Receiver<_>,
+                    >::new()));
                 while let Ok(envelope) = requests.recv().await {
-                    let tcode_protocol::ServerEvent::PreviewRequest {
-                        request_id,
-                        session_id,
-                        request,
-                    } = envelope.event
-                    else {
-                        continue;
+                    let (request_id, session_id, request) = match envelope.event {
+                        tcode_protocol::ServerEvent::PreviewRequest {
+                            request_id,
+                            session_id,
+                            request,
+                        } => (request_id, session_id, request),
+                        tcode_protocol::ServerEvent::PreviewRequestCancelled { request_id } => {
+                            if let Some(receiver) = waiting.borrow_mut().remove(&request_id) {
+                                receiver.close();
+                            }
+                            continue;
+                        }
+                        _ => continue,
                     };
                     let (reply, receiver) = async_channel::bounded(1);
+                    waiting.borrow_mut().insert(request_id, receiver.clone());
                     // A request sent before the thread's page moved away
                     // would otherwise open the page here again.
                     if store
@@ -1798,10 +1849,14 @@ impl AppShell {
                     // Each operation waits independently: a slow wait_for must
                     // not block a second client's navigation or a screenshot.
                     let store = store.clone();
+                    let waiting = waiting.clone();
                     cx.spawn(async move |cx| {
-                        let response = receiver
-                            .recv()
-                            .await
+                        let response = receiver.recv().await;
+                        // Cancelled by the host, which waits for it no more.
+                        if waiting.borrow_mut().remove(&request_id).is_none() {
+                            return;
+                        }
+                        let response = response
                             .unwrap_or_else(|_| Err("preview panel dropped request".into()));
                         let _ =
                             store.update(cx, |store, _| store.preview_reply(request_id, response));
@@ -2307,13 +2362,11 @@ impl AppShell {
         if std::mem::replace(&mut link.stamped, true) {
             return;
         }
-        if let Some(client) = cx.try_global::<crate::remote::ClientAttachment>() {
-            // The timestamp mutation must share the transport's persistence
-            // transaction so it cannot restore a pre-migration address.
-            client
-                .host()
-                .stamp_connected(&host.host_id, crate::time::now_secs());
-        }
+        // The timestamp mutation must share the transport's persistence
+        // transaction so it cannot restore a pre-migration address.
+        cx.global::<crate::remote::ClientAttachment>()
+            .host()
+            .stamp_connected(&host.host_id, crate::time::now_secs(cx));
     }
 
     /// The first full-scope host whose settings arrive gives each device
@@ -4124,6 +4177,9 @@ impl AppShell {
             let label = match &action {
                 RuntimeToastAction::RetryGit(_) => crate::tr!("git.toast.retry"),
                 RuntimeToastAction::UpdateProviders(_) => crate::tr!("providers.update_all"),
+                RuntimeToastAction::CancelPluginOperation(_) => {
+                    crate::tr!("providers.plugins.toast.cancel")
+                }
             }
             .into_owned()
             .into();
@@ -4135,6 +4191,9 @@ impl AppShell {
                         RuntimeToastAction::RetryGit(request) => store.retry_git_action(request),
                         RuntimeToastAction::UpdateProviders(providers) => {
                             store.update_providers(providers)
+                        }
+                        RuntimeToastAction::CancelPluginOperation(profile_id) => {
+                            store.cancel_plugin_operation(profile_id)
                         }
                     });
                 }),
@@ -6663,24 +6722,39 @@ pub(crate) mod tests {
             None
         }
 
-        fn load_hosts(&self) -> Vec<tcode_client::pairing::PairedHost> {
-            if self.machine_exists {
+        fn load_hosts(
+            &self,
+        ) -> Result<Vec<tcode_client::pairing::PairedHost>, tcode_client::host::FileFailure>
+        {
+            Ok(if self.machine_exists {
                 vec![self.saved.clone()]
             } else {
                 Vec::new()
-            }
+            })
         }
 
-        fn load_preferences(&self) -> tcode_client::host::ClientPreferences {
-            self.preferences.borrow().clone()
+        fn load_preferences(
+            &self,
+        ) -> Result<tcode_client::host::ClientPreferences, tcode_client::host::FileFailure>
+        {
+            Ok(self.preferences.borrow().clone())
         }
 
-        fn save_preferences(&self, preferences: &tcode_client::host::ClientPreferences) {
+        fn save_preferences(
+            &self,
+            preferences: &tcode_client::host::ClientPreferences,
+        ) -> Result<(), tcode_client::host::FileFailure> {
             *self.preferences.borrow_mut() = preferences.clone();
             self.saves.set(self.saves.get() + 1);
+            Ok(())
         }
 
-        fn save_hosts(&self, _: &[tcode_client::pairing::PairedHost]) {}
+        fn save_hosts(
+            &self,
+            _: &[tcode_client::pairing::PairedHost],
+        ) -> Result<(), tcode_client::host::FileFailure> {
+            Ok(())
+        }
 
         fn last_host_id(&self) -> Option<String> {
             Some(self.saved.host_id.clone())
@@ -6694,8 +6768,10 @@ pub(crate) mod tests {
             &self,
             _: tcode_client::pairing::PairInvite,
             _: Option<std::net::IpAddr>,
-        ) -> tcode_client::host::HostFuture<'_, Result<tcode_client::pairing::PairedHost, String>>
-        {
+        ) -> tcode_client::host::HostFuture<
+            '_,
+            Result<tcode_client::pairing::PairedHost, tcode_client::pairing::PairError>,
+        > {
             panic!("a cold start must reuse the saved pairing")
         }
 
@@ -6719,7 +6795,7 @@ pub(crate) mod tests {
         Rc<ReturningClient>,
         &'a mut VisualTestContext,
     ) {
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         mount_restored_at_width(cx, history, machine_exists, 393., "plan")
     }
 
@@ -6779,6 +6855,13 @@ pub(crate) mod tests {
             outbox: None,
         });
         let setup_client = client.clone();
+        cx.update(|cx| {
+            cx.set_global(crate::remote::ClientAttachment::new(
+                setup_client.clone(),
+                false,
+                request_host,
+            ))
+        });
         let window = cx.open_window(size(px(width), px(852.)), move |window, cx| {
             let state = cx.new(|_| WindowState::default());
             AppShell::new(
@@ -6840,23 +6923,37 @@ pub(crate) mod tests {
             None
         }
 
-        fn load_preferences(&self) -> tcode_client::host::ClientPreferences {
-            self.preferences.borrow().clone()
+        fn load_preferences(
+            &self,
+        ) -> Result<tcode_client::host::ClientPreferences, tcode_client::host::FileFailure>
+        {
+            Ok(self.preferences.borrow().clone())
         }
 
-        fn save_preferences(&self, preferences: &tcode_client::host::ClientPreferences) {
+        fn save_preferences(
+            &self,
+            preferences: &tcode_client::host::ClientPreferences,
+        ) -> Result<(), tcode_client::host::FileFailure> {
             *self.preferences.borrow_mut() = preferences.clone();
+            Ok(())
         }
 
-        fn load_hosts(&self) -> Vec<tcode_client::pairing::PairedHost> {
-            self.saved.borrow().clone()
+        fn load_hosts(
+            &self,
+        ) -> Result<Vec<tcode_client::pairing::PairedHost>, tcode_client::host::FileFailure>
+        {
+            Ok(self.saved.borrow().clone())
         }
 
-        fn save_hosts(&self, hosts: &[tcode_client::pairing::PairedHost]) {
+        fn save_hosts(
+            &self,
+            hosts: &[tcode_client::pairing::PairedHost],
+        ) -> Result<(), tcode_client::host::FileFailure> {
             *self.saved.borrow_mut() = hosts.to_vec();
             for watcher in self.watchers.borrow().iter() {
                 let _ = watcher.try_send(());
             }
+            Ok(())
         }
 
         fn saved_hosts_changes(&self) -> Option<async_channel::Receiver<()>> {
@@ -6877,8 +6974,10 @@ pub(crate) mod tests {
             &self,
             _: tcode_client::pairing::PairInvite,
             _: Option<std::net::IpAddr>,
-        ) -> tcode_client::host::HostFuture<'_, Result<tcode_client::pairing::PairedHost, String>>
-        {
+        ) -> tcode_client::host::HostFuture<
+            '_,
+            Result<tcode_client::pairing::PairedHost, tcode_client::pairing::PairError>,
+        > {
             let paired = self
                 .pairs
                 .borrow_mut()
@@ -7017,7 +7116,7 @@ pub(crate) mod tests {
         &mut VisualTestContext,
     ) {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let client = Rc::new(WorkspaceClient {
             saved: RefCell::new(saved.clone()),
             transports: RefCell::default(),
@@ -7268,7 +7367,11 @@ pub(crate) mod tests {
         assert_eq!(linked(&shell, cx), std::slice::from_ref(&key_b));
         assert_eq!(store_of(&shell, cx), b);
         assert_eq!(drafted(&hosts[&key_b]), ["on-b"]);
-        let workspace = client.load_preferences().workspace.expect("arranged");
+        let workspace = client
+            .load_preferences()
+            .unwrap()
+            .workspace
+            .expect("arranged");
         assert_eq!(workspace.left, ["host-a"]);
         assert!(workspace.hosts.iter().all(|host| host.host_id != "host-a"));
     }
@@ -7451,7 +7554,7 @@ pub(crate) mod tests {
         hosts[&key_a].come_up(&a, Vec::new(), None, cx);
 
         let _b = WorkspaceHost::offer(&client, "host-b", cx);
-        client.remember_host(saved_machine("host-b", true));
+        client.remember_host(saved_machine("host-b", true)).unwrap();
         draw(cx);
         assert_eq!(
             linked(&shell, cx),
@@ -7773,11 +7876,7 @@ pub(crate) mod tests {
 
     /// Both hosts of [`a_thread_of_a_beside_b`] keep its two threads in a
     /// project, as the palette lists a host's threads by project.
-    fn threads_in_a_project(
-        shell: &Entity<AppShell>,
-        hosts: &HashMap<HostKey, WorkspaceHost>,
-        cx: &mut VisualTestContext,
-    ) {
+    fn threads_in_a_project(hosts: &HashMap<HostKey, WorkspaceHost>, cx: &mut VisualTestContext) {
         let project = tcode_core::project::Project::from_root(PANES_CWD.into());
         let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
             unreachable!("an index");
@@ -7786,13 +7885,13 @@ pub(crate) mod tests {
             meta.project_id = Some(project.id.clone());
         }
         index.projects = vec![project];
-        for (key, host) in hosts {
+        for host in hosts.values() {
             send_events(
                 &host.host,
                 vec![(topic.clone(), ServerEvent::IndexSnapshot(index.clone()))],
             );
             draw(cx);
-            heard(host, &store_on(shell, key.name(), cx), cx);
+            heard(host, cx);
         }
     }
 
@@ -7823,15 +7922,12 @@ pub(crate) mod tests {
         let (shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1200.);
         // The device took up the system's language.
         crate::set_locale(crate::LANGUAGE_ENGLISH);
-        let (a, b) = (
-            store_on(&shell, "host-a", cx),
-            store_on(&shell, "host-b", cx),
-        );
+        let a = store_on(&shell, "host-a", cx);
         let (key_a, key_b) = (
             HostKey::Remote("host-a".into()),
             HostKey::Remote("host-b".into()),
         );
-        threads_in_a_project(&shell, &hosts, cx);
+        threads_in_a_project(&hosts, cx);
         search_palette(&shell, "thread-2", cx);
         for caption in ["Threads on host-a", "Threads on host-b"] {
             assert!(
@@ -7852,8 +7948,8 @@ pub(crate) mod tests {
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         assert!(!a.read_with(cx, |store, _| store.is_thread_open("thread-2")));
 
-        heard(&hosts[&key_a], &a, cx);
-        heard(&hosts[&key_b], &b, cx);
+        heard(&hosts[&key_a], cx);
+        heard(&hosts[&key_b], cx);
         search_palette(&shell, "quick", cx);
         // A's quick thread, then B's.
         click("palette-row-1", cx);
@@ -7985,7 +8081,10 @@ pub(crate) mod tests {
             cx.run_until_parked();
             draw(cx);
         };
-        let said = |cx: &mut VisualTestContext| cx.update(crate::overlay::notifications_said);
+        let says = |cx: &mut VisualTestContext, text: &str| {
+            cx.debug_bounds(format!("toast-says-{text}").leak())
+                .is_some()
+        };
         toast(
             &key_b,
             RuntimeToast::ProviderUpdatesAvailable {
@@ -7997,7 +8096,7 @@ pub(crate) mod tests {
             },
             cx,
         );
-        assert_eq!(said(cx), ["host-b: Update available: Codex v2.0.0"]);
+        assert!(says(cx, "host-b: Update available: Codex v2.0.0"));
         let _ = sent(&hosts[&key_a].host);
         let _ = sent(&hosts[&key_b].host);
         click("toast-action", cx);
@@ -8038,15 +8137,9 @@ pub(crate) mod tests {
             },
             cx,
         );
-        let said_now = said(cx);
         assert!(
-            said_now
-                .iter()
-                .any(|toast| toast.starts_with("host-b: Updating"))
-                && !said_now
-                    .iter()
-                    .any(|toast| toast.starts_with("host-a: Updating")),
-            "A's update finished and B's goes on: {said_now:?}"
+            says(cx, "host-b: Updating Codex… 0/1") && !says(cx, "host-a: Updating Codex… 0/1"),
+            "A's update finished and B's goes on"
         );
 
         // An update this window did not see start shows from its progress.
@@ -8058,11 +8151,9 @@ pub(crate) mod tests {
             },
             cx,
         );
-        let said = said(cx);
         assert!(
-            said.iter()
-                .any(|toast| toast.starts_with("host-a: Updating")),
-            "A's second update shows from its progress: {said:?}"
+            says(cx, "host-a: Updating Codex… 0/1"),
+            "A's second update shows from its progress"
         );
     }
 
@@ -8096,8 +8187,8 @@ pub(crate) mod tests {
         });
         crate::test_frames::draw_settled(cx);
         assert_eq!(pane_hosts(&shell, cx), std::slice::from_ref(&key_b));
-        heard(&hosts[&key_a], &a, cx);
-        heard(&hosts[&key_b], &b, cx);
+        heard(&hosts[&key_a], cx);
+        heard(&hosts[&key_b], cx);
         let patches = |host: &WorkspaceHost| {
             sent(&host.host)
                 .into_iter()
@@ -8169,7 +8260,7 @@ pub(crate) mod tests {
 
     /// `store` takes in what `host` sent it, and what it sent `host` so far
     /// is set aside.
-    fn heard(host: &WorkspaceHost, _store: &Entity<WorkspaceStore>, cx: &mut VisualTestContext) {
+    fn heard(host: &WorkspaceHost, cx: &mut VisualTestContext) {
         cx.run_until_parked();
         draw(cx);
         let _ = sent(&host.host);
@@ -8239,8 +8330,8 @@ pub(crate) mod tests {
         crate::test_frames::draw_settled(cx);
         assert_eq!(store_of(&shell, cx), a);
         assert_eq!(shell.read_with(cx, |shell, cx| shell.page_thread(cx)), None);
-        heard(&hosts[&key_a], &a, cx);
-        heard(&hosts[&key_b], &b, cx);
+        heard(&hosts[&key_a], cx);
+        heard(&hosts[&key_b], cx);
 
         let plus = cx.debug_bounds("compact-new-thread").expect("Threads' +");
         cx.simulate_click(plus.center(), gpui::Modifiers::default());
@@ -8304,7 +8395,7 @@ pub(crate) mod tests {
         );
         serve_thread(&hosts[&key_b].host, "thread-1");
         b.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
-        heard(&hosts[&key_b], &b, cx);
+        heard(&hosts[&key_b], cx);
         assert_eq!(
             shell.read_with(cx, |shell, cx| shell.page_thread(cx)),
             Some(ThreadKey {
@@ -8312,8 +8403,8 @@ pub(crate) mod tests {
                 session_id: "thread-1".into(),
             })
         );
-        heard(&hosts[&key_a], &a, cx);
-        heard(&hosts[&key_b], &b, cx);
+        heard(&hosts[&key_a], cx);
+        heard(&hosts[&key_b], cx);
 
         cx.simulate_keystrokes("secondary-d");
         draw(cx);
@@ -8929,7 +9020,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn cold_start_restores_thread_and_selects_it_once(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         for width in [393., 1024.] {
             let (shell, host, _, cx) =
                 mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, width, "plan");
@@ -9103,7 +9194,7 @@ pub(crate) mod tests {
             });
             cx.executor().advance_clock(Duration::from_millis(151));
             draw(cx);
-            let preferences = client.load_preferences();
+            let preferences = client.load_preferences().unwrap();
             assert_eq!(
                 preferences.navigation.unwrap()["history"],
                 serde_json::json!(["threads"])
@@ -9114,7 +9205,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn cold_start_restores_the_selected_panel_after_session_status(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         for (saved_panel, expected_tab) in [
             ("plan", RightTab::Plan),
             ("agents", RightTab::Agents),
@@ -9183,13 +9274,10 @@ pub(crate) mod tests {
                     expected_tab
                 );
             });
-            // A preference changed during the debounce must survive the checkpoint.
-            client.preferences.borrow_mut().language = Some("zh-CN".into());
             cx.executor().advance_clock(Duration::from_millis(151));
             draw(cx);
-            assert_eq!(client.load_preferences().language.as_deref(), Some("zh-CN"));
             assert_eq!(
-                client.load_preferences().navigation.unwrap()["panel"],
+                client.load_preferences().unwrap().navigation.unwrap()["panel"],
                 saved_panel
             );
         }
@@ -9211,7 +9299,7 @@ pub(crate) mod tests {
         draw(cx);
         assert_eq!(client.saves.get(), 1);
         assert_eq!(
-            client.load_preferences().navigation.unwrap(),
+            client.load_preferences().unwrap().navigation.unwrap(),
             serde_json::json!({
                 "history": ["threads", "thread"],
                 "thread": { "host": "last-host", "session_id": "thread-b" },
@@ -9230,7 +9318,7 @@ pub(crate) mod tests {
         cx.executor().advance_clock(Duration::from_millis(151));
         draw(cx);
         assert_eq!(client.saves.get(), 2);
-        let navigation = client.load_preferences().navigation.unwrap();
+        let navigation = client.load_preferences().unwrap().navigation.unwrap();
         assert_eq!(
             navigation["thread"],
             serde_json::json!({ "host": "last-host", "session_id": "thread-c" })
@@ -9243,10 +9331,13 @@ pub(crate) mod tests {
         cx.update(|window, cx| {
             DevicePreferences::set_theme(tcode_core::settings::ThemeMode::Light, window, cx)
         });
-        assert_eq!(client.load_preferences().navigation, Some(navigation));
         assert_eq!(
-            client.load_preferences().appearance.as_deref(),
-            Some("light")
+            client.load_preferences().unwrap().navigation,
+            Some(navigation)
+        );
+        assert_eq!(
+            client.load_preferences().unwrap().appearance,
+            Some(tcode_core::settings::ThemeMode::Light)
         );
     }
 
@@ -9275,7 +9366,7 @@ pub(crate) mod tests {
         cx: &mut TestAppContext,
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (shell, _host, client, cx) =
             mount_restored_at_width(cx, &["hosts"], false, 1024., "plan");
         let assert_on_empty_root = |cx: &mut VisualTestContext| {
@@ -9365,14 +9456,13 @@ pub(crate) mod tests {
     }
 
     /// Navigation never raises a software keyboard: on a phone every route
-    /// leaves the composer unfocused, and a desktop window opening a thread
-    /// focuses it.
+    /// leaves the composer unfocused.
     #[gpui::test]
     fn navigation_dismisses_mobile_keyboards_but_preserves_explicit_editing_focus(
         cx: &mut TestAppContext,
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount(cx);
+        let (shell, _host, cx) = mount(cx);
         as_mobile(cx);
         resize(cx, 393.);
         let store = store_of(&shell, cx);
@@ -9429,27 +9519,6 @@ pub(crate) mod tests {
             draw(cx);
             cx.update(|window, _| assert!(focus.is_focused(window)));
         }
-        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
-        resize(cx, 1024.);
-        send_events(
-            &host,
-            vec![
-                (
-                    Topic::Settings,
-                    ServerEvent::SettingsSnapshot(Default::default()),
-                ),
-                panes_index(&[]),
-            ],
-        );
-        serve_thread(&host, "thread-2");
-        let state = shell.read_with(cx, |shell, _| shell.window_state());
-        state.update(cx, |state, cx| state.close_settings(cx));
-        store.update(cx, |store, cx| store.show_thread("thread-2".into(), cx));
-        await_restore_update(&shell, cx, |store, cx| {
-            !store.chat_loading_for(Some("thread-2"), cx)
-        });
-        crate::test_frames::draw_settled(cx);
-        assert!(composer_has_keyboard(&shell, 0, cx));
     }
 
     #[gpui::test]
@@ -9484,7 +9553,7 @@ pub(crate) mod tests {
             );
             store.show_thread("thread-a".into(), cx);
         });
-        driver.wait_until(cx, &store, "selected conversation", |cx| {
+        driver.wait_until(cx, "selected conversation", |cx| {
             store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.threads_loading()
@@ -9526,13 +9595,12 @@ pub(crate) mod tests {
             driver
                 .await_with_events(
                     cx,
-                    &store,
                     host.update_state_for_test(move |state, cx| {
                         state.provider_event_for_test("thread-b", event, cx);
                     }),
                 )
                 .unwrap();
-            driver.step(cx, &store);
+            driver.step(cx);
             draw(cx);
             cx.update(|window, _| {
                 assert!(
@@ -9575,7 +9643,7 @@ pub(crate) mod tests {
             composer.read_with(cx, |composer, cx| composer.draft(cx)),
             "drafxt"
         );
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -9583,7 +9651,7 @@ pub(crate) mod tests {
     fn keyboard_cover_changes_keep_editor_focus_until_explicit_dismissal(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (shell, host, _, cx) =
             mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 393., "plan");
         restore_index(&shell, &host, true, cx);
@@ -9770,7 +9838,7 @@ pub(crate) mod tests {
     fn a_subagent_thread_composer_is_its_settings_read_only(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (shell, host, _, cx) =
             mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1200., "plan");
         restore_index(&shell, &host, true, cx);
@@ -9940,7 +10008,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn software_keyboard_restored_terminal_does_not_raise_keyboard(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (shell, host, _, cx) = mount_restored_at_width(
             cx,
             &["hosts", "threads", "thread", "panel"],
@@ -10196,7 +10264,7 @@ pub(crate) mod tests {
         status.activity.turn_running = true;
         status.running_turn = Some(tcode_core::session::RunningTurn {
             turn: 1,
-            started_at: Some(crate::time::now_millis()),
+            started_at: Some(cx.update(|_, cx| crate::time::now_millis(cx))),
         });
         send_events(
             &host,
@@ -10314,9 +10382,11 @@ pub(crate) mod tests {
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         let timeline = gpui::point(px(700.), px(300.));
-        for mobile in [true, false] {
+        for mobile in [false, true] {
             cx.update(|window, cx| {
-                crate::window_seam::override_mobile_for_test(cx, mobile);
+                if mobile {
+                    crate::window_seam::force_mobile_layout(cx);
+                }
                 window.blur(cx);
             });
             draw(cx);
@@ -10422,12 +10492,7 @@ pub(crate) mod tests {
     /// What the host answers a client showing `id`'s preview while no other
     /// client renders it: its pages are this client's.
     #[cfg(preview_backend)]
-    fn render_preview_here(
-        host: &MountedShell,
-        _store: &Entity<WorkspaceStore>,
-        id: &str,
-        cx: &mut VisualTestContext,
-    ) {
+    fn render_preview_here(host: &MountedShell, id: &str, cx: &mut VisualTestContext) {
         while let Ok(line) = host.outgoing.try_recv() {
             host.observed
                 .borrow_mut()
@@ -12259,7 +12324,7 @@ pub(crate) mod tests {
 
         let shows_agents_file = |cx: &mut VisualTestContext| {
             press_control("changed-file-chip-file-agent.rs", cx);
-            draw_until(&shell, cx, &host, "diff-line-new-agent.rs-1", None);
+            draw_until(cx, &host, "diff-line-new-agent.rs-1", None);
             assert_eq!(cx.debug_bounds("diff-line-new-lead.rs-1"), None);
             assert!(cx.debug_bounds("diff-subject").is_some());
             assert_eq!(panel_of(&store, "agent-1", cx), Some(RightTab::Diff));
@@ -12273,7 +12338,7 @@ pub(crate) mod tests {
             assert_eq!(drawer.right(), pane_bounds(&shell, cx)[0].right());
         };
         let shows_leads_diff = |cx: &mut VisualTestContext| {
-            draw_until(&shell, cx, &host, "diff-line-new-lead.rs-1", None);
+            draw_until(cx, &host, "diff-line-new-lead.rs-1", None);
             assert_eq!(cx.debug_bounds("diff-line-new-agent.rs-1"), None);
             assert_eq!(cx.debug_bounds("diff-subject"), None);
         };
@@ -12284,7 +12349,7 @@ pub(crate) mod tests {
         assert_eq!(cx.debug_bounds("right-panel"), None);
         assert!(cx.debug_bounds("chat-side-header").is_some(), "it stays");
         press_control("view-diff-1", cx);
-        draw_until(&shell, cx, &host, "diff-line-new-later.rs-1", None);
+        draw_until(cx, &host, "diff-line-new-later.rs-1", None);
         press_control("diff-close", cx);
         press_control("diff-panel", cx);
         shows_leads_diff(cx);
@@ -12323,7 +12388,7 @@ pub(crate) mod tests {
         crate::test_frames::draw_settled(cx);
 
         press_control("changed-file-chip-file-agent.rs", cx);
-        draw_until(&shell, cx, &host, "diff-line-new-agent.rs-1", None);
+        draw_until(cx, &host, "diff-line-new-agent.rs-1", None);
         assert_eq!(cx.debug_bounds("diff-line-new-lead.rs-1"), None);
         assert_eq!(panel_of(&store, "agent-1", cx), Some(RightTab::Diff));
         assert_eq!(panel_of(&store, "thread-1", cx), None);
@@ -12387,7 +12452,7 @@ pub(crate) mod tests {
         draw(cx);
         cx.simulate_click(left_diff, gpui::Modifiers::default());
         crate::test_frames::draw_settled(cx);
-        draw_until(&shell, cx, &host, "diff-line-new-left.rs-1", None);
+        draw_until(cx, &host, "diff-line-new-left.rs-1", None);
         let conversations = |cx: &mut VisualTestContext| {
             shell.read_with(cx, |shell, cx| {
                 let attachment = shell.column.as_ref().expect("attached");
@@ -12443,7 +12508,7 @@ pub(crate) mod tests {
             pane_threads(&shell, cx),
             [Some("thread-2".into()), Some("thread-1".into())]
         );
-        draw_until(&shell, cx, &host, "diff-line-new-left.rs-1", None);
+        draw_until(cx, &host, "diff-line-new-left.rs-1", None);
         let diff = cx
             .debug_bounds("diff-line-new-left.rs-1")
             .expect("the left thread's diff");
@@ -14311,7 +14376,9 @@ pub(crate) mod tests {
     ) {
         let (shell, host, cx) = mount(cx);
         cx.update(|_, cx| {
-            crate::window_seam::override_mobile_for_test(cx, mobile);
+            if mobile {
+                crate::window_seam::force_mobile_layout(cx);
+            }
             cx.set_reduce_motion(true);
         });
         // Establish the viewport before the workspace can select a draft:
@@ -14669,7 +14736,7 @@ pub(crate) mod tests {
         .unwrap();
         let saved = || tcode_traverse::NativeClientHost::new(device.clone(), "phone");
         let (shell, store, host, mut driver, cx) = mount_on_host(cx, disk, Some(Rc::new(saved())));
-        driver.wait_until(cx, &store, "the host's settings", |cx| {
+        driver.wait_until(cx, "the host's settings", |cx| {
             store.read_with(cx, |store, _| store.settings_hydrated())
         });
         draw(cx);
@@ -14690,20 +14757,20 @@ pub(crate) mod tests {
             SidebarLayout::Grouped,
         );
         assert_eq!(device_preferences(cx), adopted);
-        let persisted = saved().load_preferences();
+        let persisted = saved().load_preferences().unwrap();
         assert_eq!(
             (
-                persisted.appearance.as_deref(),
+                persisted.appearance,
                 persisted.language.as_deref(),
                 persisted.sidebar_collapsed,
-                persisted.sidebar_layout.as_deref(),
+                persisted.sidebar_layout,
                 persisted.device_name.as_deref(),
             ),
             (
-                Some("dark"),
+                Some(ThemeMode::Dark),
                 Some(crate::LANGUAGE_JAPANESE),
                 Some(true),
-                Some("grouped"),
+                Some(SidebarLayout::Grouped),
                 Some("Old phone"),
             )
         );
@@ -14724,10 +14791,10 @@ pub(crate) mod tests {
             Command::SetSidebarCollapsed { collapsed: false },
         ] {
             driver
-                .await_with_events(cx, &store, link.command(command))
+                .await_with_events(cx, link.command(command))
                 .expect("the host takes the old patch");
         }
-        driver.wait_until(cx, &store, "the host's new settings", |cx| {
+        driver.wait_until(cx, "the host's new settings", |cx| {
             store.read_with(cx, |store, _| {
                 let settings = store.settings();
                 settings.theme_mode == ThemeMode::Light
@@ -14738,10 +14805,66 @@ pub(crate) mod tests {
         });
         draw(cx);
         assert_eq!(device_preferences(cx), adopted);
-        assert_eq!(saved().load_preferences(), persisted);
+        assert_eq!(saved().load_preferences().unwrap(), persisted);
         assert!(cx.update(|_, cx| cx.theme().mode.is_dark()));
         assert_eq!(&*rust_i18n::locale(), crate::LANGUAGE_JAPANESE);
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
+        drop(shell);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// This device's preferences and saved machines in files this build
+    /// cannot read: the window opens on the host anyway, says which files and
+    /// why, and writes over neither, though the host's preferences are
+    /// adopted and the theme changes.
+    #[gpui::test]
+    fn unreadable_device_files_are_reported_and_left_as_they_are(cx: &mut TestAppContext) {
+        use crate::store::tests::scratch_root;
+        use tcode_core::settings::ThemeMode;
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let root = scratch_root("device-files-unreadable");
+        let disk =
+            tcode_services::store::SessionStore::open_at(root.clone()).expect("open test store");
+        let device = root.join("device");
+        std::fs::create_dir_all(&device).unwrap();
+        let preferences = br#"{"appearance": "dark","#;
+        let machines = br#"[{"host_id": 7}]"#;
+        std::fs::write(device.join("mobile.json"), preferences).unwrap();
+        std::fs::write(device.join("hosts.json"), machines).unwrap();
+        let client = tcode_traverse::NativeClientHost::new(device.clone(), "phone");
+        use tcode_client::host::ClientHost as _;
+        // The window says each failure in the language it starts in, before
+        // it adopts the host's.
+        let said = [
+            ("mobile.json", client.load_preferences().unwrap_err()),
+            ("hosts.json", client.load_hosts().unwrap_err()),
+        ]
+        .map(|(file, failure)| {
+            let failure = failure.to_string();
+            assert!(failure.contains(file), "{file} is named: {failure}");
+            crate::tr!("errors.file_unreadable", error = failure).into_owned()
+        });
+        let (shell, store, host, mut driver, cx) = mount_on_host(cx, disk, Some(Rc::new(client)));
+        driver.wait_until(cx, "the host's settings", |cx| {
+            store.read_with(cx, |store, _| store.settings_hydrated())
+        });
+        draw(cx);
+        for said in said {
+            assert!(
+                cx.debug_bounds(format!("toast-says-{said}").leak())
+                    .is_some(),
+                "the window says {said}"
+            );
+        }
+        cx.update(|window, cx| DevicePreferences::set_theme(ThemeMode::Light, window, cx));
+        draw(cx);
+        assert!(cx.update(|_, cx| !cx.theme().mode.is_dark()));
+        assert_eq!(
+            std::fs::read(device.join("mobile.json")).unwrap(),
+            preferences
+        );
+        assert_eq!(std::fs::read(device.join("hosts.json")).unwrap(), machines);
+        driver.shutdown(cx, &host);
         drop(shell);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -14776,18 +14899,13 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.start_draft("doomed".into(), root.clone(), cx)
         });
-        driver.wait_until(
-            cx,
-            &store,
-            "draft for the doomed project",
-            shows_draft_of("doomed"),
-        );
+        driver.wait_until(cx, "draft for the doomed project", shows_draft_of("doomed"));
         store.update(cx, |store, _| store.delete_project("doomed".into()));
-        driver.wait_until(cx, &store, "kept project's draft", shows_draft_of("kept"));
+        driver.wait_until(cx, "kept project's draft", shows_draft_of("kept"));
         let draft = store.read_with(cx, |store, _| store.sole_thread());
         assert_eq!(pane_threads(&shell, cx), [draft]);
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -14818,13 +14936,13 @@ pub(crate) mod tests {
 
         // Let the launch draft settle on the first project before the user
         // goes into "p" themselves.
-        driver.wait_until(cx, &store, "launch draft", |cx| {
+        driver.wait_until(cx, "launch draft", |cx| {
             store.read_with(cx, |store, _| store.sole_thread().is_some())
         });
         store.update(cx, |store, cx| {
             store.start_draft("p".into(), root.clone(), cx)
         });
-        driver.wait_until(cx, &store, "draft for the last project", |cx| {
+        driver.wait_until(cx, "draft for the last project", |cx| {
             store.read_with(cx, |store, cx| {
                 store
                     .sole_status(cx)
@@ -14839,7 +14957,7 @@ pub(crate) mod tests {
         });
 
         store.update(cx, |store, cx| store.show_thread("child".into(), cx));
-        driver.wait_until(cx, &store, "child shown", |cx| {
+        driver.wait_until(cx, "child shown", |cx| {
             store.read_with(cx, |store, cx| {
                 store
                     .sole_status(cx)
@@ -14848,7 +14966,7 @@ pub(crate) mod tests {
         });
 
         store.update(cx, |store, _| store.archive_session("parent".into()));
-        driver.wait_until(cx, &store, "the standing draft reopened", |cx| {
+        driver.wait_until(cx, "the standing draft reopened", |cx| {
             store.read_with(cx, |store, _| {
                 store.sole_thread().as_deref() == Some(draft_id.as_str())
             })
@@ -14863,7 +14981,7 @@ pub(crate) mod tests {
         assert!(archived(cx, &store, "parent"));
         assert!(archived(cx, &store, "child"));
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -15071,10 +15189,18 @@ pub(crate) mod tests {
             fn device_platform(&self) -> Option<String> {
                 None
             }
-            fn load_hosts(&self) -> Vec<tcode_client::pairing::PairedHost> {
-                vec![self.saved.clone()]
+            fn load_hosts(
+                &self,
+            ) -> Result<Vec<tcode_client::pairing::PairedHost>, tcode_client::host::FileFailure>
+            {
+                Ok(vec![self.saved.clone()])
             }
-            fn save_hosts(&self, _: &[tcode_client::pairing::PairedHost]) {}
+            fn save_hosts(
+                &self,
+                _: &[tcode_client::pairing::PairedHost],
+            ) -> Result<(), tcode_client::host::FileFailure> {
+                Ok(())
+            }
             fn last_host_id(&self) -> Option<String> {
                 None
             }
@@ -15083,8 +15209,10 @@ pub(crate) mod tests {
                 &self,
                 _: tcode_client::pairing::PairInvite,
                 _: Option<std::net::IpAddr>,
-            ) -> tcode_client::host::HostFuture<'_, Result<tcode_client::pairing::PairedHost, String>>
-            {
+            ) -> tcode_client::host::HostFuture<
+                '_,
+                Result<tcode_client::pairing::PairedHost, tcode_client::pairing::PairError>,
+            > {
                 unreachable!("nothing is paired here")
             }
             fn connect(&self, _: &tcode_client::pairing::PairedHost) -> Transport {
@@ -15476,7 +15604,7 @@ pub(crate) mod tests {
     /// Make the test app a mobile build: only there is a phone-sized window
     /// compact, a desktop window being wide at any width.
     fn as_mobile(cx: &mut VisualTestContext) {
-        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(|_, cx| crate::window_seam::force_mobile_layout(cx));
     }
 
     fn touch_drag(
@@ -15719,7 +15847,7 @@ pub(crate) mod tests {
                 composer.set_draft("keep this draft", window, cx);
             })
         });
-        draw_until(&shell, cx, &host, "diff-body", None);
+        draw_until(cx, &host, "diff-body", None);
         let line = "diff-line-new-a/deeply/nested/module/tree/with/an/absurdly/long/file_name.rs-1";
         for (id, mode, end_x, elapsed, commits) in [
             (3, crate::theme::ThemeMode::Light, 70., 400, false),
@@ -15940,7 +16068,7 @@ pub(crate) mod tests {
             );
             store.show_thread("first".into(), cx);
         });
-        driver.wait_until(cx, &store, "selected thread baseline", |cx| {
+        driver.wait_until(cx, "selected thread baseline", |cx| {
             store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.threads_loading()
@@ -15956,7 +16084,7 @@ pub(crate) mod tests {
             "the title is cut to {:?} in a 1600px window",
             title.size.width
         );
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -16000,7 +16128,7 @@ pub(crate) mod tests {
             );
             store.show_thread("first".into(), cx);
         });
-        driver.wait_until(cx, &store, "selected thread baseline", |cx| {
+        driver.wait_until(cx, "selected thread baseline", |cx| {
             store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.threads_loading()
@@ -16013,7 +16141,9 @@ pub(crate) mod tests {
         });
 
         for (mobile, width) in [(false, 1200.), (false, 393.), (true, 393.)] {
-            cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, mobile));
+            if mobile {
+                cx.update(|_, cx| crate::window_seam::force_mobile_layout(cx));
+            }
             resize(cx, width);
             shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
             // Let the compact push animation settle so the picker is in place.
@@ -16045,8 +16175,7 @@ pub(crate) mod tests {
             );
             cx.update(|window, _| assert!(!search.is_focused(window)));
         }
-        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -16095,7 +16224,7 @@ pub(crate) mod tests {
             );
             store.show_thread("first".into(), cx);
         });
-        driver.wait_until(cx, &store, "selected thread baseline", |cx| {
+        driver.wait_until(cx, "selected thread baseline", |cx| {
             store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.threads_loading()
@@ -16136,7 +16265,7 @@ pub(crate) mod tests {
             (first_key, "first"),
         ] {
             cx.simulate_keystrokes(keys);
-            driver.wait_until(cx, &store, "selected thread baseline", |cx| {
+            driver.wait_until(cx, "selected thread baseline", |cx| {
                 store.read_with(cx, |store, cx| {
                     store.baseline_ready()
                         && !store.threads_loading()
@@ -16172,23 +16301,6 @@ pub(crate) mod tests {
             shell.read_with(cx, |shell, cx| shell.destination(cx)),
             Destination::Thread
         );
-        as_mobile(cx);
-        resize(cx, 393.);
-        shell.read_with(cx, |shell, cx| {
-            assert!(shell.compact(cx));
-            assert_eq!(shell.destination(cx), Destination::Thread);
-        });
-        cx.simulate_keystrokes("ctrl-tab");
-        assert_eq!(
-            shell
-                .read_with(cx, |shell, cx| shell
-                    .page_thread(cx)
-                    .map(|thread| thread.session_id))
-                .as_deref(),
-            Some("second"),
-            "compact navigation uses the same shortcuts"
-        );
-        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
         resize(cx, 1200.);
         draw(cx);
         let row = cx
@@ -16198,7 +16310,7 @@ pub(crate) mod tests {
         cx.simulate_mouse_move(settle, None, gpui::Modifiers::default());
         draw(cx);
         cx.simulate_click(settle, gpui::Modifiers::default());
-        driver.wait_until(cx, &store, "thread settlement update", |cx| {
+        driver.wait_until(cx, "thread settlement update", |cx| {
             store.read_with(cx, |store, _| {
                 store
                     .sidebar_sessions()
@@ -16239,7 +16351,7 @@ pub(crate) mod tests {
         cx.update(|window, cx| window.blur(cx));
         draw(cx);
         cx.simulate_keystrokes(undo_key);
-        driver.wait_until(cx, &store, "thread settlement update", |cx| {
+        driver.wait_until(cx, "thread settlement update", |cx| {
             store.read_with(cx, |store, _| {
                 store
                     .sidebar_sessions()
@@ -16248,7 +16360,7 @@ pub(crate) mod tests {
             })
         });
         assert!(!cx.update(|window, cx| window.has_notification::<crate::sidebar::ThreadUndo>(cx)));
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -16258,7 +16370,6 @@ pub(crate) mod tests {
     fn a_narrow_desktop_window_keeps_the_wide_workspace(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
-        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
         for width in [1024., 899., 400.] {
             resize(cx, width);
             shell.read_with(cx, |shell, cx| {
@@ -16433,34 +16544,26 @@ pub(crate) mod tests {
         });
         cx.simulate_resize(size(px(393.), px(852.)));
         draw(cx);
-        let (preview, state) = shell.read_with(cx, |shell, cx| {
-            (
-                shell.current_link(cx).unwrap().preview.clone(),
-                shell.window_state(),
-            )
-        });
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
         let page_pane = shell.read_with(cx, |shell, _| {
             shell.column.as_ref().unwrap().current_pane.clone()
         });
-        let lifecycle = preview.read_with(cx, |preview, _| preview.lifecycle());
         let key = store.read_with(cx, |store, cx| {
             store.preview_key_for("thread-a", cx).unwrap()
         });
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-a", tcode_core::ui::RightTab::Preview, cx);
         });
-        render_preview_here(&host, &store, "thread-a", cx);
+        render_preview_here(&host, "thread-a", cx);
         store.update(cx, |store, cx| {
             store.set_preview_url(&key, "https://example.com/".into(), cx);
         });
-        lifecycle.update(cx, |lifecycle, _| lifecycle.seed_stub(&key));
         state.update(cx, |state, cx| state.go(Destination::Panel, cx));
         draw(cx);
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
         });
         draw(cx);
-        assert!(lifecycle.read_with(cx, |lifecycle, _| lifecycle.has_view(&key)));
         assert_eq!(
             store
                 .read_with(cx, |store, _| store.preview_url(&key))
@@ -16477,14 +16580,9 @@ pub(crate) mod tests {
             });
         });
         draw(cx);
-        assert!(!lifecycle.read_with(cx, |lifecycle, _| lifecycle.has_view(&key)));
         assert_eq!(
             store.read_with(cx, |store, _| store.preview_url(&key)),
             None
-        );
-        assert_eq!(
-            preview.read_with(cx, |preview, cx| preview.url_field(cx)),
-            ""
         );
         assert_eq!(
             state.read_with(cx, |state, _| state.destination()),
@@ -16493,7 +16591,6 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.set_preview_url(&key, "https://example.com/again".into(), cx)
         });
-        lifecycle.update(cx, |lifecycle, _| lifecycle.seed_stub(&key));
         cx.update(|window, cx| shell.update(cx, |shell, cx| assert!(shell.back(window, cx))));
         draw(cx);
         cx.update(|window, cx| shell.update(cx, |shell, cx| assert!(shell.back(window, cx))));
@@ -16502,7 +16599,6 @@ pub(crate) mod tests {
             state.read_with(cx, |state, _| state.destination()),
             Destination::Threads
         );
-        assert!(!lifecycle.read_with(cx, |lifecycle, _| lifecycle.has_view(&key)));
         assert_eq!(
             store.read_with(cx, |store, _| store.preview_url(&key)),
             None
@@ -16865,7 +16961,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn the_phone_strip_scrolls_rather_than_narrowing_its_pills(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_crowded_thread(cx);
+        let (_shell, host, cx) = mount_crowded_thread(cx);
         as_mobile(cx);
         let pills = |cx: &mut VisualTestContext| {
             (
@@ -16875,7 +16971,7 @@ pub(crate) mod tests {
             )
         };
         resize(cx, 899.);
-        draw_until(&shell, cx, &host, "phone-strip", None);
+        draw_until(cx, &host, "phone-strip", None);
         crate::test_frames::draw_settled(cx);
         let (agents, pull_requests) = pills(cx);
         resize(cx, 393.);
@@ -17067,16 +17163,20 @@ pub(crate) mod tests {
                 wakes: Default::default(),
                 waiting_for_approval: false,
                 waiting_for_input: false,
+                settle_blocked: false,
                 failed: false,
                 unread: false,
                 fork: tcode_protocol::ForkAvailability::Available,
                 agent: None,
                 latest_activity: None,
             },
+            preparing_turn: false,
             stopping: false,
             stopping_since: None,
             turn_retry: None,
             goal: None,
+            goal_control: None,
+            manual_compaction: false,
             rewind: None,
             fork_at: None,
             queue_held: false,
@@ -17090,7 +17190,10 @@ pub(crate) mod tests {
             pending_approvals: Vec::new(),
             pending_user_input: None,
             steering_supported: false,
-            provider_option_descriptors: Vec::new(),
+            // As the host describes every thread of a harness with one.
+            provider_option_descriptors: agent::permission_control(agent::ProviderKind::ClaudeCode)
+                .into_iter()
+                .collect(),
             provider_option_selections: Vec::new(),
             provider_option_requested_selections: Vec::new(),
             provider_commands: Vec::new(),
@@ -17219,7 +17322,6 @@ pub(crate) mod tests {
     /// working-tree read is answered with `git_diff` when given; returns how
     /// many the client made.
     fn draw_until(
-        _shell: &Entity<AppShell>,
         cx: &mut VisualTestContext,
         host: &MountedShell,
         selector: &'static str,
@@ -17278,14 +17380,14 @@ pub(crate) mod tests {
         store_of(&shell, cx).update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
         });
-        draw_until(&shell, cx, &host, "diff-body", None);
+        draw_until(cx, &host, "diff-body", None);
         assert!(cx.debug_bounds("right-panel-tabs").is_some());
         assert!(cx.debug_bounds("diff-close").is_some());
         as_mobile(cx);
         resize(cx, 393.);
         shell.update(cx, |shell, cx| shell.open_panels(cx));
         cx.executor().advance_clock(Duration::from_millis(250));
-        draw_until(&shell, cx, &host, "diff-body", None);
+        draw_until(cx, &host, "diff-body", None);
 
         assert!(
             cx.debug_bounds("right-panel-tabs").is_none(),
@@ -17349,7 +17451,6 @@ pub(crate) mod tests {
         events: Vec<agent::AgentEvent>,
     ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
         let (shell, host, cx) = mount(cx);
-        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
         let mut meta = tcode_core::project::SessionMeta::new(
             agent::ProviderKind::ClaudeCode,
             "/tmp/tcode-compact-panel".into(),
@@ -17448,13 +17549,13 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
         });
-        draw_until(&shell, cx, &host, "diff-body", None);
+        draw_until(cx, &host, "diff-body", None);
         let chosen = Rc::new(Cell::new(px(560.)));
 
         let walk = |cx: &mut VisualTestContext, widths: &[f32]| {
             for &width in widths {
                 resize(cx, width);
-                draw_until(&shell, cx, &host, "diff-body", None);
+                draw_until(cx, &host, "diff-body", None);
                 crate::test_frames::draw_settled(cx);
                 let sidebar = shell.read_with(cx, |shell, cx| {
                     let attachment = shell.column.as_ref().expect("attached");
@@ -17537,7 +17638,7 @@ pub(crate) mod tests {
         });
         for width in [1600., 2000.] {
             resize(cx, width);
-            draw_until(&shell, cx, &host, "diff-body", None);
+            draw_until(cx, &host, "diff-body", None);
             crate::test_frames::draw_settled(cx);
             let sidebar = shell.read_with(cx, |shell, _| {
                 shell.column.as_ref().expect("attached").sidebar_width.get()
@@ -17563,7 +17664,7 @@ pub(crate) mod tests {
         walk(cx, &[1600., 1250., 1100., 1000., 900., 860., 720., 1600.]);
 
         resize(cx, 720.);
-        draw_until(&shell, cx, &host, "diff-body", None);
+        draw_until(cx, &host, "diff-body", None);
         let close = cx.debug_bounds("diff-close").expect("the close button");
         cx.simulate_click(close.center(), gpui::Modifiers::default());
         draw(cx);
@@ -17669,112 +17770,10 @@ pub(crate) mod tests {
         // Terminal, tasks, then the diff.
         let diff = cx.debug_bounds("menu-item-2").expect("the diff's row");
         cx.simulate_click(diff.center(), gpui::Modifiers::default());
-        draw_until(&shell, cx, &host, "diff-body", None);
+        draw_until(cx, &host, "diff-body", None);
         assert!(store.read_with(cx, |store, _| {
             store.panel_state_for(Some("thread-1")).right_panel_open
         }));
-    }
-
-    /// The right panel sliding shut on a page lets the page go once it is
-    /// out of sight, keeping its address for the panel to load again. While
-    /// the thread's turn runs, its agent may be driving the page through the
-    /// preview tools with the panel shut, so the page stays until the turn
-    /// ends.
-    #[cfg(preview_backend)]
-    #[gpui::test]
-    fn the_right_panel_lets_its_page_go_once_shut_and_the_turn_is_done(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_thread_with(cx, Vec::new());
-        let store = store_of(&shell, cx);
-        resize(cx, 1600.);
-        let preview = shell.read_with(cx, |shell, cx| {
-            shell.current_link(cx).unwrap().preview.clone()
-        });
-        let lifecycle = preview.read_with(cx, |preview, _| preview.lifecycle());
-        let key = store.read_with(cx, |store, cx| {
-            store.preview_key_for("thread-1", cx).unwrap()
-        });
-        let page = |cx: &mut VisualTestContext| {
-            lifecycle.read_with(cx, |lifecycle, _| lifecycle.has_view(&key))
-        };
-        let working = |working: bool| {
-            send_events(
-                &host,
-                vec![(
-                    Topic::Index,
-                    ServerEvent::IndexSummaryReplaced(tcode_protocol::IndexSummary {
-                        activity: [(
-                            "thread-1".to_owned(),
-                            tcode_protocol::SessionActivity {
-                                working,
-                                turn_running: working,
-                                background: Default::default(),
-                                unsettled: 0,
-                                wakes: Default::default(),
-                                waiting_for_approval: false,
-                                waiting_for_input: false,
-                                failed: false,
-                                unread: false,
-                                fork: tcode_protocol::ForkAvailability::Available,
-                                agent: None,
-                                latest_activity: None,
-                            },
-                        )]
-                        .into(),
-                        ..Default::default()
-                    }),
-                )],
-            );
-        };
-        let arrive = |cx: &mut VisualTestContext| {
-            cx.run_until_parked();
-            cx.run_until_parked();
-            draw(cx);
-        };
-        let open = |cx: &mut VisualTestContext| {
-            store.update(cx, |store, cx| {
-                store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Preview, cx);
-            });
-            render_preview_here(&host, &store, "thread-1", cx);
-            store.update(cx, |store, cx| {
-                store.set_preview_url(&key, "https://example.com/".into(), cx);
-            });
-            lifecycle.update(cx, |lifecycle, _| lifecycle.seed_stub(&key));
-            crate::test_frames::draw_settled(cx);
-        };
-
-        open(cx);
-        store.update(cx, |store, cx| {
-            store.close_right_panel_for(Some("thread-1"), cx)
-        });
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        draw(cx);
-        assert!(page(cx), "the page stays while the panel slides out");
-        crate::test_frames::draw_settled(cx);
-        assert!(!page(cx), "the shut panel lets its page go");
-        assert_eq!(
-            store
-                .read_with(cx, |store, _| store.preview_url(&key))
-                .as_deref(),
-            Some("https://example.com/"),
-            "the address stays"
-        );
-
-        // A running turn shows it runs, which rests only with motion reduced.
-        cx.update(|_, cx| cx.set_reduce_motion(true));
-        working(true);
-        arrive(cx);
-        assert!(store.read_with(cx, |store, _| store.turn_running_for("thread-1")));
-        open(cx);
-        store.update(cx, |store, cx| {
-            store.close_right_panel_for(Some("thread-1"), cx)
-        });
-        crate::test_frames::draw_settled(cx);
-        assert!(page(cx), "the running turn's agent may drive the page");
-        working(false);
-        arrive(cx);
-        assert!(!page(cx), "the turn done, the page goes");
     }
 
     /// The window growing wider leaves the terminal drawer's height as the
@@ -17847,7 +17846,7 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
         });
-        draw_until(&shell, cx, &host, "diff-body", None);
+        draw_until(cx, &host, "diff-body", None);
 
         let press_expand = |cx: &mut VisualTestContext| {
             let expand = cx.debug_bounds("diff-expand").expect("the expand button");
@@ -17890,7 +17889,7 @@ pub(crate) mod tests {
         open_working_tree_panel(&shell, &host, cx);
         let store = store_of(&shell, cx);
         let clean = tcode_protocol::GitDiffResult::default();
-        assert_eq!(draw_until(&shell, cx, &host, "diff-empty", Some(&clean)), 1);
+        assert_eq!(draw_until(cx, &host, "diff-empty", Some(&clean)), 1);
         assert!(
             cx.debug_bounds("diff-body").is_none(),
             "a clean tree draws the empty state, not an empty list"
@@ -17916,7 +17915,7 @@ pub(crate) mod tests {
             store.set_right_tab_for(Some("thread-1"), RightTab::Diff, cx)
         });
         assert_eq!(
-            draw_until(&shell, cx, &host, "diff-body", Some(&changed)),
+            draw_until(cx, &host, "diff-body", Some(&changed)),
             1,
             "choosing the Diff tab reads the working tree again and lists the changed file"
         );
@@ -17941,7 +17940,7 @@ pub(crate) mod tests {
             }],
             ..Default::default()
         };
-        draw_until(&shell, cx, &host, "diff-body", Some(&changed));
+        draw_until(cx, &host, "diff-body", Some(&changed));
         crate::test_frames::draw_settled(cx);
         let tint = |mode, cx: &mut VisualTestContext| {
             cx.update(|_, cx| crate::theme::palette(mode, cx).success.opacity(0.30))
@@ -18026,11 +18025,7 @@ pub(crate) mod tests {
     /// Lets the client run and draw while the host holds every working-tree read; any other
     /// query is refused, as a workspace without a checkout would. Returns the held reads in
     /// the order the client made them.
-    fn held_git_diff_reads(
-        _shell: &Entity<AppShell>,
-        host: &MountedShell,
-        cx: &mut VisualTestContext,
-    ) -> Vec<u64> {
+    fn held_git_diff_reads(host: &MountedShell, cx: &mut VisualTestContext) -> Vec<u64> {
         let mut reads = Vec::new();
         for _ in 0..6 {
             cx.run_until_parked();
@@ -18141,14 +18136,14 @@ pub(crate) mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         open_working_tree_panel(&shell, &host, cx);
-        let reads = held_git_diff_reads(&shell, &host, cx);
+        let reads = held_git_diff_reads(&host, cx);
         assert_eq!(reads.len(), 1, "opening the panel reads the working tree");
         answer_git_diff(&host, reads[0], &created_files(&[("first.rs", 3)]));
-        assert!(held_git_diff_reads(&shell, &host, cx).is_empty());
+        assert!(held_git_diff_reads(&host, cx).is_empty());
         assert!(cx.debug_bounds("diff-line-new-first.rs-1").is_some());
 
         complete_turn(&host);
-        let reads = held_git_diff_reads(&shell, &host, cx);
+        let reads = held_git_diff_reads(&host, cx);
         assert_eq!(reads.len(), 1, "the finished turn reads the tree again");
         assert!(
             cx.debug_bounds("diff-line-new-first.rs-1").is_some(),
@@ -18160,7 +18155,7 @@ pub(crate) mod tests {
             reads[0],
             &created_files(&[("first.rs", 3), ("second.rs", 2)]),
         );
-        held_git_diff_reads(&shell, &host, cx);
+        held_git_diff_reads(&host, cx);
         assert!(
             cx.debug_bounds("diff-line-new-second.rs-1").is_some(),
             "the new diff replaces it once built"
@@ -18174,9 +18169,9 @@ pub(crate) mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         open_working_tree_panel(&shell, &host, cx);
-        let reads = held_git_diff_reads(&shell, &host, cx);
+        let reads = held_git_diff_reads(&host, cx);
         answer_git_diff(&host, reads[0], &created_files(&[("long.rs", 300)]));
-        held_git_diff_reads(&shell, &host, cx);
+        held_git_diff_reads(&host, cx);
 
         let body = cx
             .debug_bounds("diff-body")
@@ -18207,13 +18202,13 @@ pub(crate) mod tests {
         assert!(line > 20, "the reader scrolled into the file: {line}");
 
         complete_turn(&host);
-        let reads = held_git_diff_reads(&shell, &host, cx);
+        let reads = held_git_diff_reads(&host, cx);
         answer_git_diff(
             &host,
             reads[0],
             &created_files(&[("added.rs", 20), ("long.rs", 300)]),
         );
-        held_git_diff_reads(&shell, &host, cx);
+        held_git_diff_reads(&host, cx);
         assert!(
             cx.debug_bounds("diff-line-new-added.rs-1").is_none(),
             "the file listed above is out of view"
@@ -18235,18 +18230,18 @@ pub(crate) mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         open_working_tree_panel(&shell, &host, cx);
-        let reads = held_git_diff_reads(&shell, &host, cx);
+        let reads = held_git_diff_reads(&host, cx);
         answer_git_diff(&host, reads[0], &created_files(&[("first.rs", 3)]));
-        held_git_diff_reads(&shell, &host, cx);
+        held_git_diff_reads(&host, cx);
 
         complete_turn(&host);
-        let earlier = held_git_diff_reads(&shell, &host, cx);
+        let earlier = held_git_diff_reads(&host, cx);
         complete_turn(&host);
-        let later = held_git_diff_reads(&shell, &host, cx);
+        let later = held_git_diff_reads(&host, cx);
         assert_eq!((earlier.len(), later.len()), (1, 1));
 
         answer_git_diff(&host, earlier[0], &created_files(&[("stale.rs", 3)]));
-        held_git_diff_reads(&shell, &host, cx);
+        held_git_diff_reads(&host, cx);
         assert!(cx.debug_bounds("diff-line-new-stale.rs-1").is_none());
         assert!(
             cx.debug_bounds("diff-line-new-first.rs-1").is_some(),
@@ -18254,7 +18249,7 @@ pub(crate) mod tests {
         );
 
         answer_git_diff(&host, later[0], &created_files(&[("newest.rs", 3)]));
-        held_git_diff_reads(&shell, &host, cx);
+        held_git_diff_reads(&host, cx);
         assert!(cx.debug_bounds("diff-line-new-newest.rs-1").is_some());
         assert!(cx.debug_bounds("diff-line-new-stale.rs-1").is_none());
     }
@@ -18294,57 +18289,53 @@ pub(crate) mod tests {
         assert_eq!(overlay(cx), None, "it goes once the pointer leaves it");
     }
 
-    /// thread-1's timeline: a running turn holding a question, an agent
-    /// when `agent`, a first answer, and the command it runs now, which has
-    /// printed `lines` short lines so far: none long enough to wrap at any
-    /// width the tests draw, so only motion changes their heights.
-    fn reparented_timeline(lines: usize, agent: bool) -> tcode_core::session::Timeline {
-        use crate::chat::tests::{assistant, entry, user_item};
-        let mut timeline = tcode_core::session::Timeline::default();
-        timeline.turns = vec![tcode_core::session::TurnMeta {
-            running: true,
-            ..Default::default()
-        }];
-        timeline
-            .entries
-            .push(entry("user", user_item("Look at the build.")));
-        if agent {
-            timeline.entries.push(entry(
-                "agent-1",
-                tcode_core::session::EntryContent::Item(agent::ItemContent::Subagent {
-                    agent_type: "Explore".into(),
-                    description: "Survey the code".into(),
-                    status: agent::ItemStatus::InProgress,
-                    summary: None,
-                    model: None,
-                    effort: None,
-                }),
-            ));
-        }
-        timeline
-            .entries
-            .push(entry("reply", assistant("I will build it first.")));
-        let output: String = (0..lines).map(|line| format!("line {line}\n")).collect();
-        timeline.entries.push(entry(
-            "cmd",
-            tcode_core::session::EntryContent::Item(agent::ItemContent::CommandExecution {
-                command: "cargo build".into(),
-                output,
-                exit_code: None,
-                status: agent::ItemStatus::InProgress,
-            }),
-        ));
-        timeline
-    }
-
-    fn show_timeline(
-        store: &Entity<WorkspaceStore>,
-        timeline: tcode_core::session::Timeline,
-        cx: &mut VisualTestContext,
-    ) {
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test("thread-1".into(), timeline, cx)
+    /// The host serves thread-1 as a running turn holding a question, a
+    /// first answer, and the command it runs now, which has printed two
+    /// short lines so far: none long enough to wrap at any width the tests
+    /// draw, so only motion changes their heights.
+    fn serve_running_command(host: &MountedShell) {
+        let item = |id: &str, content| agent::ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content,
+        };
+        let mut status = session_status("thread-1", std::path::Path::new(PANES_CWD));
+        status.activity.working = true;
+        status.activity.turn_running = true;
+        status.running_turn = Some(tcode_core::session::RunningTurn {
+            turn: 0,
+            started_at: None,
         });
+        scenes::serve_log(
+            host,
+            status,
+            vec![
+                scenes::started(),
+                agent::AgentEvent::ItemCompleted(item(
+                    "user",
+                    agent::ItemContent::UserMessage {
+                        text: "Look at the build.".into(),
+                        attachments: Vec::new(),
+                    },
+                )),
+                agent::AgentEvent::ItemCompleted(item(
+                    "reply",
+                    agent::ItemContent::AssistantMessage {
+                        text: "I will build it first.".into(),
+                        summarized: false,
+                    },
+                )),
+                agent::AgentEvent::ItemStarted(item(
+                    "cmd",
+                    agent::ItemContent::CommandExecution {
+                        command: "cargo build".into(),
+                        output: "line 0\nline 1\n".into(),
+                        exit_code: None,
+                        status: agent::ItemStatus::InProgress,
+                    },
+                )),
+            ],
+        );
     }
 
     /// One display frame: time passes and the window draws what it asked
@@ -18565,8 +18556,7 @@ pub(crate) mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
         cx.update(|_, cx| cx.set_reduce_motion(true));
-        let store = store_of(&shell, cx);
-        show_timeline(&store, reparented_timeline(2, false), cx);
+        serve_running_command(&host);
         crate::test_frames::draw_settled(cx);
         // Shut, the command's header is the timeline's last control.
         click_command(cx);

@@ -50,7 +50,7 @@ pub use cmd_shim::CmdShim;
 #[cfg(feature = "process")]
 mod process;
 #[cfg(feature = "process")]
-pub use process::{command, stop_every_tree};
+pub use process::{SessionProcesses, command, stop_every_tree};
 #[cfg(feature = "process")]
 mod subagent_tail;
 mod tool_name;
@@ -256,7 +256,7 @@ pub enum RewindPreviewKind {
 }
 
 /// What a harness lets a client do with its standing goal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalControl {
     /// The goal can be paused and resumed without clearing it.
     pub pause: bool,
@@ -1208,6 +1208,10 @@ pub struct SessionOptions {
     /// Tcode's instructions for the model, delivered through the provider's
     /// [`Caps::instruction_channel`]; never part of a user turn's text.
     pub instructions: Option<String>,
+    /// Where the session's harness processes are held, so its starter can
+    /// stop them whatever the session is waiting on.
+    #[cfg(feature = "process")]
+    pub processes: SessionProcesses,
 }
 
 /// The per-provider environment configured in Settings → Harnesses, applied to
@@ -1363,13 +1367,75 @@ pub enum OptionDescriptor {
     },
 }
 
-/// Where the UI places the control; carries no permission semantics.
+/// What a control is, as its provider says: a client places and draws it by
+/// this, never by its id. Carries no permission semantics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OptionRole {
+    /// A trait of the model with nothing more said about it.
     #[default]
     Model,
+    /// What runs without asking the user.
     Permission,
+    /// How hard the model reasons: a select of levels, least first.
+    Effort,
+    /// The context window the session runs at: a select of presets whose
+    /// values follow [`context_window::parse_tokens`], which also takes a
+    /// custom size up to the largest preset.
+    ContextWindow,
+    /// Fast mode: a boolean that is on when fast, or a select whose fast
+    /// choices name their [`Speed`].
+    Speed,
+    /// Extended thinking, on or off.
+    Thinking,
+}
+
+/// How fast a choice of an [`OptionRole::Speed`] select runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Speed {
+    Fast,
+    Ultrafast,
+}
+
+/// What a harness's permission settings amount to, where it reports them as
+/// parts rather than as one of its named values. `None` is a part the
+/// harness did not report, or reported in a form Tcode does not know.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionSummary {
+    /// The named permission profile the settings come from.
+    pub profile: Option<String>,
+    pub sandbox: Option<PermissionSandbox>,
+    pub approval: Option<ApprovalPolicy>,
+    pub reviewer: Option<ApprovalReviewer>,
+}
+
+/// Where commands run (Codex `SandboxPolicy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionSandbox {
+    ReadOnly,
+    WorkspaceWrite,
+    FullAccess,
+    External,
+}
+
+/// When the harness stops to ask (Codex `AskForApproval`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalPolicy {
+    OnRequest,
+    Never,
+    Untrusted,
+    Granular,
+}
+
+/// Who answers when it asks (Codex `ApprovalsReviewer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalReviewer {
+    User,
+    AutoReview,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1389,6 +1455,14 @@ pub struct SelectOption {
     /// Present when this value cannot be selected; explains why.
     #[serde(default)]
     pub unavailable: Option<String>,
+    /// How fast this choice of an [`OptionRole::Speed`] select runs; `None`
+    /// for a choice that is not fast.
+    #[serde(default)]
+    pub speed: Option<Speed>,
+    /// The parts of a permission value the harness reported as parts, in
+    /// place of a description.
+    #[serde(default)]
+    pub summary: Option<PermissionSummary>,
 }
 
 type PermissionTable = (
@@ -1568,6 +1642,8 @@ pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
                 label: (*label).into(),
                 description: Some((*description).into()),
                 unavailable: None,
+                speed: None,
+                summary: None,
             })
             .collect(),
         default_value: Some(default.into()),
@@ -1722,7 +1798,7 @@ mod permission_tests {
         assert_eq!(permission_control(ProviderKind::Acp), None);
         let old: OptionDescriptor = serde_json::from_str(r#"{"kind":"select","id":"reasoningEffort","label":"Reasoning","options":[{"value":"high","label":"High","description":null}],"default_value":"high"}"#).unwrap();
         assert!(
-            matches!(old, OptionDescriptor::Select { role:OptionRole::Model, apply:ApplyTiming::Live, recommended:None, permissive:None, options, .. } if options[0].unavailable.is_none())
+            matches!(old, OptionDescriptor::Select { role:OptionRole::Model, apply:ApplyTiming::Live, recommended:None, permissive:None, options, .. } if options[0].unavailable.is_none() && options[0].speed.is_none() && options[0].summary.is_none())
         );
     }
 }
@@ -1965,7 +2041,7 @@ pub struct UserInputQuestion {
     pub prefill: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserInputOption {
     pub label: String,
     pub description: String,
@@ -2311,25 +2387,6 @@ pub async fn start_session(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanResolution {
-    /// Accepted in this thread.
-    Implemented,
-    /// Accepted in a fresh thread.
-    HandedOff { session_id: String },
-    /// Explicitly dismissed by the user.
-    Dismissed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClassifierCategory {
-    Cyber,
-    Bio,
-    Other(String),
-}
-
 /// A failed native turn can be continued without adding user input.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnRetry {
@@ -2361,11 +2418,6 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         moved_from: Option<PathBuf>,
     },
-    /// History-only: retained to decode stored plan decisions; never emitted.
-    PlanResolved {
-        item_id: String,
-        resolution: PlanResolution,
-    },
     /// The agent's self-described options (ACP `modes` / `models` /
     /// `configOptions`), pushed at session start and on every change. Reuses
     /// [`OptionDescriptor`] so the composer's existing picker renders them
@@ -2386,20 +2438,6 @@ pub enum AgentEvent {
     ServedModel {
         model: String,
         reason: Option<String>,
-    },
-    /// History-only: retained to decode stored rows; never emitted.
-    ModelFallbackDetected {
-        expected: String,
-        actual: String,
-        category: Option<ClassifierCategory>,
-        checkpoint_id: Option<String>,
-        parent_tool_use_id: Option<String>,
-    },
-    /// History-only: retained to decode stored rows; never emitted.
-    TurnBlocked {
-        category: Option<ClassifierCategory>,
-        model: Option<String>,
-        detail: String,
     },
     TurnStarted {
         turn_id: String,
@@ -2645,6 +2683,18 @@ pub enum AgentEvent {
     /// Another thread's model acted on this thread through `tcode_control`. This is
     /// never emitted by an adapter; the runtime records it in the target thread.
     ControlAction(ControlAction),
+    /// A row of a thread's log that this build cannot read, as it is stored:
+    /// a record of a type or shape Tcode no longer has. Never emitted by an
+    /// adapter nor written; the store reads it in the row's place.
+    UnreadableRecord {
+        line: String,
+    },
+    /// A record of `bytes` bytes, more than one reply to the client it was
+    /// for can carry, kept on the host in a history reply. Never emitted by
+    /// an adapter nor written; the host sends it in the record's place.
+    RecordWithheld {
+        bytes: u64,
+    },
     /// Structured plan / task list for the sidebar (Codex `turn/plan/updated`,
     /// Claude `TodoWrite`). Replaces the current turn's plan wholesale.
     PlanUpdated {
@@ -2657,16 +2707,6 @@ pub enum AgentEvent {
     /// Replaces the session's goal wholesale; `None` means there is none.
     GoalUpdated {
         goal: Option<Goal>,
-    },
-    /// History-only: retained to decode stored proposed-plan deltas; never emitted.
-    ProposedPlanDelta {
-        item_id: String,
-        text: String,
-    },
-    /// History-only: retained to decode stored proposed plans; never emitted.
-    ProposedPlan {
-        item_id: String,
-        markdown: String,
     },
     Warning {
         message: String,
@@ -3002,6 +3042,11 @@ pub enum ItemContent {
         input: serde_json::Value,
         output: Option<String>,
         status: ItemStatus,
+        /// What the call is, when its adapter knows the harness's tool for
+        /// one of the families every harness has: the UI draws it from these
+        /// fields, never from the tool's name or input.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        family: Option<Box<ToolFamily>>,
     },
     Subagent {
         agent_type: String,
@@ -3030,6 +3075,110 @@ pub enum ItemContent {
         provider_kind: String,
         summary: String,
     },
+}
+
+/// A tool call as its adapter read it from the harness's own tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolFamily {
+    /// A read of a file. The call's `output` is what was read, without the
+    /// numbers a harness put before its lines.
+    Read {
+        path: String,
+        /// The number of the output's first line, when the harness said
+        /// which line the read began at.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_line: Option<u64>,
+        /// The harness's own words after the lines it read: that the file
+        /// goes on, and where to continue.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// A search of the workspace. The call's `output` stays the harness's
+    /// whole answer, `hits` what its adapter read out of it.
+    Search {
+        scope: SearchScope,
+        /// What it looked for: a pattern of text, or of file names.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<String>,
+        /// Where it looked, as the harness was asked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        /// The files it looked in, when it was narrowed to some.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        glob: Option<String>,
+        /// What it found, once it finished and its result could be read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hits: Option<Vec<SearchHit>>,
+    },
+    /// Questions the model put to the user, and the answers each got.
+    Question { questions: Vec<AskedQuestion> },
+    /// A page fetched from the web. The call's `output` is what came back.
+    Fetch {
+        url: String,
+        /// What the harness was asked to make of the page.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+    },
+    /// A search of the web. The call's `output` stays the harness's whole
+    /// answer, `links` the pages its adapter read out of it.
+    WebSearch {
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        links: Option<Vec<WebLink>>,
+    },
+    /// A search of the harness's own deferred tools, which loads those it
+    /// finds for the model.
+    LoadTools {
+        query: String,
+        /// The tools it loaded, once it finished.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tools: Option<Vec<String>>,
+    },
+    /// A skill the harness launched or loaded.
+    Skill { name: String },
+}
+
+/// A page a web search found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebLink {
+    pub title: String,
+    pub url: String,
+}
+
+/// A question as the model asked it, with what the user answered: the
+/// labels of the options chosen, or the user's own words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskedQuestion {
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<UserInputOption>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answers: Vec<String>,
+}
+
+/// What a search looked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchScope {
+    /// Lines of files matching a pattern.
+    Content,
+    /// Files whose names match a pattern.
+    Files,
+    /// What a directory holds.
+    Entries,
+}
+
+/// One thing a search found: a file or directory, or a line of a file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchHit {
+    /// Absolute, or relative to the directory the session works in.
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
+    /// The matching line's text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3235,7 +3384,7 @@ pub enum WorktreeAnswer {
     Refused { error: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
     /// Codex aborts (`cancel`); Claude denies with "User cancelled tool execution";
@@ -3247,30 +3396,6 @@ pub enum ApprovalDecision {
     /// Claude denies with them as the message, Grok and Cursor return them as
     /// plan feedback. A provider with no channel for words declines once.
     Feedback(String),
-}
-
-impl<'de> Deserialize<'de> for ApprovalDecision {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "snake_case")]
-        enum StoredDecision {
-            Cancel,
-            Option(String),
-            Feedback(String),
-            Approve,
-            ApproveForSession,
-            Deny,
-        }
-        Ok(match StoredDecision::deserialize(deserializer)? {
-            StoredDecision::Cancel => Self::Cancel,
-            StoredDecision::Option(id) => Self::Option(id),
-            StoredDecision::Feedback(text) => Self::Feedback(text),
-            // These ids are history-only and never occur in live request options.
-            StoredDecision::Approve => Self::Option("legacy:approve".into()),
-            StoredDecision::ApproveForSession => Self::Option("legacy:approve_for_session".into()),
-            StoredDecision::Deny => Self::Option("legacy:deny".into()),
-        })
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3622,6 +3747,20 @@ mod turn_diff_tests {
 #[cfg(test)]
 mod thread_item_serde_tests {
     use super::*;
+
+    /// A call recorded before calls said what they are (v0.4.0-rc.3's
+    /// `ToolCall`, which had no `family`) reads as a call of no family.
+    #[test]
+    fn a_call_recorded_without_a_family_reads_as_one_of_none() {
+        let item: ThreadItem = serde_json::from_str(
+            r#"{"id":"t1","content":{"kind":"tool_call","name":"Read","input":{"file_path":"a.rs"},"output":"1\tfn a() {}","status":"completed"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            item.content,
+            ItemContent::ToolCall { family: None, ref name, .. } if name == "Read"
+        ));
+    }
 
     #[test]
     fn cursor_and_grok_use_their_wire_names() {

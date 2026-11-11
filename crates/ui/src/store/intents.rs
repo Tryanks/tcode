@@ -2,9 +2,10 @@ use std::path::PathBuf;
 
 use agent::{ApprovalDecision, PluginAction, ProviderKind, RewindMode};
 use gpui::{App, Context, Task};
+use tcode_client::ConnectionState;
 use tcode_core::{
     acp::AcpAgentPatch,
-    control::{ControlGrant, FollowUp, SettlementAutomation},
+    control::{ControlGrant, SettlementAutomation},
     git::GitAction,
     session::ReviewComment,
     settings::{ChildApprovalMode, ImageMode, ProfileSettingsPatch},
@@ -81,6 +82,7 @@ impl WorkspaceStore {
                 | Command::AddProviderMarketplace { .. }
                 | Command::RemoveProviderMarketplace { .. }
                 | Command::ResolvePluginChallenge { .. }
+                | Command::CancelPluginOperation { .. }
         )
     }
 
@@ -131,9 +133,7 @@ impl WorkspaceStore {
                     if Self::host_global_command(&command) {
                         return;
                     }
-                    if let Err(error) = self.host.dispatch(command) {
-                        log::error!("failed to dispatch host command: {}", error.message);
-                    }
+                    self.send(command);
                     return;
                 }
             }
@@ -141,14 +141,39 @@ impl WorkspaceStore {
             self.save_member_settings();
             return;
         }
-        if !self.baseline_topics.contains(&tcode_protocol::Topic::Scope)
-            && Self::host_global_command(&command)
-        {
-            return;
-        }
-        if let Err(error) = self.host.dispatch(command) {
-            log::error!("failed to dispatch host command: {}", error.message);
-        }
+        self.send(command);
+    }
+
+    /// Send `command` now; a refusal reaches the window in the host's words.
+    /// A message the composer sent shows its own failure in its thread. A
+    /// link that closed or dropped answers nothing of the host's: its
+    /// connection state says so, and a retained write waits in the outbox
+    /// for the next link.
+    fn send(&self, command: Command) {
+        let shown_in_thread = matches!(
+            command,
+            Command::SendTurn { .. }
+                | Command::ScheduleTurn { .. }
+                | Command::Steer { .. }
+                | Command::ConfirmRelayAndSend { .. }
+        );
+        let ack = self.host.command(command);
+        let link = self.host.clone();
+        let refused = self.refused.clone();
+        self.background
+            .spawn(async move {
+                if let Err(error) = ack.await
+                    && !shown_in_thread
+                    && error.code != "transport_closed"
+                    && !matches!(
+                        link.connection_state(),
+                        ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
+                    )
+                {
+                    let _ = refused.send(error).await;
+                }
+            })
+            .detach();
     }
 
     pub(crate) fn command(
@@ -156,9 +181,7 @@ impl WorkspaceStore {
         command: Command,
         cx: &mut App,
     ) -> Task<Result<CommandResponse, ProtocolError>> {
-        if (!self.scope.is_full() || !self.baseline_topics.contains(&tcode_protocol::Topic::Scope))
-            && Self::host_global_command(&command)
-        {
+        if !self.scope.is_full() && Self::host_global_command(&command) {
             return cx.spawn(async |_| {
                 Err(ProtocolError::out_of_scope("command is outside this space"))
             });
@@ -293,7 +316,11 @@ impl WorkspaceStore {
     pub fn reset_settings(&mut self) {
         self.dispatch(Command::ResetSettings);
     }
-    pub fn write_relaunch_marker_for(&mut self, session_id: String, reopen_settings: String) {
+    pub fn write_relaunch_marker_for(
+        &mut self,
+        session_id: Option<String>,
+        reopen_settings: String,
+    ) {
         self.dispatch(Command::WriteRelaunchMarker {
             session_id,
             reopen_settings,
@@ -406,10 +433,8 @@ impl WorkspaceStore {
     pub fn set_follow_up(&mut self, session_id: String, on: bool) {
         self.dispatch(Command::SetFollowUp {
             session_id,
-            follow_up: on.then(|| FollowUp {
-                since: crate::time::now_secs(),
-                note: None,
-            }),
+            on,
+            note: None,
         });
     }
     pub fn set_parked(&mut self, session_id: String, parked: bool) {
@@ -1475,5 +1500,8 @@ impl WorkspaceStore {
     }
     pub fn resolve_plugin_challenge(&mut self, op_id: RuntimeOperationId, accept: bool) {
         self.dispatch(Command::ResolvePluginChallenge { op_id, accept });
+    }
+    pub fn cancel_plugin_operation(&mut self, profile_id: String) {
+        self.dispatch(Command::CancelPluginOperation { profile_id });
     }
 }

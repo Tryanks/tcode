@@ -195,7 +195,6 @@ impl AppState {
             }
             ThreadOp::Unsettle => Command::UnsettleSession { session_id },
             ThreadOp::Archive if archived => return Err("already archived".into()),
-            ThreadOp::Archive if self.turn_running_for(&meta.id) => return Err("busy".into()),
             ThreadOp::Archive => Command::ArchiveSession { session_id },
             ThreadOp::Unarchive if !archived => return Err("not archived".into()),
             ThreadOp::Unarchive => Command::UnarchiveSession { session_id },
@@ -227,7 +226,8 @@ impl AppState {
             }
             ThreadOp::FollowUp { on, note } => Command::SetFollowUp {
                 session_id,
-                follow_up: on.then(|| follow_up(meta, note)),
+                on: *on,
+                note: note.clone(),
             },
             ThreadOp::Park { on } if *on == meta.parked_at.is_some() => {
                 return Err(if *on { "already parked" } else { "not parked" }.into());
@@ -275,9 +275,7 @@ impl AppState {
             ThreadOp::Rename { title } => self.rename_session(id, title, cx),
             ThreadOp::MarkRead => self.mark_session_read(id, meta.updated_at, cx),
             ThreadOp::MarkUnread => self.mark_session_unread(id, cx),
-            ThreadOp::FollowUp { on, note } => {
-                self.set_follow_up(id, on.then(|| follow_up(meta, note)), cx)
-            }
+            ThreadOp::FollowUp { on, note } => self.set_follow_up(id, *on, note.clone(), cx),
             ThreadOp::Park { on } => self.set_parked(id, *on, cx),
             ThreadOp::Keep { on } => self.set_auto_settle(id, !on, cx),
         }
@@ -345,7 +343,7 @@ impl AppState {
                 .request_id
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             thread_id: caller.thread_id.clone(),
-            recorded_at: now_secs(),
+            recorded_at: cx.clock().unix_secs(),
             coverage: params.coverage,
             items,
         };
@@ -411,7 +409,7 @@ impl AppState {
         let grant = SelfSettleGrant {
             when: params.when,
             consent_quote: consent_quote.to_owned(),
-            granted_at: now_secs(),
+            granted_at: cx.clock().unix_secs(),
         };
         let when = describe_when(&grant.when);
         let detail = grant.consent_quote.clone();
@@ -515,26 +513,36 @@ impl AppState {
         );
     }
 
+    /// A thread already on Follow-up keeps the time it was added.
     pub fn set_follow_up(
         &mut self,
         session_id: &str,
-        follow_up: Option<FollowUp>,
+        on: bool,
+        note: Option<String>,
         cx: &mut HostCx,
     ) {
-        self.change_meta(session_id, cx, |meta| meta.follow_up = follow_up);
+        let now = cx.clock().unix_secs();
+        self.change_meta(session_id, cx, |meta| {
+            meta.follow_up = on.then(|| FollowUp {
+                since: meta.follow_up.as_ref().map_or(now, |kept| kept.since),
+                note,
+            });
+        });
     }
 
     pub fn set_parked(&mut self, session_id: &str, parked: bool, cx: &mut HostCx) {
+        let now = cx.clock().unix_secs();
         self.change_meta(session_id, cx, |meta| {
             if parked != meta.parked_at.is_some() {
-                meta.parked_at = parked.then(now_secs);
+                meta.parked_at = parked.then_some(now);
             }
         });
     }
 
     pub fn dismiss_settle_suggestion(&mut self, session_id: &str, cx: &mut HostCx) {
+        let now = cx.clock().unix_secs();
         self.change_meta(session_id, cx, |meta| {
-            meta.settle_suggestion_dismissed_at = Some(now_secs());
+            meta.settle_suggestion_dismissed_at = Some(now);
         });
     }
 
@@ -558,7 +566,7 @@ impl AppState {
         if meta == before {
             return;
         }
-        meta.updated_at = now_secs();
+        meta.updated_at = cx.clock().unix_secs();
         self.store_meta(meta, cx);
     }
 }
@@ -570,17 +578,6 @@ fn agent_cx(cx: &HostCx) -> HostCx {
     cx.origin = Some(MessageOrigin::Agent);
     cx.author = None;
     cx
-}
-
-/// A thread already on Follow-up keeps the time it was added.
-fn follow_up(meta: &SessionMeta, note: &Option<String>) -> FollowUp {
-    FollowUp {
-        since: meta
-            .follow_up
-            .as_ref()
-            .map_or_else(now_secs, |follow_up| follow_up.since),
-        note: note.clone(),
-    }
 }
 
 fn thread_state(meta: &SessionMeta) -> &'static str {

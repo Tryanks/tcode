@@ -195,7 +195,7 @@ pub fn badge_label(links: &[ThreadPullRequestLink], cx: &App) -> Option<String> 
     };
     Some(label)
 }
-pub fn badge(links: &[ThreadPullRequestLink], _size: f32, cx: &App) -> Option<AnyElement> {
+pub fn badge(links: &[ThreadPullRequestLink], cx: &App) -> Option<AnyElement> {
     let (state, count, stacked) = pull_request::badge(links)?;
     let (glyph, color, _) = appearance(state, cx);
     let label = badge_label(links, cx)?;
@@ -318,7 +318,7 @@ pub fn sidebar_badge(
     store: Entity<WorkspaceStore>,
     cx: &App,
 ) -> Option<AnyElement> {
-    let badge = badge(links, 12., cx)?;
+    let badge = badge(links, cx)?;
     let id = id.to_owned();
     let hover_links = links.to_vec();
     let hover_store = store.clone();
@@ -552,15 +552,13 @@ fn source(link: Option<&ThreadPullRequestLink>) -> &'static str {
 }
 /// The number's tooltip: what made the thread show the pull request, and when the thread linked
 /// it where it did. A dismissed link and a stack layer carry no time.
-fn number_tooltip(link: Option<&ThreadPullRequestLink>) -> String {
+fn number_tooltip(link: Option<&ThreadPullRequestLink>, cx: &App) -> String {
     let source = crate::tr!(source(link)).into_owned();
     match link.and_then(|link| link.linked_at) {
         Some(linked_at) => crate::tr!(
             "pull_requests.number_tooltip",
             source = source,
-            ago = crate::time::humanize_ago(
-                tcode_core::project::now_secs().saturating_sub(linked_at)
-            )
+            ago = crate::time::humanize_ago(crate::time::now_secs(cx).saturating_sub(linked_at))
         )
         .into_owned(),
         None => source,
@@ -568,8 +566,8 @@ fn number_tooltip(link: Option<&ThreadPullRequestLink>) -> String {
 }
 
 /// When a rate limit lifts, as the notices say it: ahead, or soon once its time has passed.
-pub(super) fn resumes(retry_at: u64) -> String {
-    let now = tcode_core::project::now_secs();
+pub(super) fn resumes(retry_at: u64, cx: &App) -> String {
+    let now = crate::time::now_secs(cx);
     if retry_at <= now {
         crate::tr!("pull_requests.notice_soon").into_owned()
     } else {
@@ -577,7 +575,7 @@ pub(super) fn resumes(retry_at: u64) -> String {
     }
 }
 
-fn sync_error(link: &ThreadPullRequestLink, host_name: &str) -> String {
+fn sync_error(link: &ThreadPullRequestLink, host_name: &str, cx: &App) -> String {
     match link.sync_error.as_ref() {
         Some(PullRequestSyncError::NoCredential | PullRequestSyncError::HostDisabled) => {
             crate::tr!(
@@ -589,7 +587,7 @@ fn sync_error(link: &ThreadPullRequestLink, host_name: &str) -> String {
         Some(PullRequestSyncError::RateLimited { retry_at }) => crate::tr!(
             "pull_requests.notice_rate_limited",
             host_name = host_name,
-            when = resumes(*retry_at)
+            when = resumes(*retry_at, cx)
         )
         .into_owned(),
         Some(PullRequestSyncError::NotFound) => crate::tr!(
@@ -1197,7 +1195,7 @@ impl PullRequestsPanel {
             let layer = if let Some(link) = link.filter(|_| visible) {
                 detail.insert(
                     0,
-                    sync_error(link, &host_name(self.store.read(cx), &key.host)),
+                    sync_error(link, &host_name(self.store.read(cx), &key.host), cx),
                 );
                 None
             } else {
@@ -1521,7 +1519,7 @@ impl PullRequestsPanel {
                     .and_then(|updated| chrono::DateTime::parse_from_rfc3339(updated).ok())
                     .map(|updated| {
                         crate::time::humanize_ago(
-                            tcode_core::project::now_secs()
+                            crate::time::now_secs(cx)
                                 .saturating_sub(updated.timestamp().max(0) as u64),
                         )
                     }),
@@ -1606,7 +1604,7 @@ impl PullRequestsPanel {
                                     .text_color(cx.theme().foreground)
                                     .id("pr-number")
                                     .with_tooltip({
-                                        let label = number_tooltip(link);
+                                        let label = number_tooltip(link, cx);
                                         move |_, _| {
                                             crate::widgets::tooltip::Tooltip::new(label.clone())
                                         }
@@ -2089,7 +2087,7 @@ impl PullRequestsPanel {
                     );
                     (credential || rate_limited).then(|| {
                         (
-                            sync_error(link, &host_name(self.store.read(cx), &host)),
+                            sync_error(link, &host_name(self.store.read(cx), &host), cx),
                             credential,
                         )
                     })
@@ -2353,9 +2351,8 @@ impl PullRequestsPanel {
                 " · {}",
                 crate::tr!(
                     "pull_requests.summary_synced",
-                    ago = crate::time::humanize_ago(
-                        tcode_core::project::now_secs().saturating_sub(synced)
-                    )
+                    ago =
+                        crate::time::humanize_ago(crate::time::now_secs(cx).saturating_sub(synced))
                 )
             ));
         }
@@ -2583,8 +2580,8 @@ mod tests {
 
     /// A dismissed link keeps no time (`tcode_core::pull_request::unlink_pull_request` clears it); its
     /// number said it was linked some fifty years ago, the epoch.
-    #[test]
-    fn a_dismissed_number_names_no_link_time() {
+    #[gpui::test]
+    fn a_dismissed_number_names_no_link_time(cx: &mut gpui::TestAppContext) {
         let link = ThreadPullRequestLink {
             key: PullRequestKey::new("github.com", "owner/project", 7),
             source: PullRequestSource::Dismissed,
@@ -2595,6 +2592,6 @@ mod tests {
             sync_error: None,
             watch: None,
         };
-        assert_eq!(number_tooltip(Some(&link)), "Dismissed");
+        assert_eq!(cx.update(|cx| number_tooltip(Some(&link), cx)), "Dismissed");
     }
 }

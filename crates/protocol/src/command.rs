@@ -284,9 +284,14 @@ pub enum Command {
         op_id: RuntimeOperationId,
         accept: bool,
     },
+    /// Stop the profile's running plugin change and the commands it runs.
+    CancelPluginOperation {
+        profile_id: String,
+    },
     ResetSettings,
     WriteRelaunchMarker {
-        session_id: String,
+        /// The thread to reopen; absent when none is on screen.
+        session_id: Option<String>,
         reopen_settings: String,
     },
     ClearRelaunchMarker,
@@ -409,9 +414,12 @@ pub enum Command {
         session_id: String,
         thread_id: String,
     },
+    /// Put the thread on Follow-up or take it off. The host stamps when it
+    /// went on, and a thread already on keeps that time.
     SetFollowUp {
         session_id: String,
-        follow_up: Option<tcode_core::control::FollowUp>,
+        on: bool,
+        note: Option<String>,
     },
     SetParked {
         session_id: String,

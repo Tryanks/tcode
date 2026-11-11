@@ -34,6 +34,15 @@ pub(super) fn url(key: &PullRequestKey) -> String {
     )
 }
 
+pub(super) fn file_url(key: &PullRequestKey, revision: &str, path: &str) -> String {
+    format!(
+        "https://{}/{}/-/blob/{revision}/{}",
+        key.host,
+        key.repository,
+        crate::forge::url_path(path)
+    )
+}
+
 /// The project's path as the API names a project: URL-encoded whole.
 pub(super) fn project_id(locator: &str) -> String {
     locator.replace('/', "%2F")
@@ -166,6 +175,10 @@ mod tests {
         assert_eq!(
             url,
             "https://code.acme.test:8443/team/apps/web/-/merge_requests/7"
+        );
+        assert_eq!(
+            file_url(&key, "abc123", "docs/read me.md"),
+            "https://code.acme.test:8443/team/apps/web/-/blob/abc123/docs/read%20me.md"
         );
         assert_eq!(
             pull_request_url(

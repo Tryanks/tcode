@@ -427,7 +427,6 @@ mod tests {
         VisualTestContext, Window, div, px,
     };
 
-    use super::FocusRings;
     use crate::test_frames::{draw, draw_settled};
 
     /// A raw clickable, as `accessible_clickable` makes it, and each of
@@ -590,15 +589,14 @@ mod tests {
         asked
     }
 
-    /// The rings held at rest, and whether each is shown.
-    fn held(cx: &mut VisualTestContext) -> Vec<f32> {
-        cx.update(|_, cx| {
-            cx.default_global::<FocusRings>()
-                .0
-                .borrow()
+    /// How many focus rings the last frame painted in full.
+    fn rings_painted(cx: &mut VisualTestContext) -> usize {
+        cx.update(|window, cx| {
+            let ring = crate::material::focus_ring(cx).color;
+            crate::test_frames::painted_shadows(window)
                 .iter()
-                .map(|(_, (_, to, _))| *to)
-                .collect()
+                .filter(|shadow| shadow.color == ring)
+                .count()
         })
     }
 
@@ -630,7 +628,7 @@ mod tests {
                 if reduce {
                     assert_eq!(asked, 0, "step {step}: a ring faded with motion reduced");
                 }
-                assert_eq!(held(cx), vec![1.; rings], "step {step}");
+                assert_eq!(rings_painted(cx), rings, "step {step}");
             }
         }
     }

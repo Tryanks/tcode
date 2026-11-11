@@ -29,7 +29,7 @@ pub(super) enum GoalIntent {
 /// goal change is a turn of its own takes it only between turns; otherwise the
 /// text reaches the provider as typed.
 pub(super) fn goal_offered(state: &crate::store::ComposerState) -> Option<agent::GoalControl> {
-    let control = state.provider?.caps().goals?;
+    let control = state.goal_control?;
     (!state.conversation_read_only && (control.live || !state.turn_running && !state.stopping))
         .then_some(control)
 }
@@ -56,9 +56,7 @@ pub(super) fn compact_offered(state: &crate::store::ComposerState) -> bool {
     !state.conversation_read_only
         && !state.turn_running
         && !state.stopping
-        && state
-            .provider
-            .is_some_and(|provider| provider.caps().manual_compaction)
+        && state.manual_compaction
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,10 +312,11 @@ pub(super) fn traits_chip_label(
                 id,
                 label,
                 default_value,
+                role,
                 ..
             } => {
                 let on = option_selection_bool(selections, id).unwrap_or(*default_value);
-                if id == "fastMode" {
+                if *role == agent::OptionRole::Speed {
                     parts.push(
                         crate::tr!(if on {
                             "composer.trait_fast"
@@ -434,7 +433,7 @@ pub(super) fn context_label(usage: Option<TokenUsage>) -> String {
     match usage {
         Some(u) => {
             let window = u.context_window;
-            let used = u.used_tokens.or(u.input_tokens);
+            let used = u.used_tokens;
             match (used, window) {
                 (Some(used), Some(window)) => {
                     format!(
@@ -452,12 +451,12 @@ pub(super) fn context_label(usage: Option<TokenUsage>) -> String {
     }
 }
 
-pub(super) fn file_change_kind_label(kind: FileChangeKind) -> &'static str {
+pub(super) fn file_change_kind_label(kind: FileChangeKind) -> std::borrow::Cow<'static, str> {
     match kind {
-        FileChangeKind::Create => "create",
-        FileChangeKind::Modify => "modify",
-        FileChangeKind::Delete => "delete",
-        FileChangeKind::Rename => "rename",
+        FileChangeKind::Create => crate::tr!("diff.created"),
+        FileChangeKind::Modify => crate::tr!("diff.modified"),
+        FileChangeKind::Delete => crate::tr!("diff.deleted"),
+        FileChangeKind::Rename => crate::tr!("diff.renamed"),
     }
 }
 
@@ -602,7 +601,7 @@ mod tests {
     #[test]
     fn traits_chip_joins_descriptor_labels() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        // Fast Mode boolean → Fast/Normal; a plain boolean → "<Label> On/Off".
+        // A speed boolean → Fast/Normal; a plain boolean → "<Label> On/Off".
         let fast = agent::ModelSpec {
             id: "m".into(),
             display_name: "m".into(),
@@ -611,7 +610,7 @@ mod tests {
                 id: "fastMode".into(),
                 label: "Fast Mode".into(),
                 default_value: false,
-                role: Default::default(),
+                role: agent::OptionRole::Speed,
                 apply: Default::default(),
                 recommended: None,
                 permissive: None,
@@ -626,7 +625,7 @@ mod tests {
                 id: "thinking".into(),
                 label: "Thinking".into(),
                 default_value: false,
-                role: Default::default(),
+                role: agent::OptionRole::Thinking,
                 apply: Default::default(),
                 recommended: None,
                 permissive: None,
@@ -648,6 +647,8 @@ mod tests {
                     label: "High".into(),
                     description: None,
                     unavailable: None,
+                    speed: None,
+                    summary: None,
                 }],
                 default_value: None,
                 role: Default::default(),

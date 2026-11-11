@@ -236,8 +236,7 @@ fn a_fork_through_a_turn_holds_it_and_what_came_before_and_leaves_the_source_alo
         }}),
     )
     .unwrap();
-    cx.run_until(|_| !launches.is_empty());
-    let launch = launches.try_recv().unwrap();
+    let launch = cx.run_until_recv(&launches);
     assert_eq!(
         launch.fork,
         Some(ForkPoint::Before {

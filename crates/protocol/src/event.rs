@@ -119,6 +119,12 @@ pub enum ServerEvent {
         session_id: String,
         request: crate::PreviewRequest,
     },
+    /// The [`Self::PreviewRequest`] `request_id` is no longer waited for: the
+    /// call that asked has gone, or its turn was interrupted. The client stops
+    /// waiting on its page for it and sends no reply.
+    PreviewRequestCancelled {
+        request_id: u64,
+    },
     /// The threads a [`Topic::Preview`]'s client renders, each as it stood
     /// when rendering came to that client: the answer to subscribing, and a
     /// push whenever the set changes. A thread that leaves the set is
@@ -378,6 +384,9 @@ pub struct ProvidersStatus {
     /// Environment-variable names present for each profile. Values never cross
     /// the protocol boundary.
     pub secret_names: HashMap<String, HashSet<String>>,
+    /// Why the host's saved secrets could not be read: then no name above is
+    /// saved as far as clients can tell, and the host saves none.
+    pub secrets_unreadable: Option<String>,
     /// Native plugin catalogs of the profiles a client asked about: for each,
     /// the listing from outside any project and the listing of the one
     /// project last asked about.
@@ -690,6 +699,9 @@ pub struct SessionActivity {
     pub wakes: ThreadWakes,
     pub waiting_for_approval: bool,
     pub waiting_for_input: bool,
+    /// The host refuses to settle the thread now: something of it runs or
+    /// waits on the user.
+    pub settle_blocked: bool,
     /// The latest run ended in an error and nothing has run since.
     pub failed: bool,
     pub unread: bool,
@@ -733,9 +745,9 @@ impl BackgroundActivity {
 /// What wakes a thread later though nothing of it runs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadWakes {
-    /// Numbers of the pull requests a watch that is not paused follows.
+    /// The pull requests a watch that is not paused follows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pull_requests: Vec<u64>,
+    pub pull_requests: Vec<tcode_core::pull_request::PullRequestKey>,
     /// When its earliest scheduled message is due (unix seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_at: Option<u64>,
@@ -818,6 +830,11 @@ pub struct SessionStatus {
     pub terminal_height: f32,
     pub delivery_in_flight: Option<u64>,
     pub activity: SessionActivity,
+    /// The next turn waits on the provider, which runs none yet: it is
+    /// starting, taking new settings, or taking the message. An interrupt
+    /// stops that.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preparing_turn: bool,
     /// An interrupt was accepted by the provider and its turn has not ended yet.
     pub stopping: bool,
     /// When that first interrupt went out (unix ms).
@@ -828,6 +845,13 @@ pub struct SessionStatus {
     /// The harness's standing goal (Codex `thread/goal`, Claude Code `/goal`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<agent::Goal>,
+    /// What the harness lets a client do with that goal; none when it has
+    /// no goal a client sets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_control: Option<agent::GoalControl>,
+    /// The harness compacts its context when asked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub manual_compaction: bool,
     /// What a rewind does in this thread and whether one can start now; none
     /// when its harness, or this thread's session, has no rewind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1185,6 +1209,12 @@ pub enum RuntimeToast {
         profile_id: String,
         target: PluginOperationTarget,
         detail: String,
+    },
+    /// The user stopped it before the harness's command ended.
+    PluginOperationCancelled {
+        operation: RuntimeOperationId,
+        profile_id: String,
+        target: PluginOperationTarget,
     },
 }
 

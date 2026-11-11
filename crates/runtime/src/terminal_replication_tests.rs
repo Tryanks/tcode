@@ -7,8 +7,9 @@
 
 use std::time::{Duration, Instant};
 
-use super::p4b_tests::{fixture, linked, next, observed_events};
+use super::p4b_tests::{fixture_on, linked, next, observed_events};
 use super::*;
+use crate::clock::ManualClock;
 use tcode_protocol::terminal::{
     CellWidth, HISTORY_LIMIT, TerminalCell, TerminalFrame, TerminalLink, TerminalRow, TerminalStyle,
 };
@@ -19,6 +20,8 @@ struct Replica {
     frame: TerminalFrame,
     events: async_channel::Receiver<EventEnvelope>,
     terminal_id: u64,
+    /// The host's time, which this client turns while it waits for a frame.
+    clock: Arc<ManualClock>,
 }
 
 impl Replica {
@@ -27,6 +30,7 @@ impl Replica {
         link: &HostLink,
         events: async_channel::Receiver<EventEnvelope>,
         terminal_id: u64,
+        clock: &Arc<ManualClock>,
     ) -> Self {
         link.subscribe(Subscription {
             known_index: None,
@@ -43,6 +47,7 @@ impl Replica {
             frame: *frame,
             events,
             terminal_id,
+            clock: clock.clone(),
         }
     }
 
@@ -69,13 +74,22 @@ impl Replica {
         }
     }
 
-    /// Wait for the next event the host delivers, and apply it.
+    /// Wait for the next event the host delivers, and apply it. A frame the
+    /// host holds for its frame boundary comes due as the clock reaches it.
     fn next(&mut self) {
-        let envelope = self
-            .events
-            .recv_blocking()
-            .expect("the host stopped delivering events");
-        self.apply(envelope);
+        loop {
+            let delivered = smol::block_on(smol::future::or(
+                async { Some(self.events.recv().await) },
+                async {
+                    self.clock.advance_to_next_timer().await;
+                    None
+                },
+            ));
+            if let Some(envelope) = delivered {
+                self.apply(envelope.expect("the host stopped delivering events"));
+                return;
+            }
+        }
     }
 
     /// Take the host's events until the replica matches the host grid. A
@@ -205,11 +219,14 @@ struct Session {
     session_id: String,
     terminal_id: u64,
     terminal: Arc<term::Terminal>,
+    clock: Arc<ManualClock>,
 }
 
 /// Open a terminal panel and take a host handle for the PTY behind it.
 fn terminal_session() -> Session {
-    let (host, mux, link, session_id) = fixture();
+    let clock =
+        ManualClock::starting_at(std::time::UNIX_EPOCH + Duration::from_secs(1_780_000_000));
+    let (host, mux, link, session_id) = fixture_on(clock.host_clock());
     let events = observed_events(&link);
     link.command_blocking(Command::ToggleTerminalPanel {
         session_id: session_id.clone(),
@@ -227,7 +244,7 @@ fn terminal_session() -> Session {
     )
     .unwrap()
     .expect("a spawned terminal");
-    let watch = Replica::attach(&link, events, terminal_id);
+    let watch = Replica::attach(&link, events, terminal_id, &clock);
     Session {
         _host: host,
         mux,
@@ -236,6 +253,7 @@ fn terminal_session() -> Session {
         session_id,
         terminal_id,
         terminal,
+        clock,
     }
 }
 
@@ -328,7 +346,7 @@ fn late_attach_and_live_bursts_reproduce_modes_resize_and_retained_history() {
 
     let late = linked(&session.mux);
     let late_events = observed_events(&late);
-    let mut replica = Replica::attach(&late, late_events, session.terminal_id);
+    let mut replica = Replica::attach(&late, late_events, session.terminal_id, &session.clock);
     let host = host_frame(&session.terminal);
     assert_eq!(
         difference(&replica.frame, &host),
@@ -390,7 +408,12 @@ fn two_mux_clients_share_one_grid_and_one_pty() {
 
     let second_link = linked(&session.mux);
     let second_events = observed_events(&second_link);
-    let mut second = Replica::attach(&second_link, second_events, session.terminal_id);
+    let mut second = Replica::attach(
+        &second_link,
+        second_events,
+        session.terminal_id,
+        &session.clock,
+    );
     assert_eq!(difference(&second.frame, &session.watch.frame), None);
 
     // Live output reaches both, and a resize is authoritative for both.
@@ -414,7 +437,12 @@ fn two_mux_clients_share_one_grid_and_one_pty() {
             after: None,
         })
         .unwrap();
-    let mut rejoined = Replica::attach(&second_link, second.events.clone(), session.terminal_id);
+    let mut rejoined = Replica::attach(
+        &second_link,
+        second.events.clone(),
+        session.terminal_id,
+        &session.clock,
+    );
     session.watch.settle(&session.terminal);
     rejoined.settle(&session.terminal);
 
@@ -478,7 +506,7 @@ fn attachment_between_output_chunks_and_resize_preserves_contiguous_history() {
     session.wait_for("PAUSED");
     let late = linked(&session.mux);
     let late_events = observed_events(&late);
-    let mut replica = Replica::attach(&late, late_events, session.terminal_id);
+    let mut replica = Replica::attach(&late, late_events, session.terminal_id, &session.clock);
     session.resize(88, 21);
     session.send("continue\r");
     session.wait_for("BUSY");
@@ -546,12 +574,12 @@ fn projection_sends_changed_rows_and_defers_bursty_history_until_a_stable_gap() 
         })
         .unwrap();
     session.resize(100, 30);
-    let mut projection = TerminalProjection::new();
-    let mut replica = projection.reset(&session.terminal);
+    // The projection is handed the host's time; these are moments of it.
     let start = Instant::now();
+    let mut projection = TerminalProjection::new();
+    let mut replica = projection.reset(&session.terminal, start);
     session.terminal.grid().feed(b"one row\r\n");
-    projection.last_projected = start;
-    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal) else {
+    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal, start) else {
         panic!("changed content must produce a delta");
     };
     assert!(!delta.rows_replaced.is_empty());
@@ -561,20 +589,20 @@ fn projection_sends_changed_rows_and_defers_bursty_history_until_a_stable_gap() 
     );
     replica.apply(&delta);
     assert!(difference(&replica, &host_frame(&session.terminal)).is_none());
-    projection.last_projected = start + Duration::from_millis(16);
+    let frame = start + Duration::from_millis(16);
     assert!(
-        projection.update(&session.terminal).is_none(),
+        projection.update(&session.terminal, frame).is_none(),
         "a quiet grid has no content to send"
     );
     // A full screen that scrolls by a line moves the subscriber's rows up
     // rather than sending each of them again.
     session.terminal.grid().feed(&b"filler\r\n".repeat(40));
-    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal) else {
+    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal, frame) else {
         panic!("changed content must produce a delta");
     };
     replica.apply(&delta);
     session.terminal.grid().feed(b"one more row\r\n");
-    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal) else {
+    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal, frame) else {
         panic!("changed content must produce a delta");
     };
     assert_eq!(delta.scrolled, 1);
@@ -595,8 +623,7 @@ fn projection_sends_changed_rows_and_defers_bursty_history_until_a_stable_gap() 
             session.terminal.grid().feed(&chunk);
             last_output = now;
         }
-        projection.last_projected = now;
-        match projection.update(&session.terminal) {
+        match projection.update(&session.terminal, now) {
             Some(TerminalUpdate::Delta(delta)) => {
                 assert!(
                     delta.history.is_none(),
@@ -618,8 +645,8 @@ fn projection_sends_changed_rows_and_defers_bursty_history_until_a_stable_gap() 
     // where the earlier burst belongs, and must restart the quiet interval.
     session.terminal.grid().feed(b"tail\r\n");
     last_output += Duration::from_millis(32);
-    projection.last_projected = last_output;
-    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal) else {
+    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal, last_output)
+    else {
         panic!("the tail must update the visible screen");
     };
     assert!(delta.history.is_none());
@@ -630,10 +657,14 @@ fn projection_sends_changed_rows_and_defers_bursty_history_until_a_stable_gap() 
     .unwrap()
     .len();
     replica.apply(&delta);
-    projection.last_projected = last_output + Duration::from_millis(99);
-    assert!(projection.update(&session.terminal).is_none());
-    projection.last_projected = last_output + Duration::from_millis(100);
-    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal) else {
+    assert!(
+        projection
+            .update(&session.terminal, last_output + Duration::from_millis(99))
+            .is_none()
+    );
+    let Some(TerminalUpdate::Delta(delta)) =
+        projection.update(&session.terminal, last_output + Duration::from_millis(100))
+    else {
         panic!("a stable gap must flush the retained history");
     };
     assert!(

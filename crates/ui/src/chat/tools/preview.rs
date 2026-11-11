@@ -107,7 +107,7 @@ enum Tool<'a> {
 }
 
 pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView + 'a>> {
-    let on = |name: &str| call.served(SERVERS, &[name], true);
+    let on = |name: &str| call.served(SERVERS, &[name]);
     let tool = if on("preview_open") {
         Tool::Open(call.input::<Url<'a>>()?.url)
     } else if on("preview_navigate") {

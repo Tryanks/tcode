@@ -4,10 +4,9 @@
 //! the head that was reviewed. The project's checkout is never touched.
 
 use std::{
-    io::Read as _,
     path::{Path, PathBuf},
     process::Stdio,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tcode_core::pull_request::{StackRebaseFailure, StackRebaseGitStep, StackRebaseStep};
 
@@ -61,7 +60,7 @@ enum Run {
 }
 
 fn git(dir: &Path, env: &[(String, String)], args: &[&str]) -> Run {
-    let mut command = crate::process::command("git");
+    let mut command = crate::process::async_command("git");
     command
         .args(args)
         .current_dir(dir)
@@ -72,48 +71,29 @@ fn git(dir: &Path, env: &[(String, String)], args: &[&str]) -> Run {
         .envs(env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = match command.spawn() {
+        .stderr(Stdio::piped())
+        // A command still running at the timeout is killed with its future.
+        .kill_on_drop(true);
+    let child = match command.spawn() {
         Ok(child) => child,
         Err(error) => return Run::Failed(error.to_string()),
     };
-    let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut text = String::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_string(&mut text);
+    smol::block_on(smol::future::or(
+        async {
+            match child.output().await {
+                Ok(output) => Run::Exited {
+                    ok: output.status.success(),
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                },
+                Err(error) => Run::Failed(error.to_string()),
             }
-            text
-        })
-    };
-    let stdout = drain(child.stdout.take().map(|pipe| Box::new(pipe) as _));
-    let stderr = drain(child.stderr.take().map(|pipe| Box::new(pipe) as _));
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if started.elapsed() < GIT_TIMEOUT => {
-                std::thread::sleep(Duration::from_millis(20))
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-        }
-    };
-    let (stdout, stderr) = (
-        stdout.join().unwrap_or_default(),
-        stderr.join().unwrap_or_default(),
-    );
-    match status {
-        Some(status) => Run::Exited {
-            ok: status.success(),
-            stdout,
-            stderr,
         },
-        None => Run::TimedOut,
-    }
+        async {
+            smol::Timer::after(GIT_TIMEOUT).await;
+            Run::TimedOut
+        },
+    ))
 }
 
 /// A directory removed with everything in it once the rebase ends.

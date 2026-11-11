@@ -48,8 +48,9 @@ pub(crate) struct TerminalProjection {
     history_deadline: Option<Instant>,
     /// A projection is already scheduled; further wakeups coalesce into it.
     pub(crate) scheduled: bool,
-    pub(crate) last_projected: Instant,
-    last_cwd: Instant,
+    /// When [`Self::project`] last ran; `None` until it first does.
+    pub(crate) last_projected: Option<Instant>,
+    last_cwd: Option<Instant>,
     pub(crate) bell: bool,
     pub(crate) clipboard: Option<TerminalClipboard>,
 }
@@ -61,16 +62,31 @@ impl TerminalProjection {
             scrolled: 0,
             history_deadline: None,
             scheduled: false,
-            // Far enough in the past that the first wakeup projects immediately.
-            last_projected: Instant::now() - FRAME_INTERVAL,
-            last_cwd: Instant::now() - CWD_INTERVAL,
+            last_projected: None,
+            last_cwd: None,
             bell: false,
             clipboard: None,
         }
     }
 
-    /// Rebuild the whole frame from the terminal's current state.
-    pub(crate) fn reset(&mut self, terminal: &term::Terminal) -> TerminalFrame {
+    /// The update that carries a subscriber to the terminal's state at
+    /// `now`, the host's time: the whole frame once the style table is
+    /// exhausted, else the smallest delta.
+    pub(crate) fn project(
+        &mut self,
+        terminal: &term::Terminal,
+        now: Instant,
+    ) -> Option<TerminalUpdate> {
+        self.last_projected = Some(now);
+        if self.styles_exhausted() {
+            Some(TerminalUpdate::Frame(self.reset(terminal, now)))
+        } else {
+            self.update(terminal, now)
+        }
+    }
+
+    /// Rebuild the whole frame from the terminal's current state at `now`.
+    pub(crate) fn reset(&mut self, terminal: &term::Terminal, now: Instant) -> TerminalFrame {
         let snapshot = terminal.snapshot_since(0, HISTORY_LIMIT);
         let mut projector = Projector::default();
         let visible = (0..snapshot.screen_lines)
@@ -93,13 +109,17 @@ impl TerminalProjection {
         };
         self.scrolled = snapshot.lines_evicted + snapshot.history_size as u64;
         self.history_deadline = None;
-        self.last_cwd = Instant::now();
+        self.last_cwd = Some(now);
         self.frame.clone()
     }
 
     /// Diff the terminal's current state into the smallest update that carries
     /// a subscriber from `frame` to it.
-    pub(crate) fn update(&mut self, terminal: &term::Terminal) -> Option<TerminalUpdate> {
+    pub(crate) fn update(
+        &mut self,
+        terminal: &term::Terminal,
+        now: Instant,
+    ) -> Option<TerminalUpdate> {
         let scrolled_now = terminal.grid().scrolled_lines();
         let pending = scrolled_now.saturating_sub(self.scrolled);
         // The alternate screen swaps in a grid with its own scrollback counter,
@@ -115,7 +135,7 @@ impl TerminalProjection {
             || (pending == 0
                 && self
                     .history_deadline
-                    .is_some_and(|deadline| self.last_projected >= deadline));
+                    .is_some_and(|deadline| now >= deadline));
         let (since, budget) = if republish {
             (0, HISTORY_LIMIT)
         } else {
@@ -178,7 +198,7 @@ impl TerminalProjection {
                     .collect(),
             ))
         } else {
-            self.history_deadline = Some(self.last_projected + HISTORY_QUIET_INTERVAL);
+            self.history_deadline = Some(now + HISTORY_QUIET_INTERVAL);
             None
         };
         self.scrolled = scrolled;
@@ -192,7 +212,7 @@ impl TerminalProjection {
                 exited: snapshot.exited,
                 code: snapshot.exit_code,
             });
-        let working_directory = self.refresh_cwd(terminal);
+        let working_directory = self.refresh_cwd(terminal, now);
 
         let delta = TerminalDelta {
             cols,
@@ -231,11 +251,18 @@ impl TerminalProjection {
         Some(TerminalUpdate::Delta(delta))
     }
 
-    fn refresh_cwd(&mut self, terminal: &term::Terminal) -> Option<std::path::PathBuf> {
-        if self.last_cwd.elapsed() < CWD_INTERVAL {
+    fn refresh_cwd(
+        &mut self,
+        terminal: &term::Terminal,
+        now: Instant,
+    ) -> Option<std::path::PathBuf> {
+        if self
+            .last_cwd
+            .is_some_and(|at| now.saturating_duration_since(at) < CWD_INTERVAL)
+        {
             return None;
         }
-        self.last_cwd = Instant::now();
+        self.last_cwd = Some(now);
         let cwd = terminal.working_directory();
         (Some(&cwd) != self.frame.working_directory.as_ref()).then_some(cwd)
     }

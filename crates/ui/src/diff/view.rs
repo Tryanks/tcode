@@ -1304,9 +1304,9 @@ impl DiffPanel {
                 .or_else(|| {
                     self.git_preview
                         .as_ref()
-                        .and_then(|p| p.result.default_base.clone())
+                        .and_then(|p| p.result.base.clone())
                 })
-                .unwrap_or_else(|| "HEAD".to_string());
+                .unwrap_or_default();
             let panel = cx.entity();
             let session_base = session.clone();
             let current_label = current.clone();

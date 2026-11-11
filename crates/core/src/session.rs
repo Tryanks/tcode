@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use agent::{
     AgentEvent, ApprovalRequest, ChangeCompleteness, DeltaKind, FileChange, ItemContent,
-    ItemStatus, PlanStep, ResumeCursor, ThreadItem, TokenUsage, TurnStatus, UserInputDelivery,
-    UserInputQuestion,
+    ItemStatus, PlanStep, ResumeCursor, ThreadItem, TokenUsage, ToolFamily, TurnStatus,
+    UserInputDelivery, UserInputQuestion,
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +26,7 @@ pub use streams::{ItemStreams, SupersededStream};
 pub use superseded::{TurnSnapshots, drop_turn_diffs};
 
 /// Bump when the persisted turn-boundary policy changes.
-pub const TURN_INDEX_FOLD_VERSION: u32 = 7;
+pub const TURN_INDEX_FOLD_VERSION: u32 = 9;
 
 fn synthetic_entry_id(
     prefix: &str,
@@ -587,6 +587,16 @@ pub enum EntryContent {
         mode: Option<agent::RewindMode>,
         failure: agent::RewindFailure,
     },
+    /// A row of the log this build cannot read, as it is stored
+    /// ([`AgentEvent::UnreadableRecord`]).
+    Unreadable {
+        line: String,
+    },
+    /// A record too large to send to this client, kept on the host
+    /// ([`AgentEvent::RecordWithheld`]).
+    Withheld {
+        bytes: u64,
+    },
 }
 
 /// What a rewind did, as its divider shows it.
@@ -698,9 +708,18 @@ impl LatestActivity {
             },
             ItemContent::ImageRead { path, .. } => Self::Read { path: clip(path) },
             ItemContent::WebSearch { query } => Self::WebSearch { query: clip(query) },
-            ItemContent::ToolCall { name, input, .. } => Self::Tool {
-                name: clip(name),
-                target: identifying_argument(input).map(|target| clip(&target)),
+            ItemContent::ToolCall {
+                name,
+                input,
+                family,
+                ..
+            } => match family.as_deref() {
+                Some(ToolFamily::Read { path, .. }) => Self::Read { path: clip(path) },
+                Some(ToolFamily::WebSearch { query, .. }) => Self::WebSearch { query: clip(query) },
+                _ => Self::Tool {
+                    name: clip(name),
+                    target: identifying_argument(input).map(|target| clip(&target)),
+                },
             },
             ItemContent::Subagent { description, .. } => Self::Subagent {
                 description: clip(description),
@@ -1233,9 +1252,7 @@ impl Timeline {
             | AgentEvent::McpServersNotAttached
             | AgentEvent::BackgroundTasksChanged { .. }
             | AgentEvent::SettingsApplied { .. }
-            | AgentEvent::BackgroundTaskList { .. }
-            | AgentEvent::ModelFallbackDetected { .. }
-            | AgentEvent::TurnBlocked { .. } => {}
+            | AgentEvent::BackgroundTaskList { .. } => {}
             AgentEvent::TurnChangesUpdated {
                 turn_id,
                 changes,
@@ -1515,7 +1532,7 @@ impl Timeline {
             }
             // Logged once where the live provider event arrives; a fold also
             // replays stored records, which would log every old warning again.
-            AgentEvent::Warning { .. } | AgentEvent::PlanResolved { .. } => {}
+            AgentEvent::Warning { .. } => {}
             AgentEvent::ProviderStartFailed { error } => {
                 let turn = self.ensure_turn();
                 let id = self.synthetic_id("error", ts);
@@ -1605,21 +1622,6 @@ impl Timeline {
                 self.plan_explanation = explanation.clone();
             }
             AgentEvent::GoalUpdated { goal } => self.goal = goal.clone(),
-            AgentEvent::ProposedPlanDelta { item_id, text } => {
-                self.apply_delta(ts, item_id, DeltaKind::AssistantText, text);
-            }
-            AgentEvent::ProposedPlan { item_id, markdown } => {
-                self.upsert_item(
-                    ts,
-                    &ThreadItem {
-                        id: item_id.clone(),
-                        parent_item_id: None,
-                        content: ItemContent::Plan {
-                            markdown: markdown.clone(),
-                        },
-                    },
-                );
-            }
             AgentEvent::ControlAction(action) => {
                 let turn = self.ensure_turn();
                 let id = self.synthetic_id("control", ts);
@@ -1710,6 +1712,30 @@ impl Timeline {
                         request: request.clone(),
                         answer: answer.clone(),
                     },
+                    ts,
+                    finished_ts: None,
+                    background: false,
+                    turn,
+                }));
+            }
+            AgentEvent::UnreadableRecord { line } => {
+                let turn = self.ensure_turn();
+                let id = self.synthetic_id("unreadable", ts);
+                self.entries.push(Arc::new(TimelineEntry {
+                    id,
+                    content: EntryContent::Unreadable { line: line.clone() },
+                    ts,
+                    finished_ts: None,
+                    background: false,
+                    turn,
+                }));
+            }
+            AgentEvent::RecordWithheld { bytes } => {
+                let turn = self.ensure_turn();
+                let id = self.synthetic_id("withheld", ts);
+                self.entries.push(Arc::new(TimelineEntry {
+                    id,
+                    content: EntryContent::Withheld { bytes: *bytes },
                     ts,
                     finished_ts: None,
                     background: false,
@@ -1951,7 +1977,7 @@ impl Timeline {
         if item.parent_item_id.is_some() {
             return;
         }
-        let mut incoming = EntryContent::Item(item.content.clone());
+        let incoming = EntryContent::Item(item.content.clone());
         if let Some(position) = self.item_entry(&item.id) {
             let entry = Arc::make_mut(&mut self.entries[position]);
             entry.content = merge_content(
@@ -1964,29 +1990,7 @@ impl Timeline {
                 EntryContent::Item(ItemContent::UserMessage { .. })
             ) {
                 self.close_undo();
-                let turn = self.begin_user_turn();
-                if self.entries.iter().any(|entry| {
-                    entry.turn == turn
-                        && matches!(
-                            entry.content,
-                            EntryContent::Item(ItemContent::UserMessage { .. })
-                                | EntryContent::Steer { .. }
-                        )
-                }) {
-                    // Legacy logs represented a steer as a second UserMessage
-                    // item. Preserve their historical accepted rendering.
-                    let EntryContent::Item(ItemContent::UserMessage { text, attachments }) =
-                        incoming
-                    else {
-                        unreachable!();
-                    };
-                    incoming = EntryContent::Steer {
-                        text,
-                        status: SteeringStatus::Accepted,
-                        attachments,
-                    };
-                }
-                turn
+                self.begin_user_turn()
             } else {
                 self.ensure_turn()
             };
@@ -2138,15 +2142,10 @@ impl Timeline {
     }
 }
 
-/// The tool a subagent reports through: tcode_control's `report_result`, or the
-/// `tcode_report` server's in transcripts recorded before it moved there.
+/// The tool a subagent reports through: tcode_control's `report_result`.
 pub fn is_report_result_tool(name: &str) -> bool {
     let name = agent::ToolName::parse(name);
-    name.tool == "report_result"
-        && matches!(
-            name.server,
-            Some(agent::McpRegistration::SERVER_NAME_CONTROL | "tcode_report")
-        )
+    name.tool == "report_result" && name.server == Some(agent::McpRegistration::SERVER_NAME_CONTROL)
 }
 
 /// Merge an authoritative item snapshot over an existing entry, keeping
@@ -2364,6 +2363,7 @@ mod tests {
                         input: json!({ "path": "src/lib.rs", "limit": 10 }),
                         output: None,
                         status: ItemStatus::InProgress,
+                        family: None,
                     },
                 )),
                 Some(tool.clone()),
@@ -2426,6 +2426,7 @@ mod tests {
                     input,
                     output: None,
                     status: ItemStatus::InProgress,
+                    family: None,
                 },
             })
         };
@@ -2470,6 +2471,7 @@ mod tests {
                 input: json!({ "file_path": "src/lib.rs" }),
                 output: (status == ItemStatus::Completed).then(|| "1\tfn main() {}".into()),
                 status,
+                family: None,
             },
         };
         let timeline = Timeline::fold_events([
@@ -3153,55 +3155,6 @@ mod tests {
             "first.txt"
         );
         assert!(timeline.turns[1].changes.is_none());
-    }
-
-    #[test]
-    fn fold_marks_only_mid_turn_user_messages_as_steered() {
-        let events = vec![
-            user_msg("user-a", "A"),
-            AgentEvent::TurnStarted {
-                turn_id: "t1".into(),
-            },
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "assistant-a".into(),
-                parent_item_id: None,
-                content: ItemContent::AssistantMessage {
-                    text: "working".into(),
-                    summarized: false,
-                },
-            }),
-            user_msg("user-b", "B"),
-            AgentEvent::TurnCompleted {
-                turn_id: "t1".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            user_msg("user-c", "C"),
-            AgentEvent::TurnStarted {
-                turn_id: "t2".into(),
-            },
-        ];
-        let timeline = Timeline::fold_events(events);
-        let users: Vec<(&str, Option<SteeringStatus>)> = timeline
-            .entries
-            .iter()
-            .filter_map(|entry| match &entry.content {
-                EntryContent::Item(ItemContent::UserMessage { text, .. }) => {
-                    Some((text.as_str(), None))
-                }
-                EntryContent::Steer { text, status, .. } => Some((text.as_str(), Some(*status))),
-                _ => None,
-            })
-            .collect();
-
-        assert_eq!(
-            users,
-            vec![
-                ("A", None),
-                ("B", Some(SteeringStatus::Accepted)),
-                ("C", None),
-            ]
-        );
     }
 
     #[test]

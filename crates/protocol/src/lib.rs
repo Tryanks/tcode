@@ -28,7 +28,7 @@ pub use pull_request::{
     PullRequestReviewerCandidates, PullRequestReviewerKind, PullRequestReviewerState,
     PullRequestStackActionState, PullRequestStackHead, PullRequestStackLayerState,
     PullRequestStackPushAccess, PullRequestThreadReplies, PullRequestViewedFiles,
-    PullRequestViewedState,
+    PullRequestViewedState, max_pull_request_media_bytes,
 };
 pub mod terminal;
 mod wire;
@@ -320,13 +320,47 @@ pub use wire::{
 // unreadable}, and SessionContentHits a SessionContentHits {hits, unreadable}.
 // tcode/group/1 no longer has the full rejection. RuntimeError gains
 // file_unreadable. GitStatusStatus carries git's error. HostProblem gains
-// cli_failed. PullRequestStack's url may be absent (GitHub gives none).
+// cli_failed. PullRequestStack has no url (GitHub gives no page for one).
 // GitDiffScope and SourceTool have no unknown value. ExternalImportState's
 // finished carries failed, the ImportFailure {file, error} of each thread an
 // import could not bring in, which skipped no longer counts.
 // PullRequestSnapshot's updated_at may be absent (Azure DevOps keeps none).
 // RuntimeError gains mcp_unavailable.
 // The user_message item has no context_len.
+// PullRequestFiles' changed_files may be absent (the host gave no count).
+// PullRequestFile gains url, the file's page on the host.
+// ThreadWakes' pull_requests are PullRequestKeys, not numbers.
+// GitDiffResult's default_base is base, the one a branch diff was read against.
+// SessionActivity gains settle_blocked.
+// WriteRelaunchMarker's session_id is absent rather than empty for no thread.
+// SetFollowUp carries on and note instead of a FollowUp: the host stamps since.
+// SessionStatus gains preparing_turn.
+// ServerEvent gains preview_request_cancelled.
+// Command gains cancel_plugin_operation, RuntimeToast plugin_operation_cancelled.
+// ProvidersStatus gains secrets_unreadable.
+// The agent event stream gains unreadable_record {line}: a row of a thread's
+// log the host cannot read is sent as it is stored instead of left out.
+// The agent event stream loses plan_resolved, proposed_plan_delta,
+// proposed_plan, model_fallback_detected and turn_blocked, and
+// approval_resolved's decision no longer reads approve, approve_for_session
+// or deny: rows of them are unreadable_record.
+// The agent event stream gains record_withheld {bytes}: a history window or
+// page sends it for a record longer than the client's line, where the whole
+// reply was the history_record_too_large error.
+// OptionRole gains effort, context_window, speed and thinking. SelectOption
+// gains speed and summary (a PermissionSummary of profile, sandbox, approval
+// and reviewer); Codex's current permissions carry a summary, not a
+// description.
+// SessionStatus gains goal_control and manual_compaction.
+// ProviderSnapshot gains supported_from, the oldest release Tcode supports,
+// present when the probed CLI is older.
+// ExternalThread gains profile_id, the profile whose CLI keeps the thread.
+// The tool_call item gains family, what its adapter read the call to be:
+// read {path, first_line, note}, whose output is the lines read; search
+// {scope, pattern, path, glob, hits}, each hit {path, line, text}; question
+// {questions}, each {question, options, answers}; fetch {url, prompt};
+// web_search {query, links}, each link {title, url}; load_tools {query,
+// tools}; skill {name}.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

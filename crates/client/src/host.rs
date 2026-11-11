@@ -129,10 +129,37 @@ pub fn persistent_device_id(stored: Option<String>, store: impl FnOnce(&str)) ->
     id
 }
 
+/// A file of this client's own that exists and could not be used: what it
+/// holds is not used, and nothing is written over it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileFailure {
+    /// The file as the user finds it: a file of the data directory, such as
+    /// `hosts.json`, or a browser's site-data key.
+    pub file: String,
+    pub error: String,
+}
+
+impl FileFailure {
+    pub fn new(file: impl Into<String>, error: impl std::fmt::Display) -> Self {
+        Self {
+            file: file.into(),
+            error: error.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for FileFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.file, self.error)
+    }
+}
+
 /// Preferences which belong to the client and are never sent to the host.
+/// A record holding a value this build does not know cannot be read.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientPreferences {
-    pub appearance: Option<String>,
+    pub appearance: Option<tcode_core::settings::ThemeMode>,
+    /// A language code, or `"system"` for the system's.
     pub language: Option<String>,
     pub device_name: Option<String>,
     /// Opaque, client-local UI restoration state. The shell owns its schema.
@@ -150,9 +177,8 @@ pub struct ClientPreferences {
     pub right_panel_width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_collapsed: Option<bool>,
-    /// `"flat"` or `"grouped"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sidebar_layout: Option<String>,
+    pub sidebar_layout: Option<tcode_core::settings::SidebarLayout>,
     /// `None` until this device first arranges its workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<WorkspacePreference>,
@@ -253,18 +279,23 @@ pub trait ClientHost: 'static {
         }
     }
 
-    fn load_preferences(&self) -> ClientPreferences {
-        ClientPreferences::default()
+    /// What this client saved; nothing saved is the defaults.
+    fn load_preferences(&self) -> Result<ClientPreferences, FileFailure> {
+        Ok(ClientPreferences::default())
     }
 
-    fn save_preferences(&self, _preferences: &ClientPreferences) {}
+    /// Refused, with why, while the saved preferences cannot be read.
+    fn save_preferences(&self, _preferences: &ClientPreferences) -> Result<(), FileFailure> {
+        Ok(())
+    }
 
     fn outbox_storage(&self, _host_id: &str) -> Option<std::sync::Arc<dyn crate::outbox::Storage>> {
         None
     }
 
-    fn load_hosts(&self) -> Vec<PairedHost>;
-    fn save_hosts(&self, hosts: &[PairedHost]);
+    /// The saved machines; nothing saved is none.
+    fn load_hosts(&self) -> Result<Vec<PairedHost>, FileFailure>;
+    fn save_hosts(&self, hosts: &[PairedHost]) -> Result<(), FileFailure>;
 
     /// Wakes after the saved machines change, for as long as it is held:
     /// a group's roster arrives with a pairing, a connection or the machine
@@ -276,23 +307,31 @@ pub trait ClientHost: 'static {
 
     /// Replace one pairing while preserving unrelated saved machines. Native
     /// adapters make these mutations atomic with transport address updates.
-    fn remember_host(&self, host: PairedHost) {
-        let mut hosts = self.load_hosts();
+    fn remember_host(&self, host: PairedHost) -> Result<(), FileFailure> {
+        let mut hosts = self.load_hosts()?;
         crate::pairing::remember_host(&mut hosts, host);
-        self.save_hosts(&hosts);
+        self.save_hosts(&hosts)
     }
 
-    fn remove_host(&self, host_id: &str) {
-        let mut hosts = self.load_hosts();
+    fn remove_host(&self, host_id: &str) -> Result<(), FileFailure> {
+        let mut hosts = self.load_hosts()?;
         hosts.retain(|host| host.host_id != host_id);
-        self.save_hosts(&hosts);
+        self.save_hosts(&hosts)
     }
 
+    /// Bookkeeping no one waits on, so a failure is only logged.
     fn stamp_connected(&self, host_id: &str, timestamp: u64) {
-        let mut hosts = self.load_hosts();
-        if let Some(host) = hosts.iter_mut().find(|host| host.host_id == host_id) {
-            host.last_connected_unix = Some(timestamp);
-            self.save_hosts(&hosts);
+        let stamped = self.load_hosts().and_then(|mut hosts| {
+            match hosts.iter_mut().find(|host| host.host_id == host_id) {
+                Some(host) => {
+                    host.last_connected_unix = Some(timestamp);
+                    self.save_hosts(&hosts)
+                }
+                None => Ok(()),
+            }
+        });
+        if let Err(error) = stamped {
+            log::error!("could not record machine connection: {error}");
         }
     }
 
@@ -321,9 +360,9 @@ pub trait ClientHost: 'static {
         &self,
         invite: PairInvite,
         address: Option<std::net::IpAddr>,
-    ) -> HostFuture<'_, Result<PairedHost, String>> {
+    ) -> HostFuture<'_, Result<PairedHost, crate::pairing::PairError>> {
         let _ = (invite, address);
-        Box::pin(async { Err("this client cannot add machines".into()) })
+        Box::pin(async { Err(crate::pairing::PairError::Unsupported) })
     }
 
     /// Open a reconnecting link. Dropping the returned channels ends it.

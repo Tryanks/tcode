@@ -85,7 +85,7 @@ impl AppState {
                 // subscriber rebuilds the frame. A later one reads that same
                 // retained frame and continues from the shared delta sequence.
                 Topic::Terminal { terminal_id } => {
-                    self.refresh_terminal_projection(*terminal_id);
+                    self.refresh_terminal_projection(*terminal_id, cx);
                 }
                 Topic::CommandOutput { .. } => self.open_command_output(&subscription.topic),
                 Topic::Preview { client } => self.preview_client_subscribed(client, cx),
@@ -359,10 +359,8 @@ impl AppState {
             }
             if self.residents.live.contains_key(id) {
                 self.shutdown_active(id, cx);
-            } else if let Some(parked) = self.residents.evict(id)
-                && let Runtime::Live(commands) = parked.runtime
-            {
-                let _ = commands.try_send(SessionCommand::Shutdown);
+            } else if let Some(parked) = self.residents.evict(id) {
+                parked.stop_provider();
             }
         }
         let worktrees = self
@@ -607,7 +605,7 @@ impl AppState {
 
         let moved = move_meta(&mut meta, cwd);
         meta.project_id = Some(project.id.clone());
-        meta.updated_at = now_secs();
+        meta.updated_at = cx.clock().unix_secs();
         if !by_own_turn && moved.is_none() {
             self.detach_provider_to_idle(session_id, cx);
         }
@@ -661,7 +659,7 @@ impl AppState {
             meta.worktree = Some(meta.other_worktrees.remove(index).info);
         }
         meta.cwd = cwd.to_path_buf();
-        meta.updated_at = now_secs();
+        meta.updated_at = cx.clock().unix_secs();
         session.live_cwd = cwd.to_path_buf();
         session.git_branch = None;
         session.branches.clear();
@@ -721,9 +719,13 @@ impl AppState {
             .map(|project| project.root.clone())
             .collect();
         let sessions = self.sessions.clone();
+        let roots = ExternalRoots::in_config_dirs(
+            history_dirs(&self.settings, ProviderKind::ClaudeCode),
+            history_dirs(&self.settings, ProviderKind::Codex),
+        );
         executor.unblock(move || {
             let known = existing_external_ids(&sessions);
-            let mut history = scan_recent_dirs(&ExternalRoots::detect(), &exclude);
+            let mut history = scan_recent_dirs(&roots, &exclude);
             for dir in &mut history.dirs {
                 dir.threads
                     .retain(|thread| !known.contains(&thread.external_id));
@@ -1207,8 +1209,11 @@ impl AppState {
             self.evaluate_all_settlement(cx);
         }
         match provider_secret_names(&self.settings, &self.settings_store) {
-            Ok(names) => self.providers.provider_secret_names = names,
-            Err(error) => self.report_error(RuntimeError::External(error.to_string()), cx),
+            Ok(names) => {
+                self.providers.provider_secret_names = names;
+                self.providers.secrets_unreadable = None;
+            }
+            Err(error) => self.providers.secrets_unreadable = Some(error.to_string()),
         }
         // Keep the live computer-use MCP config in step with the persisted
         // settings on every change (the server outlives any one snapshot).
@@ -1230,23 +1235,22 @@ impl AppState {
     /// Persist a restart-continuity marker naming the Settings page to reopen and
     /// the session that is active now. Written before a Screen Recording request
     /// or an explicit relaunch, so an externally-initiated quit reopens cleanly.
-    pub fn write_relaunch_marker(&self, target_id: &str, reopen_settings: &str) {
+    pub fn write_relaunch_marker(
+        &self,
+        target_id: Option<&str>,
+        reopen_settings: &str,
+    ) -> std::io::Result<()> {
         let marker = tcode_services::relaunch::RelaunchMarker {
             reopen_settings: reopen_settings.to_string(),
-            active_session: self
-                .resident(target_id)
-                .map(|session| session.meta.id.as_str())
-                .map(str::to_string),
+            active_session: target_id
+                .and_then(|id| self.resident(id))
+                .map(|session| session.meta.id.clone()),
         };
-        if let Err(err) = tcode_services::relaunch::write(self.store.root(), &marker) {
-            log::warn!("failed to write relaunch marker: {err}");
-        }
+        tcode_services::relaunch::write(self.store.root(), &marker)
     }
 
-    pub fn clear_relaunch_marker(&self) {
-        if let Err(err) = tcode_services::relaunch::clear(self.store.root()) {
-            log::warn!("failed to clear relaunch marker: {err}");
-        }
+    pub fn clear_relaunch_marker(&self) -> std::io::Result<()> {
+        tcode_services::relaunch::clear(self.store.root())
     }
 
     /// Apply a marker taken at launch: reopen the recorded session and open
@@ -1288,7 +1292,7 @@ impl AppState {
         if self.settle_thread_busy(id) {
             return None;
         }
-        self.settle_session_at(id, now_secs(), cx)
+        self.settle_session_at(id, cx.clock().unix_secs(), cx)
     }
 
     /// What settling the thread now would do beyond marking it settled.
@@ -1369,7 +1373,7 @@ impl AppState {
         }
         meta.settled_override = Some(SettledOverride::Active);
         meta.settled_at = None;
-        meta.unsettled_at = Some(now_secs());
+        meta.unsettled_at = Some(cx.clock().unix_secs());
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
         }
@@ -1388,7 +1392,7 @@ impl AppState {
             return;
         }
         if meta.pinned_at.is_none() {
-            meta.pinned_at = Some(now_secs());
+            meta.pinned_at = Some(cx.clock().unix_secs());
             meta.pin_order = order_key;
         }
         if promotes {
@@ -1450,7 +1454,7 @@ impl AppState {
         if enabled == meta.auto_settle_disabled_at.is_none() {
             return;
         }
-        meta.auto_settle_disabled_at = (!enabled).then(now_secs);
+        meta.auto_settle_disabled_at = (!enabled).then(|| cx.clock().unix_secs());
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
         }
@@ -1479,7 +1483,7 @@ impl AppState {
             meta.self_settle = None;
         }
         if meta.is_settled() {
-            meta.unsettled_at = Some(now_secs());
+            meta.unsettled_at = Some(cx.clock().unix_secs());
         }
         meta.settled_override = None;
         meta.settled_at = None;
@@ -1490,20 +1494,19 @@ impl AppState {
         self.persist_meta(&meta, cx);
     }
 
-    /// Archive a thread (reversible; it vanishes from the sidebar). Blocked while
-    /// its turn is running (returns without changing anything so the caller's
-    /// tooltip stands). The active thread is closed back to the empty state.
+    /// Archive a thread (reversible; it vanishes from the sidebar). The
+    /// command boundary refuses a thread with work in flight. The active
+    /// thread is closed back to the empty state.
     pub fn archive_session(&mut self, session_id: &str, cx: &mut HostCx) {
-        if self.turn_running_for(session_id)
-            || self
-                .sessions
-                .iter()
-                .find(|meta| meta.id == session_id)
-                .is_none_or(|meta| meta.archived_at.is_some())
+        if self
+            .sessions
+            .iter()
+            .find(|meta| meta.id == session_id)
+            .is_none_or(|meta| meta.archived_at.is_some())
         {
             return;
         }
-        self.archive_session_ids(&[session_id.to_owned()], now_secs(), cx);
+        self.archive_session_ids(&[session_id.to_owned()], cx.clock().unix_secs(), cx);
     }
 
     /// Restore an archived thread (Settings → Archived Threads → Unarchive).
@@ -1517,7 +1520,7 @@ impl AppState {
         else {
             return;
         };
-        let now = now_secs();
+        let now = cx.clock().unix_secs();
         let mut visited_changed = false;
         let ids = descendant_session_ids(&self.sessions, session_id);
         for id in ids {
@@ -1601,7 +1604,7 @@ impl AppState {
         }
         if let Some(mut meta) = self.sessions.iter().find(|m| m.id == session_id).cloned() {
             meta.title = title.to_string();
-            meta.updated_at = now_secs();
+            meta.updated_at = cx.clock().unix_secs();
             let meta = meta.clone();
             self.persist_meta(&meta, cx);
         }
@@ -1627,18 +1630,29 @@ impl AppState {
     /// their metas and event logs in one transaction, and (when
     /// `remove_worktree`) remove each git worktree they own that no remaining
     /// thread works in. A worktree they own that is not removed is recorded as
-    /// kept, so the startup sweep leaves it.
-    pub fn delete_session(&mut self, session_id: &str, remove_worktree: bool, cx: &mut HostCx) {
+    /// kept, so the startup sweep leaves it. Their uploads are removed off
+    /// the host, and the task returned ends when they are gone.
+    pub fn delete_session(
+        &mut self,
+        session_id: &str,
+        remove_worktree: bool,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<(), ProtocolError>> {
         let mut ids = descendant_session_ids(&self.sessions, session_id);
         if ids.is_empty() {
             ids.push(session_id.to_string());
         }
-        self.delete_session_ids(&ids, remove_worktree, cx);
+        self.delete_session_ids(&ids, remove_worktree, cx)
     }
 
-    fn delete_session_ids(&mut self, ids: &[String], remove_worktree: bool, cx: &mut HostCx) {
+    fn delete_session_ids(
+        &mut self,
+        ids: &[String],
+        remove_worktree: bool,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<(), ProtocolError>> {
         if ids.is_empty() {
-            return;
+            return cx.spawn_background(async { Ok(()) });
         }
         let deleted: HashSet<&str> = ids.iter().map(String::as_str).collect();
         let metas: Vec<_> = self
@@ -1730,7 +1744,7 @@ impl AppState {
         }
         // Persist the pruned last-visited map (ignore save errors — cosmetic).
         self.persist_settings(cx);
-        self.remove_thread_uploads(ids.to_vec(), cx);
+        let uploads = self.remove_thread_uploads(ids.to_vec(), cx);
         for (deleted_id, root, cwd) in worktree_removals {
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
@@ -1753,11 +1767,17 @@ impl AppState {
                 });
             });
         }
+        uploads
     }
 
     /// Permanently remove a project and all of its threads from tcode. Project
-    /// files and worktrees on disk are left in place.
-    pub fn delete_project(&mut self, project_id: &str, cx: &mut HostCx) {
+    /// files and worktrees on disk are left in place. The task returned ends
+    /// when the threads' uploads are gone.
+    pub fn delete_project(
+        &mut self,
+        project_id: &str,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<(), ProtocolError>> {
         let session_ids: Vec<String> = self
             .sessions
             .iter()
@@ -1774,7 +1794,7 @@ impl AppState {
         for id in &drafts {
             self.shutdown_active(id, cx);
         }
-        self.remove_thread_uploads(drafts, cx);
+        let draft_uploads = self.remove_thread_uploads(drafts, cx);
         let draft_destination = ConversationDestination::ProjectDraft(project_id.to_string());
         self.terminal_workspaces.remove(&draft_destination);
         let mut ids = Vec::new();
@@ -1789,7 +1809,7 @@ impl AppState {
                 }
             }
         }
-        self.delete_session_ids(&ids, false, cx);
+        let uploads = self.delete_session_ids(&ids, false, cx);
         self.enqueue_store_write(StoreWrite::RemoveProject(project_id.to_string()), cx);
         self.settings
             .collapsed_projects
@@ -1797,16 +1817,26 @@ impl AppState {
         self.persist_settings(cx);
         self.projects.retain(|project| project.id != project_id);
         self.replace_external_import_status(project_id, None, cx);
+        cx.spawn_background(async move {
+            let drafts = draft_uploads.await;
+            uploads.await.and(drafts)
+        })
     }
 
-    fn remove_thread_uploads(&self, session_ids: Vec<String>, cx: &mut HostCx) {
+    fn remove_thread_uploads(
+        &self,
+        session_ids: Vec<String>,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<(), ProtocolError>> {
         let directories = self.user_directories.clone();
-        let uploads = cx.unblock(move || directories.remove_thread_uploads(&session_ids));
-        HostCx::spawn_detached(cx, async move {
-            if let Err(error) = uploads.await {
-                log::warn!("could not remove a deleted thread's uploads: {error}");
-            }
-        });
+        cx.unblock(move || {
+            directories
+                .remove_thread_uploads(&session_ids)
+                .map_err(|error| ProtocolError {
+                    code: "uploads_not_removed".into(),
+                    message: format!("could not remove a deleted thread's uploads: {error}"),
+                })
+        })
     }
 
     /// Whether `session_id` owns live or queued work.
@@ -2338,7 +2368,7 @@ impl AppState {
             .event_records
             .get(id)
             .and_then(|log| log.records().last()?.ts)
-            .unwrap_or_else(now_millis);
+            .unwrap_or_else(|| cx.clock().unix_millis());
         if mirror_of.is_some() {
             self.native_subagent_turns.insert(id.to_string(), false);
         }
@@ -2579,3 +2609,27 @@ pub(super) fn directory_within(root: &Path, dir: &Path) -> Option<bool> {
 #[cfg(test)]
 #[path = "sessions_tests.rs"]
 mod tests;
+
+/// The config directory each `kind` profile's CLI keeps its history in, as
+/// its own variables, its Harness's, or this process's environment name it,
+/// with the profile's id (`None` for the built-in one).
+pub(super) fn history_dirs(
+    settings: &Settings,
+    kind: ProviderKind,
+) -> Vec<(Option<String>, PathBuf)> {
+    settings
+        .profiles_for_kind(kind)
+        .into_iter()
+        .filter_map(|profile| {
+            let env = super::providers::launch_env_for_profile(
+                settings,
+                &profile.id,
+                Default::default(),
+                Default::default(),
+            );
+            let dir = agent::harness::config_dir(kind, &env)?;
+            let id = (profile.id != Settings::builtin_profile_id(kind)).then_some(profile.id);
+            Some((id, dir))
+        })
+        .collect()
+}

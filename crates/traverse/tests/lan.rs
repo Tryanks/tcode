@@ -190,12 +190,12 @@ fn a_dropped_resolve_stops_the_platform_browse_at_once() {
         assert!(stopped.is_empty(), "the browse runs on");
         let dropped_at = Instant::now();
         drop(stream);
-        let stop = tokio::time::timeout(lan::BROWSE_TIME, stopped.recv())
-            .await
-            .expect("the platform browse was stopped before its deadline")
-            .unwrap();
+        let stop = stopped.recv().await.unwrap();
         assert_eq!(stop, request);
-        assert!(dropped_at.elapsed() < lan::BROWSE_TIME);
+        assert!(
+            dropped_at.elapsed() < lan::BROWSE_TIME,
+            "the platform browse was stopped before its deadline"
+        );
         assert!(started.is_empty(), "one browse was started");
     });
 }

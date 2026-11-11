@@ -483,6 +483,7 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             output,
             status,
             image_reads,
+            ..
         }) => {
             image_reads.len().hash(hash);
             name.len().hash(hash);
@@ -552,6 +553,8 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             rewound.incomplete.is_some().hash(hash);
         }
         EntryContent::RewindFailed { failure, .. } => failure.reason.hash(hash),
+        EntryContent::Unreadable { line } => line.len().hash(hash),
+        EntryContent::Withheld { bytes } => bytes.hash(hash),
         EntryContent::Item(ItemContent::ImageRead { path, .. }) => path.hash(hash),
         EntryContent::Item(ItemContent::WebSearch { query }) => query.len().hash(hash),
         EntryContent::Item(ItemContent::Other {

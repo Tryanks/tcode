@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use agent::{
     AgentEvent, ProviderKind, RewindFailure, RewindFailureReason, RewindMode, SessionCommand,
     TurnStatus,
@@ -124,7 +122,6 @@ fn a_cold_rewind_answers_the_client_that_asked_and_lets_the_provider_go() {
         state
     });
     state.update(cx, |state, cx| {
-        state.resident_idle_grace = Duration::from_millis(1);
         install(state, ProviderKind::ClaudeCode, cwd, Runtime::Idle);
         checkpoint_two_turns(state, cx);
     });
@@ -140,10 +137,9 @@ fn a_cold_rewind_answers_the_client_that_asked_and_lets_the_provider_go() {
         }),
     );
     state.dispatch_command(cx, 2, rewind_command("phone"));
-    cx.run_until(|_| !commands.is_empty());
     assert!(matches!(
-        next_command(&commands),
-        Ok(SessionCommand::Rewind { checkpoint_id, mode: RewindMode::Conversation })
+        cx.run_until_command(&commands),
+        SessionCommand::Rewind { checkpoint_id, mode: RewindMode::Conversation }
             if checkpoint_id == "checkpoint-2"
     ));
     assert!(
@@ -174,6 +170,8 @@ fn a_cold_rewind_answers_the_client_that_asked_and_lets_the_provider_go() {
         .collect();
     assert_eq!(prefills, [("phone".into(), "the second prompt".into())]);
 
+    cx.run_until_parked();
+    cx.clock.advance(RESIDENT_IDLE_GRACE);
     cx.run_until(|state| {
         matches!(
             state.residents.live["rewound-thread"].runtime,
@@ -384,7 +382,6 @@ fn a_control_rewind_answers_with_the_harness_outcome() {
                 thread_id: "rewound-thread".into(),
                 turn: 1,
                 mode: control_mcp::RewindScope::Conversation,
-                request_id: None,
             }),
             reply,
             cx,
@@ -408,8 +405,7 @@ fn a_control_rewind_answers_with_the_harness_outcome() {
         );
     });
     // The answer goes out from a task off the host that waits for the harness's.
-    cx.run_until(|_| !answer.is_empty());
-    let outcome = answer.try_recv().unwrap().unwrap();
+    let outcome = cx.run_until_recv(&answer).unwrap();
     assert_eq!(outcome["status"], "failed");
     assert_eq!(outcome["reason"], "turn_running");
 }

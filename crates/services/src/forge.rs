@@ -84,6 +84,8 @@ pub trait Forge: Send + Sync {
     fn repository(&self, name: &str, host: &str) -> Option<Repository>;
     /// The web URL of a pull request.
     fn url(&self, key: &PullRequestKey) -> Option<String>;
+    /// The web page of a file of the pull request's repository at `revision`.
+    fn file_url(&self, key: &PullRequestKey, revision: &str, path: &str) -> Option<String>;
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError>;
     fn stack(&self, key: &PullRequestKey) -> Result<PullRequestStackState, ForgeError>;
 
@@ -281,6 +283,14 @@ impl ForgeError {
             _ => Rejection::Failed,
         }
     }
+}
+
+/// A repository-relative path as a URL's path: each segment percent-encoded.
+pub(crate) fn url_path(path: &str) -> String {
+    path.split('/')
+        .map(crate::github::pull_request_reads::percent_encode)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// A repository on a host, as pull request keys locate it.
@@ -556,6 +566,10 @@ impl Forge for Hosts {
         self.host(&key.host).url(key)
     }
 
+    fn file_url(&self, key: &PullRequestKey, revision: &str, path: &str) -> Option<String> {
+        self.host(&key.host).file_url(key, revision, path)
+    }
+
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {
         self.host(&key.host).summary(key)
     }
@@ -569,7 +583,19 @@ impl Forge for Hosts {
         key: &PullRequestKey,
         read: PullRequestRead,
     ) -> Result<(PullRequestReadResponse, SystemTime), ForgeError> {
-        self.host(&key.host).read(key, read)
+        let host = self.host(&key.host);
+        let (mut response, expires_at) = host.read(key, read)?;
+        if let PullRequestReadResponse::Files(files) = &mut response {
+            for file in &mut files.files {
+                let revision = if file.kind == agent::FileChangeKind::Delete {
+                    &files.base
+                } else {
+                    &files.head
+                };
+                file.url = host.file_url(key, revision, &file.path);
+            }
+        }
+        Ok((response, expires_at))
     }
 
     fn invalidate(&self, key: &PullRequestKey) {

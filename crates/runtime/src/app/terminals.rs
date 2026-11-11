@@ -30,7 +30,7 @@ impl AppState {
     /// Rebuilt only for the first subscriber: while anyone is attached the
     /// retained frame is advanced by the same deltas they receive, so a second
     /// client must read that shared state rather than start a new sequence.
-    pub(crate) fn refresh_terminal_projection(&mut self, terminal_id: u64) {
+    pub(crate) fn refresh_terminal_projection(&mut self, terminal_id: u64, cx: &HostCx) {
         let Some(terminal) = self.terminal_handle(terminal_id) else {
             return;
         };
@@ -38,7 +38,7 @@ impl AppState {
             .terminal_projections
             .entry(terminal_id)
             .or_insert_with(TerminalProjection::new);
-        projection.reset(&terminal);
+        projection.reset(&terminal, cx.clock().now());
     }
 
     pub(crate) fn terminal_frame(&self, terminal_id: u64) -> Option<tcode_protocol::TerminalFrame> {
@@ -87,16 +87,21 @@ impl AppState {
         if projection.scheduled {
             return;
         }
-        let elapsed = projection.last_projected.elapsed();
+        let now = cx.clock().now();
+        let elapsed = projection
+            .last_projected
+            .map_or(crate::terminal::FRAME_INTERVAL, |at| {
+                now.saturating_duration_since(at)
+            });
         if elapsed >= crate::terminal::FRAME_INTERVAL {
             self.project_terminal(terminal_id, cx);
             return;
         }
         projection.scheduled = true;
-        let delay = crate::terminal::FRAME_INTERVAL - elapsed;
+        let frame = cx.clock().timer(crate::terminal::FRAME_INTERVAL - elapsed);
         let tick = cx.clone();
         cx.spawn_detached(async move {
-            smol::Timer::after(delay).await;
+            frame.await;
             tick.enqueue(move |state, cx| {
                 if let Some(projection) = state.terminal_projections.get_mut(&terminal_id) {
                     projection.scheduled = false;
@@ -118,12 +123,7 @@ impl AppState {
         let Some(projection) = self.terminal_projections.get_mut(&terminal_id) else {
             return;
         };
-        projection.last_projected = std::time::Instant::now();
-        let update = if projection.styles_exhausted() {
-            Some(TerminalUpdate::Frame(projection.reset(&terminal)))
-        } else {
-            projection.update(&terminal)
-        };
+        let update = projection.project(&terminal, cx.clock().now());
         // A burst that outran the scrollback budget owes the client its
         // history, and the terminal may now be idle with no wakeup left to give.
         let owes_history = projection.owes_history();
@@ -325,7 +325,7 @@ impl AppState {
                     .terminal_projections
                     .insert(terminal_id, TerminalProjection::new());
                 if state.terminal_subscribed(terminal_id) {
-                    state.refresh_terminal_projection(terminal_id);
+                    state.refresh_terminal_projection(terminal_id, cx);
                     if let Some(frame) = state.terminal_frame(terminal_id) {
                         state.emit_terminal(
                             terminal_id,

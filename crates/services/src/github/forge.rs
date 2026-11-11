@@ -113,7 +113,7 @@ impl Forge for GitHub {
     }
 
     fn checkout_repository(&self, checkout: &crate::forge::Checkout<'_>) -> Option<Repository> {
-        repository::resolve(checkout).map(neutral)
+        repository::resolve(checkout, &self.api.credentials().known()).map(neutral)
     }
 
     fn repository(&self, name: &str, host: &str) -> Option<Repository> {
@@ -122,6 +122,10 @@ impl Forge for GitHub {
 
     fn url(&self, key: &PullRequestKey) -> Option<String> {
         repository::Repository::from_key(key).map(|repository| repository.url(key.number))
+    }
+
+    fn file_url(&self, key: &PullRequestKey, revision: &str, path: &str) -> Option<String> {
+        repository::Repository::from_key(key).map(|repository| repository.file_url(revision, path))
     }
 
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {
@@ -156,7 +160,7 @@ impl Forge for GitHub {
                         files: files.files,
                         next_cursor: files.next_page.map(|page| page.to_string()),
                         complete: files.complete,
-                        changed_files: files.changed_files,
+                        changed_files: Some(files.changed_files),
                     })
                 })
             }

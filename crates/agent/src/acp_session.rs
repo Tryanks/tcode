@@ -37,8 +37,8 @@ use crate::{
     ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ItemContent, ItemStatus,
     McpRegistration, OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderCommand,
     ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle,
-    SessionOptions, ThreadItem, TokenUsage, ToolName, ToolOutput, TurnStatus, UserInputDelivery,
-    UserInputQuestion,
+    SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolName, ToolOutput, TurnStatus,
+    UserInputDelivery, UserInputQuestion,
 };
 
 /// Option-descriptor ids. The composer renders an ACP agent's own
@@ -64,6 +64,15 @@ fn config_option_id(
     }
 }
 
+/// What a session config option of `category` is: a thought level is the
+/// model's reasoning effort.
+fn config_option_role(category: Option<&acp::SessionConfigOptionCategory>) -> crate::OptionRole {
+    match category {
+        Some(acp::SessionConfigOptionCategory::ThoughtLevel) => crate::OptionRole::Effort,
+        _ => crate::OptionRole::Model,
+    }
+}
+
 /// The persisted selection for the session config option `config_id` in
 /// `category`, as [`SessionOptions::option_selections`] carries it into a new
 /// process.
@@ -79,9 +88,10 @@ pub(crate) fn config_selection<'a>(
         .and_then(|selection| selection.value.as_str())
 }
 
-/// How long we wait for an agent to answer `initialize` before declaring it
-/// broken. Generous: an `npm exec` recipe may have to fetch the package first.
-const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a [`query`], which no one can stop, may take. Generous: an `npm
+/// exec` recipe may have to fetch the package first, and an agent that never
+/// answers `initialize` (cline 3.0.39) would hold its catalog forever.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub(crate) type Connection = sdk::ConnectionTo<sdk::Agent>;
 
@@ -506,6 +516,7 @@ where
     R: Send + 'static,
 {
     let (result_tx, result) = smol::channel::bounded(1);
+    let processes = opts.processes.clone();
     std::thread::Builder::new()
         .name("acp-query".into())
         .spawn(move || {
@@ -552,10 +563,25 @@ where
             let _ = result_tx.send_blocking(outcome);
         })
         .map_err(|err| AgentError::Spawn(format!("could not start the ACP query thread: {err}")))?;
-    result
-        .recv()
-        .await
-        .map_err(|_| AgentError::Protocol("ACP query exited without a result".into()))?
+    future::or(
+        async {
+            result
+                .recv()
+                .await
+                .map_err(|_| AgentError::Protocol("ACP query exited without a result".into()))?
+        },
+        async {
+            smol::Timer::after(QUERY_TIMEOUT).await;
+            // Its agent killed, the query's thread ends with it.
+            processes.stop();
+            Err(AgentError::Protocol(format!(
+                "the agent did not answer within {} s; it may not speak ACP over stdio \
+                 (check its launch arguments)",
+                QUERY_TIMEOUT.as_secs()
+            )))
+        },
+    )
+    .await
 }
 
 fn spawn_agent(
@@ -584,7 +610,7 @@ fn spawn_agent(
     );
     crate::process::refuse_batch_line_breaks(cmd.get_program(), cmd.get_args())?;
     cmd.spawn()
-        .map(crate::process::ProcessTree::new)
+        .map(|child| opts.processes.hold(crate::process::ProcessTree::new(child)))
         .map_err(|err| {
             AgentError::Spawn(format!(
                 "could not launch ACP agent `{name}` ({}): {err}",
@@ -942,6 +968,8 @@ async fn connected_actor<D: Dialect>(
                         label: mode.to_owned(),
                         description: None,
                         unavailable: Some("Reported by the launch arguments".into()),
+                        speed: None,
+                        summary: None,
                     });
                 }
                 state
@@ -1070,47 +1098,21 @@ async fn initialize(
             .write_text_file(client_services))
         .terminal(client_services);
     client_capabilities.meta = launch.client_meta.clone();
-    // On a leash: an agent that starts but never answers `initialize` (cline
-    // 3.0.39 does exactly this) would otherwise hang session startup forever,
-    // with the UI stuck on "Starting…".
-    let init = future::or(
-        async {
-            Some(
-                connection
-                    .send_request(
-                        acp::InitializeRequest::new(ProtocolVersion::LATEST)
-                            .client_capabilities(client_capabilities)
-                            .client_info(
-                                acp::Implementation::new("tcode", env!("CARGO_PKG_VERSION"))
-                                    .title("Tcode"),
-                            ),
-                    )
-                    .block_task()
-                    .await,
-            )
-        },
-        async {
-            smol::Timer::after(INITIALIZE_TIMEOUT).await;
-            None
-        },
-    )
-    .await;
-    let init = match init {
-        Some(Ok(init)) => init,
-        Some(Err(err)) => {
-            return Err(AgentError::Protocol(format!(
-                "`{name}` failed to initialize: {}",
-                describe(&err)
-            )));
-        }
-        None => {
-            return Err(AgentError::Protocol(format!(
-                "`{name}` did not answer `initialize` within {}s — it may not speak ACP over stdio (check its launch arguments)",
-                INITIALIZE_TIMEOUT.as_secs()
-            )));
-        }
-    };
-    Ok(init)
+    // An agent that never answers (cline 3.0.39) leaves the thread starting
+    // until the user stops it, which kills the agent and ends this request.
+    connection
+        .send_request(
+            acp::InitializeRequest::new(ProtocolVersion::LATEST)
+                .client_capabilities(client_capabilities)
+                .client_info(
+                    acp::Implementation::new("tcode", env!("CARGO_PKG_VERSION")).title("Tcode"),
+                ),
+        )
+        .block_task()
+        .await
+        .map_err(|err| {
+            AgentError::Protocol(format!("`{name}` failed to initialize: {}", describe(&err)))
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1654,6 +1656,8 @@ impl OptionRegistry {
                             label: mode.name.clone(),
                             description: mode.description.clone(),
                             unavailable: None,
+                            speed: None,
+                            summary: None,
                         })
                         .collect(),
                     default_value: Some(modes.current_mode_id.0.to_string()),
@@ -1687,6 +1691,8 @@ impl OptionRegistry {
                                 label: option.name.clone(),
                                 description: option.description.clone(),
                                 unavailable: None,
+                                speed: None,
+                                summary: None,
                             })
                             .collect(),
                         acp::SessionConfigSelectOptions::Grouped(groups) => groups
@@ -1697,6 +1703,8 @@ impl OptionRegistry {
                                     label: format!("{} · {}", group.name, option.name),
                                     description: option.description.clone(),
                                     unavailable: None,
+                                    speed: None,
+                                    summary: None,
                                 })
                             })
                             .collect(),
@@ -1708,7 +1716,7 @@ impl OptionRegistry {
                             label: option.name.clone(),
                             options,
                             default_value: Some(select.current_value.0.to_string()),
-                            role: crate::OptionRole::Model,
+                            role: config_option_role(option.category.as_ref()),
                             apply: crate::ApplyTiming::Live,
                             recommended: None,
                             permissive: None,
@@ -1722,7 +1730,7 @@ impl OptionRegistry {
                         id,
                         label: option.name.clone(),
                         default_value: boolean.current_value,
-                        role: crate::OptionRole::Model,
+                        role: config_option_role(option.category.as_ref()),
                         apply: crate::ApplyTiming::Live,
                         recommended: None,
                         permissive: None,
@@ -2279,6 +2287,21 @@ fn tool_call_content(tool: &ToolState, status: ItemStatus, output: String) -> It
         input: tool.raw_input.clone().unwrap_or(Value::Null),
         output: (!output.is_empty()).then_some(output),
         status,
+        family: tool_family(tool).map(Box::new),
+    }
+}
+
+/// What a call is, as its ACP `kind` and `locations` say: a read of the
+/// file it locates, from the line it locates.
+fn tool_family(tool: &ToolState) -> Option<ToolFamily> {
+    let location = tool.locations.first();
+    match tool.kind {
+        acp::ToolKind::Read => location.map(|location| ToolFamily::Read {
+            path: location.path.to_string_lossy().into_owned(),
+            first_line: location.line.map(u64::from),
+            note: None,
+        }),
+        _ => None,
     }
 }
 
@@ -2337,8 +2360,10 @@ fn file_changes(tool: &ToolState) -> Vec<FileChange> {
             _ => None,
         })
         .collect();
-    if changes.is_empty() && matches!(tool.kind, acp::ToolKind::Delete | acp::ToolKind::Move) {
-        // Deletes and renames carry no diff; the locations are all we get.
+    if changes.is_empty() {
+        // Deletes and renames carry no diff, and an edit none until it is
+        // applied (Cursor's arrives with its completion): the locations are
+        // the files it changes.
         changes = tool
             .locations
             .iter()
@@ -2346,7 +2371,8 @@ fn file_changes(tool: &ToolState) -> Vec<FileChange> {
                 path: location.path.to_string_lossy().into_owned(),
                 kind: match tool.kind {
                     acp::ToolKind::Delete => FileChangeKind::Delete,
-                    _ => FileChangeKind::Rename,
+                    acp::ToolKind::Move => FileChangeKind::Rename,
+                    _ => FileChangeKind::Modify,
                 },
                 diff: None,
             })
@@ -2924,6 +2950,46 @@ mod tests {
         serde_json::from_value(json).expect("valid session/update payload")
     }
 
+    /// An agent that never answers `initialize` (cline 3.0.39) holds its
+    /// session's start until the session is stopped. The agent here is a
+    /// process that reads its stdin and says nothing.
+    #[test]
+    fn a_start_its_agent_never_answers_ends_when_the_session_stops() {
+        const ROLE: &str = "TCODE_TEST_SILENT_AGENT";
+        const NAME: &str =
+            "acp_session::tests::a_start_its_agent_never_answers_ends_when_the_session_stops";
+        if std::env::var_os(ROLE).is_some() {
+            let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+            return;
+        }
+        let processes = crate::SessionProcesses::default();
+        let opts = SessionOptions {
+            cwd: std::env::temp_dir(),
+            model: None,
+            resume: None,
+            fork: None,
+            binary_path: None,
+            option_selections: Vec::new(),
+            mcp_servers: Vec::new(),
+            launch_env: crate::LaunchEnv::default(),
+            extra_args: Vec::new(),
+            acp: Some(crate::AcpAgent {
+                id: "silent".into(),
+                name: "Silent".into(),
+                launch: crate::AcpLaunch::Binary {
+                    command: std::env::current_exe().unwrap(),
+                    args: vec!["--exact".into(), NAME.into(), "--quiet".into()],
+                    env: vec![(ROLE.into(), "1".into())],
+                },
+            }),
+            instructions: None,
+            processes: processes.clone(),
+        };
+        let start = smol::spawn(crate::start_session(ProviderKind::Acp, opts));
+        processes.stop();
+        assert!(smol::block_on(start).is_err());
+    }
+
     #[test]
     fn prompt_acceptance_follows_the_complete_stdio_write() {
         smol::block_on(async {
@@ -3181,9 +3247,12 @@ mod tests {
                 }]
             );
         }
+        // An edit's diff arrives once it is applied; until then it is the
+        // files its locations name.
         for (kind, operation) in [
             ("delete", FileChangeKind::Delete),
             ("move", FileChangeKind::Rename),
+            ("edit", FileChangeKind::Modify),
         ] {
             let events = state().apply_update(update(json!({
                 "sessionUpdate":"tool_call", "toolCallId":"file", "title":"Change file",
@@ -3221,7 +3290,8 @@ mod tests {
         assert!(
             matches!(events.as_slice(), [AgentEvent::ItemStarted(ThreadItem {
             content:ItemContent::ToolCall {
-            image_reads: _, name, input, output:Some(output), status:ItemStatus::Completed }, ..
+            image_reads: _, name, input, output:Some(output), status:ItemStatus::Completed,
+            .. }, ..
         })] if name == "Opaque edit" && input == &json!({"path":"file.rs"}) && output == "done")
         );
     }
@@ -3267,6 +3337,7 @@ mod tests {
             output: Some("body".into()),
             status: ItemStatus::Completed,
             image_reads: Vec::new(),
+            family: None,
         };
         for (kind, expected) in [
             ("read", card.clone()),
@@ -3295,6 +3366,36 @@ mod tests {
                 other => panic!("{kind}: expected ItemStarted, got {other:?}"),
             }
         }
+    }
+
+    /// A `read` call is a read of the file its location names, from the
+    /// line it names (`ToolKind::Read`, `ToolCallLocation {path, line}` of
+    /// agent-client-protocol-schema 1.5.0).
+    #[test]
+    fn a_read_is_the_file_and_line_it_locates() {
+        let events = state().apply_update(update(json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "t1",
+            "title": "Read file",
+            "kind": "read",
+            "status": "completed",
+            "locations": [{ "path": "/repo/x.rs", "line": 12 }],
+            "content": [{ "type": "content", "content": { "type": "text", "text": "body" } }]
+        })));
+        let [AgentEvent::ItemStarted(item)] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        let ItemContent::ToolCall { family, .. } = &item.content else {
+            panic!("{item:?}");
+        };
+        assert_eq!(
+            family.as_deref(),
+            Some(&ToolFamily::Read {
+                path: "/repo/x.rs".into(),
+                first_line: Some(12),
+                note: None,
+            })
+        );
     }
 
     #[test]

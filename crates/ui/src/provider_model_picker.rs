@@ -137,19 +137,23 @@ impl ProviderModelPicker {
     }
 
     fn trigger(&self, cx: &Context<Self>) -> Button {
-        let (provider, model, profile_id) = self
-            .selected
-            .as_ref()
-            .map(|(provider, model, profile_id)| (*provider, model.as_str(), profile_id.as_deref()))
-            .unwrap_or_else(|| {
-                let kind = self
-                    .store
+        let (display, glyph) = match &self.selected {
+            Some((provider, model, profile_id)) => (
+                self.display_name(*provider, model, profile_id.as_deref(), cx),
+                Some(profile_glyph(
+                    self.store.read(cx),
+                    *provider,
+                    profile_id.as_deref(),
+                )),
+            ),
+            None => (
+                String::new(),
+                self.store
                     .read(cx)
-                    .provider_profile_kind(&self.selected_profile);
-                (kind, "", None)
-            });
-        let display = self.display_name(provider, model, profile_id, cx);
-        let glyph = profile_glyph(self.store.read(cx), provider, profile_id);
+                    .provider_profile_kind(&self.selected_profile)
+                    .map(|kind| profile_glyph(self.store.read(cx), kind, None)),
+            ),
+        };
         Button::new(self.trigger_id)
             .ghost()
             .outline()
@@ -160,7 +164,7 @@ impl ProviderModelPicker {
                     .items_center()
                     .gap_2()
                     .text_body(false, cx)
-                    .child(glyph)
+                    .children(glyph)
                     .child(div().flex_1().min_w_0().child(display))
                     .child(
                         Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground),

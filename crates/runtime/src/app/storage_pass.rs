@@ -90,9 +90,10 @@ impl AppState {
                         migration.waiting_for_space = true;
                     }
                     state.replace_storage_migration(waiting, cx);
+                    let retry = cx.clock().timer(NO_SPACE_RETRY);
                     let host_cx = cx.clone();
                     HostCx::spawn_detached(cx, async move {
-                        smol::Timer::after(NO_SPACE_RETRY).await;
+                        retry.await;
                         host_cx.enqueue(|state, cx| state.start_storage_pass(cx));
                     });
                 } else {
@@ -126,14 +127,21 @@ impl AppState {
 #[derive(Default)]
 struct MoveReport {
     reported: Option<Instant>,
+    /// The progress could not be read the last time it was asked; the
+    /// failure was reported then.
+    unreadable: bool,
 }
 
 impl MoveReport {
     async fn report(&mut self, store: &SessionStore, host_cx: &HostCx) {
-        if self.reported.is_some_and(|at| at.elapsed() < REPORT_EVERY) {
+        let now = host_cx.clock().now();
+        if self
+            .reported
+            .is_some_and(|at| now.saturating_duration_since(at) < REPORT_EVERY)
+        {
             return;
         }
-        self.reported = Some(Instant::now());
+        self.reported = Some(now);
         let reader = store.clone();
         let migration = match host_cx.unblock(move || reader.move_progress()).await {
             Ok(progress) => progress.map(|(moved, total)| StorageMigration {
@@ -142,13 +150,16 @@ impl MoveReport {
                 waiting_for_space: false,
             }),
             Err(error) => {
-                let message = format!("could not read how far the move has come: {error}");
-                host_cx.enqueue(move |state, cx| {
-                    state.report_error(RuntimeError::External(message), cx)
-                });
+                if !std::mem::replace(&mut self.unreadable, true) {
+                    let message = format!("could not read how far the move has come: {error}");
+                    host_cx.enqueue(move |state, cx| {
+                        state.report_error(RuntimeError::External(message), cx)
+                    });
+                }
                 return;
             }
         };
+        self.unreadable = false;
         host_cx.enqueue(move |state, cx| state.replace_storage_migration(migration, cx));
     }
 }
@@ -410,7 +421,7 @@ async fn pass(
         }
     }
     let reader = store.clone();
-    let cutoff = std::time::SystemTime::now() - BLOB_GRACE;
+    let cutoff = host_cx.clock().wall() - BLOB_GRACE;
     match host_cx.unblock(move || reader.prepare_sweep(cutoff)).await {
         Ok(steps) => {
             for step in steps {

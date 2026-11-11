@@ -17,8 +17,6 @@ use crate::{
 };
 
 const LIST_TIMEOUT: Duration = Duration::from_secs(60);
-/// Installs and marketplace adds may clone repositories.
-const MUTATION_TIMEOUT: Duration = Duration::from_secs(300);
 const DETAILS_CONCURRENCY: usize = 4;
 const OFFICIAL_MARKETPLACE: &str = "claude-plugins-official";
 const OFFICIAL_MARKETPLACE_REPO: &str = "anthropics/claude-plugins-official";
@@ -38,12 +36,12 @@ pub(crate) async fn list(context: &PluginContext) -> Result<PluginListing, Agent
         run_cli(
             context,
             &args(&["plugin", "list", "--json", "--available"]),
-            LIST_TIMEOUT,
+            Some(LIST_TIMEOUT),
         ),
         run_cli(
             context,
             &args(&["plugin", "marketplace", "list", "--json"]),
-            LIST_TIMEOUT,
+            Some(LIST_TIMEOUT),
         ),
     )
     .await;
@@ -78,10 +76,13 @@ pub(crate) async fn list(context: &PluginContext) -> Result<PluginListing, Agent
                 let context = context.clone();
                 let id = id.clone();
                 smol::spawn(async move {
-                    let output =
-                        run_cli(&context, &args(&["plugin", "details", &id]), LIST_TIMEOUT)
-                            .await
-                            .and_then(succeeded);
+                    let output = run_cli(
+                        &context,
+                        &args(&["plugin", "details", &id]),
+                        Some(LIST_TIMEOUT),
+                    )
+                    .await
+                    .and_then(succeeded);
                     (id, output)
                 })
             })
@@ -107,7 +108,7 @@ pub(crate) async fn run(
     context: &PluginContext,
     op: &PluginOp,
 ) -> Result<PluginOpOutcome, AgentError> {
-    let output = run_cli(context, &op_args(op)?, MUTATION_TIMEOUT).await?;
+    let output = run_cli(context, &op_args(op)?, None).await?;
     match op {
         PluginOp::AddMarketplace { .. } | PluginOp::RemoveMarketplace { .. } => {
             let stdout = succeeded(output)?;
@@ -159,19 +160,21 @@ struct CliOutput {
 async fn run_cli(
     context: &PluginContext,
     args: &[String],
-    timeout: Duration,
+    bound: Option<Duration>,
 ) -> Result<CliOutput, AgentError> {
     let display = format!("claude {}", args.join(" "));
-    let mut command = smol::process::Command::from(management_command(context, args)?);
-    // `output()` gives the child a null stdin, so a prompt can never wait on
-    // input, and dropping it on timeout kills the child.
-    command.kill_on_drop(true);
-    let output = smol::future::or(async { Some(command.output().await) }, async {
-        smol::Timer::after(timeout).await;
-        None
-    })
-    .await
-    .ok_or_else(|| AgentError::Provider(format!("`{display}` timed out")))?
+    // A listing, which no one can stop, is bounded; a change runs until it
+    // ends or the user cancels it, which drops this and stops the command.
+    let output = crate::process::tree_output(management_command(context, args)?);
+    let output = match bound {
+        Some(bound) => smol::future::or(async { Some(output.await) }, async {
+            smol::Timer::after(bound).await;
+            None
+        })
+        .await
+        .ok_or_else(|| AgentError::Provider(format!("`{display}` timed out")))?,
+        None => output.await,
+    }
     .map_err(|error| AgentError::Spawn(format!("spawning `{display}`: {error}")))?;
     Ok(CliOutput {
         success: output.status.success(),

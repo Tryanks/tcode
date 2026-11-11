@@ -39,6 +39,8 @@ pub struct HostServices {
     /// Why the MCP servers could not start; the host tells the user when the first thread
     /// starts without them.
     pub mcp_unavailable: Option<String>,
+    /// The host's time; the system's unless a test turns it.
+    pub clock: crate::clock::HostClock,
 }
 
 impl HostServices {
@@ -277,7 +279,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 state.attach_control_mcp(server);
             }
             state.mcp_unavailable(services.mcp_unavailable.take());
-            let mut cx = HostCx::new(mailbox_tx, event_tx);
+            let mut cx = HostCx::new(mailbox_tx, event_tx, services.clock.clone());
             state.pump_pull_request_requests(services.pull_requests.take(), &mut cx);
             state.start_pull_request_workers(&mut cx);
             state.pump_control_requests(&mut cx);
@@ -861,12 +863,29 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                     .map(|()| CommandResponse::Unit),
             );
         }
+        Command::CancelPluginOperation { profile_id } => {
+            app.cancel_plugin_operation(&profile_id, cx)
+        }
         Command::ResetSettings => app.reset_settings(cx),
         Command::WriteRelaunchMarker {
             session_id,
             reopen_settings,
-        } => app.write_relaunch_marker(&session_id, &reopen_settings),
-        Command::ClearRelaunchMarker => app.clear_relaunch_marker(),
+        } => {
+            if let Err(error) = app.write_relaunch_marker(session_id.as_deref(), &reopen_settings) {
+                return CommandOutcome::Immediate(Err(ProtocolError {
+                    code: "relaunch_marker".into(),
+                    message: format!("could not write the relaunch marker: {error}"),
+                }));
+            }
+        }
+        Command::ClearRelaunchMarker => {
+            if let Err(error) = app.clear_relaunch_marker() {
+                return CommandOutcome::Immediate(Err(ProtocolError {
+                    code: "relaunch_marker".into(),
+                    message: format!("could not clear the relaunch marker: {error}"),
+                }));
+            }
+        }
         Command::SetTerminalHeight { session_id, height } => {
             app.set_terminal_height(&session_id, height, cx)
         }
@@ -986,8 +1005,9 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         } => app.remove_thread_reference(&session_id, &thread_id, cx),
         Command::SetFollowUp {
             session_id,
-            follow_up,
-        } => app.set_follow_up(&session_id, follow_up, cx),
+            on,
+            note,
+        } => app.set_follow_up(&session_id, on, note, cx),
         Command::SetParked { session_id, parked } => app.set_parked(&session_id, parked, cx),
         Command::DismissSettleSuggestion { session_id } => {
             app.dismiss_settle_suggestion(&session_id, cx)
@@ -1018,9 +1038,15 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::RegenerateSessionTitle { session_id } => {
             app.regenerate_session_title(&session_id, cx)
         }
-        Command::ForkThread { id, at: None } => {
-            response = CommandResponse::SessionId(app.fork_thread(&id, cx));
-        }
+        Command::ForkThread { id, at: None } => match app.fork_thread(&id, cx) {
+            Ok(forked) => response = CommandResponse::SessionId(Some(forked)),
+            Err(refusal) => {
+                return CommandOutcome::Immediate(Err(ProtocolError {
+                    code: "fork_unavailable".into(),
+                    message: refusal.into(),
+                }));
+            }
+        },
         Command::ForkThread { id, at: Some(at) } => {
             let Some(forked) = app.fork_thread_at(&id, &at, cx) else {
                 return CommandOutcome::Immediate(Err(ProtocolError {
@@ -1046,8 +1072,18 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::DeleteSession {
             session_id,
             remove_worktree,
-        } => app.delete_session(&session_id, remove_worktree, cx),
-        Command::DeleteProject { project_id } => app.delete_project(&project_id, cx),
+        } => {
+            let uploads = app.delete_session(&session_id, remove_worktree, cx);
+            return CommandOutcome::Pending(
+                cx.spawn_background(async move { uploads.await.map(|()| CommandResponse::Unit) }),
+            );
+        }
+        Command::DeleteProject { project_id } => {
+            let uploads = app.delete_project(&project_id, cx);
+            return CommandOutcome::Pending(
+                cx.spawn_background(async move { uploads.await.map(|()| CommandResponse::Unit) }),
+            );
+        }
         Command::MarkSessionUnread { session_id } => app.mark_session_unread(&session_id, cx),
         Command::MarkSessionRead {
             session_id,
@@ -1124,7 +1160,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             task_id,
         } => {
             return CommandOutcome::Immediate(
-                app.stop_background_task(&session_id, task_id)
+                app.stop_background_task(&session_id, task_id, cx)
                     .map(|()| CommandResponse::Unit),
             );
         }
@@ -1568,11 +1604,15 @@ mod tests {
         // A process that speaks no protocol and ignores every signal but
         // SIGKILL; it imitates no harness's output.
         let stuck = root.join("ignores-signals");
+        // It says its pid through a FIFO, which the test's read waits on.
         let pid_file = root.join("ignores-signals.pid");
+        let fifo = std::ffi::CString::new(pid_file.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `fifo` is a NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         std::fs::write(
             &stuck,
             format!(
-                "#!/bin/sh\ntrap '' HUP INT TERM\necho $$ > '{pid}.tmp'\nmv '{pid}.tmp' '{pid}'\nexec sleep 120\n",
+                "#!/bin/sh\ntrap '' HUP INT TERM\necho $$ > '{pid}'\nexec sleep 120\n",
                 pid = pid_file.display()
             ),
         )
@@ -1589,20 +1629,11 @@ mod tests {
         let catalog = std::thread::spawn(move || {
             smol::block_on(agent::pi::list_models(Some(stuck), Default::default()))
         });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let harness: libc::pid_t = loop {
-            if let Some(pid) = std::fs::read_to_string(&pid_file)
-                .ok()
-                .and_then(|pid| pid.trim().parse().ok())
-            {
-                break pid;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the harness never ran"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        };
+        let harness: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
 
         let (entered, busy) = async_channel::bounded(1);
         let (release, released) = async_channel::bounded::<()>(1);
@@ -1625,27 +1656,25 @@ mod tests {
             "the host was still busy"
         );
         drop(stop);
-        let exited = |pid: libc::pid_t| {
-            // SAFETY: `info` is a valid, writable siginfo; WNOWAIT leaves the
-            // exit status for the thread that owns the child.
-            unsafe {
+        // Wait for the harness to exit. WNOWAIT leaves the exit status for
+        // the thread that owns the child; one that thread has already reaped
+        // is gone too (ECHILD).
+        loop {
+            // SAFETY: `info` is a valid, writable siginfo.
+            let waited = unsafe {
                 let mut info: libc::siginfo_t = std::mem::zeroed();
                 libc::waitid(
                     libc::P_PID,
-                    pid as libc::id_t,
+                    harness as libc::id_t,
                     &mut info,
-                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-                ) != 0
-                    || info.si_pid() == pid
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            let error = std::io::Error::last_os_error();
+            if waited == 0 || error.raw_os_error() == Some(libc::ECHILD) {
+                break;
             }
-        };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !exited(harness) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the harness {harness} outlived the quit"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            assert_eq!(error.kind(), std::io::ErrorKind::Interrupted, "{error}");
         }
 
         release.send_blocking(()).unwrap();
@@ -1659,23 +1688,14 @@ mod tests {
         events: &async_channel::Receiver<EventEnvelope>,
         ready: impl Fn(&EventEnvelope) -> bool,
     ) -> EventEnvelope {
-        smol::block_on(smol::future::race(
-            async {
-                loop {
-                    let envelope = events
-                        .recv()
-                        .await
-                        .expect("host event stream closed before the expected event");
-                    if ready(&envelope) {
-                        return envelope;
-                    }
-                }
-            },
-            async {
-                smol::Timer::after(std::time::Duration::from_secs(60)).await;
-                panic!("timed out waiting for host event");
-            },
-        ))
+        loop {
+            let envelope = events
+                .recv_blocking()
+                .expect("host event stream closed before the expected event");
+            if ready(&envelope) {
+                return envelope;
+            }
+        }
     }
 
     #[test]
@@ -2385,20 +2405,26 @@ mod tests {
             unreachable!("filtered to snapshots")
         };
         assert_eq!(end, total, "the window reaches the end of the log");
+        // The unparseable row is read as it is stored, in its place.
+        let mut logged: Vec<_> = legacy_events().into();
+        logged.insert(
+            2,
+            (
+                None,
+                agent::AgentEvent::UnreadableRecord {
+                    line: "{torn".into(),
+                },
+            ),
+        );
         assert_eq!(
-            format!("{:?}", Timeline::fold_events(records)),
-            format!(
-                "{:?}",
-                Timeline::fold_events(legacy_events().into_iter().map(|(ts, event)| {
-                    StoredEvent {
-                        origin: None,
-                        author: None,
-                        ts,
-                        event,
-                        elided: None,
-                    }
-                }))
-            )
+            Timeline::fold_events(records),
+            Timeline::fold_events(logged.into_iter().map(|(ts, event)| StoredEvent {
+                origin: None,
+                author: None,
+                ts,
+                event,
+                elided: None,
+            }))
         );
         host.shutdown_blocking().unwrap();
         let start = if migrating { "migrating" } else { "restarted" };

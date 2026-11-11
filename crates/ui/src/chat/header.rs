@@ -685,7 +685,7 @@ impl ChatView {
             .is_some_and(|activity| {
                 links
                     .iter()
-                    .any(|link| activity.wakes.pull_requests.contains(&link.key.number))
+                    .any(|link| activity.wakes.pull_requests.contains(&link.key))
             });
         let numbers = h_flex()
             .gap_1()

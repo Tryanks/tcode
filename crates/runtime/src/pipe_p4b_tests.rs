@@ -1,7 +1,6 @@
 //! Integration coverage through serialized links and the production fan-out mux.
 use super::*;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use tcode_protocol::{
     ExternalImportState, ExternalImportStatus, ExternalThread, SessionSearchHit, SourceTool,
 };
@@ -40,18 +39,30 @@ pub(crate) fn observed_events(link: &HostLink) -> async_channel::Receiver<EventE
 }
 
 pub(super) fn fixture() -> (SpawnedHost, HostMux, HostLink, String) {
-    let (host, mux, link, session_id, _) = fixture_in_project();
+    fixture_on(crate::clock::HostClock::default())
+}
+
+/// [`fixture`], on a host that keeps `clock`.
+pub(super) fn fixture_on(
+    clock: crate::clock::HostClock,
+) -> (SpawnedHost, HostMux, HostLink, String) {
+    let (host, mux, link, session_id, _) = fixture_in_project(clock);
     (host, mux, link, session_id)
 }
 
-/// [`fixture`], with the thread's directory.
-fn fixture_in_project() -> (SpawnedHost, HostMux, HostLink, String, PathBuf) {
+/// [`fixture_on`], with the thread's directory.
+fn fixture_in_project(
+    clock: crate::clock::HostClock,
+) -> (SpawnedHost, HostMux, HostLink, String, PathBuf) {
     let root = std::env::temp_dir().join(format!("tcode-p4b-{}", uuid::Uuid::new_v4()));
     let project = root.join("project");
     std::fs::create_dir_all(&project).unwrap();
     let host = spawn_host(
         SessionStore::open_at(root).unwrap(),
-        HostServices::default(),
+        HostServices {
+            clock,
+            ..HostServices::default()
+        },
     )
     .unwrap();
     let mux = HostMux::new(host.attachments.clone(), host.from_host.clone());
@@ -250,6 +261,48 @@ fn an_agent_preview_request_reaches_only_the_client_rendering_its_thread() {
     assert_eq!(
         answered.recv_blocking().unwrap(),
         Ok(preview_mcp::PreviewReply::Json(json))
+    );
+
+    desk.command_blocking(Command::ShutdownAllAndFlush).unwrap();
+}
+
+/// A call its harness stops waiting for, or whose turn is interrupted, is
+/// cancelled on the client rendering it, which then waits on its page no
+/// more.
+#[test]
+fn a_preview_call_given_up_is_cancelled_on_the_rendering_client() {
+    let (host, _mux, desk, session_id) = fixture();
+    let desk_events = observed_events(&desk);
+    let desk_client = preview_client(&desk, "Desk");
+    show_here(&desk, &session_id, &desk_client, false);
+
+    let answer = agent_call(&host, &session_id, preview_mcp::PreviewOp::Status);
+    let asked = request_id(next(&desk_events, |event| {
+        matches!(event, ServerEvent::PreviewRequest { .. })
+    }));
+    drop(answer);
+    assert_eq!(
+        next(&desk_events, |event| {
+            matches!(event, ServerEvent::PreviewRequestCancelled { .. })
+        }),
+        ServerEvent::PreviewRequestCancelled { request_id: asked }
+    );
+
+    let answer = agent_call(&host, &session_id, preview_mcp::PreviewOp::Status);
+    let asked = request_id(next(&desk_events, |event| {
+        matches!(event, ServerEvent::PreviewRequest { .. })
+    }));
+    let interrupted = session_id.clone();
+    smol::block_on(
+        host.update_state_for_test(move |state, _| state.cancel_previews_of(&interrupted)),
+    )
+    .unwrap();
+    assert!(answer.recv_blocking().is_err(), "the harness's call ends");
+    assert_eq!(
+        next(&desk_events, |event| {
+            matches!(event, ServerEvent::PreviewRequestCancelled { .. })
+        }),
+        ServerEvent::PreviewRequestCancelled { request_id: asked }
     );
 
     desk.command_blocking(Command::ShutdownAllAndFlush).unwrap();
@@ -541,6 +594,8 @@ fn claude_thread(dir: &Path, id: &str, text: &str) -> ExternalThread {
             serde_json::json!({
                 "type": "user",
                 "message": {"role": "user", "content": text},
+                "uuid": "00000000-0000-4000-8000-000000000001",
+                "parentUuid": null,
                 "timestamp": "2026-01-02T03:04:05.006Z",
                 "cwd": "/synthetic",
                 "sessionId": id,
@@ -548,6 +603,8 @@ fn claude_thread(dir: &Path, id: &str, text: &str) -> ExternalThread {
             serde_json::json!({
                 "type": "assistant",
                 "message": {"role": "assistant", "content": [{"type": "text", "text": "acknowledged"}]},
+                "uuid": "00000000-0000-4000-8000-000000000002",
+                "parentUuid": "00000000-0000-4000-8000-000000000001",
                 "timestamp": "2026-01-02T03:04:06.006Z",
                 "cwd": "/synthetic",
                 "sessionId": id,
@@ -561,6 +618,7 @@ fn claude_thread(dir: &Path, id: &str, text: &str) -> ExternalThread {
         external_id: format!("claude:{id}"),
         title_hint: None,
         last_active_ms: 1_767_322_800_000,
+        profile_id: None,
     }
 }
 
@@ -722,9 +780,13 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
     };
     assert!(!before.worktree_shared.contains("archived-owner"));
     let history = root.join("history");
+    // A thread found in an account's config directory resumes on that account.
     let threads = vec![
         claude_thread(&history, "thread-a", "first imported conversation"),
-        claude_thread(&history, "thread-b", "second imported conversation"),
+        ExternalThread {
+            profile_id: Some("work".into()),
+            ..claude_thread(&history, "thread-b", "second imported conversation")
+        },
     ];
 
     let events = observed_events(&watcher);
@@ -782,18 +844,15 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
 
     // Scan in arrival order: the finalized index must precede `Finished`.
     let mut imported_ids = std::collections::HashSet::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut profiles = std::collections::BTreeMap::new();
     loop {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "import never finished"
-        );
         let envelope = super::tests::next_event(&events, |_| true);
         match &envelope.event {
             ServerEvent::IndexUpsertSession(meta)
                 if meta.project_id.as_deref() == Some(project_id.as_str()) =>
             {
                 imported_ids.insert(meta.id.clone());
+                profiles.insert(meta.imported_from.clone(), meta.profile_id.clone());
             }
             ServerEvent::ExternalImportStatusReplaced {
                 status: Some(status),
@@ -815,6 +874,14 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
             _ => {}
         }
     }
+    assert_eq!(
+        profiles,
+        [
+            (Some("claude:thread-a".to_owned()), None),
+            (Some("claude:thread-b".to_owned()), Some("work".to_owned())),
+        ]
+        .into()
+    );
     let QueryResponse::ArchivedSessions(after) =
         smol::block_on(watcher.query(Query::ArchivedSessions)).unwrap()
     else {
@@ -931,7 +998,8 @@ fn dev_server_process() {
 #[test]
 fn a_remote_client_sees_the_dev_servers_the_host_machine_runs() {
     use std::io::BufRead as _;
-    let (_host, mux, desk, session_id, project) = fixture_in_project();
+    let (_host, mux, desk, session_id, project) =
+        fixture_in_project(crate::clock::HostClock::default());
     let phone = linked(&mux);
     let events = observed_events(&phone);
     let executable = std::env::current_exe().unwrap();

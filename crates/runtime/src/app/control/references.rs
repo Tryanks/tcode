@@ -86,6 +86,7 @@ impl AppState {
         cx: &mut HostCx,
     ) -> bool {
         let mut added = false;
+        let now = cx.clock().unix_secs();
         self.change_meta(session_id, cx, |meta| {
             if meta.id == target.id
                 || meta
@@ -98,7 +99,7 @@ impl AppState {
             meta.references.push(ThreadReference {
                 thread_id: target.id.clone(),
                 by,
-                created_at: now_secs(),
+                created_at: now,
                 boundary_notice: meta.project_id != target.project_id
                     || meta.provider != target.provider,
             });

@@ -772,7 +772,8 @@ impl AddProjectDialog {
                         .file_name()
                         .map(|name| name.to_string_lossy().into_owned())
                         .unwrap_or_else(|| recent.path.display().to_string());
-                    let ago = humanize_ago(now_secs().saturating_sub(recent.last_active_ms / 1000));
+                    let ago =
+                        humanize_ago(now_secs(cx).saturating_sub(recent.last_active_ms / 1000));
                     let count = recent.threads.len();
                     let tag = if count == 1 {
                         crate::tr!("sidebar.recent_import_count_one").into_owned()
@@ -1889,7 +1890,7 @@ mod tests {
             )
         });
         crate::store::tests::place_shown_threads(&store, cx);
-        driver.wait_until(cx, &store, "host baseline", |cx| {
+        driver.wait_until(cx, "host baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         // The dialog closes itself on success, which routes through the
@@ -1921,7 +1922,7 @@ mod tests {
         // rejected there, not here.
         retype(cx, r"C:\Users\dev\src");
         cx.simulate_keystrokes("enter");
-        driver.wait_until(cx, &store, "host path refusal", |cx| {
+        driver.wait_until(cx, "host path refusal", |cx| {
             dialog.read_with(cx, |dialog, _| dialog.error.is_some())
         });
         let error = dialog.read_with(cx, |dialog, _| dialog.error.clone());
@@ -1939,7 +1940,7 @@ mod tests {
         // The folder list under the field is the host's too: typing the start
         // of a name in the host's home lists the matching folders there.
         retype(cx, "~/work");
-        driver.settle_until(cx, &store, "the host's folder listing", |cx| {
+        driver.settle_until(cx, "the host's folder listing", |cx| {
             cx.debug_bounds("add-project-folder-workspace").is_some()
         });
         assert!(cx.debug_bounds("add-project-folder-data").is_none());
@@ -1948,7 +1949,7 @@ mod tests {
         // client never looked at it, written as the host reads it.
         retype(cx, "~/workspace/");
         cx.simulate_keystrokes(SECONDARY_ENTER);
-        driver.wait_until(cx, &store, "host project draft", |cx| {
+        driver.wait_until(cx, "host project draft", |cx| {
             store.read_with(cx, |store, _| store.sole_thread().is_some())
         });
         assert_eq!(dialog.read_with(cx, |dialog, _| dialog.error.clone()), None);
@@ -1964,7 +1965,7 @@ mod tests {
             vec![workspace.clone()]
         );
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 }

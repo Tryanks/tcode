@@ -45,6 +45,10 @@ pub(crate) enum Segment<'a> {
     Assistant(&'a TimelineEntry),
     Plan(&'a TimelineEntry),
     Error(&'a TimelineEntry),
+    /// Consecutive rows of the log this build cannot read.
+    Unreadable(Vec<&'a TimelineEntry>),
+    /// A record too large to send here, kept on the host.
+    Withheld(&'a TimelineEntry),
 }
 
 #[derive(Debug)]
@@ -280,6 +284,25 @@ pub(crate) fn segment_entries<'a>(
             }
             EntryContent::Error { .. } | EntryContent::ProviderStartError { .. } => {
                 single(&mut segments, &mut ranges, Segment::Error(entry));
+            }
+            EntryContent::Withheld { .. } => {
+                single(&mut segments, &mut ranges, Segment::Withheld(entry));
+            }
+            EntryContent::Unreadable { .. } => {
+                flush_activities(
+                    &mut segments,
+                    &mut ranges,
+                    &mut activities,
+                    &mut run_start,
+                    index,
+                );
+                if let Some(Segment::Unreadable(rows)) = segments.last_mut() {
+                    rows.push(entry);
+                    ranges.last_mut().expect("a run of rows has a range").end = index + 1;
+                } else {
+                    segments.push(Segment::Unreadable(vec![entry]));
+                    ranges.push(index..index + 1);
+                }
             }
         }
     }
@@ -1143,6 +1166,7 @@ pub(in crate::chat) mod tests {
                         data_base64: String::new(),
                         source_path: None,
                     }],
+                    family: None,
                 }),
             ),
             command("cmd"),
@@ -1155,6 +1179,28 @@ pub(in crate::chat) mod tests {
             if first.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>() == ["one", "two"] && second[0].id == "three")
         );
         assert_eq!(segmented.ranges, vec![0..2, 2..3, 3..4, 4..5]);
+        // An old plan streamed as many rows this build cannot read shows as
+        // one row of them.
+        let unreadable = |id: &str| {
+            entry(
+                id,
+                EntryContent::Unreadable {
+                    line: format!("{{\"type\":\"{id}\"}}"),
+                },
+            )
+        };
+        let entries = [
+            unreadable("a"),
+            unreadable("b"),
+            command("cmd"),
+            unreadable("c"),
+        ];
+        let segmented = segment_entries(&entries, false);
+        assert!(
+            matches!(segmented.flow.as_slice(), [Segment::Unreadable(first), Segment::ActivityRun(_), Segment::Unreadable(second)]
+            if first.len() == 2 && second[0].id == "c")
+        );
+        assert_eq!(segmented.ranges, vec![0..2, 2..3, 3..4]);
         let segmented = segment_entries(&[], false);
         assert!(segmented.flow.is_empty());
         assert!(segmented.pending_steers.is_empty());

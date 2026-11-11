@@ -17,9 +17,9 @@ use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
     ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ForkPoint, ItemContent,
     ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand,
-    ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle,
-    SessionOptions, ThreadItem, TokenUsage, ToolOutput, UserInputDelivery, UserInputOption,
-    UserInputQuestion,
+    ProviderCommandKind, ProviderKind, ResumeCursor, SearchHit, SearchScope, SelectOption,
+    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput,
+    UserInputDelivery, UserInputOption, UserInputQuestion,
 };
 
 /// The directory pi launched with `launch_env` keeps its settings, sign-in
@@ -166,10 +166,12 @@ fn map_model(
                     label: thinking_label(level),
                     description: None,
                     unavailable: None,
+                    speed: None,
+                    summary: None,
                 })
                 .collect(),
             default_value,
-            role: crate::OptionRole::Model,
+            role: crate::OptionRole::Effort,
             apply: crate::ApplyTiming::Live,
             recommended: None,
             permissive: None,
@@ -264,7 +266,7 @@ async fn run_actor(
         return;
     }
     let mut child = match cmd.spawn() {
-        Ok(child) => ProcessTree::new(child),
+        Ok(child) => opts.processes.hold(ProcessTree::new(child)),
         Err(err) => {
             let _ = ready
                 .send(Err(AgentError::Spawn(format!(
@@ -1653,19 +1655,177 @@ fn tool_item(id: &str, tool: &PiTool, status: ItemStatus) -> ThreadItem {
                 .unwrap_or_default(),
             status,
         },
-        _ => ItemContent::ToolCall {
-            image_reads: output.images.clone(),
-            name: name.clone(),
-            input: input.clone(),
-            output: (!output.text.is_empty()).then(|| output.text.clone()),
-            status,
-        },
+        _ => {
+            let text = (!output.text.is_empty()).then(|| output.text.clone());
+            let (family, text) = tool_family(name, input, text, result, status);
+            ItemContent::ToolCall {
+                image_reads: output.images.clone(),
+                name: name.clone(),
+                input: input.clone(),
+                output: text,
+                status,
+                family: family.map(Box::new),
+            }
+        }
     };
     ThreadItem {
         id: id.into(),
         parent_item_id: None,
         content,
     }
+}
+
+/// What pi's own tool `name` is, from its input and, once it succeeded, its
+/// text and `result` (`{content, details?}`). Returns the family and the
+/// output the call shows: the text, or what is left of it once the family's
+/// fields are read out. Formats are 1.5.2's (`dist/core/tools/`).
+fn tool_family(
+    name: &str,
+    input: &Value,
+    text: Option<String>,
+    result: Option<&Value>,
+    status: ItemStatus,
+) -> (Option<ToolFamily>, Option<String>) {
+    let field = |key: &str| input.get(key).and_then(Value::as_str).map(str::to_owned);
+    match name {
+        // `read.js`: the lines read as they are, from `offset` (1-based);
+        // when the file goes on, a blank line and a `[…]` notice after them.
+        "read" => {
+            let Some(path) = field("path") else {
+                return (None, text);
+            };
+            let first_line = Some(
+                input
+                    .get("offset")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1)
+                    .max(1),
+            );
+            let noticed = result
+                .is_some_and(|result| result.pointer("/details/truncation").is_some())
+                || input.get("limit").is_some();
+            let (lines, note) = match text {
+                Some(text) if status == ItemStatus::Completed && noticed => {
+                    match text.rsplit_once("\n\n[") {
+                        Some((lines, note)) if note.ends_with(']') && !note.contains('\n') => {
+                            (Some(lines.to_owned()), Some(format!("[{note}")))
+                        }
+                        _ => (Some(text), None),
+                    }
+                }
+                text => (text, None),
+            };
+            // An image's result is the `Read image file [type]` line beside
+            // the image, not lines of the file.
+            let image = lines
+                .as_deref()
+                .is_some_and(|text| text.starts_with("Read image file ["));
+            (
+                Some(ToolFamily::Read {
+                    path,
+                    first_line: first_line.filter(|_| status == ItemStatus::Completed && !image),
+                    note,
+                }),
+                lines,
+            )
+        }
+        // The tool_search extension (`extensions/tool-search/tool.js`):
+        // `{query}`, and `details.loaded`, the tools it loaded.
+        "tool_search" => match field("query") {
+            Some(query) => (
+                Some(ToolFamily::LoadTools {
+                    query,
+                    tools: result
+                        .and_then(|result| result.pointer("/details/loaded"))
+                        .and_then(Value::as_array)
+                        .map(|loaded| {
+                            loaded
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect()
+                        }),
+                }),
+                text,
+            ),
+            None => (None, text),
+        },
+        // `grep.js`, `find.js`, `ls.js`: one line each, relative to the
+        // directory searched, before any `[…]` notice after a blank line.
+        "grep" | "find" | "ls" => {
+            let path = field("path");
+            let hits = text
+                .as_deref()
+                .filter(|_| status == ItemStatus::Completed)
+                .map(|text| found(name, path.as_deref(), text));
+            (
+                Some(ToolFamily::Search {
+                    scope: match name {
+                        "grep" => SearchScope::Content,
+                        "find" => SearchScope::Files,
+                        _ => SearchScope::Entries,
+                    },
+                    pattern: field("pattern"),
+                    path,
+                    glob: field("glob"),
+                    hits,
+                }),
+                text,
+            )
+        }
+        _ => (None, text),
+    }
+}
+
+/// What a finished grep, find or ls returned. grep's matches are
+/// `path:N: text` (`path-N- text` is context), its path the searched file's
+/// name when it searched one file; find's and ls's lines are paths; an empty
+/// result is one line of pi's words.
+fn found(tool: &str, searched: Option<&str>, text: &str) -> Vec<SearchHit> {
+    let lines = match text.rsplit_once("\n\n[") {
+        Some((lines, notice)) if notice.ends_with(']') => lines,
+        _ => text,
+    };
+    let base = searched.map(Path::new);
+    let resolve = |relative: &str| match base {
+        Some(base) if base.file_name().and_then(|name| name.to_str()) == Some(relative) => {
+            base.to_string_lossy().into_owned()
+        }
+        Some(base) => base.join(relative).to_string_lossy().into_owned(),
+        None => relative.to_owned(),
+    };
+    let empty = [
+        "No matches found",
+        "No files found matching pattern",
+        "(empty directory)",
+    ];
+    if empty.contains(&lines.trim()) {
+        return Vec::new();
+    }
+    lines
+        .lines()
+        .filter_map(|line| {
+            if tool != "grep" {
+                return Some(SearchHit {
+                    path: match base {
+                        Some(base) => base.join(line).to_string_lossy().into_owned(),
+                        None => line.to_owned(),
+                    },
+                    line: None,
+                    text: None,
+                });
+            }
+            let (path, number, text) = line.match_indices(':').find_map(|(at, _)| {
+                let (number, text) = line[at + 1..].split_once(": ")?;
+                Some((&line[..at], number.parse().ok()?, text))
+            })?;
+            Some(SearchHit {
+                path: resolve(path),
+                line: Some(number),
+                text: Some(text.to_owned()),
+            })
+        })
+        .collect()
 }
 
 /// The text of a `notify` from a pi extension, at any of its levels.
@@ -2400,8 +2560,102 @@ mod tests {
                     input: json!({"path": "blue.png"}),
                     output: Some("Read image file [image/png]".into()),
                     status: ItemStatus::Completed,
+                    family: Some(Box::new(ToolFamily::Read {
+                        path: "blue.png".into(),
+                        first_line: None,
+                        note: None,
+                    })),
                 },
             ]
+        );
+    }
+
+    /// `read` returns the lines as they are, from its `offset`, and when
+    /// its `limit` stopped short of the file's end, a blank line and a notice
+    /// of what is left (1.5.2's `dist/core/tools/read.js`; content invented).
+    #[test]
+    fn a_read_is_the_lines_it_read_from_its_offset() {
+        assert_eq!(
+            tool_family(
+                "read",
+                &json!({"path": "src/lib.rs", "offset": 40, "limit": 2}),
+                Some(
+                    "fn main() {\n}\n\n[48 more lines in file. Use offset=42 to continue.]".into()
+                ),
+                None,
+                ItemStatus::Completed,
+            ),
+            (
+                Some(ToolFamily::Read {
+                    path: "src/lib.rs".into(),
+                    first_line: Some(40),
+                    note: Some("[48 more lines in file. Use offset=42 to continue.]".into()),
+                }),
+                Some("fn main() {\n}".into()),
+            )
+        );
+    }
+
+    /// grep names a match `path:N: text` under the directory it searched,
+    /// a context line `path-N- text`, and its limits in a `[…]` notice after
+    /// a blank line; ls lists the names in its directory (1.5.2's
+    /// `dist/core/tools/grep.js` and `ls.js`; content invented).
+    // The fixture's paths are as the harness prints them on a POSIX machine.
+    #[cfg(unix)]
+    #[test]
+    fn a_search_is_what_it_found_under_where_it_looked() {
+        let (family, _) = tool_family(
+            "grep",
+            &json!({"pattern": "TODO", "path": "src"}),
+            Some("a.rs-2- fn a() {\na.rs:3: // TODO: one\n\n[100 matches limit reached. Use limit=200 for more, or refine pattern]".into()),
+            None,
+            ItemStatus::Completed,
+        );
+        assert_eq!(
+            family,
+            Some(ToolFamily::Search {
+                scope: SearchScope::Content,
+                pattern: Some("TODO".into()),
+                path: Some("src".into()),
+                glob: None,
+                hits: Some(vec![SearchHit {
+                    path: "src/a.rs".into(),
+                    line: Some(3),
+                    text: Some("// TODO: one".into()),
+                }]),
+            })
+        );
+        let (family, _) = tool_family(
+            "ls",
+            &json!({"path": "src"}),
+            Some("(empty directory)".into()),
+            None,
+            ItemStatus::Completed,
+        );
+        assert!(matches!(
+            family,
+            Some(ToolFamily::Search { scope: SearchScope::Entries, hits: Some(hits), .. }) if hits.is_empty()
+        ));
+    }
+
+    /// The tool_search extension names the tools it loaded in
+    /// `details.loaded` (1.5.2's `dist/extensions/tool-search/tool.js`;
+    /// content invented).
+    #[test]
+    fn a_tool_search_is_the_tools_it_loaded() {
+        let (family, _) = tool_family(
+            "tool_search",
+            &json!({"query": "browser"}),
+            Some("Loaded 1 tool. They are available from your next call:\n- browser_open: Open a page".into()),
+            Some(&json!({"content": [], "details": {"loaded": ["browser_open"]}})),
+            ItemStatus::Completed,
+        );
+        assert_eq!(
+            family,
+            Some(ToolFamily::LoadTools {
+                query: "browser".into(),
+                tools: Some(vec!["browser_open".into()]),
+            })
         );
     }
 

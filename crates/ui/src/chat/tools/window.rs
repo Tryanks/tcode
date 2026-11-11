@@ -241,8 +241,6 @@ pub(in crate::chat) enum Detail {
     /// Open, or folding shut, as the fold samples it; the key names what
     /// the body shows, and the body's height glides when it changes.
     Fold(crate::motion::Shown<()>, AnyElement, u64),
-    /// Open, drawn without a fold: a surface that has no window to sample.
-    Open(AnyElement),
     /// Nothing to open in place: a press goes where this says, which the
     /// pointer is told as the window's tooltip.
     Elsewhere(SharedString),
@@ -343,7 +341,6 @@ pub(in crate::chat) fn tool_window(
     let folds = !matches!(detail, Detail::None | Detail::Elsewhere(_));
     let open = match &detail {
         Detail::Fold(shown, ..) => !shown.leaving(),
-        Detail::Open(_) => true,
         Detail::None | Detail::Shut | Detail::Elsewhere(_) => false,
     };
     let goes = match &detail {
@@ -410,13 +407,6 @@ pub(in crate::chat) fn tool_window(
                 body(content),
             ))))
         }
-        Detail::Open(content) => Some(
-            div()
-                .w_full()
-                .pt_1()
-                .child(body(content))
-                .into_any_element(),
-        ),
         Detail::None | Detail::Shut | Detail::Elsewhere(_) => None,
     };
     v_flex()

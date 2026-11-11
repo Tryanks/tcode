@@ -603,7 +603,7 @@ impl<'a> ActivityProjection<'a> {
                     Vec::new()
                 } else {
                     tcode_core::pull_request::watched(&meta.pull_requests)
-                        .map(|link| link.key.number)
+                        .map(|link| link.key.clone())
                         .collect()
                 },
                 scheduled_at: resident
@@ -617,6 +617,7 @@ impl<'a> ActivityProjection<'a> {
             },
             waiting_for_approval: !approvals.is_empty(),
             waiting_for_input: input.is_some(),
+            settle_blocked: self.state.settle_thread_busy(&meta.id),
             failed: self
                 .state
                 .thread_activity
@@ -1361,6 +1362,9 @@ impl AppState {
             terminal_height: session.terminal_workspace.height.clamp(120., 600.),
             delivery_in_flight: session.delivery_in_flight,
             activity: activity.session_activity(meta, Some(session)),
+            preparing_turn: session.preparing_turn(),
+            goal_control: meta.provider.caps().goals,
+            manual_compaction: meta.provider.caps().manual_compaction,
             stopping: session.interrupt_requested,
             stopping_since: session
                 .interrupt_requested_at

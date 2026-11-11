@@ -89,8 +89,7 @@ impl LocalPermissions {
             PermissionGrantAction::Request => {
                 if kind == PermissionKind::ScreenRecording {
                     let session_id = crate::shell::current_thread(cx)
-                        .and_then(|thread| self.store.read(cx).session_of(thread))
-                        .unwrap_or_default();
+                        .and_then(|thread| self.store.read(cx).session_of(thread));
                     self.store.update(cx, |store, _cx| {
                         store.write_relaunch_marker_for(session_id, "computer_use".into());
                     });
@@ -126,13 +125,37 @@ impl LocalPermissions {
         cx.notify();
     }
 
+    /// Relaunch once the host has written the marker the next instance
+    /// reopens from; a marker it could not write stops the relaunch.
     fn relaunch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let session_id = crate::shell::current_thread(cx)
-            .and_then(|thread| self.store.read(cx).session_of(thread))
-            .unwrap_or_default();
-        self.store.update(cx, |store, _cx| {
-            store.write_relaunch_marker_for(session_id, "computer_use".into());
+            .and_then(|thread| self.store.read(cx).session_of(thread));
+        let written = self.store.update(cx, |store, cx| {
+            store.command(
+                tcode_protocol::Command::WriteRelaunchMarker {
+                    session_id,
+                    reopen_settings: "computer_use".into(),
+                },
+                cx,
+            )
         });
+        cx.spawn_in(window, async move |this, cx| {
+            let written = written.await;
+            let _ = this.update_in(cx, |this, window, cx| match written {
+                Ok(_) => this.relaunch_now(window, cx),
+                Err(error) => window.push_notification(
+                    Notification::error(
+                        crate::tr!("permissions.relaunch_failed", error = error.message)
+                            .into_owned(),
+                    ),
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+
+    fn relaunch_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(error) = relaunch_app() {
             // No instance starts to read the marker; one a grant in flight
             // wrote stays for that grant.

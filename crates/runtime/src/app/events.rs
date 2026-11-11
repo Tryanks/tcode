@@ -317,7 +317,7 @@ impl AppState {
                         meta.model = model.clone();
                         filled_default_model = model.is_some();
                     }
-                    meta.updated_at = now_secs();
+                    meta.updated_at = cx.clock().unix_secs();
                     let meta = meta.clone();
                     self.persist_meta(&meta, cx);
                 }
@@ -336,7 +336,7 @@ impl AppState {
             }
             AgentEvent::TurnCompleted { .. } => {
                 if let Some(meta) = self.meta_mut(session_id) {
-                    meta.updated_at = now_secs();
+                    meta.updated_at = cx.clock().unix_secs();
                     let meta = meta.clone();
                     self.persist_meta(&meta, cx);
                 }
@@ -456,9 +456,6 @@ impl AppState {
                 );
             }
             AgentEvent::ProviderRelay { .. }
-            | AgentEvent::PlanResolved { .. }
-            | AgentEvent::ModelFallbackDetected { .. }
-            | AgentEvent::TurnBlocked { .. }
             | AgentEvent::ServedModel { .. }
             | AgentEvent::TurnChangesUpdated { .. }
             | AgentEvent::TurnCheckpoint { .. }
@@ -484,8 +481,8 @@ impl AppState {
             | AgentEvent::PlanUpdated { .. }
             | AgentEvent::GoalUpdated { .. }
             | AgentEvent::ControlAction(_)
-            | AgentEvent::ProposedPlanDelta { .. }
-            | AgentEvent::ProposedPlan { .. }
+            | AgentEvent::UnreadableRecord { .. }
+            | AgentEvent::RecordWithheld { .. }
             | AgentEvent::ProviderStartFailed { .. } => {}
         }
 
@@ -589,7 +586,7 @@ impl AppState {
     /// The same wall-clock timestamp is persisted and folded exactly once so
     /// the on-disk log and the loaded timeline agree.
     pub(super) fn record_event(&mut self, session_id: &str, event: &AgentEvent, cx: &mut HostCx) {
-        self.record_event_at(session_id, now_millis(), event, Vec::new(), cx);
+        self.record_event_at(session_id, cx.clock().unix_millis(), event, Vec::new(), cx);
     }
 
     /// Record `event`, which says the lead's provider took `reports`, in one
@@ -603,8 +600,14 @@ impl AppState {
         reports: &[ReportHandover],
         cx: &mut HostCx,
     ) {
-        let metas = self.settle_reports(reports);
-        self.record_event_at(session_id, now_millis(), event, metas.clone(), cx);
+        let metas = self.settle_reports(reports, cx.clock().unix_secs());
+        self.record_event_at(
+            session_id,
+            cx.clock().unix_millis(),
+            event,
+            metas.clone(),
+            cx,
+        );
         for meta in metas {
             if let Some(child) = self.resident_mut(&meta.id) {
                 child.meta = meta.clone();
@@ -793,7 +796,7 @@ impl AppState {
         let Some(fallback_meta) = self.resident_mut(target_id).and_then(|active| {
             active.meta.title.starts_with("New ").then(|| {
                 active.meta.title = fallback.clone();
-                active.meta.updated_at = now_secs();
+                active.meta.updated_at = cx.clock().unix_secs();
                 active.meta.clone()
             })
         }) else {
@@ -1008,9 +1011,16 @@ pub(super) async fn generate_ai_title(
     options.cwd = scratch.clone();
 
     let generated = smol::future::or(
-        generate_ai_title_inner(provider_launcher, provider, options, prompt, attachments),
+        generate_ai_title_inner(
+            provider_launcher,
+            provider,
+            options,
+            prompt,
+            attachments,
+            executor.clock(),
+        ),
         async {
-            smol::Timer::after(AI_TITLE_TIMEOUT).await;
+            executor.clock().timer(AI_TITLE_TIMEOUT).await;
             None
         },
     )
@@ -1027,6 +1037,7 @@ pub(super) async fn generate_ai_title_inner(
     options: SessionOptions,
     prompt: String,
     attachments: Vec<Attachment>,
+    clock: &crate::clock::HostClock,
 ) -> Option<String> {
     let handle = provider_launcher.launch(provider, options).await.ok()?;
     handle
@@ -1087,7 +1098,7 @@ pub(super) async fn generate_ai_title_inner(
             }
         },
         async {
-            smol::Timer::after(std::time::Duration::from_secs(2)).await;
+            clock.timer(std::time::Duration::from_secs(2)).await;
         },
     )
     .await;

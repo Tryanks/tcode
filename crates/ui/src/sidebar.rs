@@ -41,7 +41,7 @@ use tcode_core::{
     settings::SidebarLayout,
 };
 
-use crate::store::{ForkAvailability, HostKey, StoreChange, ThreadKey, TopicKind, WorkspaceStore};
+use crate::store::{HostKey, StoreChange, ThreadKey, TopicKind, WorkspaceStore};
 use crate::time::{humanize_ago, now_secs};
 use crate::typography::TextRole as _;
 use crate::window_drag_area;
@@ -411,6 +411,8 @@ struct ThreadFlags {
     waiting_for_approval: bool,
     waiting_for_input: bool,
     working: bool,
+    /// The host refuses to settle the thread now.
+    settle_blocked: bool,
     failed: bool,
     /// Pieces of background work and agents still running.
     background: (u32, u32),
@@ -418,6 +420,8 @@ struct ThreadFlags {
     unsettled: bool,
     /// What wakes the thread later though nothing of it runs.
     wakes: tcode_protocol::ThreadWakes,
+    /// The host can fork the thread's conversation, now or once it can.
+    forks: bool,
 }
 
 #[derive(Clone)]
@@ -428,6 +432,8 @@ struct ThreadRowState {
     row_key: String,
     waiting_for_approval: bool,
     waiting_for_input: bool,
+    /// The host refuses to settle the thread now.
+    settle_blocked: bool,
     /// Pieces of background work and agents still running.
     background: (u32, u32),
     unsettled: bool,
@@ -463,7 +469,7 @@ fn keeps_going(state: &ThreadRowState) -> Option<String> {
         wakes
             .pull_requests
             .iter()
-            .map(|number| crate::tr!("background.keeps_watch", number = number).into_owned()),
+            .map(|key| crate::tr!("background.keeps_watch", number = key.number).into_owned()),
     );
     if let Some(at) = wakes.scheduled_at {
         parts.push(
@@ -1075,6 +1081,7 @@ fn session_flags(sessions: &[SessionMeta], store: &WorkspaceStore) -> HashMap<St
                     waiting_for_approval: store.pending_approval_for(&meta.id),
                     waiting_for_input: store.pending_user_input_for(&meta.id),
                     working: store.turn_running_for(&meta.id),
+                    settle_blocked: store.settle_blocked_for(&meta.id),
                     failed: store.failed_for(&meta.id),
                     background: store.activity(&meta.id).map_or((0, 0), |activity| {
                         (activity.background.tasks, activity.background.agents)
@@ -1086,6 +1093,9 @@ fn session_flags(sessions: &[SessionMeta], store: &WorkspaceStore) -> HashMap<St
                         .activity(&meta.id)
                         .map(|activity| activity.wakes.clone())
                         .unwrap_or_default(),
+                    forks: store.activity(&meta.id).is_some_and(|activity| {
+                        activity.fork != tcode_protocol::ForkAvailability::Unsupported
+                    }),
                 },
             )
         })
@@ -1935,32 +1945,11 @@ impl SessionsSidebar {
         }
     }
 
-    fn on_fork(&mut self, action: &ThreadFork, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_fork(&mut self, action: &ThreadFork, _: &mut Window, cx: &mut Context<Self>) {
         let Some(store) = self.store_of(&action.0.host) else {
             return;
         };
         let id = action.0.session_id.clone();
-        let refusal = match store.read(cx).fork_availability(&id) {
-            ForkAvailability::Available => None,
-            ForkAvailability::Unsupported => {
-                let store = store.read(cx);
-                let provider = store
-                    .sidebar_sessions()
-                    .iter()
-                    .find(|meta| meta.id == id)
-                    .map_or_else(
-                        || crate::tr!("providers.harness.unnamed").into_owned(),
-                        |meta| crate::settings::provider_label(meta.provider).to_owned(),
-                    );
-                Some(crate::tr!("sidebar.fork_unsupported", provider = provider).into_owned())
-            }
-            ForkAvailability::Empty => Some(crate::tr!("sidebar.fork_empty").into_owned()),
-            ForkAvailability::Running => Some(crate::tr!("sidebar.fork_running").into_owned()),
-        };
-        if let Some(message) = refusal {
-            window.push_notification(Notification::error(message), cx);
-            return;
-        }
         store.update(cx, |store, cx| {
             store.fork_thread(id, cx);
         });
@@ -2795,8 +2784,7 @@ impl SessionsSidebar {
         }
     }
 
-    /// Archive a thread, honoring the delete-confirmation setting. Blocked while
-    /// the turn runs (`archive_session` no-ops then; the caller's tooltip warns).
+    /// Archive a thread, honoring the delete-confirmation setting.
     fn archive_thread(
         &mut self,
         thread: &ThreadKey,
@@ -2808,9 +2796,6 @@ impl SessionsSidebar {
             return;
         };
         let sidebar = cx.entity().downgrade();
-        if store.read(cx).turn_running_for(&thread.session_id) {
-            return;
-        }
         let commands = |session_id: &str| {
             (
                 vec![Command::ArchiveSession {
@@ -3831,6 +3816,7 @@ impl SessionsSidebar {
             row_key,
             waiting_for_approval: own_flags.waiting_for_approval,
             waiting_for_input: own_flags.waiting_for_input,
+            settle_blocked: own_flags.settle_blocked,
             background: own_flags.background,
             unsettled: own_flags.unsettled,
             wakes: own_flags.wakes,
@@ -3838,7 +3824,7 @@ impl SessionsSidebar {
             auto_settle_enabled: meta.auto_settle_disabled_at.is_none(),
             is_worktree: meta.worktree.is_some(),
             show_unread: own_flags.unread && !own_flags.working,
-            menu_can_fork: meta.provider.caps().supports_fork,
+            menu_can_fork: own_flags.forks,
             title_generating: store.title_generating(&meta.id),
         }
     }
@@ -4375,7 +4361,7 @@ impl SessionsSidebar {
         let can_fork = state.menu_can_fork;
         let is_worktree = state.is_worktree;
         let title_generating = state.title_generating;
-        let blocked = state.waiting_for_approval || state.waiting_for_input;
+        let settle_blocked = state.settle_blocked;
         let auto_settle_enabled = state.auto_settle_enabled;
         let follow_up = meta.follow_up.is_some();
         let parked = meta.parked_at.is_some();
@@ -4465,7 +4451,7 @@ impl SessionsSidebar {
                     } else {
                         Box::new(ThreadSettle(id.clone()))
                     },
-                    settled || (!running && !blocked),
+                    settled || !settle_blocked,
                 )
                 .when_some(moves, |menu, (up, down)| {
                     menu.menu_with_enable(
@@ -4664,13 +4650,11 @@ impl SessionsSidebar {
                     cx,
                 ),
                 |row, shown| {
-                    let blocked = store.read(cx).pending_approval_for(&meta.id)
-                        || store.read(cx).pending_user_input_for(&meta.id);
                     let slot = self.render_flat_thread_right_slot(
                         meta,
                         &state,
                         project_view_timestamp(meta),
-                        !blocked,
+                        !state.settle_blocked,
                         window,
                         cx,
                     );
@@ -4697,7 +4681,7 @@ impl SessionsSidebar {
         let action_id = state.thread.clone();
         let row_key = state.row_key.as_str();
         let settled = meta.is_settled();
-        let ago = humanize_ago(now_secs().saturating_sub(timestamp));
+        let ago = humanize_ago(now_secs(cx).saturating_sub(timestamp));
         let action_on_hover = settled || offers_settle;
         let label = if settled {
             crate::tr!("sidebar.unsettle_tooltip")
@@ -4847,8 +4831,6 @@ impl SessionsSidebar {
                 .children(dot)
                 .child(title_or_input)
                 .when(!renaming, |line| {
-                    let blocked = store.read(cx).pending_approval_for(&meta.id)
-                        || store.read(cx).pending_user_input_for(&meta.id);
                     line.children(Self::follow_up_glyph(meta, &name, window, cx))
                         .children(self.pin_glyph(meta, &state, window, cx))
                         .children(self.pane_glyph(&state, window, cx))
@@ -4856,7 +4838,7 @@ impl SessionsSidebar {
                             meta,
                             &state,
                             tcode_core::thread_sort::shown_timestamp(meta),
-                            !working && !blocked,
+                            !state.settle_blocked,
                             window,
                             cx,
                         ))
@@ -4974,8 +4956,18 @@ pub(crate) fn confirm_delete(
     window
         .spawn(cx, async move |cx| {
             let count = count.await;
-            let _ = cx.update(|window, cx| {
-                open_delete_confirmation(store, session_id, title, ok_text, count, window, cx)
+            let _ = cx.update(|window, cx| match count {
+                Ok(count) => {
+                    open_delete_confirmation(store, session_id, title, ok_text, count, window, cx)
+                }
+                // Without the archived threads the dialog could not say how
+                // many threads the delete takes.
+                Err(error) => window.push_notification(
+                    Notification::error(
+                        crate::tr!("settings.archived_failed", error = error).into_owned(),
+                    ),
+                    cx,
+                ),
             });
         })
         .detach();
@@ -5162,7 +5154,7 @@ impl SessionsSidebar {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) -> Rc<CompactListModel> {
-        let now = now_secs();
+        let now = now_secs(cx);
         let locale = rust_i18n::locale();
         if self.compact_model_dirty
             || self
@@ -6195,7 +6187,7 @@ impl SessionsSidebar {
                             })
                             .children(status)
                             .when_some(
-                                crate::pull_requests::badge(&meta.pull_requests, 14., cx),
+                                crate::pull_requests::badge(&meta.pull_requests, cx),
                                 |line, badge| line.child(badge).child("·"),
                             )
                             .child(div().flex_none().child(cached.relative_time.clone())),
@@ -7046,7 +7038,11 @@ mod tests {
                     unsettled: 0,
                     wakes: tcode_protocol::ThreadWakes {
                         pull_requests: if doing == Doing::Watch {
-                            vec![1048]
+                            vec![tcode_core::pull_request::PullRequestKey::new(
+                                "github.com",
+                                "sample/project",
+                                1048,
+                            )]
                         } else {
                             Vec::new()
                         },
@@ -7054,9 +7050,10 @@ mod tests {
                     },
                     waiting_for_approval: false,
                     waiting_for_input: false,
+                    settle_blocked: false,
                     failed: false,
                     unread: false,
-                    fork: ForkAvailability::Available,
+                    fork: tcode_protocol::ForkAvailability::Available,
                     agent: None,
                     latest_activity: None,
                 },
@@ -7212,7 +7209,7 @@ mod tests {
             let store = cx.new(|cx| {
                 WorkspaceStore::new_attached(driver.link.clone(), attachment, None, None, cx)
             });
-            driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+            driver.wait_until(cx, "sidebar baseline", |cx| {
                 store.read_with(cx, |store, _| store.baseline_ready())
             });
             Self {
@@ -7247,7 +7244,7 @@ mod tests {
             self.driver
                 .link
                 .set_connection_state(tcode_client::ConnectionState::Connected { path: None });
-            self.driver.shutdown(cx, &self.store, &self.host);
+            self.driver.shutdown(cx, &self.host);
             let _ = std::fs::remove_dir_all(self.root);
         }
     }
@@ -7342,7 +7339,7 @@ mod tests {
                 sidebar.on_pin(&ThreadPin(local("oldest")), window, cx)
             })
         });
-        driver.wait_until(cx, &store, "the pin", |cx| {
+        driver.wait_until(cx, "the pin", |cx| {
             store.read_with(cx, |store, _| {
                 store
                     .thread_meta("oldest")
@@ -7368,7 +7365,7 @@ mod tests {
                 sidebar.on_follow_up(&ThreadFollowUp(local("middle"), true), window, cx)
             })
         });
-        driver.wait_until(cx, &store, "the follow-up", |cx| {
+        driver.wait_until(cx, "the follow-up", |cx| {
             store.read_with(cx, |store, _| {
                 store
                     .thread_meta("middle")
@@ -7418,7 +7415,7 @@ mod tests {
         crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds(header).is_none(), "and is gone once it has");
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7451,7 +7448,7 @@ mod tests {
                 sidebar.on_pin(&ThreadPin(local("oldest")), window, cx)
             })
         });
-        driver.wait_until(cx, &store, "the pin", |cx| {
+        driver.wait_until(cx, "the pin", |cx| {
             store.read_with(cx, |store, _| {
                 store
                     .thread_meta("oldest")
@@ -7486,7 +7483,7 @@ mod tests {
             );
         }
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7515,7 +7512,7 @@ mod tests {
                     sidebar.perform_lifecycle(&HostKey::Local, vec![command], None, window, cx)
                 })
             });
-            driver.wait_until(cx, &store, "the lifecycle change", |cx| {
+            driver.wait_until(cx, "the lifecycle change", |cx| {
                 store.read_with(cx, |store, _| {
                     store
                         .sidebar_sessions()
@@ -7582,7 +7579,7 @@ mod tests {
         assert_eq!(top("middle", cx), None, "reduced motion takes it at once");
         assert!(top("oldest", cx) < Some(oldest), "and closes up at once");
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7670,7 +7667,7 @@ mod tests {
         );
         assert_eq!(drawn.last(), Some(&0.));
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7706,7 +7703,7 @@ mod tests {
                 sidebar.on_pin(&ThreadPin(local("second")), window, cx)
             })
         });
-        driver.wait_until(cx, &store, "the pin", |cx| {
+        driver.wait_until(cx, "the pin", |cx| {
             store.read_with(cx, |store, _| {
                 store
                     .thread_meta("second")
@@ -7727,7 +7724,7 @@ mod tests {
                 sidebar.unpin_thread(&local("second"), window, cx)
             })
         });
-        driver.wait_until(cx, &store, "the unpin", |cx| {
+        driver.wait_until(cx, "the unpin", |cx| {
             store.read_with(cx, |store, _| {
                 store
                     .thread_meta("second")
@@ -7748,7 +7745,7 @@ mod tests {
         );
         assert!(cx.debug_bounds("arrange-pinned-empty").is_some());
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7823,7 +7820,7 @@ mod tests {
             ghosts.push(ghost("oldest", cx));
             rows.push(row("oldest", cx).top());
         }
-        driver.wait_until(cx, &store, "the move", |cx| {
+        driver.wait_until(cx, "the move", |cx| {
             store.read_with(cx, |store, _| {
                 store.flat_sessions().first().map(|meta| meta.id.as_str()) == Some("oldest")
             })
@@ -7889,7 +7886,7 @@ mod tests {
         assert_eq!(ghost("middle", cx), None, "reduced motion sets it down");
         assert_eq!(row("middle", cx).top(), first, "in its new place at once");
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7905,7 +7902,9 @@ mod tests {
 
     fn cancel_inline_rename(cx: &mut TestAppContext, compact: bool) {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, compact));
+        if compact {
+            cx.update(crate::window_seam::force_mobile_layout);
+        }
         let root = crate::store::tests::scratch_root("sidebar-rename-test");
         let session_store = SessionStore::open_at(root.clone()).unwrap();
         let project = Project::from_root(root.clone());
@@ -7930,7 +7929,7 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+        driver.wait_until(cx, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
 
@@ -8165,7 +8164,7 @@ mod tests {
                 .expect("read host title");
         assert_eq!(title, "Original title");
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -8199,7 +8198,7 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+        driver.wait_until(cx, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         let window_state = cx.new(|_| WindowState::default());
@@ -8221,7 +8220,7 @@ mod tests {
         ];
         let wait_for_rows =
             |cx: &mut VisualTestContext, driver: &mut crate::store::tests::LocalHostDriver| loop {
-                driver.step(cx, &store);
+                driver.step(cx);
                 draw(cx);
                 let rows: Vec<_> = selectors
                     .iter()
@@ -8238,7 +8237,7 @@ mod tests {
              enabled: bool,
              driver: &mut crate::store::tests::LocalHostDriver| {
                 store.update(cx, |store, _| store.set_sidebar_provider_marks(enabled));
-                driver.wait_until(cx, &store, "the setting to replicate", |cx| {
+                driver.wait_until(cx, "the setting to replicate", |cx| {
                     store.read_with(cx, |store, _| store.settings().sidebar_provider_marks)
                         == enabled
                 });
@@ -8279,7 +8278,7 @@ mod tests {
                 "with marks off again no mark is drawn"
             );
         }
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -8319,7 +8318,7 @@ mod tests {
             )
         });
         crate::store::tests::place_shown_threads(&store, cx);
-        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+        driver.wait_until(cx, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         let navigation = cx.new(|_| WindowState::default().with_compact(true));
@@ -8330,7 +8329,7 @@ mod tests {
         draw(cx);
         // A remote host may not have sent status yet. Selection must repaint
         // from the client notification without waiting for a host event.
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         draw(cx);
         let a = cx.debug_bounds("compact-row-menu-0").unwrap();
         let b = cx.debug_bounds("compact-row-menu-10").unwrap();
@@ -8455,7 +8454,7 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+        driver.wait_until(cx, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         let window_state = cx.new(|_| WindowState::default().with_compact(true));
@@ -8503,8 +8502,8 @@ mod tests {
         cx.simulate_click(toggle.center(), gpui::Modifiers::default());
         draw(cx);
         assert_eq!(
-            device().load_preferences().sidebar_layout.as_deref(),
-            Some("grouped"),
+            device().load_preferences().unwrap().sidebar_layout,
+            Some(SidebarLayout::Grouped),
             "the actual header action persists this device's choice"
         );
         // The list the new layout brings folds its rows in; the reader
@@ -8527,18 +8526,13 @@ mod tests {
             for collapsed in [true, false] {
                 let header = cx.debug_bounds("compact-group-header").unwrap();
                 cx.simulate_click(header.center(), gpui::Modifiers::default());
-                driver.wait_until(
-                    cx,
-                    &store,
-                    "the project toggle to reach the replica",
-                    |cx| {
-                        store.read_with(cx, |store, _| {
-                            seeded
-                                .iter()
-                                .any(|project| store.is_project_collapsed(&project.id))
-                        }) == collapsed
-                    },
-                );
+                driver.wait_until(cx, "the project toggle to reach the replica", |cx| {
+                    store.read_with(cx, |store, _| {
+                        seeded
+                            .iter()
+                            .any(|project| store.is_project_collapsed(&project.id))
+                    }) == collapsed
+                });
                 draw_settled(cx);
                 let visible = ["compact-row-thread-0", "compact-row-thread-1"]
                     .into_iter()
@@ -8552,7 +8546,7 @@ mod tests {
             }
         }
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
         headers
     }
@@ -8586,12 +8580,13 @@ mod tests {
         )
         .unwrap();
         let project = Project::from_root(root.join("project"));
+        let now = cx.update(|cx| crate::time::now_secs(cx));
         smol::block_on(host.update_state_for_test(move |state, _| {
             state.sessions = (0..60)
                 .map(|index| {
                     let mut meta = session(&format!("scrollbar-{index}"), None);
                     meta.project_id = Some(project.id.clone());
-                    meta.updated_at = now_secs().saturating_sub(index);
+                    meta.updated_at = now.saturating_sub(index);
                     meta
                 })
                 .collect::<Vec<_>>()
@@ -8609,12 +8604,12 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+        driver.wait_until(cx, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         // The host sends its index from its own threads; wait for every
         // thread, as the app's event pump would, before judging the list.
-        driver.wait_until(cx, &store, "every thread", |cx| {
+        driver.wait_until(cx, "every thread", |cx| {
             store.read_with(cx, |store, _| store.flat_sessions().len() == 60)
         });
         let window_state = cx.new(|_| WindowState::default());
@@ -8677,7 +8672,7 @@ mod tests {
                 "dragging must not activate a thread under the scrollbar"
             );
         }
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -9983,7 +9978,7 @@ mod tests {
                 }
             }
         });
-        driver.wait_until(cx, &store, "the threads", |cx| {
+        driver.wait_until(cx, "the threads", |cx| {
             store.read_with(cx, |store, _| !store.flat_sessions().is_empty())
         });
         let window_state = cx.new(|_| WindowState::default());
@@ -10043,7 +10038,7 @@ mod tests {
             sidebar.update_in(cx, |sidebar, window, cx| {
                 sidebar.on_pin(&ThreadPin(local(id)), window, cx)
             });
-            driver.wait_until(cx, &store, "pin command reaches the host", |_| {
+            driver.wait_until(cx, "pin command reaches the host", |_| {
                 !recorded.lock().unwrap().is_empty()
             });
             let pins = std::mem::take(&mut *recorded.lock().unwrap());
@@ -10057,7 +10052,7 @@ mod tests {
             meta.pinned_at = Some(2);
             meta.pin_order = Some(key.clone());
             incoming.try_send(snapshot(&sessions)).unwrap();
-            driver.wait_until(cx, &store, "the pin", |cx| {
+            driver.wait_until(cx, "the pin", |cx| {
                 store.read_with(cx, |store, _| {
                     store
                         .thread_meta(id)
@@ -10099,7 +10094,7 @@ mod tests {
         started.updated_at = 2_000;
         sessions.push(started);
         incoming.try_send(snapshot(&sessions)).unwrap();
-        driver.wait_until(cx, &store, "the new thread", |cx| {
+        driver.wait_until(cx, "the new thread", |cx| {
             store.read_with(cx, |store, _| {
                 store.thread_meta("started-elsewhere").is_some()
             })
@@ -10241,7 +10236,7 @@ mod tests {
                 }
             }
         });
-        driver.wait_until(cx, &store, "the threads", |cx| {
+        driver.wait_until(cx, "the threads", |cx| {
             store.read_with(cx, |store, _| !store.flat_sessions().is_empty())
         });
         let window_state = cx.new(|_| WindowState::default());
@@ -10258,13 +10253,13 @@ mod tests {
         let sent = |cx: &mut VisualTestContext,
                     driver: &mut crate::store::tests::LocalHostDriver,
                     expected: usize| {
-            driver.wait_until(cx, &store, "lifecycle commands reach the host", |_| {
+            driver.wait_until(cx, "lifecycle commands reach the host", |_| {
                 recorded.lock().unwrap().len() >= expected
             });
             // A FIFO reply also establishes absence after a cancelled gesture.
             let link = driver.link.clone();
             let mut barrier = std::pin::pin!(link.query(tcode_protocol::Query::Ping));
-            driver.wait_until(cx, &store, "lifecycle command barrier", |_| {
+            driver.wait_until(cx, "lifecycle command barrier", |_| {
                 let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
                 match std::future::Future::poll(barrier.as_mut(), &mut task_cx) {
                     std::task::Poll::Ready(result) => {
@@ -10584,7 +10579,7 @@ mod tests {
         cx.simulate_mouse_up(to, left, none);
         draw(cx);
         let store = a.store.clone();
-        a.driver.wait_until(cx, &store, "the move", |cx| {
+        a.driver.wait_until(cx, "the move", |cx| {
             store.read_with(cx, |store, _| {
                 store
                     .flat_sessions()
@@ -10593,8 +10588,7 @@ mod tests {
                     .eq(["a1", "a3", "a2"])
             })
         });
-        let store = b.store.clone();
-        b.driver.step(cx, &store);
+        b.driver.step(cx);
         assert_eq!(b.listed(cx), ["b1", "b2"]);
         assert!(
             b.store.read_with(cx, |store, _| store

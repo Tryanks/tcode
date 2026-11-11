@@ -1,14 +1,13 @@
 //! Tool windows: what each tool call did, drawn from its canonical item.
 //!
 //! A window is chosen from what the item carries, never from the provider
-//! that produced it (Principle 4): first its `ItemContent` kind — a command,
-//! a file change — and then, for a `ToolCall`, by its tool name
-//! ([`agent::ToolName::parse`], so `mcp__s__t` and `s/t` name one tool)
-//! and the shape of its input. Each family view tries its names and
-//! deserializes the input into its own typed fields; a call no family
-//! accepts, or whose input is not the shape a family expects, gets the
-//! generic window. A provider that names a capability differently simply
-//! gets the generic window until a matcher accepts its name and shape.
+//! that produced it (Principle 4): first its `ItemContent` kind — a command
+//! and a file change are only ever those items — and then, for a
+//! `ToolCall`, the family its adapter read it to be ([`agent::ToolFamily`]).
+//! A call of no family is a tool of an MCP server ([`agent::ToolName`], so
+//! `mcp__s__t` and `s/t` name one tool) whose window reads its input's
+//! shape, a call the adapter named for what it is (Codex's `sleep`,
+//! `image_generation`, `auto-reviewer`), or the generic window.
 
 pub(in crate::chat) mod desktop;
 pub(in crate::chat) mod diff;
@@ -25,13 +24,12 @@ pub(in crate::chat) mod search;
 pub(in crate::chat) mod shell;
 pub(in crate::chat) mod subagent;
 pub(in crate::chat) mod threads;
-pub(in crate::chat) mod todo;
 pub(in crate::chat) mod web;
 pub(in crate::chat) mod window;
 
 use std::{any::Any, collections::HashMap, ops::Deref, path::Path, rc::Rc, sync::Arc};
 
-use agent::{Attachment, ItemContent, ItemStatus, ToolName};
+use agent::{Attachment, ItemContent, ItemStatus, ToolFamily, ToolName};
 use gpui::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
@@ -58,6 +56,7 @@ pub(in crate::chat) struct Call<'a> {
     pub(in crate::chat) output: Option<&'a str>,
     pub(in crate::chat) images: &'a [Attachment],
     pub(in crate::chat) status: ItemStatus,
+    pub(in crate::chat) family: Option<&'a ToolFamily>,
 }
 
 impl<'a> Call<'a> {
@@ -68,6 +67,7 @@ impl<'a> Call<'a> {
             input,
             output,
             status,
+            family,
         }) = &entry.content
         else {
             return None;
@@ -79,6 +79,7 @@ impl<'a> Call<'a> {
             output: output.as_deref(),
             images: image_reads,
             status: *status,
+            family: family.as_deref(),
         })
     }
 
@@ -94,15 +95,11 @@ impl<'a> Call<'a> {
     }
 
     /// Whether the call is to one of `servers`' tools named one of `names`.
-    /// A transcript imported without its MCP namespace keeps only the tool's
-    /// name, so `bare` also accepts the name alone, for names no harness
-    /// gives a tool of its own.
-    pub(in crate::chat) fn served(&self, servers: &[&str], names: &[&str], bare: bool) -> bool {
-        let server = match self.name.server {
-            Some(server) => servers.contains(&server),
-            None => bare,
-        };
-        server && names.contains(&self.name.tool)
+    pub(in crate::chat) fn served(&self, servers: &[&str], names: &[&str]) -> bool {
+        self.name
+            .server
+            .is_some_and(|server| servers.contains(&server))
+            && names.contains(&self.name.tool)
     }
 
     /// The input as a view's typed fields, borrowing its strings; `None`
@@ -145,11 +142,9 @@ type Matcher = for<'a> fn(&Call<'a>) -> Option<Box<dyn ToolView + 'a>>;
 /// Every family that claims calls by name and shape, in the order they are
 /// asked. The generic window takes whatever none accepts.
 const FAMILIES: &[Matcher] = &[
-    shell::tool_call,
     read::tool_call,
     search::tool_call,
     web::tool_call,
-    todo::tool_call,
     script::tool_call,
     desktop::tool_call,
     preview::tool_call,
@@ -202,11 +197,7 @@ pub(in crate::chat) fn family(entry: &TimelineEntry) -> Option<Family> {
         }
         ItemContent::ToolCall { .. } => {
             let call = Call::of(entry)?;
-            if shell::tool_call(&call).is_some() {
-                Family::Command
-            } else if let Some(edit) = diff::edit(entry, Path::new("")) {
-                Family::Edit(edit.files.into_iter().map(|file| file.row.path).collect())
-            } else if read::tool_call(&call).is_some() {
+            if read::tool_call(&call).is_some() {
                 Family::Read
             } else if search::tool_call(&call).is_some() {
                 Family::Search
@@ -347,59 +338,6 @@ fn kind_activity(entry: &TimelineEntry, live_reasoning: bool, cwd: &Path) -> Act
         ),
         _ => settled(Header::bare(crate::icon::IconName::Info), Vec::new()),
     }
-}
-
-/// An activity's window drawn outside a chat, for the component gallery:
-/// its header, and a command's terminal when open.
-pub(crate) fn preview_window(
-    entry: &TimelineEntry,
-    open: bool,
-    hover: crate::motion::ListHover,
-    cx: &App,
-) -> AnyElement {
-    let activity = activity(entry, false, Path::new(""));
-    let error = activity.failure();
-    let elapsed_ms = window::elapsed(&activity.header, entry);
-    let Activity {
-        header,
-        status,
-        copy,
-        expandable,
-        ..
-    } = activity;
-    let detail = match &entry.content {
-        EntryContent::Item(ItemContent::CommandExecution {
-            command, output, ..
-        }) if open => window::Detail::Open(shell::CommandPanelCache::new().render(
-            entry,
-            command,
-            output,
-            Default::default(),
-            None,
-            shell::OutputHandlers::inert(),
-            cx,
-        )),
-        _ if expandable => window::Detail::Shut,
-        _ => window::Detail::None,
-    };
-    window::tool_window(
-        window::WindowSpec {
-            key: entry.id.clone(),
-            header,
-            status,
-            error,
-            elapsed_ms,
-            compact: false,
-            copy,
-            whole_output: None,
-            path: None,
-            hover,
-            motion: Default::default(),
-        },
-        detail,
-        |_, _, _| {},
-        cx,
-    )
 }
 
 /// What a window copies, for a surface outside the window that offers the
@@ -746,16 +684,6 @@ pub(in crate::chat) fn full_output<'a>(
     held_output(call.entry, call.output.unwrap_or_default(), ctx)
 }
 
-/// [`full_output`] for any item's output text.
-pub(in crate::chat) fn full_text(
-    entry: &TimelineEntry,
-    output: &str,
-    ctx: &mut ToolCtx<'_, '_>,
-) -> (String, Option<AnyElement>) {
-    let (text, control) = held_output(entry, output, ctx);
-    (text.to_string(), control)
-}
-
 fn held_output<'a>(
     entry: &TimelineEntry,
     output: &'a str,
@@ -796,31 +724,16 @@ pub(in crate::chat) fn output_section(
     limit: Bound,
     ctx: &mut ToolCtx<'_, '_>,
 ) -> Option<AnyElement> {
-    output_section_with(call, limit, ctx, |text| text)
-}
-
-/// [`output_section`] over the part of the output `part` takes from it:
-/// what a script printed, past its harness's report.
-pub(in crate::chat) fn output_section_with(
-    call: &Call<'_>,
-    limit: Bound,
-    ctx: &mut ToolCtx<'_, '_>,
-    part: impl FnOnce(&str) -> &str,
-) -> Option<AnyElement> {
     let (text, control) = held_output(call.entry, call.output.unwrap_or_default(), ctx);
     if call.output.is_none() && matches!(text, HeldOutput::Record(_)) {
         return None;
     }
     // A half result is not JSON.
     let done = call.status != ItemStatus::InProgress;
-    let text = ctx.derived(
-        format!("tool-output-{}-{done}", call.id()),
-        part(&text),
-        |text| {
-            let pretty = done.then(|| pretty_json(text)).flatten();
-            SharedString::from(pretty.unwrap_or_else(|| text.to_owned()))
-        },
-    );
+    let text = ctx.derived(format!("tool-output-{}-{done}", call.id()), &text, |text| {
+        let pretty = done.then(|| pretty_json(text)).flatten();
+        SharedString::from(pretty.unwrap_or_else(|| text.to_owned()))
+    });
     let failed = call.status == ItemStatus::Failed;
     let label = if failed {
         crate::tr!("tools.error")

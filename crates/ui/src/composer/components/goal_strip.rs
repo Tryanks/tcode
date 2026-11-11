@@ -79,7 +79,7 @@ impl Composer {
     ) -> AnyElement {
         let state = self.composer_state(cx);
         let goal = goal.clone();
-        let control = state.provider.and_then(|provider| provider.caps().goals);
+        let control = state.goal_control;
         let enabled = self.interactive(cx) && goal_offered(&state).is_some();
         let (icon, color) = status_mark(goal.status, cx);
         let theme = cx.theme();

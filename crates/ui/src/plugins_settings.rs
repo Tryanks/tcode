@@ -339,8 +339,7 @@ impl PluginsSettingsPanel {
 
     /// Open the Harness of `profile_id`'s plugins.
     pub fn focus_profile(&mut self, profile_id: String, cx: &mut Context<Self>) {
-        let kind = self.store.read(cx).provider_profile_kind(&profile_id);
-        self.harness = Some(kind);
+        self.harness = self.store.read(cx).provider_profile_kind(&profile_id);
         self.page = Page::Harness;
         self.column = Some(profile_id);
         self.page_scroll.set_offset(point(px(0.), px(0.)));
@@ -446,7 +445,7 @@ impl PluginsSettingsPanel {
         let ours: Vec<(String, Option<PathBuf>)> = self
             .wanted(cx)
             .into_iter()
-            .filter(|(profile_id, _)| store.provider_profile_kind(profile_id) == kind)
+            .filter(|(profile_id, _)| store.provider_profile_kind(profile_id) == Some(kind))
             .collect();
         for (profile_id, cwd) in ours {
             self.listed.insert((profile_id.clone(), cwd.clone()));

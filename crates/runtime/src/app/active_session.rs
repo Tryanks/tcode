@@ -186,6 +186,9 @@ pub struct ActiveSession {
     /// previews a different provider. Consumed only by a confirmed send.
     pub(super) pending_relay: Option<PendingRelay>,
     pub(super) runtime: Runtime,
+    /// The processes of the provider [`Self::runtime`] starts or runs, which
+    /// stopping it kills whatever the provider is waiting on.
+    pub(super) provider_processes: agent::SessionProcesses,
     /// A rewind holds the queue until the user next sends a message, which
     /// goes ahead of it.
     pub(super) queue_held: bool,
@@ -319,6 +322,7 @@ impl ActiveSession {
             draft_device_id: None,
             pending_relay: None,
             runtime: Runtime::Idle,
+            provider_processes: agent::SessionProcesses::default(),
             queue_held: false,
             live_model: None,
             live_cwd,
@@ -552,8 +556,9 @@ impl ActiveSession {
                 || self.delivery_in_flight.is_some())
     }
 
-    /// The queued message the next dispatch would send, if one could go now.
-    fn next_dispatchable(&self) -> Option<&QueuedMessage> {
+    /// The queued message the next dispatch would send, if one could go at
+    /// `now`, the host's wall time.
+    fn next_dispatchable(&self, now: SystemTime) -> Option<&QueuedMessage> {
         if self.queue_held
             || self.turn_in_flight
             || self.delivery_in_flight.is_some()
@@ -562,7 +567,6 @@ impl ActiveSession {
         {
             return None;
         }
-        let now = SystemTime::now();
         self.queue.iter().find(|message| {
             !message.space_held && message.not_before.is_none_or(|time| time <= now)
         })
@@ -571,14 +575,14 @@ impl ActiveSession {
     /// The id and text of the message that opens the fresh provider session of a moved
     /// thread, or of one whose native session could not be carried to its new account,
     /// which carries the handoff; `None` until that session is live and a message can go.
-    pub(super) fn handoff_message(&self) -> Option<(u64, String)> {
+    pub(super) fn handoff_message(&self, now: SystemTime) -> Option<(u64, String)> {
         if (self.meta.moved_from.is_none() && !self.session_transfer_failed())
             || self.cwd_changed_while_live()
             || self.profile_changed_while_live()
         {
             return None;
         }
-        self.next_dispatchable()
+        self.next_dispatchable(now)
             .map(|message| (message.id, message.text.clone()))
     }
 
@@ -595,9 +599,7 @@ impl ActiveSession {
     /// `ensure_started` respawns it (with the current model + resume cursor).
     /// Queued sends are preserved so they flush once the new process is up.
     pub(super) fn shutdown_to_idle(&mut self) {
-        if let Runtime::Live(commands) = &self.runtime {
-            let _ = commands.try_send(SessionCommand::Shutdown);
-        }
+        self.stop_provider();
         self.runtime = Runtime::Idle;
         self.delivery_in_flight = None;
         self.settings_apply_in_flight = None;
@@ -609,6 +611,26 @@ impl ActiveSession {
         self.background.clear();
         self.idle_since = None;
         self._pump = None;
+    }
+
+    /// The thread's next turn waits on its provider, which has no turn running
+    /// yet: it is starting, still to answer a live settings change, or still to
+    /// take the message.
+    pub(super) fn preparing_turn(&self) -> bool {
+        !self.turn_in_flight
+            && !self.timeline.turn_running
+            && (matches!(self.runtime, Runtime::Starting { .. })
+                || self.settings_apply_in_flight.is_some()
+                || self.delivery_in_flight.is_some())
+    }
+
+    /// Stop the provider this session starts or runs: its actor is asked, and
+    /// its processes are killed, which ends whatever it waits on.
+    pub(super) fn stop_provider(&self) {
+        if let Runtime::Live(commands) = &self.runtime {
+            let _ = commands.try_send(SessionCommand::Shutdown);
+        }
+        self.provider_processes.stop();
     }
 
     /// Forget a provider process that has already closed on its own.
@@ -866,8 +888,8 @@ impl ActiveSession {
     /// finish. (Steering — the other way to send mid-turn — never goes through
     /// here; see [`AppState::steer`].) A restart background work defers does not
     /// block it: the message runs on the live process's settings and says so.
-    pub(super) fn dispatch_next_pending(&mut self) -> Result<bool, ()> {
-        let Some(send) = self.next_dispatchable().cloned() else {
+    pub(super) fn dispatch_next_pending(&mut self, now: SystemTime) -> Result<bool, ()> {
+        let Some(send) = self.next_dispatchable(now).cloned() else {
             return Ok(false);
         };
         let Runtime::Live(commands) = &self.runtime else {

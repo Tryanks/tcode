@@ -337,7 +337,7 @@ pub(super) fn answer_of(
 ) -> Result<PullRequestActionResult, ProtocolError> {
     match result {
         Ok(CommandResponse::PullRequestAction(result)) => Ok(result),
-        Ok(_) => Ok(PullRequestActionResult::Uncertain),
+        Ok(_) => Err(crate::store::unexpected_pull_request_response()),
         Err(error) if error.code == "disconnected" => Ok(PullRequestActionResult::Uncertain),
         Err(error) => Err(error),
     }

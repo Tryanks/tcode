@@ -166,11 +166,14 @@ pub async fn debug_connect() -> String {
         return serde_json::json!({"error":"call start first"}).to_string();
     }
     let host = WebHost;
-    let Some(paired) = host.last_host_id().and_then(|id| {
-        host.load_hosts()
-            .into_iter()
-            .find(|host| host.host_id == id)
-    }) else {
+    let saved = match host.load_hosts() {
+        Ok(saved) => saved,
+        Err(error) => return serde_json::json!({"error": error.to_string()}).to_string(),
+    };
+    let Some(paired) = host
+        .last_host_id()
+        .and_then(|id| saved.into_iter().find(|host| host.host_id == id))
+    else {
         return serde_json::json!({"error":"not signed in"}).to_string();
     };
     let transport = host.connect(&paired);

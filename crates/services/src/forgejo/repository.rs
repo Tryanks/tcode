@@ -29,6 +29,15 @@ pub(super) fn url(key: &PullRequestKey) -> String {
     )
 }
 
+pub(super) fn file_url(key: &PullRequestKey, revision: &str, path: &str) -> String {
+    format!(
+        "https://{}/{}/src/commit/{revision}/{}",
+        key.host,
+        key.repository,
+        crate::forge::url_path(path)
+    )
+}
+
 /// The authority among `known` that a URL's host, port and path start with, longest mount
 /// first; else the host and port alone when its name says Forgejo or Gitea. A host and port
 /// that is not one, such as one with userinfo, names no server.
@@ -177,6 +186,10 @@ mod tests {
             PullRequestKey::new("git.acme.test:3000/forge", "team/app", 7)
         );
         assert_eq!(url, "https://git.acme.test:3000/forge/team/app/pulls/7");
+        assert_eq!(
+            file_url(&key, "abc123", "docs/read me.md"),
+            "https://git.acme.test:3000/forge/team/app/src/commit/abc123/docs/read%20me.md"
+        );
         assert_eq!(
             remote(&known, "https://git.acme.test:3000/forge/team/app.git"),
             repository("git.acme.test:3000/forge", "team", "app")

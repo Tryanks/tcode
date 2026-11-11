@@ -4,8 +4,8 @@
 
 use std::rc::Rc;
 
-use gpui::{App, AppContext as _, Entity, Global, Window};
-use tcode_client::host::{ClientHost, ClientPreferences, WorkspacePreference};
+use gpui::{App, AppContext as _, Entity, EventEmitter, Global, Window};
+use tcode_client::host::{ClientHost, ClientPreferences, FileFailure, WorkspacePreference};
 use tcode_core::settings::{Settings, SidebarLayout, ThemeMode};
 
 use crate::store::HostKey;
@@ -13,7 +13,19 @@ use crate::store::HostKey;
 pub(crate) struct DevicePreferences {
     client: Option<Rc<dyn ClientHost>>,
     saved: ClientPreferences,
+    /// Why what the client saved could not be read. This device then runs on
+    /// the defaults, changes them for as long as it runs, and saves nothing
+    /// over the file.
+    unreadable: Option<FileFailure>,
 }
+
+/// What the window tells the user about this device's preferences.
+pub(crate) enum PreferencesFailure {
+    Unreadable(FileFailure),
+    Unsaved(FileFailure),
+}
+
+impl EventEmitter<PreferencesFailure> for DevicePreferences {}
 
 struct Installed(Entity<DevicePreferences>);
 
@@ -22,10 +34,21 @@ impl Global for Installed {}
 impl DevicePreferences {
     /// Make what `client` saved the preferences every view reads.
     pub(crate) fn install(client: Rc<dyn ClientHost>, cx: &mut App) {
-        let saved = client.load_preferences();
+        let loaded = client.load_preferences();
         Self::entity(cx).update(cx, |this, cx| {
             this.client = Some(client);
-            this.saved = saved;
+            match loaded {
+                Ok(saved) => {
+                    this.saved = saved;
+                    this.unreadable = None;
+                }
+                Err(error) => {
+                    log::error!("running on default device preferences: {error}");
+                    this.saved = ClientPreferences::default();
+                    this.unreadable = Some(error.clone());
+                    cx.emit(PreferencesFailure::Unreadable(error));
+                }
+            }
             cx.notify();
         });
     }
@@ -38,6 +61,7 @@ impl DevicePreferences {
         let entity = cx.new(|_| Self {
             client: None,
             saved: ClientPreferences::default(),
+            unreadable: None,
         });
         cx.set_global(Installed(entity.clone()));
         entity
@@ -49,23 +73,20 @@ impl DevicePreferences {
 
     fn update(cx: &mut App, change: impl FnOnce(&mut ClientPreferences)) {
         Self::entity(cx).update(cx, |this, cx| {
-            // Read again rather than from `saved`: a space's store writes its
-            // member settings into the same preferences.
-            let mut preferences = match &this.client {
-                Some(client) => client.load_preferences(),
-                None => this.saved.clone(),
-            };
-            let loaded = preferences.clone();
+            let mut preferences = this.saved.clone();
             change(&mut preferences);
-            if preferences != loaded
+            if preferences == this.saved {
+                return;
+            }
+            if this.unreadable.is_none()
                 && let Some(client) = &this.client
+                && let Err(error) = client.save_preferences(&preferences)
             {
-                client.save_preferences(&preferences);
+                log::error!("could not save device preferences: {error}");
+                cx.emit(PreferencesFailure::Unsaved(error));
             }
-            if preferences != this.saved {
-                this.saved = preferences;
-                cx.notify();
-            }
+            this.saved = preferences;
+            cx.notify();
         });
     }
 
@@ -81,18 +102,14 @@ impl DevicePreferences {
         });
         if unset {
             Self::update(cx, |saved| {
-                saved
-                    .appearance
-                    .get_or_insert_with(|| theme_key(host.theme_mode).to_owned());
+                saved.appearance.get_or_insert(host.theme_mode);
                 saved
                     .language
                     .get_or_insert_with(|| host.language.clone().unwrap_or("system".into()));
                 saved
                     .sidebar_collapsed
                     .get_or_insert(host.sidebar_collapsed);
-                saved
-                    .sidebar_layout
-                    .get_or_insert_with(|| layout_key(host.sidebar_layout).to_owned());
+                saved.sidebar_layout.get_or_insert(host.sidebar_layout);
             });
         }
         unset
@@ -100,12 +117,7 @@ impl DevicePreferences {
 
     /// The theme this device chose, `None` before it chose one.
     pub(crate) fn appearance(cx: &App) -> Option<ThemeMode> {
-        match Self::saved(cx)?.appearance.as_deref()? {
-            "system" => Some(ThemeMode::System),
-            "light" => Some(ThemeMode::Light),
-            "dark" => Some(ThemeMode::Dark),
-            _ => None,
-        }
+        Self::saved(cx)?.appearance
     }
 
     pub(crate) fn theme(cx: &App) -> ThemeMode {
@@ -113,9 +125,7 @@ impl DevicePreferences {
     }
 
     pub(crate) fn set_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
-        Self::update(cx, |saved| {
-            saved.appearance = Some(theme_key(mode).to_owned())
-        });
+        Self::update(cx, |saved| saved.appearance = Some(mode));
         crate::settings_page::apply_theme(mode, window, cx);
     }
 
@@ -144,16 +154,13 @@ impl DevicePreferences {
     }
 
     pub(crate) fn sidebar_layout(cx: &App) -> SidebarLayout {
-        match Self::saved(cx).and_then(|saved| saved.sidebar_layout.as_deref()) {
-            Some("grouped") => SidebarLayout::Grouped,
-            _ => SidebarLayout::Flat,
-        }
+        Self::saved(cx)
+            .and_then(|saved| saved.sidebar_layout)
+            .unwrap_or_default()
     }
 
     pub(crate) fn set_sidebar_layout(layout: SidebarLayout, cx: &mut App) {
-        Self::update(cx, |saved| {
-            saved.sidebar_layout = Some(layout_key(layout).to_owned())
-        });
+        Self::update(cx, |saved| saved.sidebar_layout = Some(layout));
     }
 
     /// The workspace as this device arranged it, `None` before it did.
@@ -271,6 +278,25 @@ impl DevicePreferences {
         });
     }
 
+    /// The settings this device keeps as a member of the space `key` names;
+    /// the space's store owns their schema.
+    pub(crate) fn member_settings(key: &str, cx: &App) -> Option<serde_json::Value> {
+        Self::saved(cx)?
+            .navigation
+            .as_ref()?
+            .get("member_settings")?
+            .get(key)
+            .cloned()
+    }
+
+    pub(crate) fn set_member_settings(key: &str, settings: serde_json::Value, cx: &mut App) {
+        Self::update(cx, |saved| {
+            saved
+                .navigation
+                .get_or_insert_with(|| serde_json::json!({}))["member_settings"][key] = settings;
+        });
+    }
+
     /// The window's navigation as last saved; the shell owns its schema.
     pub(crate) fn navigation(cx: &App) -> Option<serde_json::Value> {
         Self::saved(cx)?.navigation.clone()
@@ -302,7 +328,7 @@ impl DevicePreferences {
     pub(crate) fn restore_defaults(window: &mut Window, cx: &mut App) {
         Self::update(cx, |saved| {
             *saved = ClientPreferences {
-                appearance: Some(theme_key(ThemeMode::System).to_owned()),
+                appearance: Some(ThemeMode::System),
                 language: Some("system".into()),
                 navigation: saved.navigation.take(),
                 sidebar_collapsed: saved.sidebar_collapsed,
@@ -323,19 +349,4 @@ pub(crate) fn language(preferences: &ClientPreferences) -> Option<&str> {
         .language
         .as_deref()
         .filter(|language| *language != "system")
-}
-
-fn theme_key(mode: ThemeMode) -> &'static str {
-    match mode {
-        ThemeMode::System => "system",
-        ThemeMode::Light => "light",
-        ThemeMode::Dark => "dark",
-    }
-}
-
-fn layout_key(layout: SidebarLayout) -> &'static str {
-    match layout {
-        SidebarLayout::Flat => "flat",
-        SidebarLayout::Grouped => "grouped",
-    }
 }

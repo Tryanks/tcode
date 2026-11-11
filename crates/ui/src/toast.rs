@@ -74,7 +74,14 @@ pub fn notification(
                             .gap(spacing.md)
                             .text_body(false, cx)
                             .child(Spinner::new())
-                            .child(title),
+                            .child(
+                                div()
+                                    .debug_selector({
+                                        let title = title.clone();
+                                        move || format!("toast-says-{title}")
+                                    })
+                                    .child(title),
+                            ),
                     )
                 });
             if let Some(value) = progress {

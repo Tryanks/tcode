@@ -207,6 +207,20 @@ pub(crate) fn settings_kept_divider(id: &str, cx: &App) -> AnyElement {
     )
 }
 
+/// A record too large to send to this client, which the host keeps.
+pub(crate) fn record_withheld_divider(id: &str, bytes: u64, cx: &App) -> AnyElement {
+    divider(
+        SharedString::from(format!("withheld-{id}")),
+        crate::tr!(
+            "chat.record_withheld",
+            size = crate::thread_export::format_size(bytes)
+        )
+        .into_owned(),
+        cx.theme().muted_foreground,
+        cx,
+    )
+}
+
 pub(crate) fn session_moved_divider(
     id: &str,
     from: &std::path::Path,

@@ -83,9 +83,13 @@ impl AcpPanel {
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
-        panel
-            .store
-            .update(cx, |store, _cx| store.refresh_acp_registry());
+        // The registry is the host owner's: a link whose scope is not known
+        // yet is not asked, nor is a space, which the host would refuse.
+        panel.store.update(cx, |store, _cx| {
+            if store.can_manage_host() {
+                store.refresh_acp_registry();
+            }
+        });
         panel
     }
 

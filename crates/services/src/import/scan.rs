@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -27,12 +27,14 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Ext
         .unwrap_or_default();
     let mut found = Vec::<(PathBuf, ExternalThread)>::new();
 
-    let claude_files = roots
-        .claude_projects
-        .as_deref()
-        .map(|root| claude_session_files(root, &mut unreadable))
-        .unwrap_or_default();
-    for path in claude_files {
+    let mut claude_files = Vec::new();
+    for (profile, root) in &roots.claude_projects {
+        for path in claude_session_files(root, &mut unreadable) {
+            claude_files.push((profile.clone(), path));
+        }
+    }
+    let mut claude_ids = HashSet::new();
+    for (profile_id, path) in claude_files {
         let file = match File::open(&path) {
             Ok(file) => file,
             Err(error) => {
@@ -82,6 +84,10 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Ext
         let Some((cwd, id, entrypoint, head_ts)) = head else {
             continue;
         };
+        // A session copied into a second profile's directory is listed once.
+        if !claude_ids.insert(id.clone()) {
+            continue;
+        }
         // `entrypoint` is the CLAUDE_CODE_ENTRYPOINT the session ran under:
         // T3 Code sets "t3-code"; the Agent SDKs set "sdk-ts", "sdk-py" and
         // "sdk-cli" for any application built on them.
@@ -106,19 +112,20 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Ext
                 last_active_ms: joined
                     .and_then(|meta| meta.last_active_ms)
                     .unwrap_or_else(|| file_modified_ms(&path).max(head_ts.unwrap_or(0))),
+                profile_id,
             },
         ));
     }
 
-    for root in &roots.codex_session_roots {
-        let files = collect_files(
-            root,
-            &|path| path.extension().is_some_and(|ext| ext == "jsonl"),
-            &mut unreadable,
-        );
+    // `thread/revert` gives a thread a new rollout under the same thread id,
+    // and Codex reads the one whose name is newest
+    // (`find_thread_path_by_id_from_filenames`, `rollout/src/list.rs`).
+    let mut codex = HashMap::<String, ((String, String), PathBuf, ExternalThread)>::new();
+    for (profile_id, root) in &roots.codex_session_roots {
+        let files = collect_files(root, &super::codex::is_read_rollout, &mut unreadable);
         for path in files {
-            let line = match File::open(&path)
-                .and_then(|file| BufReader::new(file).lines().next().transpose())
+            let line = match super::codex::open_rollout(&path)
+                .and_then(|lines| lines.lines().next().transpose())
             {
                 Ok(Some(line)) => line,
                 Ok(None) => continue,
@@ -127,40 +134,57 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Ext
                     continue;
                 }
             };
-            let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            if value.get("type").and_then(Value::as_str) != Some("session_meta") {
-                continue;
-            }
-            let payload = value.get("payload").unwrap_or(&Value::Null);
-            let Some(id) = payload.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(cwd) = payload.get("cwd").and_then(Value::as_str) else {
+            // Codex reads a rollout's thread from the session_meta it starts
+            // with; one without it cannot be resumed there either.
+            let value = serde_json::from_str::<Value>(&line)
+                .ok()
+                .filter(|value| value.get("type").and_then(Value::as_str) == Some("session_meta"));
+            let payload = value.as_ref().and_then(|value| value.get("payload"));
+            let head = payload.and_then(|payload| {
+                Some((
+                    payload.get("id").and_then(Value::as_str)?,
+                    payload.get("cwd").and_then(Value::as_str)?,
+                ))
+            });
+            let (Some(value), Some(payload), Some((id, cwd))) = (&value, payload, head) else {
+                unreadable.push(format!(
+                    "{}: does not start with a session_meta naming its thread and directory",
+                    path.display()
+                ));
                 continue;
             };
             let originator = payload.get("originator").and_then(Value::as_str);
             if originator == Some("tcode") {
                 continue;
             }
-            found.push((
-                PathBuf::from(cwd),
-                ExternalThread {
-                    source: if originator == Some("Codex Desktop") {
-                        SourceTool::CodexDesktop
-                    } else {
-                        SourceTool::CodexCli
-                    },
-                    file: path.clone(),
-                    external_id: format!("codex:{id}"),
-                    title_hint: None,
-                    last_active_ms: file_modified_ms(&path)
-                        .max(value.get("timestamp").and_then(timestamp_ms).unwrap_or(0)),
+            let newest = super::codex::rollout_name(&path)
+                .map(|(timestamp, _, rollout)| (timestamp.to_owned(), rollout.to_owned()))
+                .unwrap_or_default();
+            let thread = ExternalThread {
+                source: if originator == Some("Codex Desktop") {
+                    SourceTool::CodexDesktop
+                } else {
+                    SourceTool::CodexCli
                 },
-            ));
+                file: path.clone(),
+                external_id: format!("codex:{id}"),
+                title_hint: None,
+                last_active_ms: file_modified_ms(&path)
+                    .max(value.get("timestamp").and_then(timestamp_ms).unwrap_or(0)),
+                profile_id: profile_id.clone(),
+            };
+            if codex
+                .get(&thread.external_id)
+                .is_none_or(|(kept, ..)| *kept < newest)
+            {
+                codex.insert(
+                    thread.external_id.clone(),
+                    (newest, PathBuf::from(cwd), thread),
+                );
+            }
         }
     }
+    found.extend(codex.into_values().map(|(_, cwd, thread)| (cwd, thread)));
 
     let mut groups = HashMap::<PathBuf, Vec<ExternalThread>>::new();
     for (cwd, thread) in found {

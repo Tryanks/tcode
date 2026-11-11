@@ -859,7 +859,7 @@ impl HostEditor {
         let theme = cx.theme();
         match platform.standing() {
             Standing::Rejected { status, at } => {
-                let ago = crate::time::humanize_ago(crate::time::now_secs().saturating_sub(at));
+                let ago = crate::time::humanize_ago(crate::time::now_secs(cx).saturating_sub(at));
                 Some(
                     crate::material::notice(theme.danger, cx)
                         .debug_selector(|| "source-control-problem-rejected".into())

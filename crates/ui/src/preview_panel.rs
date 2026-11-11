@@ -80,7 +80,7 @@ const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 /// a runtime directory for its socket. GPUI picks Wayland whenever
 /// `WAYLAND_DISPLAY` names one, and `guess_compositor` reports that same choice;
 /// a window cannot change display server once open.
-pub fn preview_backend() -> bool {
+pub(crate) fn preview_backend() -> bool {
     #[cfg(all(preview_backend, target_os = "linux"))]
     {
         static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -495,11 +495,6 @@ impl PreviewPanel {
                 self.navigate_here(&key, &url, window, cx);
             }
         }
-    }
-
-    #[cfg(all(test, preview_backend))]
-    pub(crate) fn url_field(&self, cx: &gpui::App) -> String {
-        self.url_input.read(cx).value().to_string()
     }
 
     fn active_url(&mut self, cx: &mut Context<Self>) -> Option<String> {

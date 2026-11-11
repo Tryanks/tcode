@@ -27,8 +27,6 @@ use crate::{
 
 /// Reading a remote plugin takes the server about two seconds.
 const LIST_TIMEOUT: Duration = Duration::from_secs(120);
-/// Installs and marketplace adds may clone repositories.
-const MUTATION_TIMEOUT: Duration = Duration::from_secs(300);
 /// `plugin/read` requests answered concurrently by one server.
 const DETAILS_CONCURRENCY: usize = 4;
 /// Marketplaces Codex itself ships or syncs from OpenAI.
@@ -47,7 +45,7 @@ const SQLITE_RACE: &str = "failed to initialize sqlite state runtime";
 const SQLITE_RACE_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 pub(crate) async fn list(context: &PluginContext) -> Result<PluginListing, AgentError> {
-    with_server(context, LIST_TIMEOUT, async |server| {
+    with_server(context, Some(LIST_TIMEOUT), async |server| {
         read_listing(server, &context.cwd).await
     })
     .await
@@ -57,7 +55,7 @@ pub(crate) async fn run(
     context: &PluginContext,
     op: &PluginOp,
 ) -> Result<PluginOpOutcome, AgentError> {
-    with_server(context, MUTATION_TIMEOUT, async |server| {
+    with_server(context, None, async |server| {
         let offered = if matches!(op, PluginOp::Install { .. }) {
             let listed = server
                 .request("plugin/list", json!({ "cwds": [context.cwd] }))
@@ -75,7 +73,7 @@ pub(crate) async fn run(
 
 async fn with_server<T>(
     context: &PluginContext,
-    timeout: Duration,
+    bound: Option<Duration>,
     work: impl AsyncFnOnce(&mut Server) -> Result<T, AgentError>,
 ) -> Result<T, AgentError> {
     let session = async {
@@ -83,9 +81,13 @@ async fn with_server<T>(
         let result = work(&mut server).await;
         server.close(result)
     };
-    // Dropping the session on timeout drops the server, which kills it.
+    // Dropping the session drops the server, which kills it: a listing, which
+    // no one can stop, at its bound; a change when the user cancels it.
+    let Some(bound) = bound else {
+        return session.await;
+    };
     smol::future::or(async { Some(session.await) }, async {
-        smol::Timer::after(timeout).await;
+        smol::Timer::after(bound).await;
         None
     })
     .await

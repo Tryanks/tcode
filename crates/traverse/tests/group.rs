@@ -2,7 +2,6 @@
 //! off, a desktop that hosts beside its own window, and phones that pair
 //! with one member and reach the others.
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
 use tcode_client::ConnectionFailure;
 use tcode_client::ConnectionState;
@@ -116,23 +115,18 @@ fn saved(device: &DeviceIdentity, machine: &Machine) -> PairedHost {
         .unwrap_or_else(|| panic!("{id} is not saved"))
 }
 
-/// The next message on `channel`, or `None` once `deadline` passes, which
-/// only a failing test reaches.
-fn next<T>(channel: &async_channel::Receiver<T>, deadline: Instant) -> Option<T> {
-    tcode_traverse::block_on(async {
-        tokio::time::timeout_at(deadline.into(), channel.recv()).await
-    })
-    .ok()?
-    .ok()
+/// The next message on `channel`, or `None` once it has closed. A message
+/// that never comes is ended by the test runner.
+fn next<T>(channel: &async_channel::Receiver<T>) -> Option<T> {
+    channel.recv_blocking().ok()
 }
 
 /// Waits until `check` holds on `machine`, which says so through its hosting
 /// state as it changes.
 fn eventually(machine: &Machine, what: &str, check: impl Fn() -> bool) {
     let changes = machine.host.hosting_events();
-    let deadline = Instant::now() + Duration::from_secs(30);
     while !check() {
-        next(&changes, deadline).unwrap_or_else(|| panic!("never saw {what}"));
+        next(&changes).unwrap_or_else(|| panic!("never saw {what}"));
     }
 }
 
@@ -142,9 +136,8 @@ fn admits(machine: &Machine, device: &DeviceIdentity) -> bool {
 }
 
 fn wait_state(transport: &Transport, wanted: impl Fn(&ConnectionState) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
     let mut seen = Vec::new();
-    while let Some(state) = next(&transport.state, deadline) {
+    while let Some(state) = next(&transport.state) {
         if wanted(&state) {
             return;
         }
@@ -314,7 +307,7 @@ fn removal_is_group_wide_and_accept_new_devices_governs_introductions() {
         admits(&second, &phone)
     });
 
-    first.host.set_pairing_enabled(false);
+    first.host.set_pairing_enabled(false).unwrap();
     let late_dir = TestDir::new("late-phone");
     let late = device(&late_dir, "Late phone");
     pair(&invitation(&second), &late);
@@ -328,7 +321,7 @@ fn removal_is_group_wide_and_accept_new_devices_governs_introductions() {
             .any(|device| device.id == late_id)
     });
     assert!(!admits(&first, &late));
-    first.host.set_pairing_enabled(true);
+    first.host.set_pairing_enabled(true).unwrap();
     // Applying the group with the switch back on, as pairing another device
     // does, does not admit what was declined.
     let other_dir = TestDir::new("other-phone");

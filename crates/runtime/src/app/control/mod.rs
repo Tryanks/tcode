@@ -59,7 +59,7 @@ impl ControlState {
 
 /// A call's answer: ready on the host thread, or computed off it because it runs git, reads
 /// the store or waits for work the call started, which would stall every client if awaited
-/// on the host thread.
+/// on the host thread. A `Later` task is dropped once its caller goes.
 pub(super) enum Answer {
     Now(Result<serde_json::Value, String>),
     Later(HostTask<Result<serde_json::Value, String>>),
@@ -368,8 +368,17 @@ impl AppState {
             Answer::Now(result) => {
                 let _ = reply.try_send(result);
             }
+            // A caller that has gone, its call cancelled or its harness
+            // stopped, takes the work on its answer with it.
             Answer::Later(task) => HostCx::spawn_detached(cx, async move {
-                let _ = reply.send(task.await).await;
+                let answered = smol::future::or(async { Some(task.await) }, async {
+                    reply.closed().await;
+                    None
+                })
+                .await;
+                if let Some(answer) = answered {
+                    let _ = reply.send(answer).await;
+                }
             }),
         }
     }
@@ -572,7 +581,7 @@ impl AppState {
             action: action.to_owned(),
             detail,
         };
-        let at = now_millis();
+        let at = cx.clock().unix_millis();
         self.record_event(target, &AgentEvent::ControlAction(action.clone()), cx);
         if target != caller.thread_id {
             let in_caller = ControlAction {

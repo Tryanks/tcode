@@ -510,12 +510,21 @@ fn last_turn(thread_id: &str, timeline: &Timeline) -> (LastTurn, usize) {
     )
 }
 
-/// The stored latest turn of a thread that is not resident, folded from its rows alone.
-fn stored_last_turn(store: &SessionStore, thread_id: &str) -> Option<(LastTurn, usize)> {
-    let start = *store.turn_index(thread_id).ok()??.starts.last()?;
-    let log = store.read_rows(thread_id, start..u64::MAX).ok()?;
+/// The stored latest turn of a thread that is not resident, folded from its rows alone;
+/// `None` when its log has no turn.
+fn stored_last_turn(
+    store: &SessionStore,
+    thread_id: &str,
+) -> std::io::Result<Option<(LastTurn, usize)>> {
+    let Some(start) = store
+        .turn_index(thread_id)?
+        .and_then(|index| index.starts.last().copied())
+    else {
+        return Ok(None);
+    };
+    let log = store.read_rows(thread_id, start..u64::MAX)?;
     let timeline = Timeline::fold_stored(&log.records);
-    Some(last_turn(thread_id, &timeline))
+    Ok(Some(last_turn(thread_id, &timeline)))
 }
 
 fn search_kinds(kinds: &[ItemKind], omitted: &mut Vec<String>) -> Vec<SearchKind> {
@@ -820,7 +829,7 @@ impl AppState {
         &mut self,
         _caller: &Caller,
         params: GetThreadParams,
-        _cx: &mut HostCx,
+        cx: &mut HostCx,
     ) -> Result<serde_json::Value, String> {
         let meta = self
             .find_meta(&params.thread_id)
@@ -854,7 +863,7 @@ impl AppState {
         let mut thread = self.thread_row(&meta);
         thread.worktree = Some(worktree_facts(&meta));
         let detail = ThreadDetail {
-            settlement: self.settlement_explanation(&meta, now_millis(), &projection),
+            settlement: self.settlement_explanation(&meta, cx.clock().unix_millis(), &projection),
             activity: projection.session_activity(&meta, resident),
             queue,
             pending_approvals: resident
@@ -1345,7 +1354,7 @@ impl AppState {
             .scope
             .clone()
             .unwrap_or_else(|| caller.grant.scope.clone());
-        let now = now_millis();
+        let now = cx.clock().unix_millis();
         let since = params
             .since
             .unwrap_or_else(|| now.saturating_sub(REVIEW_WINDOW_MS));
@@ -1440,16 +1449,20 @@ impl AppState {
                     continue;
                 }
                 match stored_last_turn(&store, &candidate.thread.id) {
-                    Some((last, count)) => {
+                    Ok(Some((last, count))) => {
                         redacted += count;
                         candidate.last_turn = Some(last);
                     }
                     // A thread whose activity is known but whose log yields no turn lacks data;
                     // one without known activity was counted already.
-                    None if candidate.thread.last_activity_at.is_some() => {
+                    Ok(None) if candidate.thread.last_activity_at.is_some() => {
                         without_enough_data += 1;
                     }
-                    None => {}
+                    Ok(None) => {}
+                    Err(error) => omitted.push(format!(
+                        "the last turn of {} could not be read from the store: {error}",
+                        candidate.thread.id
+                    )),
                 }
             }
             let dirty = dirty_states(

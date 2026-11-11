@@ -1,17 +1,14 @@
 //! The edit window: one row per file an edit touched, opening on its diff.
 //!
-//! A `FileChange` carries each file's diff from its harness. An edit made as
-//! a tool call (an imported Claude Code `Edit`/`Write`, Codex's imported
-//! `apply_patch`) carries only what it asked for: its replaced and replacing
-//! text, the content it wrote, or its patch. The window builds the same diff
-//! from that, without line numbers where the call never said which lines.
+//! An edit is a `FileChange`, which carries each file's diff from its
+//! harness.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use agent::{FileChange, FileChangeKind, ItemContent, ItemStatus};
+use agent::{FileChangeKind, ItemContent, ItemStatus};
 use gpui::{
     AnyElement, App, Axis, ElementId, HighlightStyle, Hsla, InteractiveElement as _,
     IntoElement as _, ListHorizontalSizingBehavior, ListSizingBehavior, ParentElement as _,
@@ -19,12 +16,11 @@ use gpui::{
     prelude::FluentBuilder as _, px, uniform_list,
 };
 use gpui_base::{ScrollableMask, h_flex};
-use serde::Deserialize;
 use tcode_core::session::{EntryContent, TimelineEntry};
 
+use super::copy;
 use super::window::{Argument, Chip, Header, Verb};
-use super::{Call, copy};
-use crate::chat::model::{LiveEditRow, live_edit_counts, live_edit_rows};
+use crate::chat::model::{LiveEditRow, live_edit_rows};
 use crate::diff::model::{DiffColors, FileDiffInput, RenderedRow, build_file, display_columns};
 use crate::diff::parse::{RowKind, parse_hunk_header};
 use crate::icon::IconName;
@@ -35,273 +31,35 @@ use crate::typography::TextRole as _;
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::chat) struct EditedFile {
     pub(in crate::chat) row: LiveEditRow,
-    /// Whether the diff's line numbers are the file's: a diff built from a
-    /// replaced string knows its lines only relative to the string.
+    /// Whether the diff's line numbers are the file's: a diff whose hunks
+    /// have no header knows no lines.
     pub(in crate::chat) numbered: bool,
 }
 
-/// An edit: the files it touched, how it stands, and the line a failure is
-/// told by.
+/// An edit: the files it touched and how it stands.
 pub(in crate::chat) struct Edit {
     pub(in crate::chat) files: Vec<EditedFile>,
     pub(in crate::chat) status: ItemStatus,
-    pub(in crate::chat) failure: Option<String>,
-    /// A harness's own diff, which opens by itself while it is the latest.
-    pub(in crate::chat) live: bool,
 }
 
-/// The edit `entry` made: a file change, or a call to an edit tool whose
-/// input is an edit's shape.
+/// The edit `entry` made, when it is a file change.
 pub(in crate::chat) fn edit(entry: &TimelineEntry, cwd: &Path) -> Option<Edit> {
-    match &entry.content {
-        EntryContent::Item(ItemContent::FileChange { changes, status }) => Some(Edit {
-            files: live_edit_rows(changes, cwd)
-                .into_iter()
-                .map(|row| EditedFile {
-                    numbered: row.diff.as_deref().is_some_and(|diff| {
-                        diff.lines().any(|line| parse_hunk_header(line).is_some())
-                    }),
-                    row,
-                })
-                .collect(),
-            status: *status,
-            failure: None,
-            live: true,
-        }),
-        EntryContent::Item(ItemContent::ToolCall { .. }) => {
-            let call = Call::of(entry)?;
-            let files = tool_edit(&call)?;
-            let failure = (call.status == ItemStatus::Failed)
-                .then(|| call.output.and_then(super::window::first_line))
-                .flatten();
-            Some(Edit {
-                files: files
-                    .into_iter()
-                    .map(|(change, numbered)| EditedFile {
-                        row: LiveEditRow {
-                            path: super::display_path(&change.path, cwd),
-                            kind: change.kind,
-                            counts: live_edit_counts(change.diff.as_deref()),
-                            diff: change.diff,
-                        },
-                        numbered,
-                    })
-                    .collect(),
-                status: call.status,
-                failure,
-                live: false,
-            })
-        }
-        _ => None,
-    }
-}
-
-const REPLACE: &[&str] = &[
-    "edit",
-    "multiedit",
-    "str_replace",
-    "str_replace_editor",
-    "search_replace",
-    "edit_file",
-    "replace",
-];
-const WRITE: &[&str] = &["write", "write_file", "create_file"];
-const PATCH: &[&str] = &["apply_patch"];
-
-#[derive(Deserialize)]
-struct Replace<'a> {
-    #[serde(
-        borrow,
-        alias = "path",
-        alias = "filePath",
-        alias = "target_file",
-        alias = "absolute_path"
-    )]
-    file_path: &'a str,
-    #[serde(flatten, borrow)]
-    change: Option<Strings<'a>>,
-    #[serde(default, borrow)]
-    edits: Vec<Strings<'a>>,
-}
-
-#[derive(Deserialize)]
-struct Strings<'a> {
-    #[serde(borrow, alias = "oldString", alias = "oldText", alias = "old_str")]
-    old_string: &'a str,
-    #[serde(borrow, alias = "newString", alias = "newText", alias = "new_str")]
-    new_string: &'a str,
-}
-
-#[derive(Deserialize)]
-struct Write<'a> {
-    #[serde(
-        borrow,
-        alias = "path",
-        alias = "filePath",
-        alias = "target_file",
-        alias = "absolute_path"
-    )]
-    file_path: &'a str,
-    #[serde(borrow, alias = "contents", alias = "fileText", alias = "file_text")]
-    content: &'a str,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Patch {
-    Text(String),
-    Field {
-        #[serde(alias = "input")]
-        patch: String,
-    },
-}
-
-/// The files a tool call edited, each with its diff and whether that diff
-/// carries the file's line numbers.
-fn tool_edit(call: &Call<'_>) -> Option<Vec<(FileChange, bool)>> {
-    if call.named(REPLACE)
-        && let Some(input) = call.input::<Replace<'_>>()
-    {
-        let pairs: Vec<&Strings<'_>> = input.change.iter().chain(&input.edits).collect();
-        if pairs.is_empty() {
-            return None;
-        }
-        let diff = pairs
-            .iter()
-            .map(|pair| replacement_diff(pair.old_string, pair.new_string))
-            .collect::<String>();
-        return Some(vec![(
-            FileChange {
-                path: input.file_path.to_owned(),
-                kind: FileChangeKind::Modify,
-                diff: Some(diff),
-            },
-            false,
-        )]);
-    }
-    if call.named(WRITE)
-        && let Some(input) = call.input::<Write<'_>>()
-    {
-        return Some(vec![(
-            FileChange {
-                path: input.file_path.to_owned(),
-                kind: FileChangeKind::Create,
-                diff: Some(added_diff(input.content)),
-            },
-            true,
-        )]);
-    }
-    if call.named(PATCH)
-        && let Some(patch) = call.input::<Patch>()
-    {
-        let text = match patch {
-            Patch::Text(text) | Patch::Field { patch: text } => text,
-        };
-        return patch_files(&text);
-    }
-    None
-}
-
-/// The diff of replacing `old` with `new`, its hunks numbered from the
-/// replaced text's first line.
-fn replacement_diff(old: &str, new: &str) -> String {
-    similar::TextDiff::from_lines(old, new)
-        .unified_diff()
-        .context_radius(3)
-        .to_string()
-}
-
-/// A whole file's content as added lines.
-fn added_diff(content: &str) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    let mut diff = format!("@@ -0,0 +1,{} @@\n", lines.len());
-    for line in lines {
-        diff.push('+');
-        diff.push_str(line);
-        diff.push('\n');
-    }
-    diff
-}
-
-/// The files a patch edits: a Git unified diff, or the patch grammar Codex
-/// speaks (`*** Begin Patch`, `*** Update File: …`).
-fn patch_files(text: &str) -> Option<Vec<(FileChange, bool)>> {
-    if text.lines().any(|line| line.starts_with("diff --git ")) {
-        return agent::file_changes_from_unified_diff(text)
-            .ok()
-            .map(|changes| changes.into_iter().map(|change| (change, true)).collect());
-    }
-    if !text.trim_start().starts_with("*** Begin Patch") {
+    let EntryContent::Item(ItemContent::FileChange { changes, status }) = &entry.content else {
         return None;
-    }
-    let mut files: Vec<(FileChange, bool)> = Vec::new();
-    let mut moves: Vec<(usize, String)> = Vec::new();
-    let mut hunk: Vec<&str> = Vec::new();
-    let flush = |files: &mut Vec<(FileChange, bool)>, hunk: &mut Vec<&str>| {
-        if let Some((file, _)) = files.last_mut()
-            && !hunk.is_empty()
-        {
-            let diff = file.diff.get_or_insert_with(String::new);
-            if file.kind == FileChangeKind::Create {
-                diff.push_str(&added_diff(
-                    &hunk
-                        .iter()
-                        .map(|line| line.strip_prefix('+').unwrap_or(line))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                ));
-            } else {
-                let old = hunk.iter().filter(|line| !line.starts_with('+')).count();
-                let new = hunk.iter().filter(|line| !line.starts_with('-')).count();
-                diff.push_str(&format!("@@ -1,{old} +1,{new} @@\n"));
-                for line in hunk.iter() {
-                    diff.push_str(line);
-                    diff.push('\n');
-                }
-            }
-        }
-        hunk.clear();
     };
-    for line in text.lines() {
-        let file = |kind, path: &str| {
-            (
-                FileChange {
-                    path: path.trim().to_owned(),
-                    kind,
-                    diff: None,
-                },
-                // A new file's lines are its own; an update's hunks name
-                // no lines.
-                kind == FileChangeKind::Create,
-            )
-        };
-        if let Some(path) = line.strip_prefix("*** Add File: ") {
-            flush(&mut files, &mut hunk);
-            files.push(file(FileChangeKind::Create, path));
-        } else if let Some(path) = line.strip_prefix("*** Update File: ") {
-            flush(&mut files, &mut hunk);
-            files.push(file(FileChangeKind::Modify, path));
-        } else if let Some(path) = line.strip_prefix("*** Delete File: ") {
-            flush(&mut files, &mut hunk);
-            files.push(file(FileChangeKind::Delete, path));
-        } else if let Some(path) = line.strip_prefix("*** Move to: ") {
-            if let Some(index) = files.len().checked_sub(1) {
-                files[index].0.kind = FileChangeKind::Rename;
-                moves.push((index, path.trim().to_owned()));
-            }
-        } else if line.starts_with("@@") || line.starts_with("***") {
-            flush(&mut files, &mut hunk);
-        } else if !files.is_empty() {
-            hunk.push(line);
-        }
-    }
-    flush(&mut files, &mut hunk);
-    // Codex states a move the way its own file changes do.
-    for (index, to) in moves {
-        let diff = files[index].0.diff.get_or_insert_with(String::new);
-        diff.push_str(&format!("\n\nMoved to: {to}"));
-    }
-    (!files.is_empty()).then_some(files)
+    Some(Edit {
+        files: live_edit_rows(changes, cwd)
+            .into_iter()
+            .map(|row| EditedFile {
+                numbered: row
+                    .diff
+                    .as_deref()
+                    .is_some_and(|diff| diff.lines().any(|line| parse_hunk_header(line).is_some())),
+                row,
+            })
+            .collect(),
+        status: *status,
+    })
 }
 
 /// The header of one edited file's window.

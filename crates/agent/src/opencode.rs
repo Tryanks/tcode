@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use base64::Engine as _;
 use serde_json::{Map, Value, json};
@@ -19,11 +19,12 @@ use smol::future;
 use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
-    ApprovalRequest, Attachment, ChangeCompleteness, Compaction, DeltaKind, FileChange,
-    FileChangeKind, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
+    ApprovalRequest, AskedQuestion, Attachment, ChangeCompleteness, Compaction, DeltaKind,
+    FileChange, FileChangeKind, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
     OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
-    ResumeCursor, RewindMode, SelectOption, SessionCommand, SessionHandle, SessionOptions,
-    ThreadItem, TokenUsage, ToolOutput, UserInputDelivery, UserInputOption, UserInputQuestion,
+    ResumeCursor, RewindMode, SearchHit, SearchScope, SelectOption, SessionCommand, SessionHandle,
+    SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput, UserInputDelivery,
+    UserInputOption, UserInputQuestion, WebLink,
 };
 
 /// The directory OpenCode launched with `launch_env` keeps its sessions,
@@ -36,22 +37,19 @@ pub fn data_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
         .map(|data| data.join("opencode"))
 }
 
-/// The first release with the server API this adapter speaks; 1.x servers
-/// expose an incompatible one.
-const MIN_VERSION: (u32, u32, u32) = (2, 0, 0);
 const PERMISSION_MODE: &str = "permission_mode";
 const EFFORT: &str = "reasoningEffort";
 const AGENT: &str = "agent";
 /// Tcode's entry among the session's API-managed instructions.
 const INSTRUCTIONS_KEY: &str = "tcode";
-/// A first start migrates OpenCode's database before the server listens.
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a model listing, which no one can stop, may take: a first start
+/// migrates OpenCode's database before the server listens.
+const LISTING_TIMEOUT: Duration = Duration::from_secs(60);
 /// The server streams no shell output; its own clients poll the shell's
 /// output route while the command runs.
 const SHELL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    require_supported_version(opts.binary_path.as_deref(), &opts.launch_env).await?;
     crate::spawn_session(
         ProviderKind::OpenCode,
         opts,
@@ -65,37 +63,38 @@ pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
 ) -> Result<Vec<ModelSpec>, AgentError> {
-    require_supported_version(binary_path.as_deref(), &launch_env).await?;
-    crate::process::unblock(move || {
-        let cwd = std::env::current_dir()?;
-        let mut server = Server::spawn(binary_path.as_deref(), &cwd, &launch_env, &[], &[])?;
-        let result = (|| {
-            let models = server.http.get("/api/model")?;
-            let default = server.http.get("/api/model/default")?;
-            Ok(map_models(&models["data"], &default["data"]))
-        })();
-        server.stop();
-        result
+    let processes = crate::SessionProcesses::default();
+    let listing = crate::process::unblock({
+        let processes = processes.clone();
+        move || {
+            let cwd = std::env::current_dir()?;
+            let mut server = Server::spawn(
+                binary_path.as_deref(),
+                &cwd,
+                &launch_env,
+                &[],
+                &[],
+                &processes,
+            )?;
+            let result = (|| {
+                let models = server.http.get("/api/model")?;
+                let default = server.http.get("/api/model/default")?;
+                Ok(map_models(&models["data"], &default["data"]))
+            })();
+            server.stop();
+            result
+        }
+    });
+    future::or(listing, async {
+        smol::Timer::after(LISTING_TIMEOUT).await;
+        // Its server killed, the listing's wait ends with it.
+        processes.stop();
+        Err(AgentError::Provider(format!(
+            "OpenCode did not list its models within {} s",
+            LISTING_TIMEOUT.as_secs()
+        )))
     })
     .await
-}
-
-async fn require_supported_version(
-    binary_path: Option<&Path>,
-    launch_env: &LaunchEnv,
-) -> Result<(), AgentError> {
-    let binary = crate::resolve_binary(binary_path, "opencode")?;
-    match crate::process::probe_version(&binary, launch_env, ProviderKind::OpenCode).await {
-        Some(version @ (major, minor, patch)) if version < MIN_VERSION => {
-            Err(AgentError::Provider(format!(
-                "OpenCode 2.0 or later is required, but `{}` is version {major}.{minor}.{patch}. \
-                 Update OpenCode to use it with Tcode.",
-                binary.display()
-            )))
-        }
-        // An unreadable version leaves the failure to the server start itself.
-        _ => Ok(()),
-    }
 }
 
 async fn run_actor(
@@ -113,6 +112,7 @@ async fn run_actor(
                 &opts.launch_env,
                 &opts.extra_args,
                 &opts.mcp_servers.iter().collect::<Vec<_>>(),
+                &opts.processes,
             )?;
             match server.subscribe() {
                 Ok(stream) => Ok((server, stream)),
@@ -512,10 +512,12 @@ fn map_models(models: &Value, default: &Value) -> Vec<ModelSpec> {
                             value: variant,
                             description: None,
                             unavailable: None,
+                            speed: None,
+                            summary: None,
                         })
                         .collect(),
                     default_value: None,
-                    role: crate::OptionRole::Model,
+                    role: crate::OptionRole::Effort,
                     apply: crate::ApplyTiming::Live,
                     recommended: None,
                     permissive: None,
@@ -916,6 +918,8 @@ impl OpenCodeActor {
                         label: agent.name.clone(),
                         description: agent.description.clone(),
                         unavailable: None,
+                        speed: None,
+                        summary: None,
                     })
                     .collect(),
                 default_value: None,
@@ -1104,19 +1108,8 @@ impl OpenCodeActor {
         self.http
             .post(&self.session_path("interrupt"), &json!({}))
             .map_err(rewind_failure)?;
-        let deadline = Instant::now() + Duration::from_secs(30);
         while self.mapper.active_turn.is_some() {
-            let next = future::or(async { Some(self.transport.recv().await) }, async {
-                smol::Timer::at(deadline).await;
-                None
-            })
-            .await;
-            let Some(item) = next else {
-                return Err(RewindFailure::new(
-                    RewindFailureReason::TurnRunning,
-                    "the interrupted turn did not end within 30 s".to_owned(),
-                ));
-            };
+            let item = self.transport.recv().await;
             if !matches!(
                 self.handle_transport(item).await,
                 TransportOutcome::Continue
@@ -2182,17 +2175,25 @@ impl Mapper {
                     .or_else(|| tool.child_model.clone()),
                 effort: None,
             },
-            name => ItemContent::ToolCall {
-                image_reads: images,
-                name: name.to_owned(),
-                input: input.clone(),
-                output: if status == ItemStatus::Completed {
+            name => {
+                let output = if status == ItemStatus::Completed {
                     text
                 } else {
                     error.or(text)
-                },
-                status,
-            },
+                };
+                let (family, output) = match status {
+                    ItemStatus::Completed => tool_family(name, input, output, metadata),
+                    _ => (tool_family(name, input, None, None).0, output),
+                };
+                ItemContent::ToolCall {
+                    image_reads: images,
+                    name: name.to_owned(),
+                    input: input.clone(),
+                    output,
+                    status,
+                    family: family.map(Box::new),
+                }
+            }
         };
         Some(ThreadItem {
             id: item_id.to_owned(),
@@ -2353,6 +2354,252 @@ fn file_diffs(files: &Value) -> Vec<FileChange> {
         .collect()
 }
 
+/// What OpenCode's own tool `name` is, from its input and, once it
+/// succeeded, the text it gave the model. Returns the family and the output
+/// the call shows: the text, or what is left of it once the family's fields
+/// are read out. Formats are v2.2.7's (`packages/core/src/tool/plugin/`).
+fn tool_family(
+    name: &str,
+    input: &Value,
+    output: Option<String>,
+    metadata: Option<&Value>,
+) -> (Option<ToolFamily>, Option<String>) {
+    let field = |key: &str| input.get(key).and_then(Value::as_str).map(str::to_owned);
+    match name {
+        "read" => {
+            let Some(path) = field("path") else {
+                return (None, output);
+            };
+            match output.as_deref().map(read_page) {
+                Some(Some(Page::File {
+                    first_line,
+                    lines,
+                    note,
+                })) => (
+                    Some(ToolFamily::Read {
+                        path,
+                        first_line,
+                        note,
+                    }),
+                    Some(lines),
+                ),
+                // A directory's page is what it holds, not a file's lines.
+                Some(Some(Page::Directory(entries))) => (
+                    Some(ToolFamily::Search {
+                        scope: SearchScope::Entries,
+                        pattern: None,
+                        hits: Some(
+                            entries
+                                .iter()
+                                .map(|entry| hit(Path::new(&path).join(entry)))
+                                .collect(),
+                        ),
+                        path: Some(path),
+                        glob: None,
+                    }),
+                    output,
+                ),
+                _ => (
+                    Some(ToolFamily::Read {
+                        path,
+                        first_line: None,
+                        note: None,
+                    }),
+                    output,
+                ),
+            }
+        }
+        // `grep.ts`: `Found N matches`, then each file's absolute path and
+        // its matches as `  Line N: text`.
+        "grep" => (
+            Some(ToolFamily::Search {
+                scope: SearchScope::Content,
+                pattern: field("pattern"),
+                path: field("path"),
+                glob: field("include"),
+                hits: output.as_deref().map(grep_matches),
+            }),
+            output,
+        ),
+        // `question.ts`: the questions as asked, and `metadata.answers`, the
+        // labels or words each got, in the questions' order.
+        "question" => {
+            let Some(asked) = input.get("questions").and_then(Value::as_array) else {
+                return (None, output);
+            };
+            let answers = metadata
+                .and_then(|metadata| metadata.get("answers"))
+                .and_then(Value::as_array);
+            let questions = asked
+                .iter()
+                .enumerate()
+                .filter_map(|(index, question)| {
+                    Some(AskedQuestion {
+                        question: question.get("question")?.as_str()?.to_owned(),
+                        options: question
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|option| {
+                                Some(UserInputOption {
+                                    label: option.get("label")?.as_str()?.to_owned(),
+                                    description: option
+                                        .get("description")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                })
+                            })
+                            .collect(),
+                        answers: answers
+                            .and_then(|answers| answers.get(index))
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect(),
+                    })
+                })
+                .collect();
+            (Some(ToolFamily::Question { questions }), output)
+        }
+        // `skill.ts`: the skill's `id`, and once loaded its `name` in the
+        // metadata.
+        "skill" => match metadata
+            .and_then(|metadata| metadata.get("name"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| field("id"))
+        {
+            Some(name) => (Some(ToolFamily::Skill { name }), output),
+            None => (None, output),
+        },
+        "webfetch" => match field("url") {
+            Some(url) => (Some(ToolFamily::Fetch { url, prompt: None }), output),
+            None => (None, output),
+        },
+        // `websearch.ts`: each page as `## [title](url)`, then when it was
+        // published and what it says.
+        "websearch" => match field("query") {
+            Some(query) => (
+                Some(ToolFamily::WebSearch {
+                    query,
+                    links: output.as_deref().map(|text| {
+                        text.lines()
+                            .filter_map(|line| {
+                                let link = line.strip_prefix("## [")?.strip_suffix(')')?;
+                                let (title, url) = link.rsplit_once("](")?;
+                                Some(WebLink {
+                                    title: title.to_owned(),
+                                    url: url.to_owned(),
+                                })
+                            })
+                            .collect()
+                    }),
+                }),
+                output,
+            ),
+            None => (None, output),
+        },
+        // `glob.ts`: the absolute path of each file it found.
+        "glob" => (
+            Some(ToolFamily::Search {
+                scope: SearchScope::Files,
+                pattern: field("pattern"),
+                path: field("path"),
+                glob: None,
+                hits: output.as_deref().map(|text| {
+                    text.lines()
+                        .filter(|line| Path::new(line).is_absolute())
+                        .map(hit)
+                        .collect()
+                }),
+            }),
+            output,
+        ),
+        _ => (None, output),
+    }
+}
+
+fn hit(path: impl AsRef<Path>) -> SearchHit {
+    SearchHit {
+        path: path.as_ref().to_string_lossy().into_owned(),
+        line: None,
+        text: None,
+    }
+}
+
+/// The matches in grep's text: a file's `<path>:` line, then its
+/// `  Line N: text` lines; the count before and the truncation note after
+/// are not matches.
+fn grep_matches(text: &str) -> Vec<SearchHit> {
+    let mut file = None;
+    let mut hits = Vec::new();
+    for row in text.lines() {
+        if let Some(rest) = row.strip_prefix("  Line ")
+            && let Some(path) = file
+            && let Some((number, text)) = rest.split_once(": ")
+            && let Ok(number) = number.parse()
+        {
+            hits.push(SearchHit {
+                path: String::from(path),
+                line: Some(number),
+                text: Some(text.to_owned()),
+            });
+        } else if let Some(path) = row.strip_suffix(':')
+            && Path::new(path).is_absolute()
+        {
+            file = Some(path);
+        }
+    }
+    hits
+}
+
+/// A page `read` returned (`toModelContent` in `read.ts`): a file's
+/// `Read file <path>, lines S-E` header, then each line as `N: text`, then
+/// `[Output truncated. …]` when the file goes on; or a directory's
+/// `Read directory` header, then its entries by name.
+enum Page {
+    File {
+        first_line: Option<u64>,
+        lines: String,
+        note: Option<String>,
+    },
+    Directory(Vec<String>),
+}
+
+fn read_page(text: &str) -> Option<Page> {
+    let mut rows = text.lines();
+    let header = rows.next()?;
+    if header.starts_with("Read directory ") {
+        return Some(Page::Directory(
+            rows.filter(|row| !row.starts_with("[Output truncated."))
+                .map(str::to_owned)
+                .collect(),
+        ));
+    }
+    header.strip_prefix("Read file ")?;
+    let mut first_line = None;
+    let mut lines = Vec::new();
+    let mut note = None;
+    for row in rows {
+        match row.split_once(": ") {
+            Some((number, line)) if number.bytes().all(|byte| byte.is_ascii_digit()) => {
+                first_line.get_or_insert_with(|| number.parse().ok());
+                lines.push(line);
+            }
+            _ => note = Some(row.to_owned()),
+        }
+    }
+    Some(Page::File {
+        first_line: first_line.flatten(),
+        lines: lines.join("\n"),
+        note,
+    })
+}
+
 fn file_changes(
     name: &str,
     input: &Value,
@@ -2489,6 +2736,7 @@ impl Server {
         launch_env: &LaunchEnv,
         extra_args: &[String],
         registrations: &[&crate::McpRegistration],
+        processes: &crate::SessionProcesses,
     ) -> Result<Self, AgentError> {
         let binary = crate::resolve_binary(binary_path, "opencode")?;
         let password = uuid::Uuid::new_v4().simple().to_string();
@@ -2510,10 +2758,9 @@ impl Server {
             command.env("OPENCODE_CONFIG_CONTENT", config);
         }
         crate::process::refuse_batch_line_breaks(command.get_program(), command.get_args())?;
-        let mut child =
-            crate::process::ProcessTree::new(command.spawn().map_err(|err| {
-                AgentError::Spawn(format!("spawning `{}`: {err}", binary.display()))
-            })?);
+        let mut child = processes.hold(crate::process::ProcessTree::new(command.spawn().map_err(
+            |err| AgentError::Spawn(format!("spawning `{}`: {err}", binary.display())),
+        )?));
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
@@ -2545,7 +2792,7 @@ impl Server {
                 "spawning OpenCode stdout reader: {err}"
             )));
         }
-        let announced = match receiver.recv_timeout(STARTUP_TIMEOUT) {
+        let announced = match receiver.recv() {
             Ok((Ok(line), stdout)) => {
                 let _ = server.tail.spawn(stdout, "opencode-stdout", "OpenCode");
                 line
@@ -2554,9 +2801,7 @@ impl Server {
                 return Err(server.startup_error(format!("reading OpenCode startup: {err}")));
             }
             Err(_) => {
-                return Err(server.startup_error(
-                    "timed out waiting for the OpenCode server to announce its address".into(),
-                ));
+                return Err(server.startup_error("the OpenCode startup reader ended".into()));
             }
         };
         let Some(url) = serde_json::from_str::<Value>(announced.trim())
@@ -2577,9 +2822,7 @@ impl Server {
     /// The server answers `/api/info` while it is still starting; every other
     /// route waits for it to be ready.
     fn wait_ready(&mut self) -> Result<(), AgentError> {
-        let deadline = Instant::now() + STARTUP_TIMEOUT;
-        let mut last = String::from("no response");
-        while Instant::now() < deadline {
+        loop {
             if let Ok(Some(status)) = self.child.try_wait() {
                 return Err(
                     self.startup_error(format!("OpenCode server exited during startup ({status})"))
@@ -2590,12 +2833,10 @@ impl Server {
                 Ok(500) => {
                     return Err(self.startup_error("OpenCode server failed to start".into()));
                 }
-                Ok(status) => last = format!("HTTP {status}"),
-                Err(err) => last = err.to_string(),
+                Ok(_) | Err(_) => {}
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        Err(self.startup_error(format!("timed out waiting for OpenCode to start: {last}")))
     }
 
     fn startup_error(&mut self, message: String) -> AgentError {
@@ -2605,12 +2846,9 @@ impl Server {
     }
 
     fn subscribe(&self) -> Result<(Receiver<Transport>, Sender<Transport>), AgentError> {
-        // The event stream idles between turns, so it gets its own agent
-        // without the REST read timeout; stopping the server ends the read.
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(1))
-            .build();
-        let response = agent
+        let response = self
+            .http
+            .agent
             .get(&format!("{}/api/event", self.http.base))
             .set("Authorization", &self.http.authorization)
             .call()
@@ -2700,11 +2938,9 @@ impl Http {
                 base64::engine::general_purpose::STANDARD.encode(format!("opencode:{password}"))
             ),
             directory: directory.to_path_buf(),
-            agent: ureq::AgentBuilder::new()
-                .timeout_connect(Duration::from_secs(1))
-                .timeout_read(Duration::from_secs(60))
-                .timeout_write(Duration::from_secs(10))
-                .build(),
+            // No deadline: stopping the session kills the server, which ends
+            // every request it has not answered.
+            agent: ureq::AgentBuilder::new().build(),
         }
     }
 
@@ -2864,31 +3100,20 @@ fn read_sse(reader: impl Read, sender: Sender<Transport>) {
 }
 
 async fn wait_for_server_connected(events: &Receiver<Transport>) -> Result<(), AgentError> {
-    future::race(
-        async {
-            loop {
-                match events.recv().await {
-                    Ok(Transport::Event(event)) if event["type"] == "server.connected" => {
-                        return Ok(());
-                    }
-                    Ok(Transport::Event(_) | Transport::ShellOutput { .. }) => {}
-                    Ok(Transport::Error(error)) => return Err(AgentError::Protocol(error)),
-                    Ok(Transport::Eof) | Err(_) => {
-                        return Err(AgentError::Protocol(
-                            "OpenCode event stream closed before server.connected".into(),
-                        ));
-                    }
-                }
+    loop {
+        match events.recv().await {
+            Ok(Transport::Event(event)) if event["type"] == "server.connected" => {
+                return Ok(());
             }
-        },
-        async {
-            smol::Timer::after(Duration::from_secs(10)).await;
-            Err(AgentError::Protocol(
-                "timed out waiting for OpenCode server.connected".into(),
-            ))
-        },
-    )
-    .await
+            Ok(Transport::Event(_) | Transport::ShellOutput { .. }) => {}
+            Ok(Transport::Error(error)) => return Err(AgentError::Protocol(error)),
+            Ok(Transport::Eof) | Err(_) => {
+                return Err(AgentError::Protocol(
+                    "OpenCode event stream closed before server.connected".into(),
+                ));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2971,6 +3196,179 @@ mod tests {
                 json!({"type": "token_usage", "freshness": "current", "turn_processed_tokens": null, "input_tokens": 6335, "cached_input_tokens": 3328, "output_tokens": 4, "used_tokens": 9667, "context_window": null, "total_processed_tokens": null, "cost_usd": null, "duration_ms": null}),
                 json!({"type": "turn_completed", "turn_id": "evt_198aac9f500200000000000325", "status": "completed", "usage": {"freshness": "current", "turn_processed_tokens": 9667, "input_tokens": 6335, "cached_input_tokens": 3328, "output_tokens": 4, "used_tokens": 9667, "context_window": null, "total_processed_tokens": null, "cost_usd": 0.0, "duration_ms": null}}),
             ]
+        );
+    }
+
+    /// `read` gives a page of `N: text` lines under its `Read file` header,
+    /// and says where to continue when the file goes on (v2.2.7's
+    /// `toModelContent`, `packages/core/src/tool/plugin/read.ts`; content
+    /// invented). A directory's page is a listing of its entries.
+    // The fixture's paths are as the harness prints them on a POSIX machine.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_is_the_lines_it_read_from_where_it_began() {
+        let page = "Read file src/lib.rs, lines 40-41\n40: fn main() {\n41: }\n[Output truncated. Continue reading with offset: 42]";
+        assert_eq!(
+            tool_family(
+                "read",
+                &json!({"path": "src/lib.rs", "offset": 40}),
+                Some(page.into()),
+                None
+            ),
+            (
+                Some(ToolFamily::Read {
+                    path: "src/lib.rs".into(),
+                    first_line: Some(40),
+                    note: Some("[Output truncated. Continue reading with offset: 42]".into()),
+                }),
+                Some("fn main() {\n}".into()),
+            )
+        );
+        let listing = "Read directory src, entries 1-2\nlib.rs\nbin/";
+        assert_eq!(
+            tool_family("read", &json!({"path": "src"}), Some(listing.into()), None),
+            (
+                Some(ToolFamily::Search {
+                    scope: SearchScope::Entries,
+                    pattern: None,
+                    path: Some("src".into()),
+                    glob: None,
+                    hits: Some(vec![hit("src/lib.rs"), hit("src/bin/")]),
+                }),
+                Some(listing.into())
+            )
+        );
+    }
+
+    /// grep names each file by its absolute path and its matches under it
+    /// as `  Line N: text`; glob lists the absolute path of each file
+    /// (v2.2.7's `toModelContent` in `grep.ts` and `glob.ts`; content
+    /// invented).
+    // The fixture's paths are as the harness prints them on a POSIX machine.
+    #[cfg(unix)]
+    #[test]
+    fn a_search_is_what_it_found() {
+        let grep = "Found 2 matches\n/work/src/a.rs:\n  Line 3: fn new() {}\n  Line 9: fn new_at(x: u8) {}\n\n(Results are truncated: showing first 2 results. Consider using a more specific path or pattern.)";
+        let (family, _) = tool_family(
+            "grep",
+            &json!({"pattern": "fn new", "path": "src", "include": "*.rs"}),
+            Some(grep.into()),
+            None,
+        );
+        assert_eq!(
+            family,
+            Some(ToolFamily::Search {
+                scope: SearchScope::Content,
+                pattern: Some("fn new".into()),
+                path: Some("src".into()),
+                glob: Some("*.rs".into()),
+                hits: Some(vec![
+                    SearchHit {
+                        path: "/work/src/a.rs".into(),
+                        line: Some(3),
+                        text: Some("fn new() {}".into()),
+                    },
+                    SearchHit {
+                        path: "/work/src/a.rs".into(),
+                        line: Some(9),
+                        text: Some("fn new_at(x: u8) {}".into()),
+                    },
+                ]),
+            })
+        );
+        let (family, _) = tool_family(
+            "glob",
+            &json!({"pattern": "**/*.rs"}),
+            Some("/work/src/a.rs\n/work/src/b.rs".into()),
+            None,
+        );
+        assert_eq!(
+            family,
+            Some(ToolFamily::Search {
+                scope: SearchScope::Files,
+                pattern: Some("**/*.rs".into()),
+                path: None,
+                glob: None,
+                hits: Some(vec![hit("/work/src/a.rs"), hit("/work/src/b.rs")]),
+            })
+        );
+    }
+
+    /// question reports each question's answers as a list in its metadata,
+    /// in the questions' order (v2.2.7's `question.ts`; content invented).
+    #[test]
+    fn a_question_is_what_it_asked_and_the_answers_its_metadata_lists() {
+        let (family, _) = tool_family(
+            "question",
+            &json!({"questions": [{"question": "Which colours?", "header": "Colours", "multiple": true, "options": [{"label": "Red, green", "description": "Warm and cool"}, {"label": "Blue", "description": "Cool"}]}]}),
+            Some("User has answered your questions: \"Which colours?\"=\"Red, green, Blue\". You can now continue with the user's answers in mind.".into()),
+            Some(&json!({"answers": [["Red, green", "Blue"]]})),
+        );
+        assert_eq!(
+            family,
+            Some(ToolFamily::Question {
+                questions: vec![AskedQuestion {
+                    question: "Which colours?".into(),
+                    options: vec![
+                        UserInputOption {
+                            label: "Red, green".into(),
+                            description: "Warm and cool".into(),
+                        },
+                        UserInputOption {
+                            label: "Blue".into(),
+                            description: "Cool".into(),
+                        },
+                    ],
+                    answers: vec!["Red, green".into(), "Blue".into()],
+                }],
+            })
+        );
+    }
+
+    /// websearch heads each page `## [title](url)` (v2.2.7's `websearch.ts`;
+    /// content invented).
+    #[test]
+    fn a_web_search_is_the_pages_it_found() {
+        let text = "## [CORS](https://example.com/cors)\nPublished: 2026-01-02T00:00:00.000Z\n\nA page about it.\n\n## [Preflight [MDN]](https://example.org/preflight)";
+        let (family, _) = tool_family(
+            "websearch",
+            &json!({"query": "cors preflight"}),
+            Some(text.into()),
+            Some(&json!({"provider": "exa"})),
+        );
+        assert_eq!(
+            family,
+            Some(ToolFamily::WebSearch {
+                query: "cors preflight".into(),
+                links: Some(vec![
+                    WebLink {
+                        title: "CORS".into(),
+                        url: "https://example.com/cors".into(),
+                    },
+                    WebLink {
+                        title: "Preflight [MDN]".into(),
+                        url: "https://example.org/preflight".into(),
+                    },
+                ]),
+            })
+        );
+    }
+
+    /// skill is asked for by `id` and names the skill it loaded in its
+    /// metadata (v2.2.7's `skill.ts`; content invented).
+    #[test]
+    fn a_skill_is_the_skill_it_loaded() {
+        let (family, _) = tool_family(
+            "skill",
+            &json!({"id": "release"}),
+            Some("<skill_content name=\"release\"># Skill: release</skill_content>".into()),
+            Some(&json!({"name": "release", "directory": "/work/.opencode/skills/release"})),
+        );
+        assert_eq!(
+            family,
+            Some(ToolFamily::Skill {
+                name: "release".into()
+            })
         );
     }
 
@@ -3078,8 +3476,8 @@ mod tests {
             items_only(replay("image_turn.jsonl", &[]))[..3],
             [
                 json!({"type": "item_started", "id": read, "content": {"kind": "tool_call", "name": "read", "input": {}, "output": null, "status": "in_progress"}}),
-                json!({"type": "item_updated", "id": read, "content": {"kind": "tool_call", "name": "read", "input": {"path": "blue.png"}, "output": null, "status": "in_progress"}}),
-                json!({"type": "item_completed", "id": read, "content": {"kind": "tool_call", "image_reads": [{"media_type": "image/png", "data_base64": "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg=="}], "name": "read", "input": {"path": "blue.png"}, "output": "Image read successfully", "status": "completed"}}),
+                json!({"type": "item_updated", "id": read, "content": {"kind": "tool_call", "name": "read", "input": {"path": "blue.png"}, "output": null, "status": "in_progress", "family": {"type": "read", "path": "blue.png"}}}),
+                json!({"type": "item_completed", "id": read, "content": {"kind": "tool_call", "image_reads": [{"media_type": "image/png", "data_base64": "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg=="}], "name": "read", "input": {"path": "blue.png"}, "output": "Image read successfully", "status": "completed", "family": {"type": "read", "path": "blue.png"}}}),
             ]
         );
     }
@@ -3253,7 +3651,7 @@ mod tests {
         let data =
             |name: &str| serde_json::from_str::<Value>(&fixture_text(name)).unwrap()["data"].take();
         let models = map_models(&data("model_list.json"), &data("model_default.json"));
-        let effort = |variants: &[(&str, &str)]| json!([{"kind": "select", "id": "reasoningEffort", "label": "Thinking", "options": variants.iter().map(|(value, label)| json!({"value": value, "label": label, "description": null, "unavailable": null})).collect::<Vec<_>>(), "default_value": null, "role": "model", "apply": "live", "recommended": null, "permissive": null}]);
+        let effort = |variants: &[(&str, &str)]| json!([{"kind": "select", "id": "reasoningEffort", "label": "Thinking", "options": variants.iter().map(|(value, label)| json!({"value": value, "label": label, "description": null, "unavailable": null, "speed": null, "summary": null})).collect::<Vec<_>>(), "default_value": null, "role": "effort", "apply": "live", "recommended": null, "permissive": null}]);
         assert_eq!(
             serde_json::to_value(&models).unwrap(),
             json!([
@@ -3275,7 +3673,14 @@ mod tests {
         let binary = directory.join("exits-at-start");
         std::fs::write(&binary, "#!/bin/sh\necho 'cannot start' >&2\nexit 1\n").unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let spawned = Server::spawn(Some(&binary), &directory, &LaunchEnv::default(), &[], &[]);
+        let spawned = Server::spawn(
+            Some(&binary),
+            &directory,
+            &LaunchEnv::default(),
+            &[],
+            &[],
+            &crate::SessionProcesses::default(),
+        );
         std::fs::remove_dir_all(&directory).unwrap();
         let Err(error) = spawned else {
             panic!("the server exited");

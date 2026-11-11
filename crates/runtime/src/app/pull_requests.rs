@@ -844,7 +844,7 @@ impl AppState {
             key.clone(),
             url,
             source,
-            now_secs(),
+            cx.clock().unix_secs(),
             explicit,
         ) {
             self.save_pull_request_meta(meta, cx);
@@ -906,7 +906,7 @@ impl AppState {
                     .await;
                 let Ok(task) = task else { break };
                 task.await;
-                smol::Timer::after(Duration::from_secs(60)).await;
+                host.clock().timer(Duration::from_secs(60)).await;
             }
         });
         self.pull_requests.workers.push(task);
@@ -927,7 +927,7 @@ impl AppState {
             self.drop_ended_rebases(cx);
         }
         let sweep_generation = self.pull_requests.generation;
-        let now = now_secs();
+        let now = cx.clock().unix_secs();
         let mut groups: HashMap<PullRequestKey, SyncGroup> = HashMap::new();
         for meta in self
             .sessions
@@ -968,7 +968,7 @@ impl AppState {
             self.pull_requests
                 .paused
                 .get(&(project.clone(), host.to_owned()))
-                .is_some_and(|until| *until > SystemTime::now())
+                .is_some_and(|until| *until > cx.clock().wall())
         };
         let due: Vec<_> = groups
             .into_values()
@@ -1136,7 +1136,7 @@ impl AppState {
         };
         self.pull_requests
             .last_synced
-            .insert(key.clone(), now_secs());
+            .insert(key.clone(), cx.clock().unix_secs());
         self.reconcile_unconfirmed_merges(Some((&key, summary.snapshot.state)), cx);
         if self.pull_requests.requested.get(&key).copied() == generation {
             self.pull_requests.requested.remove(&key);
@@ -1178,7 +1178,7 @@ impl AppState {
                         sibling.clone(),
                         url,
                         PullRequestSource::Stack,
-                        now_secs(),
+                        cx.clock().unix_secs(),
                         false,
                     ) {
                         changed = true;

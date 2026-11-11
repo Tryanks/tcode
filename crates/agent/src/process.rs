@@ -202,6 +202,59 @@ impl<C: Leader> Drop for ProcessTree<C> {
     }
 }
 
+/// The harness processes one session starts, which whoever started the
+/// session stops without going through its actor: an actor waiting on its
+/// harness reads no command until the harness answers, a session still
+/// starting has no actor to ask, and the harness's answer is what the user
+/// stopped waiting for. A tree held after [`stop`](Self::stop) is stopped as
+/// it is held.
+#[derive(Clone, Default, Debug)]
+pub struct SessionProcesses(Arc<Mutex<HeldTrees>>);
+
+#[derive(Default, Debug)]
+struct HeldTrees {
+    stopped: bool,
+    entries: Vec<u64>,
+}
+
+impl SessionProcesses {
+    fn held(&self) -> std::sync::MutexGuard<'_, HeldTrees> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Hold `tree` as one of this session's.
+    pub(crate) fn hold<C: Leader>(&self, mut tree: ProcessTree<C>) -> ProcessTree<C> {
+        let stopped = {
+            let mut held = self.held();
+            if !held.stopped {
+                held.entries.push(tree.entry);
+            }
+            held.stopped
+        };
+        if stopped {
+            let _ = tree.kill();
+        }
+        tree
+    }
+
+    /// Stop every tree this session holds, and each it holds from now on.
+    pub fn stop(&self) {
+        let entries = {
+            let mut held = self.held();
+            held.stopped = true;
+            std::mem::take(&mut held.entries)
+        };
+        let trees = live_trees();
+        for entry in entries {
+            if let Some(handle) = trees.get(&entry) {
+                stop_tree(handle);
+            }
+        }
+    }
+}
+
 /// Stop every harness tree this process started, for a host that is going
 /// away: the actors its shutdown asked to stop may not run again before the
 /// process exits.
@@ -441,6 +494,41 @@ pub(crate) fn refuse_batch_line_breaks<'a>(
     Ok(())
 }
 
+/// Run a harness's management command to its end and collect what it wrote.
+/// Its stdin is null, so a prompt can never wait on input; dropping the
+/// future stops the command and everything it started, as a cancelled
+/// plugin change does.
+pub(crate) async fn tree_output(
+    mut command: std::process::Command,
+) -> std::io::Result<std::process::Output> {
+    use smol::io::AsyncReadExt as _;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    async fn read_all(pipe: Option<impl smol::io::AsyncRead + Unpin>) -> std::io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            pipe.read_to_end(&mut bytes).await?;
+        }
+        Ok(bytes)
+    }
+    let mut child = ProcessTree::new(smol::process::Command::from(command).spawn()?);
+    let (stdout, stderr) =
+        smol::future::try_zip(read_all(child.stdout.take()), read_all(child.stderr.take())).await?;
+    let status = child.status().await?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 /// An async (`smol`) command with the console suppressed. `async_process`
 /// exposes no `creation_flags`, so the flag rides in through the `From` impl.
 pub(crate) fn async_command<S: AsRef<std::ffi::OsStr>>(program: S) -> smol::process::Command {
@@ -673,11 +761,82 @@ mod tests {
             output.for_each(drop);
             let _ = closed.send(());
         });
-        // Only a failure waits this out; the work then ends once `_stdin`
-        // closes with the test.
+        // Work that outlives the harness holds its stdout open, and the test
+        // runner ends the wait.
         everyone_gone
-            .recv_timeout(std::time::Duration::from_secs(10))
+            .recv()
             .unwrap_or_else(|_| panic!("the harness's background work {work} outlived it"));
+    }
+
+    /// A session's harness that waits on its stdin, which the test holds open,
+    /// ends only when the session is stopped; one started after the stop does
+    /// not outlive its start.
+    #[test]
+    fn stopping_a_session_kills_its_harness_whatever_it_waits_on() {
+        const ROLE: &str = "TCODE_TEST_SESSION_HARNESS";
+        if std::env::var_os(ROLE).is_some() {
+            let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+            return;
+        }
+        let harness = || {
+            let mut child = harness_command(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "process::tests::stopping_a_session_kills_its_harness_whatever_it_waits_on",
+                    "--quiet",
+                ])
+                .env(ROLE, "1")
+                .stdin(std::process::Stdio::piped());
+            ProcessTree::new(child.spawn().unwrap())
+        };
+        let processes = SessionProcesses::default();
+        let mut running = processes.hold(harness());
+        let _stdin = running.stdin.take();
+
+        processes.stop();
+        assert!(!running.wait().unwrap().success());
+
+        let mut late = processes.hold(harness());
+        let _stdin = late.stdin.take();
+        assert!(!late.wait().unwrap().success());
+    }
+
+    /// A plugin change the user cancels drops its command's future, which
+    /// stops the command. The command here holds a pipe the test reads, which
+    /// ends only when it exits.
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_management_command_stops_it() {
+        const ROLE: &str = "TCODE_TEST_PARKED_COMMAND";
+        if let Some(fifo) = std::env::var_os(ROLE) {
+            let mut held = std::fs::OpenOptions::new().write(true).open(fifo).unwrap();
+            writeln!(held, "parked").unwrap();
+            loop {
+                std::thread::park();
+            }
+        }
+        let fifo = std::env::temp_dir().join(format!("tcode-parked-{}", uuid::Uuid::new_v4()));
+        let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path this test owns.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let mut command = command(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "process::tests::dropping_a_management_command_stops_it",
+                "--quiet",
+            ])
+            .env(ROLE, &fifo);
+        let running = smol::spawn(tree_output(command));
+        let mut held = BufReader::new(std::fs::File::open(&fifo).unwrap());
+        let mut line = String::new();
+        held.read_line(&mut line).unwrap();
+        assert_eq!(line, "parked\n");
+
+        drop(running);
+        held.read_to_string(&mut line).unwrap();
+        std::fs::remove_file(&fifo).unwrap();
     }
 
     #[test]

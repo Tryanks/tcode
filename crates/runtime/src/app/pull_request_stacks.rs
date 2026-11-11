@@ -246,7 +246,7 @@ impl AppState {
                                 host: stack.0.clone(),
                                 repository: stack.1.clone(),
                                 stack: stack.2,
-                                started_at: now_secs(),
+                                started_at: cx.clock().unix_secs(),
                                 kind: StackOperationKind::Merging {
                                     id: id.clone(),
                                     target: key.number,
@@ -282,11 +282,12 @@ impl AppState {
         );
         let forge = self.pull_requests.forge.clone();
         let host = cx.clone();
+        let clock = cx.clock().clone();
         let task = cx.spawn_background(async move {
             let mut ended = None;
-            for offset in due_asks(now_secs().saturating_sub(started_at)) {
-                let wait = (started_at + offset).saturating_sub(now_secs());
-                smol::Timer::after(Duration::from_secs(wait)).await;
+            for offset in due_asks(clock.unix_secs().saturating_sub(started_at)) {
+                let wait = (started_at + offset).saturating_sub(clock.unix_secs());
+                clock.timer(Duration::from_secs(wait)).await;
                 let (forge, key, id) = (forge.clone(), key.clone(), id.clone());
                 match host.unblock(move || forge.merge_status(&key, &id)).await {
                     Ok(None) => {}
@@ -400,7 +401,7 @@ impl AppState {
                 host: stack.0.clone(),
                 repository: stack.1.clone(),
                 stack: stack.2,
-                started_at: now_secs(),
+                started_at: cx.clock().unix_secs(),
                 kind: StackOperationKind::Rebasing { layers },
             }),
             cx,
@@ -549,7 +550,8 @@ impl AppState {
             else {
                 continue;
             };
-            if now_secs().saturating_sub(operation.started_at) >= UNCONFIRMED_KEPT_SECS {
+            if cx.clock().unix_secs().saturating_sub(operation.started_at) >= UNCONFIRMED_KEPT_SECS
+            {
                 self.put_stack_operation(&stack, None, cx);
                 continue;
             }

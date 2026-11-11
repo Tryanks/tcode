@@ -100,14 +100,6 @@ impl PullRequestView {
             .map(|files| files.head.clone())
     }
 
-    /// The file's text at the revision Files is read for, on GitHub.
-    pub(super) fn file_url(&self, path: &str, cx: &App) -> Option<String> {
-        let url = self.url(cx)?;
-        let head = self.head()?;
-        let repository = url.rsplit_once("/pull/")?.0.to_owned();
-        Some(format!("{repository}/blob/{head}/{path}"))
-    }
-
     fn viewed_state(&self, path: &str) -> Viewed {
         let Some(page) = self.page() else {
             return Viewed::Unknown;
@@ -278,45 +270,46 @@ impl PullRequestView {
             path: path.clone(),
         };
         let created = entry.kind == FileChangeKind::Create;
-        self.read(read, cx, move |page, result| {
-            let state = match result {
-                Ok((PullRequestReadResponse::FileText(PullRequestFileText::Text(text)), _)) => {
-                    if created {
-                        TextState::Loaded {
-                            old: String::new(),
-                            new: text,
-                        }
-                    } else {
-                        match reconstruct_from_text(text, &patch) {
-                            Some((old, new)) => TextState::Loaded { old, new },
-                            None => TextState::Unreadable,
+        self.read(
+            read,
+            PullRequestReadResponse::file_text,
+            cx,
+            move |page, result, _| {
+                let state = match result {
+                    Ok((PullRequestFileText::Text(text), _)) => {
+                        if created {
+                            TextState::Loaded {
+                                old: String::new(),
+                                new: text,
+                            }
+                        } else {
+                            match reconstruct_from_text(text, &patch) {
+                                Some((old, new)) => TextState::Loaded { old, new },
+                                None => TextState::Unreadable,
+                            }
                         }
                     }
-                }
-                Ok((PullRequestReadResponse::FileText(PullRequestFileText::Missing), _)) => {
-                    TextState::Missing
-                }
-                Ok((PullRequestReadResponse::FileText(PullRequestFileText::Oversized), _)) => {
-                    TextState::Oversized
-                }
-                Ok(_) => TextState::Unreadable,
-                Err(error) => {
-                    page.files_view.texts.remove(&path);
-                    page.files_view.pending_expand = None;
-                    page.files_view.text_failure = Some(
-                        crate::tr!(
-                            "pull_requests.files.text_failed",
-                            path = path,
-                            revision = head.get(..7).unwrap_or(&head).to_owned(),
-                            reason = reason(&error)
-                        )
-                        .into_owned(),
-                    );
-                    return;
-                }
-            };
-            page.files_view.texts.insert(path, state);
-        });
+                    Ok((PullRequestFileText::Missing, _)) => TextState::Missing,
+                    Ok((PullRequestFileText::Oversized, _)) => TextState::Oversized,
+                    Ok((PullRequestFileText::Binary, _)) => TextState::Unreadable,
+                    Err(error) => {
+                        page.files_view.texts.remove(&path);
+                        page.files_view.pending_expand = None;
+                        page.files_view.text_failure = Some(
+                            crate::tr!(
+                                "pull_requests.files.text_failed",
+                                path = path,
+                                revision = head.get(..7).unwrap_or(&head).to_owned(),
+                                reason = reason(&error)
+                            )
+                            .into_owned(),
+                        );
+                        return;
+                    }
+                };
+                page.files_view.texts.insert(path, state);
+            },
+        );
     }
 
     /// Redraws a file once its text arrived, then applies the expansion that asked for it.
@@ -900,11 +893,17 @@ impl PullRequestView {
                 )
             }
             .into_owned();
-            let mut counter = crate::tr!(
-                "pull_requests.files.viewed_count",
-                viewed = viewed.to_string(),
-                total = total.to_string()
-            )
+            let mut counter = match total {
+                Some(total) => crate::tr!(
+                    "pull_requests.files.viewed_count",
+                    viewed = viewed.to_string(),
+                    total = total.to_string()
+                ),
+                None => crate::tr!(
+                    "pull_requests.files.viewed_count_unknown",
+                    viewed = viewed.to_string()
+                ),
+            }
             .into_owned();
             // The host keeps no marks Tcode can read, so the ones shown are Tcode's own.
             if host_marks == Some(false) {
@@ -1370,11 +1369,11 @@ impl PullRequestView {
             "pr-files-partial",
             (files.next_cursor.is_none() && !files.complete).then(|| {
                 let listed = files.files.len();
-                if files.changed_files > listed as u64 {
+                if let Some(total) = files.changed_files.filter(|total| *total > listed as u64) {
                     crate::tr!(
                         "pull_requests.files.partial",
                         shown = listed.to_string(),
-                        total = files.changed_files.to_string(),
+                        total = total.to_string(),
                         host_name = self.host_name(cx),
                         pr = self.noun(cx).pr
                     )
@@ -1550,7 +1549,7 @@ impl PullRequestView {
             ),
             PullRequestPatch::Hunks(_) => return div().into_any_element(),
         };
-        let url = self.file_url(&entry.path, cx);
+        let url = entry.url.clone();
         // A file with no patch keeps a block about a short hunk's height in the list; no
         // owner carries a placeholder height.
         material::card(cx)
@@ -1739,12 +1738,9 @@ impl DiffListHost for PullRequestView {
     }
 
     fn file_menu(&self, file: usize, cx: &App) -> FileMenu {
-        let path = self
-            .files_of()
-            .and_then(|files| files.get(file))
-            .map(|file| file.path.clone())
-            .unwrap_or_default();
-        let url = self.file_url(&path, cx);
+        let file = self.files_of().and_then(|files| files.get(file));
+        let path = file.map(|file| file.path.clone()).unwrap_or_default();
+        let url = file.and_then(|file| file.url.clone());
         let host_name = self.host_name(cx);
         Rc::new(move |menu, _, _| {
             menu.menu(

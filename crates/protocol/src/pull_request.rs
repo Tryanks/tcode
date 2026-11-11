@@ -7,8 +7,28 @@ use tcode_core::{
     session::ReviewSide,
 };
 
-/// The largest image a media read returns; past it the host stops reading.
-pub const MAX_PULL_REQUEST_MEDIA_BYTES: usize = 8 * 1024 * 1024;
+/// No image past this fits one network line in base64, four bytes for every three; the bound
+/// of one answer is [`max_pull_request_media_bytes`].
+pub const MAX_PULL_REQUEST_MEDIA_BYTES: usize = crate::MAX_LINE_BYTES / 4 * 3;
+
+/// The largest image whose answer fits one network line beside its id, `mime`, `validator` and
+/// expiry; past it the host stops reading.
+pub fn max_pull_request_media_bytes(mime: &str, validator: Option<&str>) -> usize {
+    let empty = crate::HostMessage::QueryResult {
+        id: u64::MAX,
+        result: Ok(crate::QueryResponse::PullRequest {
+            response: Box::new(PullRequestReadResponse::Media(PullRequestMedia::Image {
+                bytes: Vec::new(),
+                mime: mime.to_owned(),
+                validator: validator.map(str::to_owned),
+                expires_at: u64::MAX,
+            })),
+            expires_at: u64::MAX,
+        }),
+    };
+    let envelope = crate::encode_line(&empty).map_or(crate::MAX_LINE_BYTES, |line| line.len());
+    crate::MAX_LINE_BYTES.saturating_sub(envelope) / 4 * 3
+}
 
 /// One read of a pull request linked to the named thread.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,8 +82,9 @@ pub struct PullRequestFiles {
     pub next_cursor: Option<String>,
     /// Every changed file has been listed once the pages before this one were read too.
     pub complete: bool,
-    /// The host's count of changed files, which a listing may fall short of.
-    pub changed_files: u64,
+    /// The host's count of changed files, which a listing may fall short of; `None` where the
+    /// host gave none.
+    pub changed_files: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +96,8 @@ pub struct PullRequestFile {
     pub additions: u64,
     pub deletions: u64,
     pub patch: PullRequestPatch,
+    /// The file's page on the host: at the head, or at the base for a deleted file.
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -494,6 +517,31 @@ pub enum PullRequestReadResponse {
     ActionState(PullRequestActionState),
     StackState(PullRequestStackActionState),
 }
+
+/// The answer of one kind, `None` for an answer of another.
+macro_rules! answers {
+    ($($method:ident: $variant:ident($answer:ty)),* $(,)?) => {
+        impl PullRequestReadResponse {
+            $(pub fn $method(self) -> Option<$answer> {
+                match self {
+                    Self::$variant(answer) => Some(answer),
+                    _ => None,
+                }
+            })*
+        }
+    };
+}
+answers!(
+    files: Files(PullRequestFiles),
+    file_text: FileText(PullRequestFileText),
+    conversation: Conversation(Box<PullRequestConversation>),
+    thread_replies: ThreadReplies(PullRequestThreadReplies),
+    viewed_files: ViewedFiles(PullRequestViewedFiles),
+    label_candidates: LabelCandidates(PullRequestLabelCandidates),
+    reviewer_candidates: ReviewerCandidates(PullRequestReviewerCandidates),
+    action_state: ActionState(PullRequestActionState),
+    stack_state: StackState(PullRequestStackActionState),
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

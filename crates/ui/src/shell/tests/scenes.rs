@@ -75,19 +75,19 @@ fn serve_finished(host: &MountedShell, id: &str) {
 }
 
 /// `id` working on its one turn.
-fn serve_running(host: &MountedShell, id: &str) {
+fn serve_running(host: &MountedShell, id: &str, cx: &mut VisualTestContext) {
     let mut status = session_status(id, std::path::Path::new(PANES_CWD));
     status.activity.working = true;
     status.activity.turn_running = true;
     status.running_turn = Some(tcode_core::session::RunningTurn {
         turn: 0,
-        started_at: Some(crate::time::now_millis()),
+        started_at: Some(cx.update(|_, cx| crate::time::now_millis(cx))),
     });
     serve_log(host, status, vec![started(), asked(id)]);
 }
 
 /// What the host has sent arrives, and a frame is drawn.
-fn arrive(_shell: &Entity<AppShell>, cx: &mut VisualTestContext) {
+fn arrive(cx: &mut VisualTestContext) {
     cx.run_until_parked();
     draw(cx);
 }
@@ -114,7 +114,7 @@ fn at_rest(cx: &mut VisualTestContext) {
 /// what the host has answered by the frame that first draws it.
 fn switch(shell: &Entity<AppShell>, key: &str, id: &str, cx: &mut VisualTestContext) {
     cx.simulate_keystrokes(key);
-    arrive(shell, cx);
+    arrive(cx);
     assert_eq!(pane_threads(shell, cx), [Some(id.into())]);
 }
 
@@ -126,7 +126,7 @@ fn switch(shell: &Entity<AppShell>, key: &str, id: &str, cx: &mut VisualTestCont
 fn the_composer_of_a_thread_come_back_to_starts_at_rest(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx) = mount_panes(cx);
-    serve_running(&host, "thread-1");
+    serve_running(&host, "thread-1", cx);
     await_restore_update(&shell, cx, |store, cx| {
         store.composer_state_for(Some("thread-1"), cx).turn_running
     });
@@ -444,7 +444,7 @@ fn streamed_on(part: usize) -> String {
 }
 
 /// `id`'s status and log as it holds `holding`.
-fn serve_holding(host: &MountedShell, id: &str, holding: Holding) {
+fn serve_holding(host: &MountedShell, id: &str, holding: Holding, cx: &mut VisualTestContext) {
     let mut status = session_status(id, std::path::Path::new(PANES_CWD));
     let mut events = vec![started(), asked(id)];
     let running = matches!(
@@ -456,7 +456,7 @@ fn serve_holding(host: &MountedShell, id: &str, holding: Holding) {
         status.activity.turn_running = true;
         status.running_turn = Some(tcode_core::session::RunningTurn {
             turn: 0,
-            started_at: Some(crate::time::now_millis()),
+            started_at: Some(cx.update(|_, cx| crate::time::now_millis(cx))),
         });
     }
     match holding {
@@ -568,13 +568,13 @@ fn answer_delta(id: &str, text: String) -> agent::AgentEvent {
 /// `id`'s log once [`Holding::StreamedOn`]'s turn went on while the pane
 /// was away: the answer it left streaming finished, then a thought, a
 /// command and another answer, the turn still under way.
-fn serve_streamed_on(host: &MountedShell, id: &str) {
+fn serve_streamed_on(host: &MountedShell, id: &str, cx: &mut VisualTestContext) {
     let mut status = session_status(id, std::path::Path::new(PANES_CWD));
     status.activity.working = true;
     status.activity.turn_running = true;
     status.running_turn = Some(tcode_core::session::RunningTurn {
         turn: 0,
-        started_at: Some(crate::time::now_millis()),
+        started_at: Some(cx.update(|_, cx| crate::time::now_millis(cx))),
     });
     let item = |id: String, content| {
         agent::AgentEvent::ItemCompleted(agent::ThreadItem {
@@ -739,7 +739,7 @@ fn switched_to_at_rest(holding: Holding, cx: &mut TestAppContext) {
     serve_other_after(&host, 0);
     switch(&shell, "secondary-2", "thread-2", cx);
     at_rest(cx);
-    serve_holding(&host, "thread-1", holding);
+    serve_holding(&host, "thread-1", holding, cx);
     switch(&shell, "secondary-1", "thread-1", cx);
     at_rest(cx);
     let opened = store.update(cx, |store, cx| {
@@ -770,7 +770,7 @@ fn switched_to_at_rest(holding: Holding, cx: &mut TestAppContext) {
                 ServerEvent::SessionEvent(answer_delta("thread-1", streamed_on(1)).into()),
             )],
         );
-        arrive(&shell, cx);
+        arrive(cx);
         display_frame(cx);
     }
     for (key, id) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
@@ -779,11 +779,11 @@ fn switched_to_at_rest(holding: Holding, cx: &mut TestAppContext) {
             // has sent what it did since.
             ("thread-1", Holding::StreamedOn) => {
                 switch(&shell, key, id, cx);
-                serve_streamed_on(&host, id);
-                arrive(&shell, cx);
+                serve_streamed_on(&host, id, cx);
+                arrive(cx);
             }
             ("thread-1", _) => {
-                serve_holding(&host, id, holding);
+                serve_holding(&host, id, holding, cx);
                 switch(&shell, key, id, cx);
             }
             // thread-2 went on while the pane was away.
@@ -882,7 +882,7 @@ fn a_lead_switched_to_shows_the_agent_beside_it_at_rest(cx: &mut TestAppContext)
             cx,
         )
     });
-    arrive(&shell, cx);
+    arrive(cx);
     at_rest(cx);
     assert!(
         cx.debug_bounds("chat-side-card").is_some(),
@@ -968,7 +968,7 @@ fn a_thread_opened_again_on_a_phone_reveals_nothing_it_gained_away(cx: &mut Test
     let (shell, host, cx) = mount_panes(cx);
     as_mobile(cx);
     cx.simulate_resize(gpui::size(px(393.), px(852.)));
-    serve_holding(&host, "thread-1", Holding::StreamedOn);
+    serve_holding(&host, "thread-1", Holding::StreamedOn, cx);
     at_rest(cx);
     let live = |event: agent::AgentEvent| {
         (
@@ -979,7 +979,7 @@ fn a_thread_opened_again_on_a_phone_reveals_nothing_it_gained_away(cx: &mut Test
         )
     };
     send_events(&host, vec![live(answer_delta("thread-1", streamed_on(1)))]);
-    arrive(&shell, cx);
+    arrive(cx);
     display_frame(cx);
     cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx)));
     at_rest(cx);
@@ -998,10 +998,10 @@ fn a_thread_opened_again_on_a_phone_reveals_nothing_it_gained_away(cx: &mut Test
             })),
         ],
     );
-    arrive(&shell, cx);
+    arrive(cx);
     at_rest(cx);
     store_of(&shell, cx).update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
-    arrive(&shell, cx);
+    arrive(cx);
     // The frame the page lands on: its question stays where it is.
     let mut question = cx.debug_bounds(bubble("thread-1"));
     for _ in 0..60 {
@@ -1113,7 +1113,7 @@ fn a_page_landing_on_a_thread_switched_to_leaves_its_footers_at_rest(cx: &mut Te
             ),
         ],
     );
-    arrive(&shell, cx);
+    arrive(cx);
     // The thread shows, and asks for the turn before its window.
     let mut page = None;
     for _ in 0..30 {
@@ -1149,7 +1149,7 @@ fn a_page_landing_on_a_thread_switched_to_leaves_its_footers_at_rest(cx: &mut Te
             truncated: false,
         }),
     );
-    arrive(&shell, cx);
+    arrive(cx);
     let mut seen = vec![trailers(cx)];
     for _ in 0..12 {
         display_frame(cx);

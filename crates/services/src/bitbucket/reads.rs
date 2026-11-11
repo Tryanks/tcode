@@ -82,6 +82,21 @@ impl Pr<'_> {
         )?;
         Ok(checks(&page))
     }
+    /// When the pull request reached the state `pr` is in, by its activity's state updates:
+    /// the pull request object holds no time it was merged or declined. `None` when no update
+    /// of the newest page says.
+    pub(super) fn ended_at(&self, pr: &Value) -> Result<Option<String>, ForgeError> {
+        let Some(state) = pr["state"].as_str() else {
+            return Ok(None);
+        };
+        let page = self.get(
+            self.path(&format!(
+                "/activity?pagelen={PAGE_LIMIT}&fields=values.update.state,values.update.date"
+            )),
+            "Activity",
+        )?;
+        Ok(ended_at(&page, state))
+    }
     /// Whether the source merges into the destination.
     pub(super) fn conflicts(&self) -> Result<Mergeability, ForgeError> {
         Ok(conflicts(&self.get(self.path("/conflicts"), "Conflicts")?))
@@ -218,14 +233,27 @@ pub(super) fn actor(user: &Value) -> Option<PullRequestActor> {
     })
 }
 
-/// The pull request from one read; `checks` are the head's build statuses. The pull request
-/// object holds no time it was closed or merged, so neither is known.
+/// The latest of an activity page's updates to `state`, the time a pull request in it got there.
+pub(super) fn ended_at(activity: &Value, state: &str) -> Option<String> {
+    activity["values"]
+        .as_array()?
+        .iter()
+        .map(|row| &row["update"])
+        .filter(|update| update["state"].as_str() == Some(state))
+        .filter_map(|update| text(update, "date"))
+        .max()
+}
+
+/// The pull request from one read; `checks` are the head's build statuses, and `ended_at` when
+/// a pull request no longer open was merged or closed.
 pub(super) fn snapshot(
     pr: &Value,
     checks: &[PullRequestCheck],
+    ended_at: Option<String>,
     synced_at: u64,
 ) -> Option<PullRequestSnapshot> {
     let state = state(pr)?;
+    let ended_at = ended_at.filter(|_| state != PullRequestState::Open);
     let updated_at = text(pr, "updated_on")?;
     Some(PullRequestSnapshot {
         state,
@@ -235,8 +263,10 @@ pub(super) fn snapshot(
         is_draft: pr["draft"].as_bool().unwrap_or(false),
         updated_at: Some(updated_at),
         synced_at,
-        closed_at: None,
-        merged_at: None,
+        merged_at: ended_at
+            .clone()
+            .filter(|_| state == PullRequestState::Merged),
+        closed_at: ended_at,
         author: login(&pr["author"]).map(|login| PullRequestAuthor {
             login,
             avatar_url: text(&pr["author"]["links"]["avatar"], "href"),
@@ -607,6 +637,39 @@ pub(super) fn remarks(activity: &[Value]) -> Vec<PullRequestRemark> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A merged pull request's activity, newest first, as `fields=values.update.state,
+    /// values.update.date` cuts it. Shape: Bitbucket Cloud's REST reference, GET
+    /// /repositories/{workspace}/{repo_slug}/pullrequests/{pull_request_id}/activity, whose
+    /// documented example lists `update` entries (`state`, `date`) beside `approval` and
+    /// `comment` ones. Content is invented.
+    #[test]
+    fn the_activity_dates_the_update_to_the_state_the_pull_request_is_in() {
+        let activity = json!({ "values": [
+            { "approval": { "date": "2026-03-04T10:00:00.000000+00:00" } },
+            { "update": { "state": "MERGED", "date": "2026-03-04T09:30:00.123456+00:00" } },
+            { "update": { "state": "OPEN", "date": "2026-03-02T08:00:00.000000+00:00" } },
+            { "update": { "state": "OPEN", "date": "2026-03-01T08:00:00.000000+00:00" } }
+        ] });
+        assert_eq!(
+            ended_at(&activity, "MERGED").as_deref(),
+            Some("2026-03-04T09:30:00.123456+00:00")
+        );
+        assert_eq!(ended_at(&activity, "DECLINED"), None);
+        let pr = json!({
+            "state": "MERGED", "title": "Parser", "updated_on": "2026-03-04T09:30:01+00:00",
+            "source": { "branch": { "name": "parser" } },
+            "destination": { "branch": { "name": "main" } }
+        });
+        let snapshot = snapshot(&pr, &[], ended_at(&activity, "MERGED"), 1).unwrap();
+        assert_eq!(
+            (snapshot.merged_at.as_deref(), snapshot.closed_at.as_deref()),
+            (
+                Some("2026-03-04T09:30:00.123456+00:00"),
+                Some("2026-03-04T09:30:00.123456+00:00")
+            )
+        );
+    }
 
     /// The conflicts page is Bitbucket's one word on mergeability, taken at the first read
     /// (#729): a path in it is a conflict, an empty page is clean.

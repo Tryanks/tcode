@@ -119,20 +119,15 @@ fn syncing_directly(state: &ConnectionState) -> bool {
     )
 }
 
-/// The next message on `channel`, or `None` once `deadline` passes, which
-/// only a failing test reaches.
-fn next<T>(channel: &async_channel::Receiver<T>, deadline: Instant) -> Option<T> {
-    tcode_traverse::block_on(async {
-        tokio::time::timeout_at(deadline.into(), channel.recv()).await
-    })
-    .ok()?
-    .ok()
+/// The next message on `channel`, or `None` once it has closed. A message
+/// that never comes is ended by the test runner.
+fn next<T>(channel: &async_channel::Receiver<T>) -> Option<T> {
+    channel.recv_blocking().ok()
 }
 
 fn wait_state(transport: &Transport, wanted: impl Fn(&ConnectionState) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
     let mut seen = Vec::new();
-    while let Some(state) = next(&transport.state, deadline) {
+    while let Some(state) = next(&transport.state) {
         if wanted(&state) {
             return;
         }
@@ -142,8 +137,7 @@ fn wait_state(transport: &Transport, wanted: impl Fn(&ConnectionState) -> bool) 
 }
 
 fn recv_type(transport: &Transport, kind: &str, id: Option<u64>) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while let Some(line) = next(&transport.from_host, deadline) {
+    while let Some(line) = next(&transport.from_host) {
         let value: Value = serde_json::from_str(line.trim_end()).unwrap();
         if value["type"] == kind && id.is_none_or(|id| value["content"]["id"].as_u64() == Some(id))
         {
@@ -250,7 +244,7 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
     assert!(host.pairing_enabled());
     std::fs::remove_dir(&blocker).unwrap();
 
-    host.set_pairing_enabled(false);
+    host.set_pairing_enabled(false).unwrap();
     let minted = host.new_invitation();
     assert_eq!(pair(&minted.invite, &other), Err(PairError::Disabled));
     host.shutdown();
@@ -340,14 +334,14 @@ fn invitation_changes_are_reported_in_order() {
     assert_eq!(events.recv_blocking().unwrap(), Some(third.clone()));
     pair(&third.invite, &phone).unwrap();
     assert_eq!(events.recv_blocking().unwrap(), None, "used");
-    host.set_pairing_enabled(false);
+    host.set_pairing_enabled(false).unwrap();
     assert!(events.try_recv().is_err(), "nothing to withdraw");
-    host.set_pairing_enabled(true);
+    host.set_pairing_enabled(true).unwrap();
     let late = host.invitation_events();
     let fourth = host.new_invitation();
     assert_eq!(events.recv_blocking().unwrap(), Some(fourth.clone()));
     assert_eq!(late.recv_blocking().unwrap(), Some(fourth));
-    host.set_pairing_enabled(false);
+    host.set_pairing_enabled(false).unwrap();
     assert_eq!(events.recv_blocking().unwrap(), None, "pairing off");
     assert_eq!(late.recv_blocking().unwrap(), None);
     assert!(events.try_recv().is_err());
@@ -559,12 +553,8 @@ fn a_parked_link_closes_the_endpoint_and_the_return_delivers_what_was_written_me
         matches!(state, ConnectionState::Reconnecting { .. })
     });
     wait_relays(&phone, &[]);
-    let deadline = Instant::now() + Duration::from_secs(20);
     while host.devices()[0].live.is_some() {
-        assert!(
-            next(&hosting, deadline).is_some(),
-            "the machine saw the device leave"
-        );
+        assert!(next(&hosting).is_some(), "the machine saw the device leave");
     }
     let open = json!({"id": 2, "payload": {"type": "command", "content": {"type": "open_latest_session"}}});
     client.to_host.send_blocking(open.to_string()).unwrap();
@@ -634,9 +624,8 @@ fn two_devices_route_acks_broadcast_events_and_scope_keys() {
         .unwrap();
     // B's own acknowledgment comes after A's on the host stream, so it also
     // bounds the check that nothing addressed to A reached B.
-    let deadline = Instant::now() + Duration::from_secs(10);
     let from_b = loop {
-        let line = next(&client_b.from_host, deadline).expect("B's command was acknowledged");
+        let line = next(&client_b.from_host).expect("B's command was acknowledged");
         let value: Value = serde_json::from_str(&line).unwrap();
         assert_ne!(
             value["content"]["id"].as_u64(),
@@ -699,9 +688,8 @@ fn hosting_followers_hear_of_a_change_made_elsewhere() {
     let host = start_host(silent.mux.clone(), &host_dir, None);
     let window = host.hosting_events();
     let design = host.create_space("Design".into()).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let state = next(&window, deadline).expect("the window was told");
+        let state = next(&window).expect("the window was told");
         if state.spaces.iter().any(|space| space.id == design) {
             break;
         }
@@ -847,7 +835,7 @@ fn a_restarted_machine_rejoins_and_delivers_writes_buffered_while_it_was_down() 
     });
     let endpoint_id = host.endpoint_id();
 
-    host.set_pairing_enabled(false);
+    host.set_pairing_enabled(false).unwrap();
     host.shutdown();
     wait_state(&client, |state| {
         link.set_connection_state(state.clone());
@@ -905,10 +893,9 @@ fn a_restarted_machine_rejoins_and_delivers_writes_buffered_while_it_was_down() 
         link.set_connection_state(state.clone());
         connected_directly(state)
     });
-    let deadline = Instant::now() + Duration::from_secs(10);
     let (mut resubscribed, mut acked) = (false, false);
     while !(resubscribed && acked) {
-        let line = next(&client.from_host, deadline).unwrap_or_else(|| {
+        let line = next(&client.from_host).unwrap_or_else(|| {
             panic!("rejoin incomplete: resubscribed {resubscribed}, buffered write acked {acked}")
         });
         let value: Value = serde_json::from_str(line.trim_end()).unwrap();
@@ -951,7 +938,7 @@ fn scoped_ping(
     // Other connections can send idle heartbeats into this shared host queue.
     // Mux request IDs are global, so identify the probe by its retained key.
     tcode_traverse::block_on(async {
-        tokio::time::timeout(Duration::from_secs(10), async {
+        {
             loop {
                 let line = host_rx.recv().await.unwrap().line;
                 let request = tcode_protocol::decode_client_line(&line).unwrap();
@@ -977,9 +964,7 @@ fn scoped_ping(
                     break;
                 }
             }
-        })
-        .await
-        .unwrap();
+        }
     });
     let reply = recv_type(client, "query_result", Some(id));
     assert_eq!(reply["content"]["result"]["Ok"]["type"], "pong");
@@ -1122,9 +1107,9 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     assert!(host.space_link_url(&id).is_none());
     assert_eq!(pair(&invite, &other), Err(PairError::SpaceUnavailable));
     host.set_space_link_enabled(&id, true).unwrap();
-    host.set_pairing_enabled(false);
+    host.set_pairing_enabled(false).unwrap();
     assert_eq!(pair(&invite, &other), Err(PairError::Disabled));
-    host.set_pairing_enabled(true);
+    host.set_pairing_enabled(true).unwrap();
     let one_shot = host.new_invitation();
     let wrong = PairInvite {
         secret: "AAAAAAAAAAAAAAAAAAAAAA".into(),
@@ -1562,18 +1547,14 @@ async fn admitted_original(
     link: &tcode_client::HostLink,
     target: &tcode_protocol::OriginalTarget,
 ) -> tcode_client::OriginalTransfer {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let mut next = link.read_original(target.clone());
-            match next.metadata().await {
-                Ok(_) => break next,
-                Err(error) if error.code == "busy" => tokio::task::yield_now().await,
-                Err(error) => panic!("original: {error:?}"),
-            }
+    loop {
+        let mut next = link.read_original(target.clone());
+        match next.metadata().await {
+            Ok(_) => break next,
+            Err(error) if error.code == "busy" => tokio::task::yield_now().await,
+            Err(error) => panic!("original: {error:?}"),
         }
-    })
-    .await
-    .expect("a finished or cancelled read must release its admission")
+    }
 }
 
 /// Contract: revoking a project grant prevents a blocked original from completing.
@@ -1611,32 +1592,25 @@ fn revoked_project_original_never_completes() {
         let mut transfer = link.read_original(target.clone());
         assert!(!transfer.read().await.unwrap().unwrap().is_empty());
         host.set_space_projects(&space_id, Vec::new()).unwrap();
-        let result = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                match transfer.read().await {
-                    Ok(Some(_)) => {}
-                    other => break other,
-                }
+        // The grant change ends the original.
+        let result = loop {
+            match transfer.read().await {
+                Ok(Some(_)) => {}
+                other => break other,
             }
-        })
-        .await
-        .expect("grant change ends the original");
+        };
         assert!(result.is_err(), "revoked original completed");
         drop(transfer);
-        tokio::time::timeout(Duration::from_secs(10), async {
-            let mut reconnecting = false;
-            loop {
-                let state = transport.state.recv().await.unwrap();
-                if matches!(state, ConnectionState::Reconnecting { .. }) {
-                    reconnecting = true;
-                }
-                if reconnecting && matches!(state, ConnectionState::Syncing { .. }) {
-                    break;
-                }
+        let mut reconnecting = false;
+        loop {
+            let state = transport.state.recv().await.unwrap();
+            if matches!(state, ConnectionState::Reconnecting { .. }) {
+                reconnecting = true;
             }
-        })
-        .await
-        .unwrap();
+            if reconnecting && matches!(state, ConnectionState::Syncing { .. }) {
+                break;
+            }
+        }
         let mut denied = link.read_original(target);
         assert_eq!(denied.metadata().await.unwrap_err().code, "out_of_scope");
         link.close();

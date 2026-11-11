@@ -214,7 +214,7 @@ impl Bitbucket {
             return Ok(PullRequestFiles {
                 base,
                 head,
-                changed_files: files.len() as u64,
+                changed_files: Some(files.len() as u64),
                 files,
                 next_cursor: None,
                 complete: true,
@@ -244,16 +244,17 @@ impl Bitbucket {
                             _ => agent::FileChangeKind::Modify,
                         },
                         previous_path: previous,
-                        additions: row["lines_added"].as_u64().unwrap_or(0),
-                        deletions: row["lines_removed"].as_u64().unwrap_or(0),
+                        additions: row["lines_added"].as_u64()?,
+                        deletions: row["lines_removed"].as_u64()?,
                         patch: PullRequestPatch::Withheld,
+                        url: None,
                         path,
                     })
                 })
                 .collect(),
             complete: next.is_none(),
             next_cursor: next,
-            changed_files: page["size"].as_u64().unwrap_or(0),
+            changed_files: page["size"].as_u64(),
         })
     }
 
@@ -603,6 +604,10 @@ impl Forge for Bitbucket {
         Some(repository::url(key))
     }
 
+    fn file_url(&self, key: &PullRequestKey, revision: &str, path: &str) -> Option<String> {
+        Some(repository::file_url(key, revision, path))
+    }
+
     /// The pull request and its head's build statuses.
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {
         let ttl = self.sync_ttl();
@@ -614,8 +619,14 @@ impl Forge for Bitbucket {
         let pr = self.pr(key);
         let read = pr.pr()?;
         let checks = pr.checks(&reads::head(&read).unwrap_or_default())?;
+        let ended_at =
+            if reads::state(&read) == Some(tcode_core::pull_request::PullRequestState::Open) {
+                None
+            } else {
+                pr.ended_at(&read)?
+            };
         let summary = Summary {
-            snapshot: reads::snapshot(&read, &checks, Self::now()).ok_or_else(|| {
+            snapshot: reads::snapshot(&read, &checks, ended_at, Self::now()).ok_or_else(|| {
                 error(
                     ForgeErrorKind::Uncertain,
                     "Bitbucket pull request unreadable",
