@@ -15600,6 +15600,112 @@ pub(crate) mod tests {
         (shell, host, cx)
     }
 
+    /// A reader halfway up a long conversation keeps their place as the
+    /// right panel opens beside it and the conversation narrows: the
+    /// message the timeline starts at is the one it started at before.
+    #[gpui::test]
+    fn opening_the_right_panel_keeps_the_reader_at_the_message_they_were_at(
+        cx: &mut TestAppContext,
+    ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(crate::markdown::init);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let root = crate::store::tests::scratch_root("panel-reader");
+        let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::ClaudeCode,
+            root.clone(),
+            None,
+        );
+        meta.id = "thread-1".into();
+        disk.upsert_meta(&meta).unwrap();
+        // Answers long enough to wrap again when the conversation narrows.
+        let answer =
+            "Each step of the migration checks what the one before it left behind. ".repeat(12);
+        let message = |id: String, content: agent::ItemContent| {
+            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id,
+                parent_item_id: None,
+                content,
+            })
+        };
+        let log = (0..40).flat_map(|turn| {
+            [
+                agent::AgentEvent::TurnStarted {
+                    turn_id: turn.to_string(),
+                },
+                message(
+                    format!("user-{turn}"),
+                    agent::ItemContent::UserMessage {
+                        text: format!("Question {turn}"),
+                        attachments: Vec::new(),
+                    },
+                ),
+                message(
+                    format!("answer-{turn}"),
+                    agent::ItemContent::AssistantMessage {
+                        text: answer.clone(),
+                        summarized: false,
+                    },
+                ),
+                agent::AgentEvent::TurnCompleted {
+                    turn_id: turn.to_string(),
+                    status: agent::TurnStatus::Completed,
+                    usage: None,
+                },
+            ]
+        });
+        for (ts, event) in log.enumerate() {
+            disk.append_event(&meta.id, ts as u64, &event).unwrap();
+        }
+        let (_shell, store, host, mut driver, cx) = mount_on_host(cx, disk, None);
+        resize(cx, 1100.);
+        // The reader goes to a turn halfway up, as the palette takes them.
+        store.update(cx, |store, cx| {
+            store.show_thread_at_turn("thread-1".into(), 20, cx)
+        });
+        driver.settle_until(cx, "the turn the reader went to", |cx| {
+            cx.update(|_, cx| store.read(cx).pending_chat_turn("thread-1").is_none())
+                && top_row(cx).is_some_and(|row| row > 0)
+        });
+        // And scrolls up a little, into the middle of a message.
+        let timeline = cx.debug_bounds("chat-timeline").unwrap();
+        for (delta, phase) in [
+            (0., gpui::TouchPhase::Started),
+            (90., gpui::TouchPhase::Moved),
+            (0., gpui::TouchPhase::Ended),
+        ] {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: timeline.center(),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(delta))),
+                touch_phase: phase,
+                ..Default::default()
+            });
+            crate::test_frames::draw_settled(cx);
+        }
+        let reading = top_row(cx).expect("the timeline shows the thread");
+
+        store.update(cx, |store, cx| {
+            store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Plan, cx)
+        });
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("right-panel").is_some(), "the panel is open");
+        assert_eq!(top_row(cx), Some(reading), "the reader is where they were");
+
+        driver.shutdown(cx, &host);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The row of the conversation at the top of the timeline: the first
+    /// one drawn that reaches into it.
+    fn top_row(cx: &mut VisualTestContext) -> Option<usize> {
+        let top = cx.debug_bounds("chat-timeline")?.top();
+        (0..1_000).find(|row| {
+            cx.debug_bounds(format!("timeline-row-{row}").leak())
+                .is_some_and(|bounds| bounds.bottom() > top)
+        })
+    }
+
     /// The right panel comes back to the width the user chose by dragging
     /// its edge after the window narrows and widens again, after a sidebar
     /// drag, and after it was expanded to everything beside the sidebar and

@@ -1238,6 +1238,7 @@ impl ChatView {
                 main.child(
                     div()
                         .id("timeline")
+                        .debug_selector(|| "chat-timeline".into())
                         .flex()
                         .flex_col()
                         .flex_1()
