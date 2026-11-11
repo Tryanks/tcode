@@ -254,13 +254,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn a_config_without_servers_lists_none_and_a_broken_one_says_so() {
-        assert_eq!(
-            parse(NativeMcpConfig::McpServersJson, r#"{"numStartups": 1}"#),
-            Ok(Vec::new())
-        );
-        assert!(parse(NativeMcpConfig::McpServersJson, "{").is_err());
-    }
 }

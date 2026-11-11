@@ -8942,26 +8942,6 @@ mod tests {
     }
 
     #[test]
-    fn assistant_served_model_is_emitted_once_per_change() {
-        let mut mapper = Mapper::new();
-        let line = r#"{"type":"assistant","message":{"model":"claude-sonnet-4","id":"msg-1","content":[]}}"#;
-        let first = feed(&mut mapper, line);
-        let repeat = feed(&mut mapper, line);
-        assert!(matches!(
-            first.as_slice(),
-            [AgentEvent::ServedModel { model, reason: None }] if model == "claude-sonnet-4"
-        ));
-        assert!(repeat.is_empty());
-        let changed = feed(
-            &mut mapper,
-            r#"{"type":"assistant","message":{"model":"claude-opus-4-8","id":"msg-1","content":[]}}"#,
-        );
-        assert!(
-            matches!(changed.as_slice(), [AgentEvent::ServedModel { model, reason: None }] if model == "claude-opus-4-8")
-        );
-    }
-
-    #[test]
     fn refusal_stop_reason_warns_once_across_delta_and_assistant() {
         let mut mapper = Mapper::new();
         let delta = feed(

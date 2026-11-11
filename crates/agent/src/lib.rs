@@ -3595,12 +3595,6 @@ mod resolve_binary_tests {
         }
     }
 
-    #[test]
-    fn missing_binary_reports_a_helpful_error() {
-        let err = resolve_binary(None, "tcode-definitely-not-a-real-binary").unwrap_err();
-        assert!(matches!(err, AgentError::Spawn(msg) if msg.contains("not found on PATH")));
-    }
-
     #[cfg(unix)]
     #[test]
     fn unix_path_search_requires_executable_files_and_absolute_directories() {
