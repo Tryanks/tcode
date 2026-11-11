@@ -174,7 +174,9 @@ fn tool_results_are_judged_by_their_raw_output_and_cursors_failure_text_fails_th
         other => panic!("{other:?}"),
     }
     match &last_item(&events, "call_edit_1").content {
-        ItemContent::FileChange { changes, status } => {
+        ItemContent::FileChange {
+            changes, status, ..
+        } => {
             assert_eq!(*status, ItemStatus::Completed);
             assert_eq!(changes[0].path, "src/lib.rs");
         }

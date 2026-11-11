@@ -4048,6 +4048,9 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
                 .map(|changes| changes.iter().filter_map(map_file_change).collect())
                 .unwrap_or_default(),
             status: map_status(item.get("status").and_then(Value::as_str)),
+            // `FileChangeThreadItem` (v2, 0.167.1) says nothing of the patch's
+            // result beyond its status.
+            output: None,
         },
         "mcpToolCall" | "dynamicToolCall" => {
             let result = item
@@ -4307,6 +4310,18 @@ pub fn rollout_file_changes(changes: &Value) -> Vec<FileChange> {
         .collect();
     changes.sort_by(|a, b| a.path.cmp(&b.path));
     changes
+}
+
+/// What a rollout records apply_patch printing for a patch, its own
+/// `FileChange` item's or a legacy `patch_apply_end`'s `stdout` and then
+/// `stderr` (`protocol/src/protocol.rs` at `rust-v0.167.0`).
+pub fn rollout_patch_output(record: &Value) -> Option<String> {
+    let printed: Vec<&str> = ["stdout", "stderr"]
+        .into_iter()
+        .filter_map(|stream| record.get(stream).and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+        .collect();
+    (!printed.is_empty()).then(|| printed.join("\n"))
 }
 
 /// A rollout's snake_case status of a turn item, as its live item's.
@@ -7610,7 +7625,7 @@ mod tests {
                 matches!(events.try_recv().unwrap(), AgentEvent::TurnStarted { ref turn_id } if turn_id == "turn-1")
             );
             assert!(
-                matches!(events.try_recv().unwrap(), AgentEvent::ItemStarted(ThreadItem { content: ItemContent::FileChange { ref changes, status: ItemStatus::InProgress }, .. }) if changes[0].kind == FileChangeKind::Create)
+                matches!(events.try_recv().unwrap(), AgentEvent::ItemStarted(ThreadItem { content: ItemContent::FileChange { ref changes, status: ItemStatus::InProgress, .. }, .. }) if changes[0].kind == FileChangeKind::Create)
             );
             assert!(
                 matches!(events.try_recv().unwrap(), AgentEvent::ApprovalRequested(ApprovalRequest { ref id, kind: ApprovalKind::FileChange { ref changes, .. }, .. }) if id == "41" && changes.len() == 1)

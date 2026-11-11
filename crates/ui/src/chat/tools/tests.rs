@@ -383,7 +383,8 @@ impl StoredThread {
 
 /// An edit reads as a window per file: what happened to it, its path and
 /// the lines it added and removed, opening on its diff. A diff keeps its
-/// line numbers; one whose hunks say no lines numbers none.
+/// line numbers; one whose hunks say no lines numbers none. A failed edit
+/// says why in its harness's words.
 #[gpui::test]
 fn an_edit_reads_as_its_files_and_opens_on_each_diff(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
@@ -460,6 +461,12 @@ fn an_edit_reads_as_its_files_and_opens_on_each_diff(cx: &mut TestAppContext) {
     click(cx, &format!("activity-row-{unnumbered}-file-0"));
     assert!(shows(cx, "file-edit-diff-line-0"));
     assert!(!shows(cx, "file-edit-diff-gutter-0"));
+    click(cx, &format!("activity-row-{unnumbered}-file-0"));
+
+    let failed = "toolu_010000000000000000000006";
+    assert!(shows(cx, &format!("tool-error-{failed}-file-0")));
+    click(cx, &format!("activity-row-{failed}-file-0"));
+    assert!(shows(cx, &format!("tool-text-{failed}-output")));
     thread.shutdown(cx);
 }
 

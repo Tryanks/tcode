@@ -2162,6 +2162,11 @@ impl Mapper {
             "edit" | "write" | "patch" => ItemContent::FileChange {
                 changes: file_changes(&tool.name, input, text.as_deref(), metadata),
                 status,
+                output: if status == ItemStatus::Completed {
+                    text
+                } else {
+                    error.or(text)
+                },
             },
             "subagent" => ItemContent::Subagent {
                 agent_type: input["agent"].as_str().unwrap_or_default().to_owned(),
@@ -3236,8 +3241,7 @@ mod tests {
             )
         );
         // A page laid out any other way is the call's output as written.
-        let past_the_end =
-            "Read file src/lib.rs, lines 90-90 (offset 95 is past the end; the file has 90 lines)\n90: }";
+        let past_the_end = "Read file src/lib.rs, lines 90-90 (offset 95 is past the end; the file has 90 lines)\n90: }";
         assert_eq!(
             tool_family(
                 "read",
@@ -3443,11 +3447,11 @@ mod tests {
                 json!({"type": "plan_updated", "turn_id": "evt_198b1771a00100000000000013", "explanation": null, "steps": [{"step": "Write code", "status": "inProgress"}, {"step": "Test code", "status": "pending"}]}),
                 json!({"type": "item_started", "id": write, "content": {"kind": "file_change", "changes": [], "status": "in_progress"}}),
                 json!({"type": "item_updated", "id": write, "content": {"kind": "file_change", "changes": [{"path": "/work/project/notes2.txt", "kind": "modify", "diff": null}], "status": "in_progress"}}),
-                json!({"type": "item_completed", "id": write, "content": {"kind": "file_change", "changes": [{"path": "/work/project/notes2.txt", "kind": "create", "diff": "+blue"}], "status": "completed"}}),
+                json!({"type": "item_completed", "id": write, "content": {"kind": "file_change", "changes": [{"path": "/work/project/notes2.txt", "kind": "create", "diff": "+blue"}], "status": "completed", "output": "Created file successfully: notes2.txt"}}),
                 fetch_diff.clone(),
                 json!({"type": "item_started", "id": edit, "content": {"kind": "file_change", "changes": [], "status": "in_progress"}}),
                 json!({"type": "item_updated", "id": edit, "content": {"kind": "file_change", "changes": [{"path": "/work/project/notes2.txt", "kind": "modify", "diff": null}], "status": "in_progress"}}),
-                json!({"type": "item_completed", "id": edit, "content": {"kind": "file_change", "changes": [{"path": "notes2.txt", "kind": "modify", "diff": "Index: notes2.txt\n===================================================================\n--- notes2.txt\n+++ notes2.txt\n@@ -1,1 +1,1 @@\n-blue\n+green\n"}], "status": "completed"}}),
+                json!({"type": "item_completed", "id": edit, "content": {"kind": "file_change", "changes": [{"path": "notes2.txt", "kind": "modify", "diff": "Index: notes2.txt\n===================================================================\n--- notes2.txt\n+++ notes2.txt\n@@ -1,1 +1,1 @@\n-blue\n+green\n"}], "status": "completed", "output": "Edited notes2.txt (1 replacement)"}}),
                 fetch_diff,
                 json!({"type": "item_started", "id": "msg_198b1897700100000000000049:text:0", "content": {"kind": "assistant_message", "text": ""}}),
                 json!({"type": "delta", "item_id": "msg_198b1897700100000000000049:text:0", "kind": "assistant_text", "text": "DONE"}),

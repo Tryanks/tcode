@@ -3053,6 +3053,10 @@ pub enum ItemContent {
     FileChange {
         changes: Vec<FileChange>,
         status: ItemStatus,
+        /// What the harness gave back for the change, as written: the text
+        /// its tool returned, or why it failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
     },
     ToolCall {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]

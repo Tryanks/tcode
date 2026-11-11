@@ -375,6 +375,8 @@ pub use wire::{
 // harness_option_labels.
 // HarnessDescription's plugins is a PluginsDescription {actions, marketplaces,
 // scopes, source_install, unmanaged} instead of a bool; it gains home_path.
+// The file_change item gains output, what the harness gave back for the
+// change: its tool's result, or why it failed.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

@@ -1149,6 +1149,7 @@ pub(in crate::chat) mod tests {
                 EntryContent::Item(ItemContent::FileChange {
                     changes: vec![],
                     status: ItemStatus::Completed,
+                    output: None,
                 }),
             ),
             command("cmd-2"),
@@ -1265,6 +1266,7 @@ pub(in crate::chat) mod tests {
                     })
                     .collect(),
                 status: ItemStatus::Completed,
+                output: None,
             }),
         )
     }

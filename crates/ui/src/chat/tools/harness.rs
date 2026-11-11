@@ -112,7 +112,7 @@ impl ToolView for Harness<'_> {
                     .children(names);
                 let loaded = section(&crate::tr!("tools.loaded"), list, cx).into_any_element();
                 let raw = (!output.trim().is_empty())
-                    .then(|| super::raw_section(call, output, ctx));
+                    .then(|| super::raw_section(call.entry, output, ctx));
                 super::body(std::iter::once(loaded).chain(raw))
             }
             Kind::Review(_) => {

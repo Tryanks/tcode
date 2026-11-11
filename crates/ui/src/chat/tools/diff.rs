@@ -36,15 +36,22 @@ pub(in crate::chat) struct EditedFile {
     pub(in crate::chat) numbered: bool,
 }
 
-/// An edit: the files it touched and how it stands.
-pub(in crate::chat) struct Edit {
+/// An edit: the files it touched, how it stands, and what its harness gave
+/// back for it.
+pub(in crate::chat) struct Edit<'a> {
     pub(in crate::chat) files: Vec<EditedFile>,
     pub(in crate::chat) status: ItemStatus,
+    pub(in crate::chat) output: Option<&'a str>,
 }
 
 /// The edit `entry` made, when it is a file change.
-pub(in crate::chat) fn edit(entry: &TimelineEntry, cwd: &Path) -> Option<Edit> {
-    let EntryContent::Item(ItemContent::FileChange { changes, status }) = &entry.content else {
+pub(in crate::chat) fn edit<'a>(entry: &'a TimelineEntry, cwd: &Path) -> Option<Edit<'a>> {
+    let EntryContent::Item(ItemContent::FileChange {
+        changes,
+        status,
+        output,
+    }) = &entry.content
+    else {
         return None;
     };
     Some(Edit {
@@ -59,7 +66,23 @@ pub(in crate::chat) fn edit(entry: &TimelineEntry, cwd: &Path) -> Option<Edit> {
             })
             .collect(),
         status: *status,
+        output: output.as_deref().filter(|output| !output.trim().is_empty()),
     })
+}
+
+/// What the harness gave back for an edit: why it failed, as its error, or
+/// the text its tool returned, folded until asked for.
+pub(in crate::chat) fn edit_output(
+    entry: &TimelineEntry,
+    output: &str,
+    status: ItemStatus,
+    ctx: &mut super::ToolCtx<'_, '_>,
+) -> AnyElement {
+    if status == ItemStatus::Failed {
+        super::text_section(entry, output, true, super::Bound::OUTPUT, None, ctx)
+    } else {
+        super::raw_section(entry, output, ctx)
+    }
 }
 
 /// The header of one edited file's window.

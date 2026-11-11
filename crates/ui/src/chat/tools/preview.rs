@@ -278,7 +278,7 @@ impl ToolView for Preview<'_> {
                     super::counted("tools.elements", nodes.len()),
                     ctx,
                 );
-                let raw = super::raw_section(call, text.trim(), ctx);
+                let raw = super::raw_section(call.entry, text.trim(), ctx);
                 super::body(elements.into_iter().chain([raw]).chain(control))
             }
             Tool::Evaluate(js) => {

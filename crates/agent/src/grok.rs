@@ -1625,7 +1625,7 @@ mod tests {
 
         // The diff is the hunk Grok sent, placed at its `_meta` line.
         assert!(matches!(completed(&events, "call_35_0"),
-            ItemContent::FileChange { changes, status: ItemStatus::Completed }
+            ItemContent::FileChange { changes, status: ItemStatus::Completed, .. }
                 if changes.len() == 1 && changes[0].kind == FileChangeKind::Modify
                     && changes[0].path.ends_with("/in.txt")
                     && changes[0].diff.as_deref() == Some(

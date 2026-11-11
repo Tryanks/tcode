@@ -1655,6 +1655,7 @@ fn tool_item(id: &str, tool: &PiTool, status: ItemStatus) -> ThreadItem {
                 })
                 .unwrap_or_default(),
             status,
+            output: (!output.text.is_empty()).then(|| output.text.clone()),
         },
         _ => {
             let text = (!output.text.is_empty()).then(|| output.text.clone());
@@ -2530,6 +2531,7 @@ mod tests {
                         ),
                     }],
                     status: ItemStatus::Completed,
+                    output: Some("Successfully replaced 1 block(s) in a.txt.".into()),
                 },
                 ItemContent::FileChange {
                     changes: vec![FileChange {
@@ -2538,6 +2540,7 @@ mod tests {
                         diff: Some("+fresh".into()),
                     }],
                     status: ItemStatus::Completed,
+                    output: Some("Successfully wrote to new.txt".into()),
                 },
                 ItemContent::ToolCall {
                     image_reads: vec![Attachment {

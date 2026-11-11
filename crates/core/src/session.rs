@@ -2215,6 +2215,7 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
             EntryContent::Item(ItemContent::FileChange {
                 mut changes,
                 status,
+                output,
             }),
         ) => {
             for change in &mut changes {
@@ -2227,7 +2228,11 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
                     change.diff = Some(existing_diff.clone());
                 }
             }
-            EntryContent::Item(ItemContent::FileChange { changes, status })
+            EntryContent::Item(ItemContent::FileChange {
+                changes,
+                status,
+                output,
+            })
         }
         (
             EntryContent::Item(ItemContent::Subagent {
@@ -2998,6 +3003,7 @@ mod tests {
                                 diff: Some(diff.into()),
                             }],
                             status,
+                            output: None,
                         },
                     }),
                 );
@@ -3042,6 +3048,7 @@ mod tests {
                         diff: Some("+visible diff".into()),
                     }],
                     status: ItemStatus::InProgress,
+                    output: None,
                 },
             }),
             AgentEvent::ItemCompleted(ThreadItem {
@@ -3054,6 +3061,7 @@ mod tests {
                         diff: None,
                     }],
                     status: ItemStatus::Completed,
+                    output: None,
                 },
             }),
         ]);
@@ -3084,6 +3092,7 @@ mod tests {
                         diff: Some("-intermediate\n+value\n".into()),
                     }],
                     status: ItemStatus::Completed,
+                    output: None,
                 },
             }),
         ]);
@@ -3112,6 +3121,7 @@ mod tests {
                         diff: Some("+late\n".into()),
                     }],
                     status: ItemStatus::Completed,
+                    output: None,
                 },
             }),
         );

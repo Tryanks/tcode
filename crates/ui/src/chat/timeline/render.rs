@@ -1582,15 +1582,37 @@ impl TimelineView {
             let expanded =
                 self.auto_activity_expanded((turn, &entry.id), &key, enabled, recency, cx);
             let window_key = format!("{}-file-{file_index}", entry.id);
-            let detail = if file.row.counts.is_none() {
+            // What the harness gave back belongs to the edit, told once.
+            let output = edit.output.filter(|_| file_index == 0);
+            let detail = if file.row.counts.is_none() && output.is_none() {
                 tools::window::Detail::None
             } else {
                 match tools::window::fold(&self.motion, &window_key, expanded, window, cx) {
-                    Some(shown) => tools::window::Detail::Fold(
-                        shown,
-                        self.inline_diffs.render(&key, file, cx),
-                        0,
-                    ),
+                    Some(shown) => {
+                        let diff = file
+                            .row
+                            .counts
+                            .is_some()
+                            .then(|| self.inline_diffs.render(&key, file, cx));
+                        let output = output.map(|output| {
+                            tools::diff::edit_output(
+                                entry,
+                                output,
+                                edit.status,
+                                &mut tools::ToolCtx {
+                                    chat: self,
+                                    cx,
+                                    cwd,
+                                    images_inline: false,
+                                },
+                            )
+                        });
+                        tools::window::Detail::Fold(
+                            shown,
+                            tools::body(diff.into_iter().chain(output)),
+                            0,
+                        )
+                    }
                     None => tools::window::Detail::Shut,
                 }
             };
@@ -1599,6 +1621,11 @@ impl TimelineView {
             let elapsed_ms = (file_index == 0)
                 .then(|| tools::window::elapsed(&header, entry))
                 .flatten();
+            let error = tools::window::failure_line(&header, edit.status, output);
+            let mut copy = tools::diff::file_copy_items(file);
+            if let Some(output) = output {
+                tools::copy(&mut copy, "chat.copy_output", output);
+            }
             let toggle_key = key.clone();
             let entry_id = entry.id.clone();
             rows.push(tools::window::tool_window(
@@ -1606,10 +1633,10 @@ impl TimelineView {
                     key: window_key,
                     header,
                     status: edit.status,
-                    error: None,
+                    error,
                     elapsed_ms,
                     compact: false,
-                    copy: tools::diff::file_copy_items(file),
+                    copy,
                     whole_output: None,
                     path: Some((file.row.path.clone(), cwd.to_path_buf())),
                     hover: self.hover.clone(),

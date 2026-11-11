@@ -583,6 +583,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             status: agent::codex::rollout_status(
                                 item.get("status").and_then(Value::as_str),
                             ),
+                            output: agent::codex::rollout_patch_output(item),
                         },
                         _ => continue,
                     };
@@ -598,6 +599,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                         status: agent::codex::rollout_status(
                             payload.get("status").and_then(Value::as_str),
                         ),
+                        output: agent::codex::rollout_patch_output(payload),
                     };
                     let id = payload
                         .get("call_id")

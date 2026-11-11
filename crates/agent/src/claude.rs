@@ -1843,6 +1843,7 @@ impl ToolItem {
                 ItemContent::FileChange {
                     changes,
                     status: ItemStatus::InProgress,
+                    output: None,
                 },
             )
         } else {
@@ -1910,7 +1911,11 @@ impl ToolItem {
                         }
                     }
                 }
-                ItemContent::FileChange { changes, status }
+                ItemContent::FileChange {
+                    changes,
+                    status,
+                    output: (!text.is_empty()).then_some(text),
+                }
             }
             ToolItem::Tool { name, input } => {
                 let (family, output) = tool_family(&name, &input, Some((text, tool_use_result)));
@@ -6758,6 +6763,7 @@ mod tests {
                     diff: Some("-hello\n+bye".into()),
                 }],
                 status: ItemStatus::Completed,
+                output: Some("The file /home/user/project/a.txt has been updated successfully. (file state is current in your context — no need to Read it back)".into()),
             }
         );
         // A subagent's tool result comes without the output object, so its
@@ -8007,7 +8013,10 @@ mod tests {
                     AgentEvent::ItemCompleted(item) => ("completed", item),
                     _ => return None,
                 };
-                let ItemContent::FileChange { changes, status } = &item.content else {
+                let ItemContent::FileChange {
+                    changes, status, ..
+                } = &item.content
+                else {
                     return None;
                 };
                 Some((phase, item.id.as_str(), *status, changes.as_slice()))

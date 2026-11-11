@@ -2171,7 +2171,12 @@ impl State {
                 if changes.is_empty() {
                     tool_call_content(tool, status, self.tool_output(tool))
                 } else {
-                    ItemContent::FileChange { changes, status }
+                    let output = self.tool_output(tool);
+                    ItemContent::FileChange {
+                        changes,
+                        status,
+                        output: (!output.is_empty()).then_some(output),
+                    }
                 }
             }
             acp::ToolKind::Think => {
@@ -3247,7 +3252,10 @@ mod tests {
             })));
             let [
                 AgentEvent::ItemStarted(ThreadItem {
-                    content: ItemContent::FileChange { changes, status },
+                    content:
+                        ItemContent::FileChange {
+                            changes, status, ..
+                        },
                     ..
                 }),
             ] = events.as_slice()
