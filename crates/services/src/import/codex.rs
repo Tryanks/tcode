@@ -180,6 +180,10 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
     let mut updated_ms = first_meta_ts;
     let mut entries = Vec::new();
     let mut pending = HashMap::<String, usize>::new();
+    // Commands still running when their call returned, by the session id
+    // Codex gave them, and the `write_stdin` calls to them.
+    let mut sessions = HashMap::<u64, usize>::new();
+    let mut stdin = HashMap::<String, usize>::new();
     let mut next_id = 0_u64;
 
     for line in inherited
@@ -270,6 +274,19 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             .and_then(|text| serde_json::from_str(text).ok())
                             .unwrap_or(arguments);
                         let name = tool_name(payload);
+                        // A write to a running command's stdin is part of
+                        // that command, as Codex shows it live
+                        // (`item/commandExecution/terminalInteraction` on
+                        // the command's item).
+                        if name == WRITE_STDIN
+                            && let Some(&command) = input
+                                .get("session_id")
+                                .and_then(Value::as_u64)
+                                .and_then(|session| sessions.get(&session))
+                        {
+                            stdin.insert(call_id, command);
+                            continue;
+                        }
                         if name == UPDATE_PLAN
                             && let Some((explanation, steps)) = agent::codex::rollout_plan(&input)
                         {
@@ -316,6 +333,33 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                         let Some(call_id) = payload.get("call_id").and_then(Value::as_str) else {
                             continue;
                         };
+                        if let Some(command) = stdin.remove(call_id) {
+                            let (result, _) =
+                                call_output(payload.get("output").unwrap_or(&Value::Null));
+                            if let Some(ConvertedEntry::Item { item, .. }) =
+                                entries.get_mut(command)
+                                && let ItemContent::CommandExecution {
+                                    output,
+                                    exit_code,
+                                    status,
+                                    ..
+                                } = &mut item.content
+                                && !aborted(&result.text)
+                            {
+                                let (code, printed) = exec_result(&result.text);
+                                output.push_str(printed);
+                                if let Some(code) = code {
+                                    *exit_code = Some(code);
+                                    *status = if code != 0 {
+                                        ItemStatus::Failed
+                                    } else {
+                                        ItemStatus::Completed
+                                    };
+                                    sessions.retain(|_, running| *running != command);
+                                }
+                            }
+                            continue;
+                        }
                         let Some(index) = pending.remove(call_id) else {
                             continue;
                         };
@@ -336,11 +380,17 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                 } else {
                                     let (code, printed) = exec_result(&result.text);
                                     *exit_code = code;
+                                    let running = running_session(&result.text);
                                     // Codex's own rule for a command's status
                                     // (`core/src/tools/events.rs`): it failed
-                                    // when it exited non-zero.
-                                    *status = match code {
-                                        Some(code) if code != 0 => ItemStatus::Failed,
+                                    // when it exited non-zero. One still
+                                    // running goes on past its call.
+                                    *status = match (code, running) {
+                                        (Some(code), _) if code != 0 => ItemStatus::Failed,
+                                        (None, Some(session)) => {
+                                            sessions.insert(session, index);
+                                            ItemStatus::InProgress
+                                        }
                                         _ => ItemStatus::Completed,
                                     };
                                     *output = printed.to_owned();
@@ -560,6 +610,8 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                     if let Some(turns) = value.pointer("/payload/num_turns").and_then(Value::as_u64)
                     {
                         roll_back(&mut entries, &mut pending, turns);
+                        sessions.retain(|_, command| *command < entries.len());
+                        stdin.retain(|_, command| *command < entries.len());
                     }
                 }
                 _ => {}
@@ -567,8 +619,9 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
             _ => {}
         }
     }
-    // A call the rollout never answered was cut off with its turn.
-    for index in pending.into_values() {
+    // A call the rollout never answered, or a command it never saw exit,
+    // was cut off with its turn.
+    for index in pending.into_values().chain(sessions.into_values()) {
         if let Some(ConvertedEntry::Item { item, .. }) = entries.get_mut(index)
             && let ItemContent::CommandExecution { status, .. }
             | ItemContent::ToolCall { status, .. } = &mut item.content
@@ -697,6 +750,9 @@ fn aborted(output: &str) -> bool {
 /// Codex 0.167's tool that runs a command line (`create_exec_command_tool`,
 /// `core/src/tools/handlers/shell_spec.rs`), whose `cmd` is the command.
 const EXEC_COMMAND: &str = "exec_command";
+/// The tool that writes to a running command's stdin, named by the
+/// session id its command's result gave (`shell_spec.rs`).
+const WRITE_STDIN: &str = "write_stdin";
 /// The tool that sets Codex's plan (`plan_spec.rs`).
 const UPDATE_PLAN: &str = "update_plan";
 /// The tool that shows Codex an image (`view_image_spec.rs`).
@@ -725,6 +781,20 @@ fn exec_result(text: &str) -> (Option<i32>, &str) {
             .ok()
     });
     (code, printed)
+}
+
+/// The session id a command's result gives when the command was still
+/// running as its call returned (`Process running with session ID N` in
+/// `ExecCommandToolOutput::response_header`, `core/src/tools/context.rs`).
+fn running_session(text: &str) -> Option<u64> {
+    text.lines()
+        .take_while(|line| *line != "Output:")
+        .find_map(|line| {
+            line.strip_prefix("Process running with session ID ")?
+                .trim()
+                .parse()
+                .ok()
+        })
 }
 
 /// The live adapter's name for a call: an MCP tool, which the rollout files

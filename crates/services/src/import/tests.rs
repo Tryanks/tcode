@@ -163,6 +163,12 @@ const CODEX_ROLLOUT: &str = r#"{"timestamp":"2026-01-02T03:04:05.000Z","type":"s
 {"timestamp":"2026-01-02T03:04:11.330Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_script","output":[{"type":"input_text","text":"Wall time: 0.4200 seconds\nOutput:"},{"type":"input_text","text":"clicked OK"}]}}
 {"timestamp":"2026-01-02T03:04:11.340Z","type":"response_item","payload":{"type":"tool_search_call","call_id":"call_tools","status":"completed","execution":"client","arguments":{"query":"calendar"}}}
 {"timestamp":"2026-01-02T03:04:11.350Z","type":"response_item","payload":{"type":"tool_search_output","call_id":"call_tools","status":"completed","execution":"client","tools":[{"name":"mcp__calendar","tools":[{"name":"list_events"}]}]}}
+{"timestamp":"2026-01-02T03:04:11.360Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"python3 -i\",\"yield_time_ms\":1000}","call_id":"call_repl"}}
+{"timestamp":"2026-01-02T03:04:11.365Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_repl","output":"Chunk ID: 1a2b3c\nWall time: 1.0012 seconds\nProcess running with session ID 7\nOriginal token count: 2\nOutput:\n>>> "}}
+{"timestamp":"2026-01-02T03:04:11.370Z","type":"response_item","payload":{"type":"function_call","name":"write_stdin","arguments":"{\"session_id\":7,\"chars\":\"print(1)\\n\"}","call_id":"call_stdin_1"}}
+{"timestamp":"2026-01-02T03:04:11.375Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_stdin_1","output":"Chunk ID: 4d5e6f\nWall time: 0.5004 seconds\nProcess running with session ID 7\nOriginal token count: 3\nOutput:\n1\n>>> "}}
+{"timestamp":"2026-01-02T03:04:11.380Z","type":"response_item","payload":{"type":"function_call","name":"write_stdin","arguments":"{\"session_id\":7,\"chars\":\"exit()\\n\"}","call_id":"call_stdin_2"}}
+{"timestamp":"2026-01-02T03:04:11.385Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_stdin_2","output":"Chunk ID: 7a8b9c\nWall time: 0.2001 seconds\nProcess exited with code 0\nOriginal token count: 0\nOutput:\n"}}
 {"timestamp":"2026-01-02T03:04:11.400Z","type":"response_item","payload":{"type":"function_call","name":"update_plan","arguments":"{\"explanation\":\"Lint next\",\"plan\":[{\"step\":\"Read the readme\",\"status\":\"completed\"},{\"step\":\"Lint\",\"status\":\"in_progress\"}]}","call_id":"call_plan"}}
 {"timestamp":"2026-01-02T03:04:11.450Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_plan","output":"Plan updated"}}
 {"timestamp":"2026-01-02T03:04:11.500Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"make lint\"}","call_id":"call_lint"}}
@@ -406,6 +412,9 @@ fn readme_revised(status: ItemStatus) -> Option<ItemContent> {
 /// what its server returned, without the `Wall time` header Codex writes
 /// before it for the model (`McpToolOutput::response_payload`,
 /// `core/src/tools/context.rs`), an
+/// command still running when its call returned goes on through the
+/// `write_stdin` calls to its session (`Process running with session ID N`,
+/// `shell_spec.rs`), whose output is its own, until one sees it exit, an
 /// `update_plan` is the plan it sets (`UpdatePlanArgs`,
 /// `protocol/src/plan_tool.rs`), as live, a patch
 /// shows the changes Codex applied, a call Codex dropped, stopped or never
@@ -460,6 +469,7 @@ fn a_codex_rollout_imports_as_codex_recorded_it() {
                     tools: Some(vec!["calendar/list_events".into()]),
                 })),
             }),
+            command("python3 -i", ">>> 1\n>>> ", Some(0), ItemStatus::Completed),
             command(
                 "make lint",
                 "make: *** No rule to make target 'lint'.  Stop.\n",
