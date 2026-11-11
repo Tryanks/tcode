@@ -155,6 +155,7 @@ impl ProviderCatalog {
             *status = ProviderVersionState {
                 revision: status.revision + 1,
                 updating: status.updating,
+                announced: status.announced.take(),
                 ..Default::default()
             };
         }
@@ -170,16 +171,16 @@ impl ProviderCatalog {
     ) -> Option<RuntimeToast> {
         let status = self.provider_versions.entry(provider).or_default();
         let update = if status.revision == revision {
-            let already = status.update_available;
             status.checking = false;
             status.installation = installation;
             status.installed = assessment.current;
             status.latest = assessment.latest;
             status.update_available = assessment.update_available;
             if status.update_available
-                && !already
+                && status.announced != status.latest
                 && let Some(version) = &status.latest
             {
+                status.announced = Some(version.clone());
                 Some(ProviderUpdateAvailable {
                     provider,
                     version: version.clone(),

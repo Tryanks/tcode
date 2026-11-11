@@ -323,6 +323,9 @@ pub struct ProviderVersionState {
     pub latest: Option<String>,
     /// Whether `latest` is strictly newer than `installed`.
     pub update_available: bool,
+    /// The newest version a notice has offered. It outlives a configuration
+    /// change, so a check after one does not offer the same update again.
+    announced: Option<String>,
     /// Whether a version check is currently running.
     pub checking: bool,
     /// Whether an installation update is currently running.
