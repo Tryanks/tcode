@@ -319,11 +319,12 @@ impl AppState {
         caller: &Caller,
         params: DeleteThreadsParams,
         cx: &mut HostCx,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Answer {
         let remove_worktree = params.remove_worktree.unwrap_or(false);
         let dry_run = params.dry_run.unwrap_or(false);
-        let mut cx = agent_cx(cx);
+        let mut agent_cx = agent_cx(cx);
         let mut results = Vec::with_capacity(params.thread_ids.len());
+        let mut removals = Vec::new();
         for target in params.thread_ids {
             let skipped = |reason: String| BatchResult {
                 target: target.clone(),
@@ -374,18 +375,16 @@ impl AppState {
                 });
                 continue;
             }
-            let uploads = self.delete_session(&target, remove_worktree, &mut cx);
-            cx.spawn_detached(async move {
-                if let Err(error) = uploads.await {
-                    log::warn!("{}", error.message);
-                }
-            });
+            removals.push((
+                results.len(),
+                self.delete_session(&target, remove_worktree, &mut agent_cx),
+            ));
             self.audit(
                 caller,
                 &caller.thread_id,
                 action::DELETE_THREADS,
                 Some(meta.title.clone()),
-                &mut cx,
+                &mut agent_cx,
             );
             results.push(BatchResult {
                 target,
@@ -394,7 +393,19 @@ impl AppState {
                 side_effects: Some(side_effects),
             });
         }
-        Ok(serde_json::json!({ "results": results }))
+        if removals.is_empty() {
+            return Answer::Now(Ok(serde_json::json!({ "results": results })));
+        }
+        Answer::Later(cx.spawn_background(async move {
+            for (index, removal) in removals {
+                if let Err(error) = removal.await {
+                    let result = &mut results[index];
+                    result.outcome = Outcome::Failed;
+                    result.reason = Some(error.message);
+                }
+            }
+            Ok(serde_json::json!({ "results": results }))
+        }))
     }
 
     /// Rewind a thread through its harness and answer with what the harness

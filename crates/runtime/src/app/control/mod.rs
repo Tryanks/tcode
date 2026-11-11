@@ -550,7 +550,7 @@ impl AppState {
             ControlOp::RespondApproval(p) => self.op_respond_approval(caller, p, cx),
             ControlOp::ReportResult(p) => self.op_report_result(caller, p),
             ControlOp::Terminal(p) => self.op_terminal(caller, p, cx),
-            ControlOp::DeleteThreads(p) => self.op_delete_threads(caller, p, cx),
+            ControlOp::DeleteThreads(p) => return self.op_delete_threads(caller, p, cx),
             ControlOp::Rewind(p) => return self.op_rewind(caller, p, cx),
             ControlOp::PatchSettings(p) => self.op_patch_settings(caller, p, cx),
             ControlOp::RequestGrant(p) => self.op_request_grant(caller, p, cx),
