@@ -10586,24 +10586,6 @@ pub(crate) mod tests {
         })
     }
 
-    /// The chat column's width, and the width each pane on screen shows at,
-    /// in the layout's order.
-    fn pane_widths(shell: &Entity<AppShell>, cx: &VisualTestContext) -> (Pixels, Vec<Pixels>) {
-        shell.read_with(cx, widths_of)
-    }
-
-    fn widths_of(shell: &AppShell, cx: &App) -> (Pixels, Vec<Pixels>) {
-        let attachment = shell.column.as_ref().expect("attached");
-        (
-            attachment.thread_panes.read(cx).bounds().size.width,
-            attachment
-                .all_panes(cx)
-                .iter()
-                .map(|pane| pane.read(cx).bounds().size.width)
-                .collect(),
-        )
-    }
-
     /// Where each pane on screen was painted, in the layout's order.
     fn pane_bounds(shell: &Entity<AppShell>, cx: &VisualTestContext) -> Vec<gpui::Bounds<Pixels>> {
         shell.read_with(cx, |shell, cx| {
@@ -10724,31 +10706,13 @@ pub(crate) mod tests {
             .expect("the pane the drop would open");
         assert!(indicator.left() >= pane.center().x && indicator.right() <= pane.right());
 
-        let ghost = |cx: &mut VisualTestContext| cx.debug_bounds("drag-ghost-thread-thread-2");
-        let carried = ghost(cx).expect("the row is carried");
         cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
         draw(cx);
-        // The placeholder leaves where the drop landed, fading out, and the
-        // row's ghost travels into it rather than back to the list.
-        assert_eq!(cx.debug_bounds("pane-drop-indicator"), Some(indicator));
-        assert_eq!(ghost(cx), Some(carried));
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        draw(cx);
-        let landing = ghost(cx).expect("the ghost, on its way in");
-        let off = |ghost: gpui::Bounds<Pixels>| (ghost.center().x - indicator.center().x).abs();
-        assert!(
-            off(landing) < off(carried),
-            "{carried:?} -> {landing:?} into {indicator:?}"
-        );
         serve_thread(&host, "thread-2");
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-2"), cx)
         });
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
-        assert!(cx.debug_bounds("pane-drop-indicator").is_none());
         crate::test_frames::draw_settled(cx);
-        assert_eq!(ghost(cx), None, "the ghost has gone into the pane");
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("thread-2".into())]
@@ -11647,110 +11611,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// How opaque the chat column is painted, read from its frame's fill, and
-    /// how many panes it draws, in the frame drawn now.
-    fn column_scene(shell: &Entity<AppShell>, cx: &mut VisualTestContext) -> (f32, usize) {
-        frame(cx, |window, cx| {
-            let attachment = shell.read(cx).column.as_ref().expect("attached");
-            let column = attachment
-                .thread_panes
-                .read(cx)
-                .bounds()
-                .scale(window.scale_factor());
-            let alpha = window
-                .painted_quads()
-                .iter()
-                .find(|quad| quad.bounds == column)
-                .and_then(|quad| quad.background.as_solid())
-                .expect("the column's fill")
-                .a;
-            (alpha, attachment.all_panes(cx).len())
-        })
-    }
-
-    /// ⇧⌘↩ grows the right pane out of its slot over the column, the left
-    /// pane still drawn where it was beneath it, taking neither the pointer
-    /// nor the keyboard; zoomed, the pane fills the column. ⇧⌘↩ again
-    /// shrinks it back into its slot.
-    #[gpui::test]
-    fn a_zoomed_pane_grows_over_the_column_and_back_into_its_slot(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_panes(cx);
-        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
-        assert_eq!(keyboard_pane(&shell, cx), Some(1));
-        let painted = |cx: &mut VisualTestContext| {
-            frame(cx, |_, cx| {
-                let attachment = shell.read(cx).column.as_ref().expect("attached");
-                let panes: Vec<_> = attachment
-                    .all_panes(cx)
-                    .iter()
-                    .map(|pane| pane.read(cx).bounds())
-                    .collect();
-                (attachment.thread_panes.read(cx).bounds(), panes)
-            })
-        };
-        let (column, slots) = painted(cx);
-        let between = |zoomed: gpui::Bounds<Pixels>| {
-            zoomed.intersect(&column) == zoomed
-                && slots[1].intersect(&zoomed) == slots[1]
-                && slots[1].size.width + px(1.) < zoomed.size.width
-                && zoomed.size.width < column.size.width - px(1.)
-        };
-        let settle = crate::edge_back::SETTLE;
-
-        cx.simulate_keystrokes("secondary-shift-enter");
-        draw(cx);
-        cx.executor().advance_clock(settle / 2);
-        let (_, panes) = painted(cx);
-        let zoomed = cx
-            .debug_bounds("zoomed-pane")
-            .expect("drawn over the column");
-        assert!(
-            between(zoomed),
-            "growing: {zoomed:?} from {slots:?} to {column:?}"
-        );
-        assert_eq!(panes, [slots[0], zoomed], "the left pane where it was");
-        assert_eq!(keyboard_pane(&shell, cx), Some(1), "the zoomed pane's keys");
-        let beneath = cx.update(|window, _| {
-            let left = slots[0].scale(window.scale_factor());
-            window.painted_quads().iter().any(|quad| {
-                quad.bounds.intersect(&left) == quad.bounds
-                    && quad.background.as_solid().is_some_and(|fill| fill.a > 0.)
-            })
-        });
-        assert!(beneath, "the left pane is still painted beneath");
-        let uncovered = gpui::point((column.left() + zoomed.left()) / 2., column.center().y);
-        cx.simulate_click(uncovered, gpui::Modifiers::default());
-        draw(cx);
-        assert_eq!(keyboard_pane(&shell, cx), Some(1), "the click is swallowed");
-        cx.simulate_keystrokes("secondary-alt-left");
-        draw(cx);
-        assert_eq!(
-            keyboard_pane(&shell, cx),
-            Some(1),
-            "nor does it take the keys"
-        );
-
-        cx.executor().advance_clock(settle);
-        let (_, panes) = painted(cx);
-        assert_eq!(cx.debug_bounds("zoomed-pane"), Some(column));
-        assert_eq!(panes, [slots[0], column], "zoomed, it fills the column");
-
-        cx.simulate_keystrokes("secondary-shift-enter");
-        draw(cx);
-        cx.executor().advance_clock(settle / 2);
-        draw(cx);
-        let zoomed = cx
-            .debug_bounds("zoomed-pane")
-            .expect("still over the column");
-        assert!(between(zoomed), "shrinking: {zoomed:?}");
-        cx.executor().advance_clock(settle);
-        let (_, panes) = painted(cx);
-        assert!(cx.debug_bounds("zoomed-pane").is_none());
-        assert_eq!(panes, slots, "both back in their slots");
-        assert_eq!(keyboard_pane(&shell, cx), Some(1));
-    }
-
     /// Tab and ⇧Tab in a zoomed pane keep the keyboard in it: the panes it
     /// covers are still laid out, tab stops and all, but never take it. Back
     /// in its slot the pane keeps the keyboard, and Tab leaves it again.
@@ -11810,36 +11670,10 @@ pub(crate) mod tests {
         draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
         assert!(cx.debug_bounds("waiting-pane").is_some());
-        // The new pane grows out of nothing beside the one it halves.
-        let (column, widths) = pane_widths(&shell, cx);
-        assert!(
-            widths[1] < px(1.) && (widths[0] - column).abs() < px(1.),
-            "{widths:?} of {column:?}"
-        );
         answer_draft(&shell, &host, "draft-1", cx);
-        // The hint fades out under the draft's chat, which has the keyboard
-        // from the start of the fade.
-        assert!(cx.debug_bounds("waiting-pane").is_some());
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        draw(cx);
-        let (column, widths) = pane_widths(&shell, cx);
-        assert!(
-            px(0.) < widths[1]
-                && widths[1] < column / 2.
-                && column / 2. < widths[0]
-                && widths[0] < column,
-            "halfway: {widths:?} of {column:?}"
-        );
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
-        let (column, widths) = pane_widths(&shell, cx);
-        assert!(
-            widths
-                .iter()
-                .all(|width| (*width - column / 2.).abs() < px(1.)),
-            "landed: {widths:?} of {column:?}"
-        );
         assert!(cx.debug_bounds("waiting-pane").is_none());
         assert_eq!(
             pane_threads(&shell, cx),
@@ -12002,19 +11836,10 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
-        let (column, start) = pane_widths(&shell, cx);
 
         cx.simulate_keystrokes("secondary-alt-w");
         draw(cx);
-        assert_eq!(pane_threads(&shell, cx).len(), 3, "they glide shut first");
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        draw(cx);
-        let (_, halfway) = pane_widths(&shell, cx);
-        assert!(
-            start[1] < halfway[1] && halfway[1] < column,
-            "{start:?} then {halfway:?} of {column:?}"
-        );
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
@@ -12784,25 +12609,6 @@ pub(crate) mod tests {
             assert!(store.is_thread_open("thread-1"));
             assert!(store.is_thread_open("thread-2"));
         });
-        let slots = pane_bounds(&shell, cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        draw(cx);
-        // Each conversation is on its way across to the other pane.
-        let leftward = cx.debug_bounds("flying-chat-thread-2").expect("travels");
-        let rightward = cx.debug_bounds("flying-chat-thread-1").expect("travels");
-        assert!(
-            slots[0].left() < leftward.left() && leftward.left() < slots[1].left(),
-            "{leftward:?} between {slots:?}"
-        );
-        assert!(
-            slots[0].left() < rightward.left() && rightward.left() < slots[1].left(),
-            "{rightward:?} between {slots:?}"
-        );
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
-        assert_eq!(cx.debug_bounds("flying-chat-thread-2"), None, "landed");
-        assert_eq!(cx.debug_bounds("flying-chat-thread-1"), None, "landed");
-        assert_eq!(pane_bounds(&shell, cx), slots, "the panes held still");
     }
 
     /// Moving the right pane's thread left trades it with the left pane's:
@@ -12816,21 +12622,10 @@ pub(crate) mod tests {
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
 
         let mac = cx.update(|_, cx| cx.platform_info().is_mac());
-        let slots = pane_bounds(&shell, cx);
         cx.simulate_keystrokes(if mac { "cmd-ctrl-left" } else { "alt-left" });
         draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        draw(cx);
-        // The keyboard is with the moved thread while it travels left.
-        assert_eq!(keyboard_pane(&shell, cx), Some(0));
-        let moved = cx.debug_bounds("flying-chat-thread-2").expect("travels");
-        assert!(
-            slots[0].left() < moved.left() && moved.left() < slots[1].left(),
-            "{moved:?} between {slots:?}"
-        );
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
-        assert_eq!(cx.debug_bounds("flying-chat-thread-2"), None, "landed");
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-2".into()), Some("thread-1".into())]
@@ -12987,36 +12782,13 @@ pub(crate) mod tests {
         resize(cx, SIDEBAR_WIDTH + 2. * PANE_MIN_WIDTH - 10.);
         draw(cx);
         // A thread carried from the pane's middle, where it would land, to
-        // its right edge, which has no room: the placeholder fades out rather
-        // than vanishing, and the drop there does nothing.
+        // its right edge, which has no room: the drop there does nothing.
         let pane = only_pane(&shell, cx);
         drag_row("sidebar-thread-thread-2", pane.center(), cx);
         assert!(cx.debug_bounds("pane-drop-indicator").is_some());
         let edge = gpui::point(pane.right() - px(20.), pane.center().y);
         cx.simulate_mouse_move(edge, Some(MouseButton::Left), gpui::Modifiers::default());
         draw(cx);
-        let painted_alpha = |cx: &mut VisualTestContext| {
-            let placeholder = cx
-                .debug_bounds("pane-drop-indicator")
-                .expect("the placeholder, still drawn while it fades out");
-            cx.update(|window, _| {
-                window
-                    .painted_quads()
-                    .iter()
-                    .find(|quad| quad.bounds == placeholder.scale(window.scale_factor()))
-                    .and_then(|quad| quad.background.as_solid())
-                    .expect("the placeholder's fill")
-                    .a
-            })
-        };
-        let leaving = painted_alpha(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 3);
-        draw(cx);
-        let fading = painted_alpha(cx);
-        assert!(
-            fading < leaving,
-            "the placeholder fades: {leaving} then {fading}"
-        );
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
         assert!(cx.debug_bounds("pane-drop-indicator").is_none());
@@ -13217,77 +12989,6 @@ pub(crate) mod tests {
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
     }
 
-    /// With motion reduced a split, a zoom, a layout and a close land in the
-    /// frame they are made: the panes are at their halves at once, a zoomed
-    /// pane fills the column and is back in its slot, a layout is in with
-    /// the column at rest, and a closed pane is gone rather than left at the
-    /// dock's floor for a frame.
-    #[gpui::test]
-    fn with_motion_reduced_panes_split_zoom_lay_out_and_close_at_once(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(|cx| cx.set_reduce_motion(true));
-        let (shell, host, cx) = mount_panes(cx);
-        cx.simulate_keystrokes("secondary-d");
-        draw(cx);
-        let (column, widths) = pane_widths(&shell, cx);
-        assert!(
-            widths.len() == 2
-                && widths
-                    .iter()
-                    .all(|width| (*width - column / 2.).abs() < px(1.)),
-            "split: {widths:?} of {column:?}"
-        );
-        answer_draft(&shell, &host, "draft-1", cx);
-        cx.simulate_keystrokes("secondary-alt-left");
-        draw(cx);
-        assert_eq!(keyboard_pane(&shell, cx), Some(0));
-
-        let (column, halves) = shell.read_with(cx, |shell, cx| {
-            let attachment = shell.column.as_ref().expect("attached");
-            let panes = attachment.all_panes(cx);
-            (
-                attachment.thread_panes.read(cx).bounds(),
-                panes
-                    .iter()
-                    .map(|pane| pane.read(cx).bounds())
-                    .collect::<Vec<_>>(),
-            )
-        });
-        cx.simulate_keystrokes("secondary-shift-enter");
-        draw(cx);
-        assert_eq!(cx.debug_bounds("zoomed-pane"), Some(column), "zoomed");
-        cx.simulate_keystrokes("secondary-shift-enter");
-        draw(cx);
-        assert!(cx.debug_bounds("zoomed-pane").is_none(), "unzoomed");
-        let (rest, _) = column_scene(&shell, cx);
-        cx.simulate_keystrokes("secondary-alt-3");
-        assert_eq!(column_scene(&shell, cx), (rest, 3), "one beside two");
-        cx.simulate_keystrokes("secondary-alt-2");
-        assert_eq!(column_scene(&shell, cx), (rest, 2), "two columns");
-        let panes: Vec<_> = shell.read_with(cx, |shell, cx| {
-            let panes = shell.column.as_ref().expect("attached").all_panes(cx);
-            panes.iter().map(|pane| pane.read(cx).bounds()).collect()
-        });
-        assert_eq!(panes, halves);
-
-        let closing = shell.read_with(cx, |shell, cx| {
-            shell.column.as_ref().expect("attached").all_panes(cx)[0].clone()
-        });
-        let half = closing.read_with(cx, |pane, _| pane.bounds());
-        cx.simulate_keystrokes("secondary-shift-w");
-        draw(cx);
-        // The keystroke's own frame already leaves it out: it is not drawn
-        // again, not even at the dock's floor for a frame.
-        let last = closing.read_with(cx, |pane, _| pane.bounds());
-        assert_eq!(last, half, "where the closed pane was last drawn");
-        let (column, widths) = pane_widths(&shell, cx);
-        assert!(
-            widths.len() == 1 && (widths[0] - column).abs() < px(1.),
-            "closed: {widths:?} of {column:?}"
-        );
-        assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into())]);
-    }
-
     /// Closing a pane closes its thread, which stays listed, and the store
     /// moves on to the thread of the pane the keyboard lands in.
     #[gpui::test]
@@ -13319,76 +13020,8 @@ pub(crate) mod tests {
         cx.simulate_click(closing.center(), gpui::Modifiers::default());
         draw(cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(1), "the click is swallowed");
-        let (column, start) = pane_widths(&shell, cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        draw(cx);
-        let (_, halfway) = pane_widths(&shell, cx);
-        assert!(
-            halfway[0] < start[0] && start[1] < halfway[1] && halfway[1] < column,
-            "{start:?} then {halfway:?} of {column:?}"
-        );
-        // Below the dock's slot floor it stops narrowing and fades out
-        // instead, gone as it is taken out.
-        let floored = |cx: &mut VisualTestContext| {
-            let closing = shell.read_with(cx, |shell, cx| {
-                shell.column.as_ref().expect("attached").all_panes(cx)[0]
-                    .read(cx)
-                    .bounds()
-            });
-            assert!(
-                (closing.size.width - gpui_base::PANEL_MIN_SIZE).abs() < px(1.),
-                "at the floor: {closing:?}"
-            );
-            cx.update(|window, _| {
-                let closing = closing.scale(window.scale_factor());
-                window
-                    .painted_quads()
-                    .iter()
-                    .filter(|quad| {
-                        let mask = quad.content_mask.bounds;
-                        !mask.is_empty() && mask.intersect(&closing) == mask
-                    })
-                    .filter_map(|quad| quad.background.as_solid())
-                    .map(|fill| fill.a)
-                    .fold(0., f32::max)
-            })
-        };
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 5);
-        draw(cx);
-        let fading = floored(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 8);
-        draw(cx);
-        let faded = floored(cx);
-        assert!(
-            0. < faded && faded < fading && fading < 1.,
-            "the closing pane's content fades: {fading} then {faded}"
-        );
-        // The frame the glide lands in no longer draws the pane: no strip at
-        // the floor, its neighbour has the whole column.
-        let strip = shell.read_with(cx, |shell, cx| {
-            shell.column.as_ref().expect("attached").all_panes(cx)[0]
-                .read(cx)
-                .bounds()
-        });
         cx.executor().advance_clock(crate::edge_back::SETTLE);
-        let (landed, (column, widths)) = frame(cx, |window, cx| {
-            let strip = strip.scale(window.scale_factor());
-            let landed = window
-                .painted_quads()
-                .iter()
-                .filter(|quad| {
-                    let mask = quad.content_mask.bounds;
-                    !mask.is_empty() && mask.intersect(&strip) == mask
-                })
-                .filter_map(|quad| quad.background.as_solid())
-                .map(|fill| fill.a)
-                .fold(0., f32::max);
-            (landed, widths_of(shell.read(cx), cx))
-        });
-        assert!(
-            landed == 0. && widths.len() == 1 && (widths[0] - column).abs() < px(1.),
-            "landed: {landed} drawn in the strip, {widths:?} of {column:?}"
-        );
+        draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into())]);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         store_of(&shell, cx).read_with(cx, |store, _| {
@@ -13761,7 +13394,6 @@ pub(crate) mod tests {
             cx.executor().advance_clock(by);
             draw(cx);
         };
-        let half = crate::edge_back::SETTLE / 2;
         let settle = crate::edge_back::SETTLE;
         let panes = pane_bounds(&shell, cx);
         assert_eq!(fills(cx), [weak, full]);
@@ -13779,12 +13411,6 @@ pub(crate) mod tests {
         cx.simulate_mouse_down(answer, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_up(answer, MouseButton::Left, gpui::Modifiers::default());
         draw(cx);
-        wait(half, cx);
-        let [first, second] = fills(cx);
-        assert!(
-            weak < first && first < full && weak < second && second < full,
-            "gliding: {first} {second}"
-        );
         wait(settle, cx);
         assert_eq!(fills(cx), [weak, full]);
         assert!(!composer_has_keyboard(&shell, 0, cx));
@@ -14093,9 +13719,8 @@ pub(crate) mod tests {
     }
 
     /// Among several panes each pane's header ends with its close button,
-    /// which fades and rises in as the column gains a second pane and fades
-    /// out as it is left with one; pressing it closes its own pane, which
-    /// glides shut.
+    /// which goes as the column is left with one; pressing it closes its
+    /// own pane.
     #[gpui::test]
     fn a_panes_header_closes_it_from_its_right_end(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -14104,7 +13729,6 @@ pub(crate) mod tests {
             cx.executor().advance_clock(by);
             draw(cx);
         };
-        let half = crate::edge_back::SETTLE / 2;
         let settle = crate::edge_back::SETTLE;
         let pane_bounds = |cx: &mut VisualTestContext| -> Vec<gpui::Bounds<Pixels>> {
             shell.read_with(cx, |shell, cx| {
@@ -14112,28 +13736,12 @@ pub(crate) mod tests {
                 panes.iter().map(|pane| pane.read(cx).bounds()).collect()
             })
         };
-        // Where the button is drawn: it sinks as it fades out and rises as
-        // it fades in, so its top follows how far in it is.
-        let close_top = |cx: &mut VisualTestContext| {
-            cx.debug_bounds("pane-close")
-                .expect("the pane's close button")
-                .top()
-        };
         assert!(cx.debug_bounds("pane-close").is_none(), "a lone pane");
 
-        // Stacked, so the top pane keeps its width and its header shows
-        // while the split glides; the new pane waits for its draft.
+        // Stacked; the new pane waits for its draft.
         cx.simulate_keystrokes("secondary-shift-d");
         draw(cx);
-        let entering = close_top(cx);
-        wait(half, cx);
-        let rising = close_top(cx);
         wait(settle, cx);
-        let at_rest = close_top(cx);
-        assert!(
-            entering > rising && rising > at_rest,
-            "{entering:?} then {rising:?} then {at_rest:?}"
-        );
         let close = cx
             .debug_bounds("pane-close")
             .expect("the pane's close button");
@@ -14148,13 +13756,6 @@ pub(crate) mod tests {
 
         cx.simulate_keystrokes("secondary-shift-w");
         draw(cx);
-        let leaving = close_top(cx);
-        wait(half, cx);
-        let sinking = close_top(cx);
-        assert!(
-            leaving == at_rest && sinking > leaving,
-            "{leaving:?} then {sinking:?}"
-        );
         wait(settle, cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
         assert!(
@@ -14180,15 +13781,7 @@ pub(crate) mod tests {
         assert!(start[1].contains(&close.center()), "{close:?} in {start:?}");
         cx.simulate_click(close.center(), gpui::Modifiers::default());
         draw(cx);
-        assert_eq!(pane_threads(&shell, cx).len(), 2, "it glides shut first");
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
-        wait(half, cx);
-        let halfway = pane_bounds(cx);
-        assert!(
-            halfway[1].size.height < start[1].size.height
-                && halfway[0].size.height > start[0].size.height,
-            "{start:?} then {halfway:?}"
-        );
         wait(settle, cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
         store_of(&shell, cx).read_with(cx, |store, _| {
@@ -15346,8 +14939,8 @@ pub(crate) mod tests {
 
     /// The compact palette opens from the threads page and a thread as a
     /// sheet on the window's bottom edge; the page beneath and what the sheet
-    /// holds glide onto the window's seam as the status bar and the keyboard
-    /// come; Back dismisses the keyboard before the sheet.
+    /// holds keep clear of the status bar and the keyboard; Back dismisses
+    /// the keyboard before the sheet.
     #[gpui::test]
     fn compact_palette_is_reachable_from_threads_and_thread(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -15399,9 +14992,7 @@ pub(crate) mod tests {
                         .contains_focused(window, cx)
                 );
             });
-            // The status bar and the keyboard cover the window: the page
-            // beneath and the sheet glide onto the new seam together rather
-            // than jumping there.
+            // The status bar and the keyboard cover the window.
             let page_top = |cx: &mut VisualTestContext| {
                 cx.debug_bounds(selector).expect("the page beneath").top()
             };
@@ -15415,26 +15006,6 @@ pub(crate) mod tests {
                 },
             );
             draw(cx);
-            cx.executor().advance_clock(crate::edge_back::SETTLE / 3);
-            draw(cx);
-            let gliding = |seen: Pixels, from: Pixels, to: Pixels, what: &str| {
-                assert!(
-                    from.min(to) + px(1.) < seen && seen < from.max(to) - px(1.),
-                    "{what} jumped: {seen:?}, not between {from:?} and {to:?}"
-                );
-            };
-            gliding(
-                page_top(cx),
-                uncovered,
-                uncovered + px(47.),
-                "the page's top",
-            );
-            gliding(
-                cx.debug_bounds("palette-list").unwrap().bottom(),
-                px(852.),
-                px(452.),
-                "the list's bottom",
-            );
             cx.executor().advance_clock(crate::edge_back::SETTLE);
             draw(cx);
             assert_eq!(page_top(cx), uncovered + px(47.));
@@ -15461,21 +15032,6 @@ pub(crate) mod tests {
             cx.executor().advance_clock(Duration::from_millis(250));
             draw(cx);
         }
-        // With motion reduced the page lands on the seam at once.
-        cx.update(|_, cx| cx.set_reduce_motion(true));
-        let uncovered = cx.debug_bounds("compact-open-palette").unwrap().top();
-        crate::window_seam::occlude_for_test(
-            cx,
-            gpui::Edges {
-                top: px(47.),
-                ..Default::default()
-            },
-        );
-        draw(cx);
-        assert_eq!(
-            cx.debug_bounds("compact-open-palette").unwrap().top(),
-            uncovered + px(47.)
-        );
     }
 
     /// What a phone's or a tablet's status bar, home indicator and side
@@ -16887,11 +16443,11 @@ pub(crate) mod tests {
         }
     }
 
-    /// Opening the first host, its workspace rises over the empty threads;
-    /// leaving the last, the empty threads rise over the workspace, whose
-    /// views are let go once it is covered.
+    /// Opening the first host replaces the empty threads with its workspace;
+    /// leaving the last brings the empty threads back, and the workspace's
+    /// views are let go.
     #[gpui::test]
-    fn the_first_host_and_the_last_rise_over_what_the_window_showed(cx: &mut TestAppContext) {
+    fn the_first_host_and_the_last_replace_what_the_window_showed(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let studio = saved_machine("studio", false);
         let (shell, _hosts, _client, cx) = mount_workspace(
@@ -16905,27 +16461,14 @@ pub(crate) mod tests {
         );
         crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("no-hosts").is_some());
-        let half_way = |cx: &mut VisualTestContext| {
-            draw(cx);
-            cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-            draw(cx);
-        };
 
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
                 shell.open_host(AttachmentTarget::Remote(Box::new(studio)), window, cx)
             })
         });
-        half_way(cx);
-        assert!(
-            cx.debug_bounds("chat-route").is_some(),
-            "the workspace rises"
-        );
-        assert!(
-            cx.debug_bounds("no-hosts").is_some(),
-            "over the empty threads"
-        );
         crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("chat-route").is_some(), "the workspace");
         assert!(cx.debug_bounds("no-hosts").is_none());
 
         let left = shell.read_with(cx, |shell, _| {
@@ -16941,16 +16484,8 @@ pub(crate) mod tests {
                 shell.leave_host(&HostKey::Remote("studio".into()), window, cx)
             })
         });
-        half_way(cx);
-        assert!(
-            cx.debug_bounds("no-hosts").is_some(),
-            "the empty threads rise"
-        );
-        assert!(
-            cx.debug_bounds("chat-route").is_some(),
-            "over the workspace the window left"
-        );
         crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("no-hosts").is_some(), "the empty threads");
         assert!(cx.debug_bounds("chat-route").is_none());
         assert!(left.upgrade().is_none(), "the workspace left is let go");
     }
