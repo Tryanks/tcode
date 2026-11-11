@@ -46,6 +46,17 @@ fn option_id(id: &str) -> &str {
     }
 }
 
+/// What the manifest's option `id` is.
+fn option_role(id: &str) -> crate::OptionRole {
+    match id {
+        "effort" => crate::OptionRole::Effort,
+        crate::context_window::OPTION_ID => crate::OptionRole::ContextWindow,
+        "fastMode" => crate::OptionRole::Speed,
+        "thinking" => crate::OptionRole::Thinking,
+        _ => crate::OptionRole::Model,
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ManifestFile {
@@ -301,6 +312,8 @@ fn descriptor(option: &Value) -> Option<OptionDescriptor> {
                     label,
                     description: option.description.clone(),
                     unavailable: None,
+                    speed: None,
+                    summary: None,
                 });
             }
             OptionDescriptor::Select {
@@ -308,17 +321,17 @@ fn descriptor(option: &Value) -> Option<OptionDescriptor> {
                 label: non_empty(&label)?,
                 options: mapped,
                 default_value,
-                role: crate::OptionRole::Model,
+                role: option_role(&id),
                 apply: crate::ApplyTiming::Live,
                 recommended: None,
                 permissive: None,
             }
         }
         OptionFile::Boolean { id, label } => OptionDescriptor::Boolean {
+            role: option_role(&id),
             id: option_id(&non_empty(&id)?).to_owned(),
             label: non_empty(&label)?,
             default_value: false,
-            role: crate::OptionRole::Model,
             apply: crate::ApplyTiming::Live,
             recommended: None,
             permissive: None,
@@ -332,16 +345,18 @@ fn fixed_context_window_descriptor(tokens: u64) -> OptionDescriptor {
     let label = crate::context_window::format(tokens);
     let value = label.to_ascii_lowercase();
     OptionDescriptor::Select {
-        id: "contextWindow".into(),
+        id: crate::context_window::OPTION_ID.into(),
         label: "Context Window".into(),
         options: vec![SelectOption {
             value: value.clone(),
             label,
             description: None,
             unavailable: None,
+            speed: None,
+            summary: None,
         }],
         default_value: Some(value),
-        role: crate::OptionRole::Model,
+        role: crate::OptionRole::ContextWindow,
         apply: crate::ApplyTiming::Live,
         recommended: None,
         permissive: None,
@@ -872,28 +887,36 @@ mod tests {
                             label: "Low".into(),
                             description: None,
                             unavailable: None,
+                            speed: None,
+                            summary: None,
                         },
                         SelectOption {
                             value: "medium".into(),
                             label: "Medium".into(),
                             description: None,
                             unavailable: None,
+                            speed: None,
+                            summary: None,
                         },
                         SelectOption {
                             value: "max".into(),
                             label: "Max".into(),
                             description: None,
                             unavailable: None,
+                            speed: None,
+                            summary: None,
                         },
                         SelectOption {
                             value: "ultracode".into(),
                             label: "Ultracode".into(),
                             description: Some("xhigh plus orchestration".into()),
                             unavailable: None,
+                            speed: None,
+                            summary: None,
                         },
                     ],
                     default_value: Some("medium".into()),
-                    role: crate::OptionRole::Model,
+                    role: crate::OptionRole::Effort,
                     apply: crate::ApplyTiming::Live,
                     recommended: None,
                     permissive: None,
@@ -907,16 +930,20 @@ mod tests {
                             label: "200k".into(),
                             description: None,
                             unavailable: None,
+                            speed: None,
+                            summary: None,
                         },
                         SelectOption {
                             value: "1m".into(),
                             label: "1M".into(),
                             description: None,
                             unavailable: None,
+                            speed: None,
+                            summary: None,
                         },
                     ],
                     default_value: Some("1m".into()),
-                    role: crate::OptionRole::Model,
+                    role: crate::OptionRole::ContextWindow,
                     apply: crate::ApplyTiming::Live,
                     recommended: None,
                     permissive: None,
@@ -931,7 +958,7 @@ mod tests {
                 id: "fastMode".into(),
                 label: "Fast Mode".into(),
                 default_value: false,
-                role: crate::OptionRole::Model,
+                role: crate::OptionRole::Speed,
                 apply: crate::ApplyTiming::Live,
                 recommended: None,
                 permissive: None,
@@ -948,9 +975,11 @@ mod tests {
                     label: "1M".into(),
                     description: None,
                     unavailable: None,
+                    speed: None,
+                    summary: None,
                 }],
                 default_value: Some("1m".into()),
-                role: crate::OptionRole::Model,
+                role: crate::OptionRole::ContextWindow,
                 apply: crate::ApplyTiming::Live,
                 recommended: None,
                 permissive: None,

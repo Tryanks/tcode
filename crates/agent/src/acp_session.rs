@@ -64,6 +64,15 @@ fn config_option_id(
     }
 }
 
+/// What a session config option of `category` is: a thought level is the
+/// model's reasoning effort.
+fn config_option_role(category: Option<&acp::SessionConfigOptionCategory>) -> crate::OptionRole {
+    match category {
+        Some(acp::SessionConfigOptionCategory::ThoughtLevel) => crate::OptionRole::Effort,
+        _ => crate::OptionRole::Model,
+    }
+}
+
 /// The persisted selection for the session config option `config_id` in
 /// `category`, as [`SessionOptions::option_selections`] carries it into a new
 /// process.
@@ -959,6 +968,8 @@ async fn connected_actor<D: Dialect>(
                         label: mode.to_owned(),
                         description: None,
                         unavailable: Some("Reported by the launch arguments".into()),
+                        speed: None,
+                        summary: None,
                     });
                 }
                 state
@@ -1645,6 +1656,8 @@ impl OptionRegistry {
                             label: mode.name.clone(),
                             description: mode.description.clone(),
                             unavailable: None,
+                            speed: None,
+                            summary: None,
                         })
                         .collect(),
                     default_value: Some(modes.current_mode_id.0.to_string()),
@@ -1678,6 +1691,8 @@ impl OptionRegistry {
                                 label: option.name.clone(),
                                 description: option.description.clone(),
                                 unavailable: None,
+                                speed: None,
+                                summary: None,
                             })
                             .collect(),
                         acp::SessionConfigSelectOptions::Grouped(groups) => groups
@@ -1688,6 +1703,8 @@ impl OptionRegistry {
                                     label: format!("{} · {}", group.name, option.name),
                                     description: option.description.clone(),
                                     unavailable: None,
+                                    speed: None,
+                                    summary: None,
                                 })
                             })
                             .collect(),
@@ -1699,7 +1716,7 @@ impl OptionRegistry {
                             label: option.name.clone(),
                             options,
                             default_value: Some(select.current_value.0.to_string()),
-                            role: crate::OptionRole::Model,
+                            role: config_option_role(option.category.as_ref()),
                             apply: crate::ApplyTiming::Live,
                             recommended: None,
                             permissive: None,
@@ -1713,7 +1730,7 @@ impl OptionRegistry {
                         id,
                         label: option.name.clone(),
                         default_value: boolean.current_value,
-                        role: crate::OptionRole::Model,
+                        role: config_option_role(option.category.as_ref()),
                         apply: crate::ApplyTiming::Live,
                         recommended: None,
                         permissive: None,

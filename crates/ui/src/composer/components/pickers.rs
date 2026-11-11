@@ -353,43 +353,29 @@ impl Composer {
             .active_option_descriptors
             .iter()
             .filter(|descriptor| {
-                matches!(
-                    descriptor,
-                    OptionDescriptor::Select {
-                        role: agent::OptionRole::Model,
-                        ..
-                    } | OptionDescriptor::Boolean {
-                        role: agent::OptionRole::Model,
-                        ..
-                    }
-                ) && !matches!(
-                    descriptor,
-                    OptionDescriptor::Select { id, .. } if id == "contextWindow"
+                !matches!(
+                    descriptor_role(descriptor),
+                    agent::OptionRole::Permission | agent::OptionRole::ContextWindow
                 )
             })
             .cloned()
             .collect::<Vec<_>>();
         if composer.conversation_read_only {
-            let effort =
-                option_selection_str(&composer.active_option_selections, "reasoningEffort");
-            let descriptor = descriptors.iter().find(|option| {
-                matches!(option, OptionDescriptor::Select { id, .. } if id == "reasoningEffort")
-            });
-            let label = if let Some(OptionDescriptor::Select {
-                options,
-                default_value,
-                ..
-            }) = descriptor
-            {
-                let value = effort.or(default_value.as_deref());
-                value.map(|value| {
-                    options
-                        .iter()
-                        .find(|option| option.value == value)
-                        .map_or_else(|| value.to_owned(), |option| option.label.clone())
-                })
-            } else {
-                effort.map(str::to_owned)
+            let label = match effort_descriptor(&descriptors) {
+                Some(OptionDescriptor::Select {
+                    id,
+                    options,
+                    default_value,
+                    ..
+                }) => option_selection_str(&composer.active_option_selections, id)
+                    .or(default_value.as_deref())
+                    .map(|value| {
+                        options
+                            .iter()
+                            .find(|option| option.value == value)
+                            .map_or_else(|| value.to_owned(), |option| option.label.clone())
+                    }),
+                _ => None,
             }
             .unwrap_or_else(|| crate::tr!("composer.context_unknown").into_owned());
             let label = gpui::SharedString::from(label);
@@ -423,9 +409,7 @@ impl Composer {
         // every parameter, including context capacity and service tier.
         let mut chip_spec = spec.clone();
         if self.compact
-            && let Some(effort) = spec.options.iter().find(|option| {
-                matches!(option, OptionDescriptor::Select { id, .. } if id == "reasoningEffort")
-            })
+            && let Some(effort) = effort_descriptor(&spec.options)
         {
             chip_spec.options = vec![effort.clone()];
         }
@@ -731,6 +715,26 @@ impl Composer {
             })
             .into_any_element()
     }
+}
+
+/// What a descriptor is, as its provider says.
+fn descriptor_role(descriptor: &OptionDescriptor) -> agent::OptionRole {
+    match descriptor {
+        OptionDescriptor::Select { role, .. } | OptionDescriptor::Boolean { role, .. } => *role,
+    }
+}
+
+/// The model's reasoning-effort select among `descriptors`.
+fn effort_descriptor(descriptors: &[OptionDescriptor]) -> Option<&OptionDescriptor> {
+    descriptors.iter().find(|descriptor| {
+        matches!(
+            descriptor,
+            OptionDescriptor::Select {
+                role: agent::OptionRole::Effort,
+                ..
+            }
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1048,23 +1052,21 @@ fn render_compact_model_footer(
         .read(cx)
         .composer_state_for(session_id.as_deref(), cx);
     let selections = composer_state.active_option_selections.clone();
-    let effort = composer_state
-        .active_option_descriptors
-        .iter()
-        .find_map(|descriptor| match descriptor {
-            OptionDescriptor::Select {
-                id,
-                options,
-                default_value,
-                ..
-            } if id == "reasoningEffort" => Some((
-                // Use the localized shared label instead of provider-specific copy.
-                crate::tr!("composer.effort").into_owned(),
-                options.clone(),
-                resolved_select_value(id, options, default_value, &selections),
-            )),
-            _ => None,
-        });
+    let effort = match effort_descriptor(&composer_state.active_option_descriptors) {
+        Some(OptionDescriptor::Select {
+            id,
+            options,
+            default_value,
+            ..
+        }) => Some((
+            id.clone(),
+            // Use the localized shared label instead of provider-specific copy.
+            crate::tr!("composer.effort").into_owned(),
+            options.clone(),
+            resolved_select_value(id, options, default_value, &selections),
+        )),
+        _ => None,
+    };
 
     let group = |label: gpui::SharedString, track: ChoiceGroup, cx: &mut Context<PopoverState>| {
         crate::material::section(Some(label), cx)
@@ -1079,7 +1081,7 @@ fn render_compact_model_footer(
         .gap(spacing.md)
         .px(px(crate::material::COMPACT_PAGE_INSET))
         .pt(spacing.md);
-    if let Some((label, options, current)) = effort {
+    if let Some((effort_id, label, options, current)) = effort {
         let segments = options
             .iter()
             .map(|option| {
@@ -1087,6 +1089,7 @@ fn render_compact_model_footer(
                 let store = store_entity.clone();
                 let session_id = session_id.clone();
                 let value = option.value.clone();
+                let effort_id = effort_id.clone();
                 Choice::new(
                     gpui::SharedString::from(format!("compact-effort-{}", option.value)),
                     option.label.clone(),
@@ -1097,7 +1100,7 @@ fn render_compact_model_footer(
                     store.update(cx, |store, _cx| {
                         store.set_active_option_for(
                             session_id.clone().unwrap_or_default(),
-                            "reasoningEffort".to_string(),
+                            effort_id.clone(),
                             Some(serde_json::Value::String(value)),
                         );
                     });
@@ -1368,20 +1371,12 @@ impl PermissionControl {
                             })
                             .zip(composer.space_policy.as_ref())
                             .is_some_and(|(class, policy)| !policy.allows_class(class));
+                        let (label, description) = crate::i18n::permission_option(&id, &option);
                         PermissionRow {
                             recommended: recommended.as_deref() == Some(option.value.as_str()),
-                            description: option.description.map(|description| {
-                                crate::i18n::translate_permission_description(
-                                    &format!("permission.values.{id}.{}", option.value),
-                                    &description,
-                                )
-                            }),
+                            description,
                             value: serde_json::Value::String(option.value),
-                            label: crate::i18n::translate_english(
-                                "permission.current.label",
-                                &option.label,
-                            )
-                            .into_owned(),
+                            label,
                             unavailable: option
                                 .unavailable
                                 .map(|reason| {
@@ -1611,14 +1606,15 @@ fn render_effort_slider(
     let composer_state = store_entity
         .read(cx)
         .composer_state_for(session_id.as_deref(), cx);
-    let (levels, current) = composer_state.active_option_descriptors.iter().find_map(
-        |descriptor| match descriptor {
+    let (effort_id, levels, current) =
+        match effort_descriptor(&composer_state.active_option_descriptors)? {
             OptionDescriptor::Select {
                 id,
                 options,
                 default_value,
                 ..
-            } if id == "reasoningEffort" => Some((
+            } => (
+                id.clone(),
                 options.clone(),
                 resolved_select_value(
                     id,
@@ -1626,10 +1622,9 @@ fn render_effort_slider(
                     default_value,
                     &composer_state.active_option_selections,
                 ),
-            )),
-            _ => None,
-        },
-    )?;
+            ),
+            OptionDescriptor::Boolean { .. } => return None,
+        };
     if levels.len() < 2 {
         return None;
     }
@@ -1665,7 +1660,7 @@ fn render_effort_slider(
                 store.update(cx, |store, _cx| {
                     store.set_active_option_for(
                         session_id.clone().unwrap_or_default(),
-                        "reasoningEffort".to_string(),
+                        effort_id.clone(),
                         Some(serde_json::Value::String(value)),
                     );
                 });
@@ -1767,9 +1762,9 @@ fn render_traits_pane(
 
     let mut pane = v_flex().w_full().p_1().gap_0p5();
 
-    // The bolt in the corner owns fast mode: the Claude `fastMode` rows are
-    // dropped and a Codex service-tier list keeps only its non-fast tiers
-    // (hidden entirely when Standard is all that is left).
+    // The bolt in the corner owns fast mode: a speed boolean's rows are
+    // dropped and a speed select keeps only its choices that are not fast
+    // (hidden entirely when one is all that is left).
     let fast = FastMode::of(spec);
     for descriptor in &spec.options {
         let fast_owned = fast.as_ref().is_some_and(|fast| {
@@ -1783,14 +1778,13 @@ fn render_traits_pane(
                 label,
                 options,
                 default_value,
+                role,
                 ..
             } => {
                 let options: Vec<agent::SelectOption> = if fast_owned {
                     options
                         .iter()
-                        .filter(|choice| {
-                            !FastMode::is_fast_tier(choice) && !FastMode::is_ultrafast_tier(choice)
-                        })
+                        .filter(|choice| choice.speed.is_none())
                         .cloned()
                         .collect()
                 } else {
@@ -1801,7 +1795,7 @@ fn render_traits_pane(
                 }
                 let options = &options;
                 // The slider carries its own label and replaces the rows.
-                if id == "reasoningEffort"
+                if *role == agent::OptionRole::Effort
                     && let Some(slider) =
                         render_effort_slider(store_entity, session_id.clone(), window, cx)
                 {

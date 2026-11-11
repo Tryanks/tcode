@@ -2483,28 +2483,22 @@ impl HarnessDialog {
             .default_permission
             .clone();
         let current = chosen.clone().or(recommended);
-        let label = |option: &agent::SelectOption| {
-            crate::i18n::translate_english("permission.current.label", &option.label).into_owned()
-        };
         let selected = options
             .iter()
             .find(|option| Some(&option.value) == current.as_ref())
-            .map(label)
+            .map(|option| crate::i18n::permission_option(&id, option).0)
             .unwrap_or_default();
         let options = options
             .iter()
-            .map(|option| crate::settings_rows::SelectRowOption {
-                value: option.value.clone(),
-                id: SharedString::from(format!("harness-permission-{}", option.value)),
-                label: label(option).into(),
-                description: option.description.as_ref().map(|description| {
-                    crate::i18n::translate_permission_description(
-                        &format!("permission.values.{id}.{}", option.value),
-                        description,
-                    )
-                    .into()
-                }),
-                selected: Some(&option.value) == current.as_ref(),
+            .map(|option| {
+                let (label, description) = crate::i18n::permission_option(&id, option);
+                crate::settings_rows::SelectRowOption {
+                    value: option.value.clone(),
+                    id: SharedString::from(format!("harness-permission-{}", option.value)),
+                    label: label.into(),
+                    description: description.map(Into::into),
+                    selected: Some(&option.value) == current.as_ref(),
+                }
             })
             .collect();
         let reset = crate::settings_rows::reset_action(

@@ -1,6 +1,6 @@
 //! Pure provider model resolution, ordering, and custom-slug validation.
 
-use agent::{ModelSpec, OptionDescriptor, OptionSelection, SelectOption};
+use agent::{ModelSpec, OptionDescriptor, OptionRole, OptionSelection, Speed};
 use serde_json::Value;
 
 use crate::settings::ProviderSettings;
@@ -27,12 +27,12 @@ pub struct ResolvedModel {
 fn capabilities(spec: &ModelSpec) -> Vec<ModelCapability> {
     let mut out = Vec::new();
     for option in &spec.options {
-        let capability = match option {
-            OptionDescriptor::Boolean { id, .. } if id == "fastMode" => ModelCapability::FastMode,
-            OptionDescriptor::Boolean { id, .. } if id == "thinking" => ModelCapability::Thinking,
-            OptionDescriptor::Select { id, .. } if id == "reasoningEffort" => {
-                ModelCapability::Reasoning
-            }
+        let (OptionDescriptor::Select { role, .. } | OptionDescriptor::Boolean { role, .. }) =
+            option;
+        let capability = match role {
+            OptionRole::Speed => ModelCapability::FastMode,
+            OptionRole::Thinking => ModelCapability::Thinking,
+            OptionRole::Effort => ModelCapability::Reasoning,
             _ => continue,
         };
         if !out.contains(&capability) {
@@ -42,10 +42,10 @@ fn capabilities(spec: &ModelSpec) -> Vec<ModelCapability> {
     out
 }
 
-/// A model's fast-mode switch: Claude's `fastMode` boolean or a Codex
-/// `serviceTier` select offering a fast tier, and above it an ultrafast tier
-/// when the select offers one. `None` when the model has neither. The
-/// composer's bolt keys on it.
+/// A model's fast-mode switch: its [`OptionRole::Speed`] boolean, or its
+/// speed select's fast choice and above it an ultrafast one when the select
+/// offers one. `None` when the model has neither. The composer's bolt keys on
+/// it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FastMode {
     /// The option id the switch writes.
@@ -67,8 +67,11 @@ impl FastMode {
     pub fn of(spec: &ModelSpec) -> Option<Self> {
         spec.options.iter().find_map(|option| match option {
             OptionDescriptor::Boolean {
-                id, default_value, ..
-            } if id == "fastMode" => Some(Self {
+                id,
+                default_value,
+                role: OptionRole::Speed,
+                ..
+            } => Some(Self {
                 option_id: id.clone(),
                 off: Value::Bool(false),
                 fast: Value::Bool(true),
@@ -83,12 +86,18 @@ impl FastMode {
                 id,
                 options,
                 default_value,
+                role: OptionRole::Speed,
                 ..
-            } if id == "serviceTier" => {
-                let fast = options.iter().find(|choice| Self::is_fast_tier(choice))?;
+            } => {
+                let fast = options
+                    .iter()
+                    .find(|choice| choice.speed == Some(Speed::Fast))?;
                 let ultra = options
                     .iter()
-                    .find(|choice| Self::is_ultrafast_tier(choice));
+                    .find(|choice| choice.speed == Some(Speed::Ultrafast));
+                // Off is the default when it is not fast, else the first
+                // choice that is not.
+                let off = options.iter().find(|choice| choice.speed.is_none())?;
                 let default = default_value.as_deref();
                 let default_level = if default == Some(fast.value.as_str()) {
                     FastLevel::Fast
@@ -99,7 +108,7 @@ impl FastMode {
                 };
                 let off = match (default_level, default) {
                     (FastLevel::Off, Some(tier)) => tier.to_owned(),
-                    _ => "default".into(),
+                    _ => off.value.clone(),
                 };
                 Some(Self {
                     option_id: id.clone(),
@@ -111,17 +120,6 @@ impl FastMode {
             }
             _ => None,
         })
-    }
-
-    /// Whether a service-tier choice is the fast one: Codex's speed tiers name
-    /// it `fast`; its app-server model list reports `priority` labelled "Fast".
-    pub fn is_fast_tier(choice: &SelectOption) -> bool {
-        choice.value == "fast" || choice.label.eq_ignore_ascii_case("fast")
-    }
-
-    /// Whether a service-tier choice is Codex's `ultrafast` tier.
-    pub fn is_ultrafast_tier(choice: &SelectOption) -> bool {
-        choice.value == "ultrafast" || choice.label.eq_ignore_ascii_case("ultrafast")
     }
 
     pub fn level(&self, selections: &[OptionSelection]) -> FastLevel {
@@ -263,7 +261,7 @@ mod tests {
         let mut models = catalog();
         models[1].options = vec![
             OptionDescriptor::Boolean {
-                role: Default::default(),
+                role: OptionRole::Thinking,
                 apply: Default::default(),
                 recommended: None,
                 permissive: None,
@@ -272,7 +270,7 @@ mod tests {
                 default_value: false,
             },
             OptionDescriptor::Select {
-                role: Default::default(),
+                role: OptionRole::Effort,
                 apply: Default::default(),
                 recommended: None,
                 permissive: None,
@@ -283,6 +281,8 @@ mod tests {
                     value: "high".into(),
                     label: "High".into(),
                     description: None,
+                    speed: None,
+                    summary: None,
                 }],
                 default_value: None,
             },
@@ -367,10 +367,10 @@ mod tests {
     }
 
     #[test]
-    fn fast_mode_keys_on_claude_boolean_and_codex_fast_tiers() {
+    fn fast_mode_keys_on_a_speed_boolean_or_a_speed_selects_fast_choices() {
         let claude = ModelSpec {
             options: vec![OptionDescriptor::Boolean {
-                role: Default::default(),
+                role: OptionRole::Speed,
                 apply: Default::default(),
                 recommended: None,
                 permissive: None,
@@ -392,10 +392,10 @@ mod tests {
         assert_eq!(fast.next(FastLevel::Fast), FastLevel::Off);
         assert_eq!(fast.value(FastLevel::Off), serde_json::json!(false));
 
-        // The app-server model list names the fast tier `priority` / "Fast".
+        // A speed select's fast choices say which they are.
         let codex = ModelSpec {
             options: vec![OptionDescriptor::Select {
-                role: Default::default(),
+                role: OptionRole::Speed,
                 apply: Default::default(),
                 recommended: None,
                 permissive: None,
@@ -407,18 +407,24 @@ mod tests {
                         value: "default".into(),
                         label: "Standard".into(),
                         description: None,
+                        speed: None,
+                        summary: None,
                     },
                     SelectOption {
                         unavailable: None,
                         value: "priority".into(),
                         label: "Fast".into(),
                         description: None,
+                        speed: Some(Speed::Fast),
+                        summary: None,
                     },
                     SelectOption {
                         unavailable: None,
                         value: "ultrafast".into(),
                         label: "Ultrafast".into(),
                         description: None,
+                        speed: Some(Speed::Ultrafast),
+                        summary: None,
                     },
                 ],
                 default_value: Some("default".into()),
@@ -442,10 +448,10 @@ mod tests {
         assert_eq!(fast.next(FastLevel::Ultra), FastLevel::Off);
         assert_eq!(fast.value(FastLevel::Off), serde_json::json!("default"));
 
-        // Neither descriptor shape: no fast mode (Fable / Sonnet catalogs).
+        // No speed role: no fast mode, whatever the effort select offers.
         let plain = ModelSpec {
             options: vec![OptionDescriptor::Select {
-                role: Default::default(),
+                role: OptionRole::Effort,
                 apply: Default::default(),
                 recommended: None,
                 permissive: None,
@@ -456,6 +462,8 @@ mod tests {
                     value: "high".into(),
                     label: "High".into(),
                     description: None,
+                    speed: None,
+                    summary: None,
                 }],
                 default_value: None,
             }],

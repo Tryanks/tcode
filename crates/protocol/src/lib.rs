@@ -347,6 +347,10 @@ pub use wire::{
 // The agent event stream gains record_withheld {bytes}: a history window or
 // page sends it for a record longer than the client's line, where the whole
 // reply was the history_record_too_large error.
+// OptionRole gains effort, context_window, speed and thinking. SelectOption
+// gains speed and summary (a PermissionSummary of profile, sandbox, approval
+// and reviewer); Codex's current permissions carry a summary, not a
+// description.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

@@ -314,10 +314,11 @@ pub(super) fn traits_chip_label(
                 id,
                 label,
                 default_value,
+                role,
                 ..
             } => {
                 let on = option_selection_bool(selections, id).unwrap_or(*default_value);
-                if id == "fastMode" {
+                if *role == agent::OptionRole::Speed {
                     parts.push(
                         crate::tr!(if on {
                             "composer.trait_fast"
@@ -602,7 +603,7 @@ mod tests {
     #[test]
     fn traits_chip_joins_descriptor_labels() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        // Fast Mode boolean → Fast/Normal; a plain boolean → "<Label> On/Off".
+        // A speed boolean → Fast/Normal; a plain boolean → "<Label> On/Off".
         let fast = agent::ModelSpec {
             id: "m".into(),
             display_name: "m".into(),
@@ -611,7 +612,7 @@ mod tests {
                 id: "fastMode".into(),
                 label: "Fast Mode".into(),
                 default_value: false,
-                role: Default::default(),
+                role: agent::OptionRole::Speed,
                 apply: Default::default(),
                 recommended: None,
                 permissive: None,
@@ -626,7 +627,7 @@ mod tests {
                 id: "thinking".into(),
                 label: "Thinking".into(),
                 default_value: false,
-                role: Default::default(),
+                role: agent::OptionRole::Thinking,
                 apply: Default::default(),
                 recommended: None,
                 permissive: None,
@@ -648,6 +649,8 @@ mod tests {
                     label: "High".into(),
                     description: None,
                     unavailable: None,
+                    speed: None,
+                    summary: None,
                 }],
                 default_value: None,
                 role: Default::default(),

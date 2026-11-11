@@ -2713,6 +2713,8 @@ impl Mapper {
                     } else {
                         "Reported by Claude".into()
                     }),
+                    speed: None,
+                    summary: None,
                 });
             }
         }

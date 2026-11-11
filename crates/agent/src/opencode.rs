@@ -534,10 +534,12 @@ fn map_models(models: &Value, default: &Value) -> Vec<ModelSpec> {
                             value: variant,
                             description: None,
                             unavailable: None,
+                            speed: None,
+                            summary: None,
                         })
                         .collect(),
                     default_value: None,
-                    role: crate::OptionRole::Model,
+                    role: crate::OptionRole::Effort,
                     apply: crate::ApplyTiming::Live,
                     recommended: None,
                     permissive: None,
@@ -938,6 +940,8 @@ impl OpenCodeActor {
                         label: agent.name.clone(),
                         description: agent.description.clone(),
                         unavailable: None,
+                        speed: None,
+                        summary: None,
                     })
                     .collect(),
                 default_value: None,
@@ -3242,7 +3246,7 @@ mod tests {
         let data =
             |name: &str| serde_json::from_str::<Value>(&fixture_text(name)).unwrap()["data"].take();
         let models = map_models(&data("model_list.json"), &data("model_default.json"));
-        let effort = |variants: &[(&str, &str)]| json!([{"kind": "select", "id": "reasoningEffort", "label": "Thinking", "options": variants.iter().map(|(value, label)| json!({"value": value, "label": label, "description": null, "unavailable": null})).collect::<Vec<_>>(), "default_value": null, "role": "model", "apply": "live", "recommended": null, "permissive": null}]);
+        let effort = |variants: &[(&str, &str)]| json!([{"kind": "select", "id": "reasoningEffort", "label": "Thinking", "options": variants.iter().map(|(value, label)| json!({"value": value, "label": label, "description": null, "unavailable": null, "speed": null, "summary": null})).collect::<Vec<_>>(), "default_value": null, "role": "effort", "apply": "live", "recommended": null, "permissive": null}]);
         assert_eq!(
             serde_json::to_value(&models).unwrap(),
             json!([

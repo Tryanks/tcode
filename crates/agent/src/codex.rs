@@ -1,7 +1,10 @@
 //! Codex provider: a small client for the newline-delimited JSON protocol used
 //! by `codex app-server`.
 
-use crate::{ForkPoint, LaterHistory, RewindFailure, RewindFailureReason, RewindMode};
+use crate::{
+    ApprovalPolicy, ApprovalReviewer, ForkPoint, LaterHistory, PermissionSandbox,
+    PermissionSummary, RewindFailure, RewindFailureReason, RewindMode, Speed,
+};
 use std::collections::{HashMap, HashSet};
 use std::io::BufWriter;
 #[cfg(test)]
@@ -110,43 +113,48 @@ fn current_permission_option(effective: &str, settings: &Value) -> SelectOption 
         .or_else(|| settings.get("sandbox"))
         .and_then(|sandbox| sandbox.get("type"))
         .and_then(Value::as_str);
+    // `v2/SandboxPolicy.ts`, `AskForApproval.ts` and `ApprovalsReviewer.ts`
+    // (codex 0.167.0); the reviewer is `user` when unset.
     let sandbox = match sandbox {
-        Some("readOnly") => "read-only sandbox",
-        Some("workspaceWrite") => "workspace sandbox",
-        Some("dangerFullAccess") => "full access",
-        Some("externalSandbox") => "external sandbox",
-        _ => "unspecified sandbox",
+        Some("readOnly") => Some(PermissionSandbox::ReadOnly),
+        Some("workspaceWrite") => Some(PermissionSandbox::WorkspaceWrite),
+        Some("dangerFullAccess") => Some(PermissionSandbox::FullAccess),
+        Some("externalSandbox") => Some(PermissionSandbox::External),
+        _ => None,
     };
     let approval = match settings.get("approvalPolicy") {
         Some(Value::String(policy)) => match policy.as_str() {
-            "on-request" => "asks on request",
-            "never" => "never asks for approval",
-            "untrusted" => "asks for untrusted actions",
-            "granular" => "uses granular approval rules",
-            _ => "unspecified approval policy",
+            "on-request" => Some(ApprovalPolicy::OnRequest),
+            "never" => Some(ApprovalPolicy::Never),
+            "untrusted" => Some(ApprovalPolicy::Untrusted),
+            _ => None,
         },
         Some(Value::Object(policy)) if policy.contains_key("granular") => {
-            "uses granular approval rules"
+            Some(ApprovalPolicy::Granular)
         }
-        _ => "unspecified approval policy",
+        _ => None,
     };
     let reviewer = match settings.get("approvalsReviewer").and_then(Value::as_str) {
-        Some("auto_review" | "guardian_subagent") => "reviewed by auto-review",
-        Some("user") | None => "reviewed by you",
-        _ => "unspecified reviewer",
+        Some("auto_review" | "guardian_subagent") => Some(ApprovalReviewer::AutoReview),
+        Some("user") | None => Some(ApprovalReviewer::User),
+        _ => None,
     };
     let profile = settings
         .pointer("/activePermissionProfile/id")
         .and_then(Value::as_str)
         .or_else(|| effective.strip_prefix("profile:"));
-    let prefix = profile
-        .map(|id| format!("Profile {id}: "))
-        .unwrap_or_default();
     SelectOption {
         value: effective.into(),
         label: profile.unwrap_or("Current permissions").into(),
-        description: Some(format!("{prefix}{sandbox}, {approval}, {reviewer}.")),
+        description: None,
         unavailable: Some("Inherited permission configuration".into()),
+        speed: None,
+        summary: Some(PermissionSummary {
+            profile: profile.map(str::to_owned),
+            sandbox,
+            approval,
+            reviewer,
+        }),
     }
 }
 
@@ -183,16 +191,15 @@ fn permission_descriptor(
         options.push(SelectOption {
             value,
             label: id.into(),
-            description: Some(
-                profile
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .filter(|description| !description.is_empty())
-                    .unwrap_or("Configured permission profile")
-                    .into(),
-            ),
+            description: profile
+                .get("description")
+                .and_then(Value::as_str)
+                .filter(|description| !description.is_empty())
+                .map(str::to_owned),
             unavailable: (profile.get("allowed").and_then(Value::as_bool) == Some(false))
                 .then(|| "Not allowed by your configuration".into()),
+            speed: None,
+            summary: None,
         });
     }
     if !options.iter().any(|option| option.value == effective) {
@@ -400,6 +407,8 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
                     value,
                     label,
                     description,
+                    speed: None,
+                    summary: None,
                 })
             })
             .collect();
@@ -409,7 +418,7 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
                 .and_then(Value::as_str)
                 .map(str::to_owned);
             options.push(OptionDescriptor::Select {
-                role: Default::default(),
+                role: crate::OptionRole::Effort,
                 apply: Default::default(),
                 recommended: None,
                 permissive: None,
@@ -435,10 +444,12 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
             value: "default".into(),
             label: "Standard".into(),
             description: None,
+            speed: None,
+            summary: None,
         });
         select_options.extend(tiers);
         options.push(OptionDescriptor::Select {
-            role: Default::default(),
+            role: crate::OptionRole::Speed,
             apply: Default::default(),
             recommended: None,
             permissive: None,
@@ -458,8 +469,6 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
     })
 }
 
-/// Derive service-tier options from `serviceTiers` (preferred) or, absent that,
-/// `additionalSpeedTiers`, displaying the `fast` value as `Fast`.
 /// The `contextWindow` selector: the native window (default) and the largest
 /// one Codex accepts for `model_context_window`. Without cached windows the
 /// selector has no presets and the custom size stands alone.
@@ -471,6 +480,8 @@ fn context_window_descriptor(windows: Option<&model_windows::ModelWindows>) -> O
             label,
             description: None,
             unavailable: None,
+            speed: None,
+            summary: None,
         }
     };
     let (options, default_value) = match windows {
@@ -485,7 +496,7 @@ fn context_window_descriptor(windows: Option<&model_windows::ModelWindows>) -> O
         None => (Vec::new(), None),
     };
     OptionDescriptor::Select {
-        role: Default::default(),
+        role: crate::OptionRole::ContextWindow,
         apply: Default::default(),
         recommended: None,
         permissive: None,
@@ -516,33 +527,30 @@ fn service_tiers(model: &Value) -> Vec<SelectOption> {
                     .map(str::to_owned);
                 Some(SelectOption {
                     unavailable: None,
+                    speed: tier_speed(&value, &label),
                     value,
                     label,
                     description,
-                })
-            })
-            .collect();
-    }
-    if let Some(speed) = model.get("additionalSpeedTiers").and_then(Value::as_array) {
-        return speed
-            .iter()
-            .filter_map(|tier| {
-                let value = tier.as_str()?.to_owned();
-                let label = if value == "fast" {
-                    "Fast".to_owned()
-                } else {
-                    value.clone()
-                };
-                Some(SelectOption {
-                    unavailable: None,
-                    value,
-                    label,
-                    description: None,
+                    summary: None,
                 })
             })
             .collect();
     }
     Vec::new()
+}
+
+/// Which service tiers are Codex's fast mode, as ChatGPT.app (26.1103) tells
+/// them: the `priority` or `fast` id or a tier named Fast, and the
+/// `ultrafast` id or a tier named Ultrafast.
+fn tier_speed(id: &str, name: &str) -> Option<Speed> {
+    let name = name.trim().to_ascii_lowercase();
+    if matches!(id, "priority" | "fast") || name == "fast" {
+        Some(Speed::Fast)
+    } else if id == "ultrafast" || name == "ultrafast" {
+        Some(Speed::Ultrafast)
+    } else {
+        None
+    }
 }
 
 /// Format model ids for display: `gpt…` → `GPT…`, capitalizing the letter
@@ -4608,38 +4616,59 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![
                     ("profile:restricted", Some("Only this workspace"), false),
-                    (
-                        "profile:blocked",
-                        Some("Configured permission profile"),
-                        true
-                    )
+                    ("profile:blocked", None, true)
                 ]
             );
-            for (settings, label, description) in [
+            for (settings, label, summary) in [
                 (
                     json!({"sandboxPolicy":{"type":"workspaceWrite"},"approvalPolicy":"never","approvalsReviewer":"user"}),
                     "Current permissions",
-                    "workspace sandbox, never asks for approval, reviewed by you.",
+                    (
+                        None,
+                        PermissionSandbox::WorkspaceWrite,
+                        ApprovalPolicy::Never,
+                        ApprovalReviewer::User,
+                    ),
                 ),
                 (
                     json!({"activePermissionProfile":{"id":"my-team"},"sandboxPolicy":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"user"}),
                     "my-team",
-                    "Profile my-team: workspace sandbox, asks on request, reviewed by you.",
+                    (
+                        Some("my-team"),
+                        PermissionSandbox::WorkspaceWrite,
+                        ApprovalPolicy::OnRequest,
+                        ApprovalReviewer::User,
+                    ),
                 ),
                 (
                     json!({"activePermissionProfile":{"id":"my-team"},"sandboxPolicy":{"type":"readOnly"},"approvalPolicy":"untrusted","approvalsReviewer":"auto_review"}),
                     "my-team",
-                    "Profile my-team: read-only sandbox, asks for untrusted actions, reviewed by auto-review.",
+                    (
+                        Some("my-team"),
+                        PermissionSandbox::ReadOnly,
+                        ApprovalPolicy::Untrusted,
+                        ApprovalReviewer::AutoReview,
+                    ),
                 ),
                 (
                     json!({"sandboxPolicy":{"type":"externalSandbox","networkAccess":"restricted"},"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":true,"skill_approval":true,"request_permissions":true,"mcp_elicitations":true}},"approvalsReviewer":"guardian_subagent"}),
                     "Current permissions",
-                    "external sandbox, uses granular approval rules, reviewed by auto-review.",
+                    (
+                        None,
+                        PermissionSandbox::External,
+                        ApprovalPolicy::Granular,
+                        ApprovalReviewer::AutoReview,
+                    ),
                 ),
                 (
                     json!({"sandboxPolicy":{"type":"dangerFullAccess"},"approvalPolicy":"on-request","approvalsReviewer":"user"}),
                     "Current permissions",
-                    "full access, asks on request, reviewed by you.",
+                    (
+                        None,
+                        PermissionSandbox::FullAccess,
+                        ApprovalPolicy::OnRequest,
+                        ApprovalReviewer::User,
+                    ),
                 ),
             ] {
                 actor.handle_line(&json!({"method":"thread/settings/updated","params":{"threadId":"thread-1","threadSettings":settings}}).to_string()).await;
@@ -4657,8 +4686,18 @@ mod tests {
                     .iter()
                     .find(|option| json!(option.value) == selections[0].value)
                     .unwrap();
+                let (profile, sandbox, approval, reviewer) = summary;
                 assert_eq!(selected.label, label);
-                assert_eq!(selected.description.as_deref(), Some(description));
+                assert_eq!(selected.description, None);
+                assert_eq!(
+                    selected.summary,
+                    Some(PermissionSummary {
+                        profile: profile.map(str::to_owned),
+                        sandbox: Some(sandbox),
+                        approval: Some(approval),
+                        reviewer: Some(reviewer),
+                    })
+                );
                 assert_eq!(
                     selected.unavailable.as_deref(),
                     Some("Inherited permission configuration")
@@ -5922,8 +5961,10 @@ mod tests {
         assert_eq!(crate::context_window::largest(&spec.options), Some(872_000));
     }
 
+    /// `v2/Model.ts` `serviceTiers` (codex 0.167.0); which of them are fast
+    /// mode is ChatGPT.app's rule (26.1103).
     #[test]
-    fn hidden_model_is_skipped_and_speed_tiers_adapt() {
+    fn hidden_model_is_skipped_and_fast_tiers_say_so() {
         assert!(
             map_model(
                 &json!({"model": "secret", "displayName": "secret", "hidden": true}),
@@ -5932,13 +5973,17 @@ mod tests {
             .is_none()
         );
 
-        // No serviceTiers → adapt additionalSpeedTiers (`fast` → `Fast`).
         let spec = map_model(
             &json!({
                 "model": "gpt-x",
                 "displayName": "gpt-x",
                 "supportedReasoningEfforts": [],
-                "additionalSpeedTiers": ["fast", "priority"]
+                "serviceTiers": [
+                    {"id": "priority", "name": "Fast", "description": ""},
+                    {"id": "flex", "name": "Flex", "description": ""},
+                    {"id": "ultrafast", "name": "Ultrafast", "description": ""}
+                ],
+                "defaultServiceTier": null
             }),
             None,
         )
@@ -5947,12 +5992,23 @@ mod tests {
         // a contextWindow selector without presets (no cached windows).
         assert_eq!(spec.options.len(), 2);
         match &spec.options[0] {
-            OptionDescriptor::Select { id, options, .. } => {
+            OptionDescriptor::Select {
+                id, options, role, ..
+            } => {
                 assert_eq!(id, "serviceTier");
-                assert_eq!(options[1].value, "fast");
-                assert_eq!(options[1].label, "Fast");
-                assert_eq!(options[2].value, "priority");
-                assert_eq!(options[2].label, "priority");
+                assert_eq!(*role, crate::OptionRole::Speed);
+                assert_eq!(
+                    options
+                        .iter()
+                        .map(|option| (option.value.as_str(), option.speed))
+                        .collect::<Vec<_>>(),
+                    [
+                        ("default", None),
+                        ("priority", Some(Speed::Fast)),
+                        ("flex", None),
+                        ("ultrafast", Some(Speed::Ultrafast)),
+                    ]
+                );
             }
             other => panic!("expected serviceTier Select, got {other:?}"),
         }

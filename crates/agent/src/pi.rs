@@ -166,10 +166,12 @@ fn map_model(
                     label: thinking_label(level),
                     description: None,
                     unavailable: None,
+                    speed: None,
+                    summary: None,
                 })
                 .collect(),
             default_value,
-            role: crate::OptionRole::Model,
+            role: crate::OptionRole::Effort,
             apply: crate::ApplyTiming::Live,
             recommended: None,
             permissive: None,

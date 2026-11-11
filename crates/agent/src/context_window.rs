@@ -46,11 +46,17 @@ pub fn format(tokens: u64) -> String {
     }
 }
 
-/// The `contextWindow` selector among a model's descriptors.
+/// The context-window selector among a model's descriptors.
 pub fn descriptor(descriptors: &[OptionDescriptor]) -> Option<&OptionDescriptor> {
-    descriptors.iter().find(
-        |descriptor| matches!(descriptor, OptionDescriptor::Select { id, .. } if id == OPTION_ID),
-    )
+    descriptors.iter().find(|descriptor| {
+        matches!(
+            descriptor,
+            OptionDescriptor::Select {
+                role: crate::OptionRole::ContextWindow,
+                ..
+            }
+        )
+    })
 }
 
 /// The window a session runs at: its `contextWindow` selection, else the
@@ -119,16 +125,20 @@ mod tests {
                     label: "272k".into(),
                     description: None,
                     unavailable: None,
+                    speed: None,
+                    summary: None,
                 },
                 crate::SelectOption {
                     value: "872k".into(),
                     label: "872k".into(),
                     description: None,
                     unavailable: None,
+                    speed: None,
+                    summary: None,
                 },
             ],
             default_value: Some("272k".into()),
-            role: Default::default(),
+            role: crate::OptionRole::ContextWindow,
             apply: Default::default(),
             recommended: None,
             permissive: None,

@@ -1367,13 +1367,75 @@ pub enum OptionDescriptor {
     },
 }
 
-/// Where the UI places the control; carries no permission semantics.
+/// What a control is, as its provider says: a client places and draws it by
+/// this, never by its id. Carries no permission semantics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OptionRole {
+    /// A trait of the model with nothing more said about it.
     #[default]
     Model,
+    /// What runs without asking the user.
     Permission,
+    /// How hard the model reasons: a select of levels, least first.
+    Effort,
+    /// The context window the session runs at: a select of presets whose
+    /// values follow [`context_window::parse_tokens`], which also takes a
+    /// custom size up to the largest preset.
+    ContextWindow,
+    /// Fast mode: a boolean that is on when fast, or a select whose fast
+    /// choices name their [`Speed`].
+    Speed,
+    /// Extended thinking, on or off.
+    Thinking,
+}
+
+/// How fast a choice of an [`OptionRole::Speed`] select runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Speed {
+    Fast,
+    Ultrafast,
+}
+
+/// What a harness's permission settings amount to, where it reports them as
+/// parts rather than as one of its named values. `None` is a part the
+/// harness did not report, or reported in a form Tcode does not know.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionSummary {
+    /// The named permission profile the settings come from.
+    pub profile: Option<String>,
+    pub sandbox: Option<PermissionSandbox>,
+    pub approval: Option<ApprovalPolicy>,
+    pub reviewer: Option<ApprovalReviewer>,
+}
+
+/// Where commands run (Codex `SandboxPolicy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionSandbox {
+    ReadOnly,
+    WorkspaceWrite,
+    FullAccess,
+    External,
+}
+
+/// When the harness stops to ask (Codex `AskForApproval`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalPolicy {
+    OnRequest,
+    Never,
+    Untrusted,
+    Granular,
+}
+
+/// Who answers when it asks (Codex `ApprovalsReviewer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalReviewer {
+    User,
+    AutoReview,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1393,6 +1455,14 @@ pub struct SelectOption {
     /// Present when this value cannot be selected; explains why.
     #[serde(default)]
     pub unavailable: Option<String>,
+    /// How fast this choice of an [`OptionRole::Speed`] select runs; `None`
+    /// for a choice that is not fast.
+    #[serde(default)]
+    pub speed: Option<Speed>,
+    /// The parts of a permission value the harness reported as parts, in
+    /// place of a description.
+    #[serde(default)]
+    pub summary: Option<PermissionSummary>,
 }
 
 type PermissionTable = (
@@ -1572,6 +1642,8 @@ pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
                 label: (*label).into(),
                 description: Some((*description).into()),
                 unavailable: None,
+                speed: None,
+                summary: None,
             })
             .collect(),
         default_value: Some(default.into()),
@@ -1726,7 +1798,7 @@ mod permission_tests {
         assert_eq!(permission_control(ProviderKind::Acp), None);
         let old: OptionDescriptor = serde_json::from_str(r#"{"kind":"select","id":"reasoningEffort","label":"Reasoning","options":[{"value":"high","label":"High","description":null}],"default_value":"high"}"#).unwrap();
         assert!(
-            matches!(old, OptionDescriptor::Select { role:OptionRole::Model, apply:ApplyTiming::Live, recommended:None, permissive:None, options, .. } if options[0].unavailable.is_none())
+            matches!(old, OptionDescriptor::Select { role:OptionRole::Model, apply:ApplyTiming::Live, recommended:None, permissive:None, options, .. } if options[0].unavailable.is_none() && options[0].speed.is_none() && options[0].summary.is_none())
         );
     }
 }

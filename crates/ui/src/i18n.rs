@@ -291,45 +291,51 @@ pub(crate) fn translate_option_name(english: &str) -> String {
     translate_english(&format!("harness_options.{slug}"), english).into_owned()
 }
 
-pub(crate) fn translate_permission_description(key: &str, english: &str) -> String {
-    let translated = translate_english(key, english).into_owned();
-    if translated != english {
-        return translated;
-    }
-    let (profile, settings) = if let Some(rest) = english.strip_prefix("Profile ")
-        && let Some((profile, settings)) = rest.rsplit_once(": ")
-    {
-        (Some(profile), settings)
-    } else {
-        (None, english)
+/// A permission value's name and description in the current language: the
+/// parts a harness reported for it, else its own text.
+pub(crate) fn permission_option(
+    id: &str,
+    option: &agent::SelectOption,
+) -> (String, Option<String>) {
+    let Some(summary) = &option.summary else {
+        let description = option.description.as_ref().map(|description| {
+            translate_english(
+                &format!("permission.values.{id}.{}", option.value),
+                description,
+            )
+            .into_owned()
+        });
+        return (option.label.clone(), description);
     };
-    let Some(settings) = settings.strip_suffix('.') else {
-        return translated;
-    };
-    let fragments: Vec<_> = settings.split(", ").collect();
-    if fragments.len() != 3 {
-        return translated;
-    }
-    if fragments
-        .iter()
-        .zip(["sandbox", "approval", "reviewer"])
-        .any(|(fragment, category)| {
-            !(1..)
-                .map_while(|variant| {
-                    _rust_i18n_try_translate(
-                        LANGUAGE_ENGLISH,
-                        format!("permission.current.{category}.{variant}"),
-                    )
-                })
-                .any(|source| source == *fragment)
-        })
-    {
-        return translated;
-    }
-    let sandbox = translate_english("permission.current.sandbox", fragments[0]);
-    let approval = translate_english("permission.current.approval", fragments[1]);
-    let reviewer = translate_english("permission.current.reviewer", fragments[2]);
-    let sentence = match profile {
+    let label = summary
+        .profile
+        .clone()
+        .unwrap_or_else(|| crate::tr!("permission.current.label").into_owned());
+    (label, Some(permission_summary(summary)))
+}
+
+fn permission_summary(summary: &agent::PermissionSummary) -> String {
+    use agent::{ApprovalPolicy, ApprovalReviewer, PermissionSandbox};
+    let sandbox = crate::tr!(match summary.sandbox {
+        Some(PermissionSandbox::ReadOnly) => "permission.current.sandbox.read_only",
+        Some(PermissionSandbox::WorkspaceWrite) => "permission.current.sandbox.workspace_write",
+        Some(PermissionSandbox::FullAccess) => "permission.current.sandbox.full_access",
+        Some(PermissionSandbox::External) => "permission.current.sandbox.external",
+        None => "permission.current.sandbox.unspecified",
+    });
+    let approval = crate::tr!(match summary.approval {
+        Some(ApprovalPolicy::OnRequest) => "permission.current.approval.on_request",
+        Some(ApprovalPolicy::Never) => "permission.current.approval.never",
+        Some(ApprovalPolicy::Untrusted) => "permission.current.approval.untrusted",
+        Some(ApprovalPolicy::Granular) => "permission.current.approval.granular",
+        None => "permission.current.approval.unspecified",
+    });
+    let reviewer = crate::tr!(match summary.reviewer {
+        Some(ApprovalReviewer::User) => "permission.current.reviewer.user",
+        Some(ApprovalReviewer::AutoReview) => "permission.current.reviewer.auto_review",
+        None => "permission.current.reviewer.unspecified",
+    });
+    match &summary.profile {
         Some(profile) => crate::tr!(
             "permission.current.profile",
             profile = profile,
@@ -343,8 +349,8 @@ pub(crate) fn translate_permission_description(key: &str, english: &str) -> Stri
             approval = approval,
             reviewer = reviewer
         ),
-    };
-    sentence.into_owned()
+    }
+    .into_owned()
 }
 
 /// Translate a key using tcode-ui's embedded locale backend.
@@ -501,36 +507,26 @@ mod tests {
             ),
             "不可用：会话以另一种模式启动"
         );
+        let current = agent::SelectOption {
+            value: "effective".into(),
+            label: "my-team".into(),
+            description: None,
+            unavailable: None,
+            speed: None,
+            summary: Some(agent::PermissionSummary {
+                profile: Some("my-team".into()),
+                sandbox: Some(agent::PermissionSandbox::WorkspaceWrite),
+                approval: Some(agent::ApprovalPolicy::OnRequest),
+                reviewer: None,
+            }),
+        };
         assert_eq!(
-            translate_english("permission.current.label", "Current permissions"),
-            "当前权限"
+            permission_option("permissions", &current),
+            (
+                "my-team".to_owned(),
+                Some("配置档 my-team：工作区沙箱，按请求询问，未指定审批方。".to_owned())
+            )
         );
-        for (english, expected) in [
-            (
-                "Profile my-team: workspace sandbox, asks on request, reviewed by you.",
-                "配置档 my-team：工作区沙箱，按请求询问，由你审批。",
-            ),
-            (
-                "external sandbox, uses granular approval rules, reviewed by auto-review.",
-                "外部沙箱，使用细分审批规则，由自动审查（auto-review）审批。",
-            ),
-            (
-                "read-only sandbox, asks for untrusted actions, reviewed by you.",
-                "只读沙箱，对不受信任的操作询问，由你审批。",
-            ),
-            (
-                "full access, never asks for approval, reviewed by auto-review.",
-                "完全访问，从不请求审批，由自动审查（auto-review）审批。",
-            ),
-        ] {
-            assert_eq!(
-                translate_permission_description(
-                    "permission.values.permissions.effective",
-                    english
-                ),
-                expected
-            );
-        }
         set_locale(LANGUAGE_ENGLISH);
     }
 
