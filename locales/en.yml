@@ -3060,10 +3060,6 @@ tools:
       running: "Searching the web"
       done: "Searched the web"
       asked: "Search the web"
-    plan:
-      running: "Updating the plan"
-      done: "Updated the plan"
-      asked: "Update the plan"
     agent:
       running: "Running subagent"
       done: "Ran subagent"
@@ -3266,8 +3262,6 @@ tools:
   links: "%{count} links"
   copy_url: "Copy URL"
   copy_query: "Copy query"
-  steps_done: "%{done}/%{total} done"
-  copy_plan: "Copy plan"
   code_lines: "Show code · %{count} lines"
   hide_code: "Hide code"
   show_raw: "Show raw output"

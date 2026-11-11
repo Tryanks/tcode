@@ -102,8 +102,19 @@ struct ConvertedThread {
 
 #[derive(Debug)]
 enum ConvertedEntry {
-    Item { ts: u64, item: Box<ThreadItem> },
-    Compacted { ts: u64 },
+    Item {
+        ts: u64,
+        item: Box<ThreadItem>,
+    },
+    Compacted {
+        ts: u64,
+    },
+    /// The plan a call set, which a live session shows as the plan.
+    Plan {
+        ts: u64,
+        explanation: Option<String>,
+        steps: Vec<agent::PlanStep>,
+    },
 }
 
 impl ConvertedThread {
@@ -228,6 +239,20 @@ pub fn import_thread(
             }
             ConvertedEntry::Compacted { ts } => {
                 events.push((ts, AgentEvent::ContextCompacted(Default::default())));
+            }
+            ConvertedEntry::Plan {
+                ts,
+                explanation,
+                steps,
+            } => {
+                events.push((
+                    ts,
+                    AgentEvent::PlanUpdated {
+                        turn_id: open_turn.clone(),
+                        explanation,
+                        steps,
+                    },
+                ));
             }
         }
     }

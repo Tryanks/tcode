@@ -103,6 +103,14 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
                             let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
                             let input = block.get("input").cloned().unwrap_or(Value::Null);
+                            if let Some(steps) = agent::claude::todo_plan(name, &input) {
+                                entries.push(ConvertedEntry::Plan {
+                                    ts,
+                                    explanation: None,
+                                    steps,
+                                });
+                                continue;
+                            }
                             let (call, content) = TranscriptCall::start(name.to_string(), input);
                             if !id.is_empty() {
                                 pending.insert(id.to_string(), (entries.len(), call));

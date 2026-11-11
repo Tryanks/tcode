@@ -681,34 +681,6 @@ fn a_web_call_reads_as_its_url_or_query(cx: &mut TestAppContext) {
     thread.shutdown(cx);
 }
 
-/// A plan written as a tool call reads as the step under way and how many
-/// are done, and opens on the checklist, every step in its order.
-#[gpui::test]
-fn a_plan_written_as_a_call_reads_as_a_checklist(cx: &mut TestAppContext) {
-    let _locale = crate::settings::TestLocaleGuard::acquire();
-    crate::set_locale("en");
-    let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/todo.jsonl"), 1_024.);
-    let plan = "call_000000000000000000000035";
-    assert_eq!(
-        thread.header(plan, cx),
-        Read {
-            chips: vec![Chip::Count("0/4 done".to_owned())],
-            ..read(
-                "Updated the plan",
-                None,
-                Some("梳理旧配置文件格式与字段命名规则"),
-                None
-            )
-        }
-    );
-    thread.open_work_log(plan, cx);
-    click(cx, &format!("activity-row-{plan}"));
-    for index in 0..4 {
-        assert!(shows(cx, &format!("tool-todo-{plan}-{index}")), "{index}");
-    }
-    thread.shutdown(cx);
-}
-
 /// A subagent is a window in the shared grammar: the agent's type and its
 /// task, the model and effort it ran with as a chip, interrupted said in
 /// words.

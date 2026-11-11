@@ -3053,10 +3053,6 @@ tools:
       running: "网络搜索中"
       done: "已网络搜索"
       asked: "网络搜索"
-    plan:
-      running: "更新计划中"
-      done: "已更新计划"
-      asked: "更新计划"
     agent:
       running: "委派中"
       done: "已委派"
@@ -3259,8 +3255,6 @@ tools:
   links: "%{count} 个链接"
   copy_url: "复制网址"
   copy_query: "复制查询"
-  steps_done: "已完成 %{done}/%{total}"
-  copy_plan: "复制计划"
   code_lines: "显示代码 · %{count} 行"
   hide_code: "隐藏代码"
   show_raw: "显示原始输出"

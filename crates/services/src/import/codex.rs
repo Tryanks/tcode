@@ -270,6 +270,16 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             .and_then(|text| serde_json::from_str(text).ok())
                             .unwrap_or(arguments);
                         let name = tool_name(payload);
+                        if name == UPDATE_PLAN
+                            && let Some((explanation, steps)) = agent::codex::rollout_plan(&input)
+                        {
+                            entries.push(ConvertedEntry::Plan {
+                                ts,
+                                explanation,
+                                steps,
+                            });
+                            continue;
+                        }
                         let content = match input.get("cmd").and_then(Value::as_str) {
                             Some(command) if name == EXEC_COMMAND => {
                                 ItemContent::CommandExecution {
@@ -660,6 +670,8 @@ fn aborted(output: &str) -> bool {
 /// Codex 0.167's tool that runs a command line (`create_exec_command_tool`,
 /// `core/src/tools/handlers/shell_spec.rs`), whose `cmd` is the command.
 const EXEC_COMMAND: &str = "exec_command";
+/// The tool that sets Codex's plan (`plan_spec.rs`).
+const UPDATE_PLAN: &str = "update_plan";
 /// The tool that shows Codex an image (`view_image_spec.rs`).
 const VIEW_IMAGE: &str = "view_image";
 

@@ -3596,7 +3596,7 @@ impl Mapper {
 
         // TodoWrite drives the structured plan/task sidebar, not the timeline.
         if is_todo_tool(&name) {
-            if let Some(steps) = extract_plan_steps_from_todo(&input) {
+            if let Some(steps) = todo_plan(&name, &input) {
                 return vec![AgentEvent::PlanUpdated {
                     turn_id: self.current_turn_id.clone(),
                     explanation: None,
@@ -5027,6 +5027,15 @@ fn parse_provider_commands(init: &Value) -> Vec<ProviderCommand> {
     push("slash_commands", ProviderCommandKind::Command);
     push("skills", ProviderCommandKind::Skill);
     out
+}
+
+/// The plan a call of `name` sets, when it is a `TodoWrite`: a session
+/// shows it as the plan, not as a call. The importer reads a transcript's
+/// calls through this.
+pub fn todo_plan(name: &str, input: &Value) -> Option<Vec<PlanStep>> {
+    is_todo_tool(name)
+        .then(|| extract_plan_steps_from_todo(input))
+        .flatten()
 }
 
 fn is_todo_tool(name: &str) -> bool {

@@ -3060,10 +3060,6 @@ tools:
       running: "ウェブ検索中"
       done: "ウェブ検索済み"
       asked: "ウェブ検索"
-    plan:
-      running: "計画を更新中"
-      done: "計画を更新済み"
-      asked: "計画を更新"
     agent:
       running: "サブエージェントに委任中"
       done: "サブエージェントに委任済み"
@@ -3266,8 +3262,6 @@ tools:
   links: "%{count} 件のリンク"
   copy_url: "URL をコピー"
   copy_query: "クエリをコピー"
-  steps_done: "%{done}/%{total} 完了"
-  copy_plan: "計画をコピー"
   code_lines: "コードを表示 · %{count} 行"
   hide_code: "コードを非表示"
   show_raw: "生の出力を表示"

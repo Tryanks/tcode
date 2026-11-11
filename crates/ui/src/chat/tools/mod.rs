@@ -26,7 +26,6 @@ pub(in crate::chat) mod search;
 pub(in crate::chat) mod shell;
 pub(in crate::chat) mod subagent;
 pub(in crate::chat) mod threads;
-pub(in crate::chat) mod todo;
 pub(in crate::chat) mod web;
 pub(in crate::chat) mod window;
 
@@ -152,7 +151,6 @@ const FAMILIES: &[Matcher] = &[
     read::tool_call,
     search::tool_call,
     web::tool_call,
-    todo::tool_call,
     script::tool_call,
     desktop::tool_call,
     preview::tool_call,

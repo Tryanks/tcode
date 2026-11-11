@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use agent::{ItemContent, ItemStatus};
+use agent::{ItemContent, ItemStatus, PlanStepStatus};
 use serde_json::json;
 
 use super::{ConvertedEntry, ConvertedThread, claude, codex};
@@ -80,15 +80,33 @@ fn a_codex_rollout_without_its_session_meta_is_reported() {
     );
 }
 
-/// What the thread shows, in order: each item's content, `None` for a
-/// compaction.
+/// What the thread's timeline shows, in order: each item's content, `None`
+/// for a compaction. A plan shows in the plan panel, not here.
 fn shown(thread: ConvertedThread) -> Vec<Option<ItemContent>> {
     thread
         .entries
         .into_iter()
-        .map(|entry| match entry {
-            ConvertedEntry::Item { item, .. } => Some(item.content),
-            ConvertedEntry::Compacted { .. } => None,
+        .filter_map(|entry| match entry {
+            ConvertedEntry::Item { item, .. } => Some(Some(item.content)),
+            ConvertedEntry::Compacted { .. } => Some(None),
+            ConvertedEntry::Plan { .. } => None,
+        })
+        .collect()
+}
+
+/// The plans the thread set, in order: each one's steps.
+fn plans(thread: &ConvertedThread) -> Vec<Vec<(String, PlanStepStatus)>> {
+    thread
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ConvertedEntry::Plan { steps, .. } => Some(
+                steps
+                    .iter()
+                    .map(|step| (step.step.clone(), step.status))
+                    .collect(),
+            ),
+            _ => None,
         })
         .collect()
 }
@@ -141,6 +159,8 @@ const CODEX_ROLLOUT: &str = r#"{"timestamp":"2026-01-02T03:04:05.000Z","type":"s
 {"timestamp":"2026-01-02T03:04:11.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_read","output":"Chunk ID: 0a1b2c\nWall time: 0.0123 seconds\nProcess exited with code 0\nOriginal token count: 4\nOutput:\nExample readme\n"}}
 {"timestamp":"2026-01-02T03:04:11.200Z","type":"response_item","payload":{"type":"function_call","name":"view_image","arguments":"{\"path\":\"/work/example/shot.png\"}","call_id":"call_view"}}
 {"timestamp":"2026-01-02T03:04:11.300Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_view","output":[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==","detail":"high"}]}}
+{"timestamp":"2026-01-02T03:04:11.400Z","type":"response_item","payload":{"type":"function_call","name":"update_plan","arguments":"{\"explanation\":\"Lint next\",\"plan\":[{\"step\":\"Read the readme\",\"status\":\"completed\"},{\"step\":\"Lint\",\"status\":\"in_progress\"}]}","call_id":"call_plan"}}
+{"timestamp":"2026-01-02T03:04:11.450Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_plan","output":"Plan updated"}}
 {"timestamp":"2026-01-02T03:04:11.500Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"make lint\"}","call_id":"call_lint"}}
 {"timestamp":"2026-01-02T03:04:11.600Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_lint","output":"Wall time: 1.2000 seconds\nProcess exited with code 2\nOutput:\nmake: *** No rule to make target 'lint'.  Stop.\n"}}
 {"timestamp":"2026-01-02T03:04:11.700Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"sleep 60\"}","call_id":"call_stopped"}}
@@ -378,13 +398,22 @@ fn readme_revised(status: ItemStatus) -> Option<ItemContent> {
 /// A rollout shows what Codex recorded: a local shell call shows the
 /// command in its `action`, a command shows what it printed and the code
 /// it exited with, failing when that is not 0 as Codex judges it, an image
-/// Codex was shown is that image as Codex reports it live, a patch
+/// Codex was shown is that image as Codex reports it live, an
+/// `update_plan` is the plan it sets (`UpdatePlanArgs`,
+/// `protocol/src/plan_tool.rs`), as live, a patch
 /// shows the changes Codex applied, a call Codex dropped, stopped or never
 /// answered is interrupted, and a turn the user rolled back is gone.
 #[test]
 fn a_codex_rollout_imports_as_codex_recorded_it() {
     let rollout = Transcript::new(CODEX_ROLLOUT);
     let thread = codex::convert(&rollout.0, "codex:example").unwrap();
+    assert_eq!(
+        plans(&thread),
+        [vec![
+            ("Read the readme".to_owned(), PlanStepStatus::Completed),
+            ("Lint".to_owned(), PlanStepStatus::InProgress),
+        ]]
+    );
     assert_eq!(
         shown(thread),
         [
@@ -500,6 +529,8 @@ const CLAUDE_TRANSCRIPT: &str = r#"{"type":"user","message":{"role":"user","cont
 {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_edit","content":"The file /work/example/README.md has been updated successfully."}]},"toolUseResult":{"filePath":"/work/example/README.md","oldString":"Example readme","newString":"Example readme, revised","originalFile":"Example readme\n","structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":1,"lines":["-Example readme","+Example readme, revised"]}],"userModified":false,"replaceAll":false},"uuid":"00000000-0000-4000-8000-000000000026","parentUuid":"00000000-0000-4000-8000-000000000025","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:10.700Z"}
 {"type":"assistant","message":{"id":"msg_example_6","type":"message","role":"assistant","model":"claude-example","content":[{"type":"tool_use","id":"toolu_plan","name":"ExitPlanMode","input":{"plan":"Revise the readme:\n\n1. Reword it.","planFilePath":"/work/example/.claude/plan.md"}}]},"uuid":"00000000-0000-4000-8000-000000000027","parentUuid":"00000000-0000-4000-8000-000000000026","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:10.800Z"}
 {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_plan","content":"User has approved your plan."}]},"uuid":"00000000-0000-4000-8000-000000000028","parentUuid":"00000000-0000-4000-8000-000000000027","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:10.900Z"}
+{"type":"assistant","message":{"id":"msg_example_7","type":"message","role":"assistant","model":"claude-example","content":[{"type":"tool_use","id":"toolu_todo","name":"TodoWrite","input":{"todos":[{"content":"Reword the readme","status":"completed","activeForm":"Rewording the readme"},{"content":"Build it","status":"in_progress","activeForm":"Building it"}]}}]},"uuid":"00000000-0000-4000-8000-000000000029","parentUuid":"00000000-0000-4000-8000-000000000028","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:10.950Z"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_todo","content":"Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable"}]},"toolUseResult":{"oldTodos":[],"newTodos":[{"content":"Reword the readme","status":"completed","activeForm":"Rewording the readme"},{"content":"Build it","status":"in_progress","activeForm":"Building it"}]},"uuid":"00000000-0000-4000-8000-000000000030","parentUuid":"00000000-0000-4000-8000-000000000029","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:10.960Z"}
 {"type":"ai-title","aiTitle":"Read and build the example","sessionId":"00000000-0000-4000-8000-000000000010"}
 {"type":"custom-title","customTitle":"Readme review","sessionId":"00000000-0000-4000-8000-000000000010"}
 {"type":"ai-title","aiTitle":"Review the example","sessionId":"00000000-0000-4000-8000-000000000010"}
@@ -518,13 +549,21 @@ const CLAUDE_TRANSCRIPT: &str = r#"{"type":"user","message":{"role":"user","cont
 /// result is an error, a call never answered is interrupted, a compaction is
 /// marked where it happened, and a slash
 /// command shows as the command line the user typed, a local one with its
-/// output. The thread is named as that CLI names it: a custom title before
-/// a generated one.
+/// output. A TodoWrite is the plan it sets, as a live session shows it.
+/// The thread is named as that CLI names it: a custom title before a
+/// generated one.
 #[test]
 fn a_claude_transcript_imports_as_claude_recorded_it() {
     let transcript = Transcript::new(CLAUDE_TRANSCRIPT);
     let thread = claude::convert(&transcript.0, "claude:example").unwrap();
     assert_eq!(thread.title.as_deref(), Some("Readme review"));
+    assert_eq!(
+        plans(&thread),
+        [vec![
+            ("Reword the readme".to_owned(), PlanStepStatus::Completed),
+            ("Build it".to_owned(), PlanStepStatus::InProgress),
+        ]]
+    );
     assert_eq!(
         shown(thread),
         [

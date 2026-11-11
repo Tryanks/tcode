@@ -4442,6 +4442,36 @@ fn goal_status_wire(status: GoalStatus) -> &'static str {
 }
 
 /// One `turn/plan/updated` step (`v2/TurnPlanStep.ts`).
+/// The plan an `update_plan` call sets, as a rollout records its
+/// arguments: `{explanation?, plan: [{step, status}]}` with a snake_case
+/// status (`UpdatePlanArgs`, `protocol/src/plan_tool.rs` at
+/// `rust-v0.167.0`). Live, Codex reports the same plan as
+/// `turn/plan/updated`, never as a call; the importer reads it through this.
+pub fn rollout_plan(arguments: &Value) -> Option<(Option<String>, Vec<PlanStep>)> {
+    let steps = arguments
+        .get("plan")?
+        .as_array()?
+        .iter()
+        .filter_map(|step| {
+            let status = match step.get("status")?.as_str()? {
+                "pending" => PlanStepStatus::Pending,
+                "in_progress" => PlanStepStatus::InProgress,
+                "completed" => PlanStepStatus::Completed,
+                _ => return None,
+            };
+            Some(PlanStep {
+                step: step.get("step")?.as_str()?.to_owned(),
+                status,
+            })
+        })
+        .collect();
+    let explanation = arguments
+        .get("explanation")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Some((explanation, steps))
+}
+
 fn map_plan_step(step: &Value) -> Option<PlanStep> {
     let status = match step.get("status")?.as_str()? {
         "pending" => PlanStepStatus::Pending,
