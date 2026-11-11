@@ -1228,8 +1228,29 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             model,
             profile_id,
         } => {
-            app.set_active_model(&session_id, provider, model, profile_id, cx);
-            app.release_policy_holds(&session_id, cx);
+            // Whether the switch hands the conversation over is read from the
+            // thread's timeline, which a thread just opened may still be
+            // folding from its log: the switch waits for that.
+            let target = session_id.clone();
+            let switch = move |app: &mut AppState, cx: &mut HostCx| {
+                app.set_active_model(&session_id, provider, model, profile_id, cx);
+                app.release_policy_holds(&session_id, cx);
+                Ok(CommandResponse::Unit)
+            };
+            let Some(settled) = app.timeline_settled(&target) else {
+                return CommandOutcome::Immediate(switch(app, cx));
+            };
+            let host_cx = cx.clone();
+            return CommandOutcome::Pending(cx.spawn_background(async move {
+                let _ = settled.recv().await;
+                host_cx
+                    .enqueue_and_wait(switch)
+                    .await
+                    .map_err(|()| ProtocolError {
+                        code: "host_stopped".into(),
+                        message: "The host stopped before the model could change.".into(),
+                    })?
+            }));
         }
         Command::SetActiveOption {
             session_id,
