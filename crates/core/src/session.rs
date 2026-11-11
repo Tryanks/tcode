@@ -2120,6 +2120,7 @@ impl Timeline {
             }
             DeltaKind::CommandOutput => EntryContent::Item(ItemContent::CommandExecution {
                 command: String::new(),
+                input: Vec::new(),
                 output: text.into(),
                 exit_code: None,
                 status: ItemStatus::InProgress,
@@ -2186,12 +2187,14 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
             }),
             EntryContent::Item(ItemContent::CommandExecution {
                 command,
+                input,
                 output,
                 exit_code,
                 status,
             }),
         ) => EntryContent::Item(ItemContent::CommandExecution {
             command,
+            input,
             output: merge_text(old_output, output),
             exit_code,
             status,
@@ -2291,6 +2294,7 @@ mod tests {
         };
         let command = |status, output: &str| ItemContent::CommandExecution {
             command: "cargo   test\n  --locked".into(),
+            input: Vec::new(),
             output: output.into(),
             exit_code: None,
             status,
@@ -3350,6 +3354,7 @@ mod tests {
                         DeltaKind::ReasoningText => ItemContent::Reasoning { text: text.into() },
                         DeltaKind::CommandOutput => ItemContent::CommandExecution {
                             command: "echo hi".into(),
+                            input: Vec::new(),
                             output: text.into(),
                             exit_code: Some(0),
                             status: ItemStatus::Completed,
@@ -3384,6 +3389,7 @@ mod tests {
                     ) => text,
                     EntryContent::Item(ItemContent::CommandExecution {
                         command,
+                        input: _,
                         output,
                         exit_code,
                         status,
@@ -3746,6 +3752,7 @@ mod tests {
             parent_item_id: None,
             content: ItemContent::CommandExecution {
                 command: "ls".into(),
+                input: Vec::new(),
                 output: String::new(),
                 exit_code: None,
                 status,

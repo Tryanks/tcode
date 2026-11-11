@@ -849,6 +849,7 @@ fn background_work_open_at_a_fork_point_ends_as_interrupted_in_the_fork() {
                     parent_item_id: None,
                     content: ItemContent::CommandExecution {
                         command: "serve".into(),
+                        input: Vec::new(),
                         output: "listening".into(),
                         exit_code: None,
                         status: ItemStatus::InProgress,

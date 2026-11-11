@@ -783,6 +783,7 @@ mod tests {
             parent_item_id: None,
             content: ItemContent::CommandExecution {
                 command: command.into(),
+                input: Vec::new(),
                 output: String::new(),
                 exit_code: (status == ItemStatus::Completed).then_some(0),
                 status,
@@ -959,6 +960,7 @@ mod tests {
                 parent_item_id: None,
                 content: ItemContent::CommandExecution {
                     command: "cargo build --release".into(),
+                    input: Vec::new(),
                     output: String::new(),
                     exit_code: None,
                     status: ItemStatus::InProgress,

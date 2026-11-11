@@ -78,6 +78,7 @@ fn only_a_new_item_publishes_a_threads_latest_activity() {
             id,
             ItemContent::CommandExecution {
                 command: "cargo test".into(),
+                input: Vec::new(),
                 output: String::new(),
                 exit_code: None,
                 status: ItemStatus::InProgress,
@@ -220,6 +221,7 @@ fn a_native_subagents_activity_is_published_on_its_mirror() {
             parent_item_id: Some("spawn".into()),
             content: ItemContent::CommandExecution {
                 command: "ls".into(),
+                input: Vec::new(),
                 output: String::new(),
                 exit_code: None,
                 status: ItemStatus::InProgress,
@@ -2276,6 +2278,7 @@ fn title_regeneration_context_keeps_the_original_goal_and_recent_messages() {
             "command",
             ItemContent::CommandExecution {
                 command: "cargo test".into(),
+                input: Vec::new(),
                 output: "tool output".into(),
                 exit_code: Some(0),
                 status: ItemStatus::Completed,
@@ -7204,6 +7207,7 @@ fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
                 "toolu-sleep",
                 ItemContent::CommandExecution {
                     command: "sleep 300".into(),
+                    input: Vec::new(),
                     output: String::new(),
                     exit_code: None,
                     status: ItemStatus::InProgress,
@@ -7228,6 +7232,7 @@ fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
                 parent_item_id: Some("toolu-review".into()),
                 content: ItemContent::CommandExecution {
                     command: "cat migration.sql".into(),
+                    input: Vec::new(),
                     output: String::new(),
                     exit_code: None,
                     status: ItemStatus::InProgress,
@@ -7651,6 +7656,7 @@ fn background_work_no_process_can_finish_ends_as_interrupted_on_load() {
                 parent_item_id: None,
                 content: ItemContent::CommandExecution {
                     command: "serve".into(),
+                    input: Vec::new(),
                     output: String::new(),
                     exit_code: None,
                     status: ItemStatus::InProgress,
@@ -10720,6 +10726,7 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
                 parent_item_id: None,
                 content: ItemContent::CommandExecution {
                     command: "make".into(),
+                    input: Vec::new(),
                     output: command_output.clone(),
                     exit_code: Some(0),
                     status: ItemStatus::Completed,
@@ -11271,6 +11278,7 @@ fn a_completion_drops_the_deltas_it_repeats_in_the_same_commit() {
     };
     let command = |output: &str| ItemContent::CommandExecution {
         command: "ls".into(),
+        input: Vec::new(),
         output: output.into(),
         exit_code: Some(0),
         status: agent::ItemStatus::Completed,
@@ -14078,6 +14086,7 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
             parent_item_id: None,
             content: ItemContent::CommandExecution {
                 command: "make".into(),
+                input: Vec::new(),
                 output: String::new(),
                 exit_code: None,
                 status: ItemStatus::InProgress,

@@ -1485,6 +1485,7 @@ pub(crate) mod tests {
             id,
             EntryContent::Item(ItemContent::CommandExecution {
                 command: id.to_string(),
+                input: Vec::new(),
                 output: String::new(),
                 exit_code: Some(0),
                 status: agent::ItemStatus::Completed,
@@ -1497,6 +1498,7 @@ pub(crate) mod tests {
             id,
             EntryContent::Item(ItemContent::CommandExecution {
                 command: format!("run {id}"),
+                input: Vec::new(),
                 output: format!("output of {id}\n"),
                 exit_code: Some(0),
                 status: ItemStatus::Completed,

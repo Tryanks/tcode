@@ -826,6 +826,9 @@ struct Actor {
     background_terminals: Vec<crate::BackgroundTask>,
     /// The commands whose background terminals the user stopped.
     stopped_commands: HashSet<String>,
+    /// What was written to each running command's stdin since its last
+    /// finished line ([`typed_lines`]).
+    terminal_input: HashMap<String, String>,
     /// When to read the list again, while any terminal runs.
     background_terminal_read: Option<std::time::Instant>,
     /// Stable parent capsule for each provider-native child thread. Codex 0.150
@@ -937,6 +940,7 @@ async fn run_actor(
         backgrounded_subagents: HashSet::new(),
         background_terminals: Vec::new(),
         stopped_commands: HashSet::new(),
+        terminal_input: HashMap::new(),
         background_terminal_read: None,
         subagent_parent_by_thread: HashMap::new(),
         seen_subagent_activities: HashSet::new(),
@@ -2979,6 +2983,16 @@ impl Actor {
                             *exit_code = None;
                         }
                     }
+                    // Codex's item never carries what was typed into it.
+                    if let ItemContent::CommandExecution { input, .. } = &mut item.content
+                        && let Some(ItemContent::CommandExecution { input: typed, .. }) =
+                            self.items.get(&item.id).map(|known| &known.content)
+                    {
+                        input.clone_from(typed);
+                    }
+                    if method == "item/completed" {
+                        self.terminal_input.remove(&item.id);
+                    }
                     if let Some(subagent) = self.subagents.get(&item.id) {
                         let status = if method == "item/completed" {
                             item_status(&item.content)
@@ -3042,6 +3056,9 @@ impl Actor {
             }
             "item/commandExecution/outputDelta" | "command/exec/outputDelta" => {
                 self.emit_delta(params, DeltaKind::CommandOutput).await
+            }
+            "item/commandExecution/terminalInteraction" => {
+                self.on_terminal_interaction(params).await
             }
             "thread/tokenUsage/updated" => {
                 if let Some(usage) = map_usage(params.get("tokenUsage").unwrap_or(&Value::Null)) {
@@ -3384,6 +3401,35 @@ impl Actor {
             return;
         };
         self.events.emit(event).await;
+    }
+
+    /// `item/commandExecution/terminalInteraction`: what was written to a
+    /// running command's stdin. Each line it finishes joins the command's
+    /// `input`.
+    async fn on_terminal_interaction(&mut self, params: &Value) {
+        let (Some(item_id), Some(stdin)) = (
+            params.get("itemId").and_then(Value::as_str),
+            params.get("stdin").and_then(Value::as_str),
+        ) else {
+            return;
+        };
+        let buffer = self.terminal_input.entry(item_id.to_owned()).or_default();
+        let lines = typed_lines(buffer, stdin);
+        if buffer.is_empty() {
+            self.terminal_input.remove(item_id);
+        }
+        if lines.is_empty() {
+            return;
+        }
+        let Some(item) = self.items.get_mut(item_id) else {
+            return;
+        };
+        let ItemContent::CommandExecution { input, .. } = &mut item.content else {
+            return;
+        };
+        input.extend(lines);
+        let item = item.clone();
+        self.events.emit(AgentEvent::ItemUpdated(item)).await;
     }
 
     async fn emit_delta(&self, params: &Value, kind: DeltaKind) {
@@ -4144,6 +4190,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
         }
         "commandExecution" => ItemContent::CommandExecution {
             command: shell_script(&string_field(item, "command")),
+            input: Vec::new(),
             output: string_field(item, "aggregatedOutput"),
             exit_code: item
                 .get("exitCode")
@@ -4394,6 +4441,32 @@ pub fn question_family(name: &str, input: &Value, output: Option<&str>) -> Optio
     Some(ToolFamily::Question { questions })
 }
 
+/// The lines `stdin` finishes, written after what `pending` holds of an
+/// unfinished one, which it then holds of the next, as ChatGPT.app lists
+/// what was typed into a command (`applyTerminalInteraction`, 26.1103): a
+/// return or newline ends a line, blank lines are dropped, ^C drops the
+/// line so far, and a backspace or delete takes back its last character.
+pub fn typed_lines(pending: &mut String, stdin: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for character in stdin.chars() {
+        match character {
+            '\r' | '\n' => {
+                let line = pending.trim();
+                if !line.is_empty() {
+                    lines.push(line.to_owned());
+                }
+                pending.clear();
+            }
+            '\u{3}' => pending.clear(),
+            '\u{8}' | '\u{7f}' => {
+                pending.pop();
+            }
+            other => pending.push(other),
+        }
+    }
+    lines
+}
+
 /// A command as a rollout records Codex's own `CommandExecution` turn item
 /// (`CommandExecutionItem`, `protocol/src/items.rs` at `rust-v0.167.0`: the
 /// argv as `command`, `aggregated_output`, `exit_code`, a snake_case
@@ -4409,6 +4482,7 @@ pub fn rollout_command(item: &Value) -> ItemContent {
         .collect();
     ItemContent::CommandExecution {
         command: shell_script(&shell_words::join(argv)),
+        input: Vec::new(),
         output: string_field(item, "aggregated_output"),
         exit_code: item
             .get("exit_code")
@@ -5430,6 +5504,7 @@ mod tests {
                 backgrounded_subagents: HashSet::new(),
                 background_terminals: Vec::new(),
                 stopped_commands: HashSet::new(),
+                terminal_input: HashMap::new(),
                 background_terminal_read: None,
                 subagent_parent_by_thread: HashMap::new(),
                 seen_subagent_activities: HashSet::new(),
@@ -6389,6 +6464,59 @@ mod tests {
                 .handle_line(&json!({"id": request["id"], "result": result}).to_string())
                 .await;
             assert_eq!(answer.try_recv().unwrap().unwrap(), result);
+        });
+    }
+
+    /// What is written to a running command's stdin is part of the command:
+    /// each line it finishes, as ChatGPT.app lists them (a backspace takes
+    /// back a character, ^C drops the line so far), and the item Codex
+    /// completes keeps them. Shapes from the 0.167.0 schema
+    /// (`v2/TerminalInteractionNotification.ts`, `v2/ThreadItem.ts`).
+    #[test]
+    fn the_lines_typed_into_a_command_are_part_of_it() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            let item = |status: &str| {
+                json!({"threadId":"thread-1","turnId":"T1","item":{
+                    "type":"commandExecution","id":"call_repl","command":"python3 -i",
+                    "cwd":"/work/example","processId":"7","status":status,
+                    "commandActions":[],"aggregatedOutput":null,"exitCode":null,"durationMs":null
+                }})
+            };
+            actor
+                .handle_notification("item/started", &item("inProgress"))
+                .await;
+            while events.try_recv().is_ok() {}
+            for stdin in [
+                "print(1)\n",
+                "prx\u{7f}int(2",
+                ")\nimport os\u{3}",
+                "\nexit()\n",
+            ] {
+                actor
+                    .handle_notification(
+                        "item/commandExecution/terminalInteraction",
+                        &json!({"threadId":"thread-1","turnId":"T1","itemId":"call_repl",
+                            "processId":"7","stdin":stdin}),
+                    )
+                    .await;
+            }
+            actor
+                .handle_notification("item/completed", &item("completed"))
+                .await;
+            let mut last = None;
+            while let Ok(event) = events.try_recv() {
+                last = Some(event);
+            }
+            let Some(AgentEvent::ItemCompleted(item)) = last else {
+                panic!("expected the completed command: {last:?}");
+            };
+            let ItemContent::CommandExecution { input, .. } = item.content else {
+                panic!("expected a command: {:?}", item.content);
+            };
+            assert_eq!(input, ["print(1)", "print(2)", "exit()"]);
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
         });
     }
 

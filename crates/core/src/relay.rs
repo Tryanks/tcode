@@ -234,6 +234,7 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
             EntryContent::Feedback { .. } | EntryContent::Item(ItemContent::Plan { .. }) => {}
             EntryContent::Item(ItemContent::CommandExecution {
                 command,
+                input: _,
                 output,
                 exit_code,
                 status,

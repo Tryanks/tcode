@@ -584,6 +584,7 @@ mod tests {
                 parent_item_id: None,
                 content: ItemContent::CommandExecution {
                     command: "grep -q missing notes.txt".into(),
+                    input: Vec::new(),
                     output: String::new(),
                     exit_code,
                     status,

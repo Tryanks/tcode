@@ -259,6 +259,7 @@ fn kind_activity(entry: &TimelineEntry, live_reasoning: bool, cwd: &Path) -> Act
     match item {
         ItemContent::CommandExecution {
             command,
+            input: _,
             output,
             exit_code,
             status,

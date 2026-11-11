@@ -15979,6 +15979,7 @@ pub(crate) mod tests {
                     "cmd",
                     agent::ItemContent::CommandExecution {
                         command: "cargo build".into(),
+                        input: Vec::new(),
                         output: "line 0\nline 1\n".into(),
                         exit_code: None,
                         status: agent::ItemStatus::InProgress,

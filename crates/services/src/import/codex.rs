@@ -267,6 +267,8 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
     // Codex gave them, and the `write_stdin` calls to them.
     let mut sessions = HashMap::<u64, usize>::new();
     let mut stdin = HashMap::<String, usize>::new();
+    // What was written to each command's stdin since its last finished line.
+    let mut typing = HashMap::<usize, String>::new();
     let mut next_id = 0_u64;
 
     for line in inherited
@@ -368,6 +370,18 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                 .and_then(Value::as_u64)
                                 .and_then(|session| sessions.get(&session))
                         {
+                            let chars = input.get("chars").and_then(Value::as_str);
+                            let lines = agent::codex::typed_lines(
+                                typing.entry(command).or_default(),
+                                chars.unwrap_or_default(),
+                            );
+                            if let Some(ConvertedEntry::Item { item, .. }) =
+                                entries.get_mut(command)
+                                && let ItemContent::CommandExecution { input, .. } =
+                                    &mut item.content
+                            {
+                                input.extend(lines);
+                            }
                             stdin.insert(call_id, command);
                             continue;
                         }
@@ -385,6 +399,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             Some(command) if name == EXEC_COMMAND => {
                                 ItemContent::CommandExecution {
                                     command: command.to_owned(),
+                                    input: Vec::new(),
                                     output: String::new(),
                                     exit_code: None,
                                     status: ItemStatus::InProgress,
@@ -658,6 +673,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             &mut next_id,
                             ItemContent::CommandExecution {
                                 command,
+                                input: Vec::new(),
                                 output: String::new(),
                                 exit_code: None,
                                 status: ItemStatus::Completed,
@@ -714,6 +730,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                         roll_back(&mut entries, &mut pending, turns);
                         sessions.retain(|_, command| *command < entries.len());
                         stdin.retain(|_, command| *command < entries.len());
+                        typing.retain(|command, _| *command < entries.len());
                     }
                 }
                 _ => {}

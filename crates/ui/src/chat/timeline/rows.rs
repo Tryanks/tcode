@@ -455,11 +455,13 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
         }
         EntryContent::Item(ItemContent::CommandExecution {
             command,
+            input,
             output,
             exit_code,
             status,
         }) => {
             command.len().hash(hash);
+            input.len().hash(hash);
             output.len().hash(hash);
             exit_code.hash(hash);
             std::mem::discriminant(status).hash(hash);

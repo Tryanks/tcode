@@ -3293,6 +3293,7 @@ tools:
   input: "入力"
   output: "出力"
   error: "エラー"
+  typed_input: "入力した内容："
   no_output: "出力なし"
   more_lines: "+%{count} 行"
   show_less: "折りたたむ"

@@ -352,6 +352,8 @@ pub use wire::{
 // login shell's environment at start.
 // ProvidersStatus gains model_problems, what of a provider's model catalog
 // could not be read and was left out.
+// The agent event stream's command_execution gains input, the lines written to
+// the command's stdin in order; rows without it read as none.
 // The agent event stream gains unreadable_record {line}: a row of a thread's
 // log the host cannot read is sent as it is stored instead of left out, and so
 // is a subagent's item (with parent_item_id) a build before v0.1.42 wrote

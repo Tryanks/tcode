@@ -1959,6 +1959,7 @@ impl TimelineView {
         match item {
             ItemContent::CommandExecution {
                 command,
+                input,
                 output,
                 status,
                 ..
@@ -1966,6 +1967,7 @@ impl TimelineView {
                 tools::shell::ShellRun {
                     entry,
                     command,
+                    input,
                     output,
                     running: *status == agent::ItemStatus::InProgress,
                 },
@@ -2275,6 +2277,7 @@ mod tests {
                 parent_item_id: None,
                 content: ItemContent::CommandExecution {
                     command: "make".into(),
+                    input: Vec::new(),
                     output: String::new(),
                     exit_code: None,
                     status: ItemStatus::InProgress,

@@ -1685,6 +1685,7 @@ fn tool_item(id: &str, tool: &PiTool, status: ItemStatus) -> ThreadItem {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_owned(),
+            input: Vec::new(),
             output: output.text.clone(),
             exit_code: result
                 .and_then(|result| result.pointer("/structuredContent/exit_code"))
@@ -2589,6 +2590,7 @@ mod tests {
             [
                 ItemContent::CommandExecution {
                     command: "echo hi; exit 3".into(),
+                    input: Vec::new(),
                     output: "hi\n\n\nCommand exited with code 3".into(),
                     exit_code: Some(3),
                     status: ItemStatus::Failed,

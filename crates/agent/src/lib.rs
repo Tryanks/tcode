@@ -3090,6 +3090,9 @@ pub enum ItemContent {
     },
     CommandExecution {
         command: String,
+        /// The lines written to the command's stdin while it ran, in order.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        input: Vec<String>,
         output: String,
         exit_code: Option<i32>,
         status: ItemStatus,

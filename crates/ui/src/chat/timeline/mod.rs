@@ -2579,6 +2579,7 @@ mod tests {
                 parent_item_id: None,
                 content: agent::ItemContent::CommandExecution {
                     command: format!("cargo test {id}"),
+                    input: Vec::new(),
                     output: "ok\n".into(),
                     exit_code: Some(0),
                     status: ItemStatus::Completed,

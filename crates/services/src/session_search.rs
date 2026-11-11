@@ -559,6 +559,7 @@ mod tests {
                 "command",
                 ItemContent::CommandExecution {
                     command: "rg auth.rs crates".into(),
+                    input: Vec::new(),
                     output: "DO_NOT_INDEX output".into(),
                     exit_code: Some(0),
                     status: ItemStatus::Completed,
@@ -777,6 +778,7 @@ mod tests {
                 "c0",
                 ItemContent::CommandExecution {
                     command: "rg auth.rs".into(),
+                    input: Vec::new(),
                     output: "auth.rs:1".into(),
                     exit_code: Some(0),
                     status: ItemStatus::Completed,

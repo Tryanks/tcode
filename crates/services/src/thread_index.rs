@@ -411,6 +411,7 @@ impl Activity {
             EntryContent::Item(item) => match item {
                 ItemContent::CommandExecution {
                     command,
+                    input: _,
                     output,
                     exit_code,
                     status,
@@ -1193,6 +1194,7 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
             ItemContent::Reasoning { text } => ("reasoning", text.clone()),
             ItemContent::CommandExecution {
                 command,
+                input,
                 output,
                 exit_code,
                 status,
@@ -1200,9 +1202,10 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
                 let exit = exit_code
                     .map(|code| format!("exit {code}"))
                     .unwrap_or_else(|| format!("{status:?}").to_lowercase());
+                let typed: String = input.iter().map(|line| format!("> {line}\n")).collect();
                 (
                     "command_execution",
-                    format!("$ {command}\n[{exit}]\n{output}"),
+                    format!("$ {command}\n{typed}[{exit}]\n{output}"),
                 )
             }
             ItemContent::FileChange {

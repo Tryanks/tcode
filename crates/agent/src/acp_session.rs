@@ -2168,6 +2168,7 @@ impl State {
         let content = match tool.kind {
             acp::ToolKind::Execute => ItemContent::CommandExecution {
                 command: command_of(tool),
+                input: Vec::new(),
                 output: self.tool_output(tool),
                 exit_code: self.exit_code_of(tool),
                 status,
@@ -3224,6 +3225,7 @@ mod tests {
             AgentEvent::ItemCompleted(item) => match &item.content {
                 ItemContent::CommandExecution {
                     command,
+                    input: _,
                     output,
                     exit_code,
                     status,

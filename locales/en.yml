@@ -3293,6 +3293,7 @@ tools:
   input: "Input"
   output: "Output"
   error: "Error"
+  typed_input: "Typed into it:"
   no_output: "No output"
   more_lines: "+%{count} lines"
   show_less: "Show less"

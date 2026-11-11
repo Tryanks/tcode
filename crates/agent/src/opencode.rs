@@ -2162,6 +2162,7 @@ impl Mapper {
         let content = match tool.name.as_str() {
             "shell" => ItemContent::CommandExecution {
                 command: input["command"].as_str().unwrap_or_default().to_owned(),
+                input: Vec::new(),
                 output: text
                     .or_else(|| (!tool.live_output.is_empty()).then(|| tool.live_output.clone()))
                     .or(error.filter(|_| status == ItemStatus::Failed))

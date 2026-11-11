@@ -1871,6 +1871,7 @@ mod tests {
                     parent_item_id: None,
                     content: agent::ItemContent::CommandExecution {
                         command: "echo red".into(),
+                        input: Vec::new(),
                         // Bold red, 25 characters: it fits one 40-column row and
                         // wraps onto a second at 20.
                         output: "\u{1b}[1;31mabcdefghijklmnopqrstuvwxy\u{1b}[0m\nplain\r\nend\n"
@@ -1890,6 +1891,7 @@ mod tests {
                     parent_item_id: None,
                     content: agent::ItemContent::CommandExecution {
                         command: "true".into(),
+                        input: Vec::new(),
                         output: String::new(),
                         exit_code: Some(0),
                         status: agent::ItemStatus::Completed,
@@ -1996,6 +1998,7 @@ mod tests {
             parent_item_id: None,
             content: agent::ItemContent::CommandExecution {
                 command: "build".into(),
+                input: Vec::new(),
                 output: String::new(),
                 exit_code: None,
                 status: agent::ItemStatus::InProgress,

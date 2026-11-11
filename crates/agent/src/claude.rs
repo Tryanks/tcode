@@ -1793,6 +1793,7 @@ impl ToolItem {
                 },
                 ItemContent::CommandExecution {
                     command,
+                    input: Vec::new(),
                     output: String::new(),
                     exit_code: None,
                     status: ItemStatus::InProgress,
@@ -1847,6 +1848,7 @@ impl ToolItem {
                 };
                 ItemContent::CommandExecution {
                     command,
+                    input: Vec::new(),
                     output,
                     exit_code,
                     status,
@@ -3094,6 +3096,7 @@ impl Mapper {
             parent_item_id: None,
             content: ItemContent::CommandExecution {
                 command,
+                input: Vec::new(),
                 output,
                 exit_code: (status == ItemStatus::Completed).then_some(0),
                 status,
@@ -3736,6 +3739,7 @@ impl Mapper {
                     );
                     ItemContent::CommandExecution {
                         command,
+                        input: Vec::new(),
                         output,
                         exit_code: None,
                         status: ItemStatus::InProgress,
@@ -6756,6 +6760,7 @@ mod tests {
             item.content,
             ItemContent::CommandExecution {
                 command: "Get-ChildItem build".into(),
+                input: Vec::new(),
                 output: "Get-ChildItem: Cannot find path 'build'.".into(),
                 exit_code: Some(2),
                 status: ItemStatus::Failed,

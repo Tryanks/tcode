@@ -95,6 +95,8 @@ pub(in crate::chat) fn ran(entry: &TimelineEntry) -> Option<Ran> {
 pub(in crate::chat) struct ShellRun<'a> {
     pub(in crate::chat) entry: &'a TimelineEntry,
     pub(in crate::chat) command: &'a str,
+    /// The lines written to its stdin, in order.
+    pub(in crate::chat) input: &'a [String],
     /// What the command printed, as its harness returned it.
     pub(in crate::chat) output: &'a str,
     pub(in crate::chat) running: bool,
@@ -102,12 +104,14 @@ pub(in crate::chat) struct ShellRun<'a> {
 
 /// Every shell window's body: the command line and what it printed, all of
 /// it, in the terminal grid, which scrolls through it inside the window's
-/// height and follows its end while it grows. The host lays its screen out
-/// from the whole output it holds, so there is nothing to load.
+/// height and follows its end while it grows, then the lines written to its
+/// stdin. The host lays its screen out from the whole output it holds, so
+/// there is nothing to load.
 pub(in crate::chat) fn shell_body(run: ShellRun<'_>, ctx: &mut ToolCtx<'_, '_>) -> AnyElement {
     let ShellRun {
         entry,
         command,
+        input,
         output,
         running,
     } = run;
@@ -161,6 +165,25 @@ pub(in crate::chat) fn shell_body(run: ShellRun<'_>, ctx: &mut ToolCtx<'_, '_>) 
                 div()
                     .text_secondary(false, cx)
                     .child(crate::tr!("tools.no_output").into_owned()),
+            )
+        })
+        .when(!input.is_empty(), |body| {
+            body.child(
+                v_flex()
+                    .debug_selector({
+                        let id = entry.id.clone();
+                        move || format!("tool-shell-input-{id}")
+                    })
+                    .child(
+                        div()
+                            .text_secondary(false, cx)
+                            .child(crate::tr!("tools.typed_input").into_owned()),
+                    )
+                    .children(
+                        input
+                            .iter()
+                            .map(|line| div().text_meta_mono(false, cx).child(format!("> {line}"))),
+                    ),
             )
         })
         .into_any_element()

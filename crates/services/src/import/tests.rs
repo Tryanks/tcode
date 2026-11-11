@@ -468,6 +468,7 @@ fn command(
 ) -> Option<ItemContent> {
     Some(ItemContent::CommandExecution {
         command: command.into(),
+        input: Vec::new(),
         output: output.into(),
         exit_code,
         status,
@@ -495,7 +496,8 @@ fn readme_revised(status: ItemStatus) -> Option<ItemContent> {
 /// `core/src/tools/context.rs`), an
 /// command still running when its call returned goes on through the
 /// `write_stdin` calls to its session (`Process running with session ID N`,
-/// `shell_spec.rs`), whose output is its own, until one sees it exit, an
+/// `shell_spec.rs`), whose output is its own and whose `chars` are the
+/// lines typed into it, until one sees it exit, an
 /// `update_plan` is the plan it sets (`UpdatePlanArgs`,
 /// `protocol/src/plan_tool.rs`), as live, a patch
 /// shows the changes Codex applied, a call Codex dropped, stopped or never
@@ -550,7 +552,13 @@ fn a_codex_rollout_imports_as_codex_recorded_it() {
                     tools: Some(vec!["calendar/list_events".into()]),
                 })),
             }),
-            command("python3 -i", ">>> 1\n>>> ", Some(0), ItemStatus::Completed),
+            Some(ItemContent::CommandExecution {
+                command: "python3 -i".into(),
+                input: vec!["print(1)".into(), "exit()".into()],
+                output: ">>> 1\n>>> ".into(),
+                exit_code: Some(0),
+                status: ItemStatus::Completed,
+            }),
             command(
                 "make lint",
                 "make: *** No rule to make target 'lint'.  Stop.\n",
@@ -700,6 +708,7 @@ fn a_claude_transcript_imports_as_claude_recorded_it() {
             }),
             Some(ItemContent::CommandExecution {
                 command: "make".into(),
+                input: Vec::new(),
                 output: "make: *** No targets.  Stop.".into(),
                 exit_code: Some(2),
                 status: ItemStatus::Failed,
@@ -731,6 +740,7 @@ fn a_claude_transcript_imports_as_claude_recorded_it() {
             }),
             Some(ItemContent::CommandExecution {
                 command: "make test".into(),
+                input: Vec::new(),
                 output: String::new(),
                 exit_code: None,
                 status: ItemStatus::Interrupted,

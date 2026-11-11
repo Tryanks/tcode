@@ -3286,6 +3286,7 @@ tools:
   input: "输入"
   output: "输出"
   error: "错误"
+  typed_input: "向它输入了："
   no_output: "无输出"
   more_lines: "+%{count} 行"
   show_less: "收起"
