@@ -34,18 +34,26 @@ pub fn list_workspace(cwd: &Path) -> Result<WorkspaceListing, String> {
     if crate::git::is_git_repo(cwd)? {
         let text = crate::git::run_git(
             cwd,
-            &["ls-files", "--cached", "--others", "--exclude-standard"],
+            &[
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ],
         )?;
         return Ok(entries_from_relpaths(&text));
     }
     list_from_walk(cwd)
 }
 
-/// Parse newline-separated relative file paths into file + derived-folder entries.
+/// Parse NUL-separated relative file paths (`-z`, which leaves a path with
+/// non-ASCII or special characters unquoted) into file + derived-folder
+/// entries.
 fn entries_from_relpaths(text: &str) -> WorkspaceListing {
     let mut files: Vec<PathEntry> = Vec::new();
     let mut dirs: BTreeSet<String> = BTreeSet::new();
-    let mut lines = text.lines().map(str::trim).filter(|rel| !rel.is_empty());
+    let mut lines = text.split('\0').filter(|rel| !rel.is_empty());
     let mut truncated = false;
     for rel in lines.by_ref() {
         if files.len() + dirs.len() >= MAX_ENTRIES {
