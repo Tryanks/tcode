@@ -1106,8 +1106,8 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             session_id,
             text,
             attachment_paths,
-            fire_at_unix_secs,
-        } => app.schedule_turn(&session_id, text, attachment_paths, fire_at_unix_secs, cx),
+            due,
+        } => app.schedule_turn(&session_id, text, attachment_paths, due, cx),
         Command::ConfirmRelayAndSend {
             session_id,
             text,
@@ -1715,7 +1715,7 @@ mod tests {
                 session_id: "gone".into(),
                 text: "hi".into(),
                 attachment_paths: Vec::new(),
-                fire_at_unix_secs: 1,
+                due: tcode_protocol::TurnDue::AtUnixSecs(1),
             },
             Command::Steer {
                 session_id: "gone".into(),

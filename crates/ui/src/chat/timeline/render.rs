@@ -360,7 +360,9 @@ impl TimelineView {
                                                         tcode_core::session::RESUME_PROMPT
                                                             .to_string(),
                                                         vec![],
-                                                        resets_at,
+                                                        tcode_protocol::TurnDue::AtUnixSecs(
+                                                            resets_at,
+                                                        ),
                                                     )
                                                 });
                                             },

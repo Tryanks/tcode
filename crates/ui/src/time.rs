@@ -7,6 +7,16 @@ pub(crate) fn executor_millis(executor: &BackgroundExecutor) -> u64 {
     u64::try_from(now.timestamp_millis()).unwrap_or(0)
 }
 
+/// Now, on the local time zone's wall clock, by the executor's clock.
+pub(crate) fn now_local(cx: &App) -> chrono::DateTime<chrono::Local> {
+    cx.background_executor()
+        .scheduler_executor()
+        .scheduler()
+        .clock()
+        .utc_now()
+        .with_timezone(&chrono::Local)
+}
+
 /// Now, in unix milliseconds, by the executor's clock.
 pub(crate) fn now_millis(cx: &App) -> u64 {
     executor_millis(cx.background_executor())

@@ -4791,7 +4791,7 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
             "scheduled-active",
             "scheduled".into(),
             Vec::new(),
-            fire_at,
+            tcode_protocol::TurnDue::AtUnixSecs(fire_at),
             cx,
         );
 
@@ -5102,7 +5102,7 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
             "mid-turn-relay",
             "check the logs".into(),
             Vec::new(),
-            cx.clock().unix_secs(),
+            tcode_protocol::TurnDue::AfterSecs(0),
             cx,
         );
 
@@ -12586,7 +12586,7 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
             session_id: "parent".into(),
             text: "human later".into(),
             attachment_paths: vec![],
-            fire_at_unix_secs: cx.now_secs() + 3600,
+            due: tcode_protocol::TurnDue::AfterSecs(3600),
         }),
     );
     let denied = through_pipe(

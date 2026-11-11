@@ -786,13 +786,13 @@ impl WorkspaceStore {
         session_id: String,
         text: String,
         attachment_paths: Vec<PathBuf>,
-        fire_at_unix_secs: u64,
+        due: tcode_protocol::TurnDue,
     ) {
         self.dispatch(Command::ScheduleTurn {
             session_id,
             text,
             attachment_paths,
-            fire_at_unix_secs,
+            due,
         });
     }
     pub fn confirm_relay_and_send_for(

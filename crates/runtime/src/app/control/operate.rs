@@ -505,7 +505,7 @@ impl AppState {
                 session_id: target.to_owned(),
                 text: text.clone(),
                 attachment_paths: Vec::new(),
-                fire_at_unix_secs: *at,
+                due: tcode_protocol::TurnDue::AtUnixSecs(*at),
             },
             SendMode::Queue | SendMode::Steer => Command::SendTurn {
                 session_id: target.to_owned(),

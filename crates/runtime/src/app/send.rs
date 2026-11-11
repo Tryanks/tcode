@@ -1,5 +1,6 @@
 use super::active_session::{QueuedMessageKind, native_skill_invocation};
 use super::*;
+use tcode_protocol::TurnDue;
 
 impl AppState {
     /// Submit a user turn. Starts the provider lazily if needed.
@@ -27,10 +28,13 @@ impl AppState {
         target_id: &str,
         text: String,
         attachment_paths: Vec<PathBuf>,
-        fire_at_unix_secs: u64,
+        due: TurnDue,
         cx: &mut HostCx,
     ) {
-        let not_before = UNIX_EPOCH + Duration::from_secs(fire_at_unix_secs);
+        let not_before = match due {
+            TurnDue::AfterSecs(secs) => cx.clock().wall() + Duration::from_secs(secs),
+            TurnDue::AtUnixSecs(secs) => UNIX_EPOCH + Duration::from_secs(secs),
+        };
         let Some((text, attachments)) =
             self.assemble_user_message(target_id, text, attachment_paths, cx)
         else {

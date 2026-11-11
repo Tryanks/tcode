@@ -35,7 +35,7 @@ mod wire;
 
 pub use command::{
     ChildSettlement, Command, CommandResponse, ForkAt, SettingsPatch, SettleChildrenResult,
-    TerminalSelection, ThreadExportFormat,
+    TerminalSelection, ThreadExportFormat, TurnDue,
 };
 pub use event::{
     AccountDiskUsage, AcpMarketplaceItem, AgentStatus, ArchivedSessions, BackgroundActivity,
@@ -389,6 +389,9 @@ pub use wire::{
 // where it was an empty list.
 // ProvidersStatus gains acp_registry_loaded and loses acp_registry_loading.
 // Command gains stop_plugin_listing; PluginStaleReason gains stopped.
+// ScheduleTurn carries due, a TurnDue (after_secs from when the host takes it
+// in, or at_unix_secs), instead of fire_at_unix_secs computed by the client's
+// clock.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

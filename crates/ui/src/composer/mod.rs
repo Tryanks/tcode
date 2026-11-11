@@ -44,7 +44,6 @@ use agent::{
     ApprovalDecision, ApprovalKind, ApprovalOptionKind, ApprovalRequest, ModelSpec,
     OptionDescriptor, ProviderCommandKind, ProviderKind, TokenUsage, UserInputQuestion,
 };
-use chrono::Local;
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, ClipboardEntry, Context, Entity, EventEmitter,
     ExternalPaths, Focusable as _, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -810,9 +809,9 @@ impl Composer {
             return;
         }
         if terminal_contexts.is_empty()
-            && let Some(later) = parse_later(&text, Local::now())
+            && let Some(later) = parse_later(&text, crate::time::now_local(cx))
         {
-            let (fire_at_unix_secs, message) = match later {
+            let (delay_secs, message) = match later {
                 Ok(later) => later,
                 Err(error) => {
                     let text = match error {
@@ -842,7 +841,7 @@ impl Composer {
                     self.session_id.clone().unwrap_or_default(),
                     message,
                     attachment_paths,
-                    fire_at_unix_secs,
+                    tcode_protocol::TurnDue::AfterSecs(delay_secs),
                 );
             });
             cx.notify();

@@ -73,9 +73,10 @@ pub(super) enum LaterError {
     },
 }
 
-/// Parse a scheduled-message command against an injectable local clock. A
-/// non-command returns `None`, keeping provider commands and lookalikes on the
-/// ordinary submit path; recognized but malformed commands return an error.
+/// Parse a scheduled-message command into the seconds from `now` until it is
+/// due and the message. A non-command returns `None`, keeping provider
+/// commands and lookalikes on the ordinary submit path; recognized but
+/// malformed commands return an error.
 pub(super) fn parse_later(
     text: &str,
     now: DateTime<Local>,
@@ -96,16 +97,16 @@ pub(super) fn parse_later(
         return Some(Err(LaterError::MissingMessage));
     }
 
-    let fire_at = if let Some((hour, minute)) = parse_wall_clock(time_spec) {
-        next_wall_clock(now, hour, minute)
+    let delay = if let Some((hour, minute)) = parse_wall_clock(time_spec) {
+        next_wall_clock(now, hour, minute).map(|at| at - now)
     } else {
         parse_relative(time_spec)
-            .and_then(|duration| now.checked_add_signed(duration))
+            .filter(|duration| now.checked_add_signed(*duration).is_some())
             .ok_or(LaterError::InvalidTime)
     };
-    Some(fire_at.and_then(|fire_at| {
-        u64::try_from(fire_at.timestamp())
-            .map(|timestamp| (timestamp, message.to_string()))
+    Some(delay.and_then(|delay| {
+        u64::try_from(delay.num_seconds())
+            .map(|secs| (secs, message.to_string()))
             .map_err(|_| LaterError::InvalidTime)
     }))
 }
@@ -497,11 +498,8 @@ mod tests {
     }
 
     fn parsed_later(text: &str, now: DateTime<Local>) -> (DateTime<Local>, String) {
-        let (timestamp, message) = parse_later(text, now).unwrap().unwrap();
-        (
-            Local.timestamp_opt(timestamp as i64, 0).single().unwrap(),
-            message,
-        )
+        let (delay, message) = parse_later(text, now).unwrap().unwrap();
+        (now + chrono::Duration::seconds(delay as i64), message)
     }
 
     #[test]
