@@ -24,7 +24,7 @@ use crate::{
     OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
     ResumeCursor, RewindMode, SearchHit, SearchScope, SelectOption, SessionCommand, SessionHandle,
     SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput, UserInputDelivery,
-    UserInputOption, UserInputQuestion,
+    UserInputOption, UserInputQuestion, WebLink,
 };
 
 /// The directory OpenCode launched with `launch_env` keeps its sessions,
@@ -2465,6 +2465,33 @@ fn tool_family(
                 .collect();
             (Some(ToolFamily::Question { questions }), output)
         }
+        "webfetch" => match field("url") {
+            Some(url) => (Some(ToolFamily::Fetch { url, prompt: None }), output),
+            None => (None, output),
+        },
+        // `websearch.ts`: each page as `## [title](url)`, then when it was
+        // published and what it says.
+        "websearch" => match field("query") {
+            Some(query) => (
+                Some(ToolFamily::WebSearch {
+                    query,
+                    links: output.as_deref().map(|text| {
+                        text.lines()
+                            .filter_map(|line| {
+                                let link = line.strip_prefix("## [")?.strip_suffix(')')?;
+                                let (title, url) = link.rsplit_once("](")?;
+                                Some(WebLink {
+                                    title: title.to_owned(),
+                                    url: url.to_owned(),
+                                })
+                            })
+                            .collect()
+                    }),
+                }),
+                output,
+            ),
+            None => (None, output),
+        },
         // `glob.ts`: the absolute path of each file it found.
         "glob" => (
             Some(ToolFamily::Search {
@@ -3279,6 +3306,35 @@ mod tests {
                     ],
                     answers: vec!["Red, green".into(), "Blue".into()],
                 }],
+            })
+        );
+    }
+
+    /// websearch heads each page `## [title](url)` (v2.2.7's `websearch.ts`;
+    /// content invented).
+    #[test]
+    fn a_web_search_is_the_pages_it_found() {
+        let text = "## [CORS](https://example.com/cors)\nPublished: 2026-01-02T00:00:00.000Z\n\nA page about it.\n\n## [Preflight [MDN]](https://example.org/preflight)";
+        let (family, _) = tool_family(
+            "websearch",
+            &json!({"query": "cors preflight"}),
+            Some(text.into()),
+            Some(&json!({"provider": "exa"})),
+        );
+        assert_eq!(
+            family,
+            Some(ToolFamily::WebSearch {
+                query: "cors preflight".into(),
+                links: Some(vec![
+                    WebLink {
+                        title: "CORS".into(),
+                        url: "https://example.com/cors".into(),
+                    },
+                    WebLink {
+                        title: "Preflight [MDN]".into(),
+                        url: "https://example.org/preflight".into(),
+                    },
+                ]),
             })
         );
     }

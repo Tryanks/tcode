@@ -715,6 +715,7 @@ impl LatestActivity {
                 ..
             } => match family.as_deref() {
                 Some(ToolFamily::Read { path, .. }) => Self::Read { path: clip(path) },
+                Some(ToolFamily::WebSearch { query, .. }) => Self::WebSearch { query: clip(query) },
                 _ => Self::Tool {
                     name: clip(name),
                     target: identifying_argument(input).map(|target| clip(&target)),

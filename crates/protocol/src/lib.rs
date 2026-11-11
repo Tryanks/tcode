@@ -358,7 +358,8 @@ pub use wire::{
 // The tool_call item gains family, what its adapter read the call to be:
 // read {path, first_line, note}, whose output is the lines read; search
 // {scope, pattern, path, glob, hits}, each hit {path, line, text}; question
-// {questions}, each {question, options, answers}.
+// {questions}, each {question, options, answers}; fetch {url, prompt};
+// web_search {query, links}, each link {title, url}.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

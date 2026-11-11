@@ -625,8 +625,8 @@ fn a_search_reads_as_its_pattern_and_opens_on_what_it_found(cx: &mut TestAppCont
 
 /// A fetch reads as its URL and opens on the prompt it was asked with and
 /// what came back; a web search as its query and the links it found, each
-/// opening its page, with the text around them; a search item with no
-/// query says only that it searched.
+/// opening its page, with the harness's whole answer a click away; a
+/// search item with no query says only that it searched.
 #[gpui::test]
 fn a_web_call_reads_as_its_url_or_query(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
@@ -677,6 +677,7 @@ fn a_web_call_reads_as_its_url_or_query(cx: &mut TestAppContext) {
     for index in 0..9 {
         assert!(shows(cx, &format!("tool-link-{search}-{index}")), "{index}");
     }
+    click(cx, &format!("tool-raw-{search}-toggle"));
     assert!(shows(cx, &format!("tool-text-{search}-output")));
     thread.shutdown(cx);
 }

@@ -46,7 +46,7 @@ use crate::{
     OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
     ResumeCursor, RewindMode, SearchHit, SearchScope, SessionCommand, SessionHandle,
     SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput, TurnStatus, UserInputDelivery,
-    UserInputOption, UserInputQuestion, WorktreeAnswer, WorktreeRequest, selection_bool,
+    UserInputOption, UserInputQuestion, WebLink, WorktreeAnswer, WorktreeRequest, selection_bool,
     selection_str,
 };
 
@@ -4512,6 +4512,45 @@ fn tool_family(
             glob: None,
             hits: structured.and_then(filenames),
         },
+        "WebFetch" => {
+            let Some(url) = text("url") else {
+                return (None, output);
+            };
+            ToolFamily::Fetch {
+                url: url.to_owned(),
+                prompt: text("prompt").map(str::to_owned),
+            }
+        }
+        // `WebSearchOutput.results`: the model's own words, or a search's
+        // `{tool_use_id, content: [{title, url}]}`.
+        "WebSearch" => {
+            let Some(query) = text("query") else {
+                return (None, output);
+            };
+            ToolFamily::WebSearch {
+                query: query.to_owned(),
+                links: structured
+                    .and_then(|result| result.get("results"))
+                    .and_then(Value::as_array)
+                    .map(|results| {
+                        results
+                            .iter()
+                            .filter_map(|result| result.get("content")?.as_array())
+                            .flatten()
+                            .filter_map(|link| {
+                                Some(WebLink {
+                                    title: link
+                                        .get("title")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                    url: link.get("url")?.as_str()?.to_owned(),
+                                })
+                            })
+                            .collect()
+                    }),
+            }
+        }
         // `AskUserQuestionInput`'s questions, and `AskUserQuestionOutput`'s
         // `answers`, keyed by question text: one string, a multi-select's
         // labels joined with ", " (a record written before 2.1.3xx joined
@@ -6866,6 +6905,48 @@ mod tests {
                 vec!["Red, green".to_owned(), "Blue".to_owned()],
                 vec!["It matches the logo".to_owned()],
             ]
+        );
+    }
+
+    /// A WebSearch is the pages its output object's searches found, past
+    /// the model's own words among them; a WebFetch the page and the prompt
+    /// it was read with (`WebSearchOutput`, `WebFetchInput` of
+    /// `sdk-tools.d.ts` in `@anthropic-ai/claude-agent-sdk` 0.3.322; content
+    /// invented).
+    #[test]
+    fn a_web_call_is_the_page_or_the_pages_it_found() {
+        let mut mapper = Mapper::new();
+        let started = feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg_web","content":[{"type":"tool_use","id":"toolu_search","name":"WebSearch","input":{"query":"cors preflight"}},{"type":"tool_use","id":"toolu_fetch","name":"WebFetch","input":{"url":"https://example.com/cors","prompt":"How long is it cached?"}}]}}"#,
+        );
+        assert!(
+            matches!(
+                &started[1],
+                AgentEvent::ItemStarted(ThreadItem { content: ItemContent::ToolCall { family: Some(family), .. }, .. })
+                    if **family == ToolFamily::Fetch { url: "https://example.com/cors".into(), prompt: Some("How long is it cached?".into()) }
+            ),
+            "{started:?}"
+        );
+        let completed = feed(
+            &mut mapper,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_search","content":"Web search results for query: \"cors preflight\"\n\nLinks: [{\"title\":\"CORS\",\"url\":\"https://example.com/cors\"}]\n\nREMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks."}]},"tool_use_result":{"query":"cors preflight","results":["Searching for the cache header.",{"tool_use_id":"srvtoolu_1","content":[{"title":"CORS","url":"https://example.com/cors"}]}],"durationSeconds":1.5}}"#,
+        );
+        let [AgentEvent::ItemCompleted(item)] = completed.as_slice() else {
+            panic!("{completed:?}");
+        };
+        let ItemContent::ToolCall { family, .. } = &item.content else {
+            panic!("{item:?}");
+        };
+        assert_eq!(
+            family.as_deref(),
+            Some(&ToolFamily::WebSearch {
+                query: "cors preflight".into(),
+                links: Some(vec![WebLink {
+                    title: "CORS".into(),
+                    url: "https://example.com/cors".into(),
+                }]),
+            })
         );
     }
 

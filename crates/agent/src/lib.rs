@@ -3113,6 +3113,27 @@ pub enum ToolFamily {
     },
     /// Questions the model put to the user, and the answers each got.
     Question { questions: Vec<AskedQuestion> },
+    /// A page fetched from the web. The call's `output` is what came back.
+    Fetch {
+        url: String,
+        /// What the harness was asked to make of the page.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+    },
+    /// A search of the web. The call's `output` stays the harness's whole
+    /// answer, `links` the pages its adapter read out of it.
+    WebSearch {
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        links: Option<Vec<WebLink>>,
+    },
+}
+
+/// A page a web search found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebLink {
+    pub title: String,
+    pub url: String,
 }
 
 /// A question as the model asked it, with what the user answered: the
