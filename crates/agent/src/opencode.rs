@@ -36,9 +36,6 @@ pub fn data_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
         .map(|data| data.join("opencode"))
 }
 
-/// The first release with the server API this adapter speaks; 1.x servers
-/// expose an incompatible one.
-const MIN_VERSION: (u32, u32, u32) = (2, 0, 0);
 const PERMISSION_MODE: &str = "permission_mode";
 const EFFORT: &str = "reasoningEffort";
 const AGENT: &str = "agent";
@@ -52,7 +49,6 @@ const LISTING_TIMEOUT: Duration = Duration::from_secs(60);
 const SHELL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    require_supported_version(opts.binary_path.as_deref(), &opts.launch_env).await?;
     crate::spawn_session(
         ProviderKind::OpenCode,
         opts,
@@ -66,7 +62,6 @@ pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
 ) -> Result<Vec<ModelSpec>, AgentError> {
-    require_supported_version(binary_path.as_deref(), &launch_env).await?;
     let processes = crate::SessionProcesses::default();
     let listing = crate::process::unblock({
         let processes = processes.clone();
@@ -99,24 +94,6 @@ pub async fn list_models(
         )))
     })
     .await
-}
-
-async fn require_supported_version(
-    binary_path: Option<&Path>,
-    launch_env: &LaunchEnv,
-) -> Result<(), AgentError> {
-    let binary = crate::resolve_binary(binary_path, "opencode")?;
-    match crate::process::probe_version(&binary, launch_env, ProviderKind::OpenCode).await {
-        Some(version @ (major, minor, patch)) if version < MIN_VERSION => {
-            Err(AgentError::Provider(format!(
-                "OpenCode 2.0 or later is required, but `{}` is version {major}.{minor}.{patch}. \
-                 Update OpenCode to use it with Tcode.",
-                binary.display()
-            )))
-        }
-        // An unreadable version leaves the failure to the server start itself.
-        _ => Ok(()),
-    }
 }
 
 async fn run_actor(
