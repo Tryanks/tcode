@@ -79,7 +79,9 @@ const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 /// GPUI connected to Wayland hosts it through [`wayland`] instead, which needs
 /// a runtime directory for its socket. GPUI picks Wayland whenever
 /// `WAYLAND_DISPLAY` names one, and `guess_compositor` reports that same choice;
-/// a window cannot change display server once open.
+/// a window cannot change display server once open. WebKitGTK itself is loaded
+/// only when the first page is built (`gtk_dlopen`), so a machine without it
+/// still offers the Preview and says there why no page opens.
 pub(crate) fn preview_backend() -> bool {
     #[cfg(all(preview_backend, target_os = "linux"))]
     {

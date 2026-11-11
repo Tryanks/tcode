@@ -13,7 +13,6 @@ license=('MIT')
 depends=(
   'alsa-lib'
   'fontconfig'
-  'gtk3'
   'libx11'
   'libxcb'
   'libxkbcommon'
@@ -21,12 +20,12 @@ depends=(
   'mesa'
   'vulkan-icd-loader'
   'wayland'
-  'webkit2gtk-4.1'
 )
 optdepends=(
   'nvidia-utils: NVIDIA GPU Vulkan support'
   'vulkan-intel: Intel GPU Vulkan support'
   'vulkan-radeon: AMD GPU Vulkan support'
+  'webkit2gtk-4.1: side-panel preview browser (everything else works without it)'
 )
 source_x86_64=("tcode-${pkgver}-linux-x64.tar.gz::https://github.com/Tryanks/tcode/releases/download/v${pkgver}/tcode-${pkgver}-linux-x64.tar.gz")
 source_aarch64=("tcode-${pkgver}-linux-arm64.tar.gz::https://github.com/Tryanks/tcode/releases/download/v${pkgver}/tcode-${pkgver}-linux-arm64.tar.gz")

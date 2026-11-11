@@ -23,6 +23,7 @@ members = [
     "crates/platform/frame-pacing",
     "crates/platform/touch",
     "crates/platform/wayland-nest",
+    "crates/platform/gtk-dlopen",
     "crates/android",
 ]
 exclude = [
