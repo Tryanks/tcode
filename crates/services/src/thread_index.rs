@@ -1223,7 +1223,11 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
                     format!("$ {command}\n[{exit}]\n{output}"),
                 )
             }
-            ItemContent::FileChange { changes, status } => (
+            ItemContent::FileChange {
+                changes,
+                status,
+                output,
+            } => (
                 "file_change",
                 changes
                     .iter()
@@ -1240,6 +1244,7 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
                         }
                         text
                     })
+                    .chain(output.clone())
                     .collect::<Vec<_>>()
                     .join("\n"),
             ),
@@ -1437,7 +1442,10 @@ pub fn file_history(log: &IndexedLog, path: &str) -> Vec<FileEdit> {
     let wanted = path.trim_end_matches('/');
     let mut edits = Vec::new();
     for (position, entry) in log.entries() {
-        let EntryContent::Item(ItemContent::FileChange { changes, status }) = &entry.content else {
+        let EntryContent::Item(ItemContent::FileChange {
+            changes, status, ..
+        }) = &entry.content
+        else {
             continue;
         };
         for change in changes {
@@ -1740,6 +1748,7 @@ mod tests {
                     diff: diff.map(str::to_owned),
                 }],
                 status: ItemStatus::Completed,
+                output: None,
             },
         ))
     }

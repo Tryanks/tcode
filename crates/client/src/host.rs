@@ -265,19 +265,12 @@ pub trait ClientHost: 'static {
     fn device_name(&self) -> String;
 
     /// Stable, client-generated id (see [`persistent_device_id`]) so a host
-    /// keeps one record for this device however often it pairs again.
-    fn device_id(&self) -> String;
+    /// keeps one record for this device however often it pairs again; the
+    /// file that holds it, when it exists and cannot be read.
+    fn device_id(&self) -> Result<String, FileFailure>;
 
     /// Operating system name and version shown next to the device name on hosts.
     fn device_platform(&self) -> Option<String>;
-
-    fn device_identity(&self) -> DeviceIdentity {
-        DeviceIdentity {
-            id: self.device_id(),
-            name: self.device_name(),
-            platform: self.device_platform(),
-        }
-    }
 
     /// What this client saved; nothing saved is the defaults.
     fn load_preferences(&self) -> Result<ClientPreferences, FileFailure> {
@@ -337,8 +330,8 @@ pub trait ClientHost: 'static {
 
     /// The id of the machine hosted from this client's own data, which is
     /// never also one of its remote machines.
-    fn local_machine_id(&self) -> Option<String> {
-        None
+    fn local_machine_id(&self) -> Result<Option<String>, FileFailure> {
+        Ok(None)
     }
 
     /// `Some(id)` of the host to reconnect to on launch.

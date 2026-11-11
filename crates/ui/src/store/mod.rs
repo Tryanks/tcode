@@ -24,9 +24,9 @@ use tcode_protocol::{AcpMarketplaceItem, RuntimeNotification as RuntimeEvent};
 use tcode_protocol::{
     ArchivedSessions, Command, CommandResponse, DiskUsageState, EventEnvelope,
     ExternalImportStatus, ExternalThread, GitDiffResult, GitDiffScope, GitStatusStatus,
-    IndexSummary, PathEntry, ProtocolError, ProviderVersionStatus, ProvidersStatus, Query,
-    QueryResponse, Scope, ScopedProviderChoice, ServerEvent, SessionContentHits, SessionPlan,
-    SessionStatus, StorageMigration, Subscription, Topic,
+    IndexSummary, ProtocolError, ProviderVersionStatus, ProvidersStatus, Query, QueryResponse,
+    Scope, ScopedProviderChoice, ServerEvent, SessionContentHits, SessionPlan, SessionStatus,
+    StorageMigration, Subscription, Topic,
 };
 #[cfg(target_family = "wasm")]
 use web_time::Instant;
@@ -3671,9 +3671,9 @@ impl WorkspaceStore {
             {
                 QueryResponse::PullRequest {
                     response,
-                    expires_at,
+                    fresh_for,
                 } => answer(*response)
-                    .map(|answer| (answer, expires_at))
+                    .map(|answer| (answer, fresh_for))
                     .ok_or_else(unexpected_pull_request_response),
                 _ => Err(unexpected_pull_request_response()),
             }
@@ -3696,7 +3696,12 @@ impl WorkspaceStore {
             return Some(crate::tr!("chat.from_orchestrator").into_owned());
         }
         let author = attribution.authors.get(entry_id)?;
-        let own_id = self.client_host.as_ref().map(|host| host.device_id());
+        // A device whose id cannot be read reaches no other machine, so no
+        // message there is its own.
+        let own_id = self
+            .client_host
+            .as_ref()
+            .and_then(|host| host.device_id().ok());
         // The host attributes only space members' messages. An unattributed
         // one is the owner's, which is someone else only from inside a space.
         let other = author.as_ref().map_or(!self.scope.is_full(), |author| {
@@ -3770,26 +3775,6 @@ impl WorkspaceStore {
         if self.pending_chat_turn.as_ref() == Some(&(session_id.to_string(), turn + turn_offset)) {
             self.pending_chat_turn = None;
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_session_replica_for_test(
-        &mut self,
-        session_id: String,
-        timeline: Timeline,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.is_thread_open(&session_id) {
-            self.open_thread(&session_id, cx);
-            self.put_back_thread(session_id.clone(), cx);
-        }
-        self.threads
-            .get_mut(&session_id)
-            .expect("the selected thread is held")
-            .timeline = Some(timeline);
-        // As every change the host's events make: what draws the thread
-        // hears of it and folds its rows again.
-        cx.notify();
     }
 
     pub fn with_composer_destination_for<R>(
@@ -3922,14 +3907,14 @@ impl WorkspaceStore {
 
     pub fn list_workspace_for(
         &self,
-        session_id: Option<&str>,
+        session_id: &str,
         cx: &mut App,
-    ) -> Task<Result<Vec<PathEntry>, String>> {
-        let session_id = session_id.unwrap_or_default().to_owned();
+    ) -> Task<Result<tcode_protocol::WorkspaceListing, String>> {
+        let session_id = session_id.to_owned();
         let host = self.host.clone();
         cx.spawn(
             async move |_| match host.query(Query::ListActiveWorkspace { session_id }).await {
-                Ok(QueryResponse::ActiveWorkspace(entries)) => Ok(entries),
+                Ok(QueryResponse::ActiveWorkspace(listing)) => Ok(listing),
                 Ok(other) => Err(format!("unexpected active-workspace response: {other:?}")),
                 Err(error) => Err(error.message),
             },
@@ -4817,8 +4802,8 @@ pub(crate) mod tests {
             fn device_name(&self) -> String {
                 "member".into()
             }
-            fn device_id(&self) -> String {
-                "member-device".into()
+            fn device_id(&self) -> Result<String, tcode_client::host::FileFailure> {
+                Ok("member-device".into())
             }
             fn device_platform(&self) -> Option<String> {
                 None
@@ -4849,7 +4834,7 @@ pub(crate) mod tests {
                 unreachable!("the store is handed its link")
             }
         }
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let saved = serde_json::json!("not this device's settings");
         let device = std::rc::Rc::new(Device(RefCell::new(ClientPreferences {
             navigation: Some(serde_json::json!({
@@ -4906,7 +4891,7 @@ pub(crate) mod tests {
     fn member_settings_are_saved_among_the_device_preferences(cx: &mut TestAppContext) {
         use tcode_client::host::ClientHost as _;
         use tcode_core::settings::SidebarLayout;
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let root = scratch_root("member-settings-saved");
         std::fs::create_dir_all(&root).unwrap();
         let device = std::rc::Rc::new(tcode_traverse::NativeClientHost::new(
@@ -4954,7 +4939,7 @@ pub(crate) mod tests {
         cx: &mut TestAppContext,
     ) {
         use tcode_core::settings::{EnvVar, ProviderProfile, ProviderSettings};
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, _outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let profile = |settings| ProviderProfile {
@@ -5041,7 +5026,7 @@ pub(crate) mod tests {
 
     #[gpui::test]
     fn member_scope_seeds_only_the_space_index_and_reseeds_on_reconnect(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(|cx| cx.set_reduce_motion(true));
         let mut host = ScriptedSpace::new();
         let workspace = host.store(cx);
@@ -5399,7 +5384,7 @@ pub(crate) mod tests {
     #[cfg(preview_backend)]
     #[gpui::test]
     fn preview_requests_for_an_unviewed_thread_reach_the_panel(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let (to_host, _requests) = async_channel::unbounded();
         let (_replies, from_host) = async_channel::unbounded();
@@ -5439,7 +5424,7 @@ pub(crate) mod tests {
 
     #[gpui::test]
     fn scripted_host_send_waits_for_ack_and_rejection_offers_retry(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let (to_host, requests) = async_channel::unbounded();
         let (replies, from_host) = async_channel::unbounded();
@@ -5892,7 +5877,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn threads_wait_for_baseline_before_rendering_empty(cx: &mut TestAppContext) {
         use gpui::{px, size};
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         for remote in [true, false] {
             let (to_host, _outgoing) = async_channel::unbounded();
             let (incoming, from_host) = async_channel::unbounded();
@@ -7067,7 +7052,7 @@ pub(crate) mod tests {
             }
         }
 
-        fn command(&mut self, cx: &mut TestAppContext, command: Command) {
+        pub(crate) fn command(&mut self, cx: &mut TestAppContext, command: Command) {
             let link = self.link.clone();
             self.await_with_events(cx, link.command(command))
                 .expect("typed host command");
@@ -8074,25 +8059,20 @@ pub(crate) mod tests {
         let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
         meta.id = "reconnect".into();
         disk.upsert_meta(&meta).unwrap();
+        for (ts, text) in [(1, "one"), (2, "two"), (3, "three")] {
+            disk.append_event(
+                "reconnect",
+                ts,
+                &AgentEvent::Warning {
+                    message: text.into(),
+                },
+            )
+            .unwrap();
+        }
         let host = test_host(disk);
         let mut driver = LocalHostDriver::new(&host);
         let workspace = driver.workspace(cx);
         workspace.update(cx, |store, cx| store.show_alone("reconnect".into(), cx));
-        driver.wait_until(cx, "selected status", |cx| {
-            workspace.read_with(cx, |store, cx| store.sole_status(cx).is_some())
-        });
-        update_host!(&host, |state, cx| {
-            for (ts, text) in [(1, "one"), (2, "two"), (3, "three")] {
-                state.record_event_for_replica_test(
-                    "reconnect",
-                    ts,
-                    &AgentEvent::Warning {
-                        message: text.into(),
-                    },
-                    cx,
-                );
-            }
-        });
         driver.wait_until(cx, "three records", |cx| {
             workspace.read_with(cx, |store, _| {
                 held_window(store, "reconnect").is_some_and(|held| held.records.len() == 3)

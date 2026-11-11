@@ -55,6 +55,15 @@ impl AttachmentPolicy {
         }
     }
 
+    /// The longest line this connection carries: a network connection closes
+    /// on a longer one; an in-process connection has no limit.
+    pub fn line_limit(self) -> Option<usize> {
+        match self.queue {
+            QueuePolicy::Disconnect { max_line_bytes, .. } => Some(max_line_bytes),
+            QueuePolicy::Unbounded => None,
+        }
+    }
+
     pub fn read_limit(self, requested: Option<u64>) -> Option<u64> {
         match (self.read_budget, requested) {
             (Some(budget), Some(requested)) => Some(budget.min(requested)),

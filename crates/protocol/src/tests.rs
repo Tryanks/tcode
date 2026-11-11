@@ -21,7 +21,7 @@ fn the_largest_pull_request_image_fits_one_network_line() {
                     validator: validator.map(str::to_owned),
                     expires_at: u64::MAX,
                 })),
-                expires_at: u64::MAX,
+                fresh_for: u64::MAX,
             }),
         })
         .unwrap()

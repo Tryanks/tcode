@@ -734,7 +734,26 @@ pub(in crate::chat) fn output_section(
         let pretty = done.then(|| pretty_json(text)).flatten();
         SharedString::from(pretty.unwrap_or_else(|| text.to_owned()))
     });
-    let failed = call.status == ItemStatus::Failed;
+    Some(text_section(
+        call.entry,
+        &text,
+        call.status == ItemStatus::Failed,
+        limit,
+        control,
+        ctx,
+    ))
+}
+
+/// A text a call gave back, under its label: the error, danger-tinted, when
+/// it failed, else the output; `control` follows it.
+pub(in crate::chat) fn text_section(
+    entry: &TimelineEntry,
+    text: &str,
+    failed: bool,
+    limit: Bound,
+    control: Option<AnyElement>,
+    ctx: &mut ToolCtx<'_, '_>,
+) -> AnyElement {
     let label = if failed {
         crate::tr!("tools.error")
     } else {
@@ -746,7 +765,7 @@ pub(in crate::chat) fn output_section(
             .child(crate::tr!("tools.no_output").into_owned())
             .into_any_element()
     } else {
-        bounded_text(call.entry, "output", &text, true, limit, ctx)
+        bounded_text(entry, "output", text, true, limit, ctx)
     };
     let cx = ctx.app();
     let body = div()
@@ -759,14 +778,12 @@ pub(in crate::chat) fn output_section(
                 .text_color(cx.theme().danger)
         })
         .child(body);
-    Some(
-        window::section(
-            &label,
-            v_flex().w_full().gap_1().child(body).children(control),
-            cx,
-        )
-        .into_any_element(),
+    window::section(
+        &label,
+        v_flex().w_full().gap_1().child(body).children(control),
+        cx,
     )
+    .into_any_element()
 }
 
 /// `text` as indented JSON, when it is a JSON object or array.
@@ -977,13 +994,13 @@ pub(in crate::chat) fn code_section(
 /// The output a body read a structured view from, as the call returned
 /// it: folded until asked for, then bounded as any output is.
 pub(in crate::chat) fn raw_section(
-    call: &Call<'_>,
+    entry: &TimelineEntry,
     text: &str,
     ctx: &mut ToolCtx<'_, '_>,
 ) -> AnyElement {
-    let key = format!("tool-raw-{}", call.id());
+    let key = format!("tool-raw-{}", entry.id);
     let open = ctx.is_open(&key);
-    let on_click = ctx.toggle(call.entry, key.clone());
+    let on_click = ctx.toggle(entry, key.clone());
     let label = if open {
         crate::tr!("tools.hide_raw")
     } else {
@@ -1003,7 +1020,7 @@ pub(in crate::chat) fn raw_section(
                 ctx.app(),
             )),
     );
-    let raw = open.then(|| bounded_text(call.entry, "output", text, true, Bound::HEAD, ctx));
+    let raw = open.then(|| bounded_text(entry, "output", text, true, Bound::HEAD, ctx));
     v_flex()
         .w_full()
         .min_w_0()

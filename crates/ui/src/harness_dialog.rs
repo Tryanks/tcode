@@ -85,8 +85,7 @@ impl HarnessId {
     }
 }
 
-/// The host's description of `harness`; before one arrives, what its
-/// adapter's facts say.
+/// The host's description of `harness`, once the host has sent one.
 pub(crate) fn describe(store: &WorkspaceStore, harness: &HarnessId) -> Option<HarnessDescription> {
     store
         .harness_descriptions()
@@ -2628,7 +2627,7 @@ impl HarnessDialog {
     ) -> Option<AnyElement> {
         let mut rows = Vec::new();
         let name = harness_name(self.store.read(cx), &self.harness);
-        if description.plugins {
+        if description.plugins.manages() {
             let builtin = self.builtin_id().to_owned();
             rows.push(
                 crate::material::accessible_clickable(
@@ -3242,7 +3241,7 @@ mod tests {
             sessions: Vec<tcode_core::project::SessionMeta>,
             cx: &mut TestAppContext,
         ) -> Self {
-            cx.update(crate::theme::init);
+            cx.update(crate::test_client::init);
             let (to_host, outgoing) = async_channel::unbounded();
             let (incoming, from_host) = async_channel::unbounded();
             let event = |topic, event| {

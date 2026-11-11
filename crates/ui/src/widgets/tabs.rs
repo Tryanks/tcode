@@ -1053,7 +1053,7 @@ mod tests {
 
     #[gpui::test]
     fn a_trailing_control_does_not_activate_its_tab(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let clicks = Rc::new(Cell::new((0, 0)));
         let (_, cx) = cx.add_window_view({
             let clicks = clicks.clone();

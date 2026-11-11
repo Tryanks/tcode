@@ -436,7 +436,9 @@ impl PullRequestView {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
+                // Freshness counts from when this window got the answer.
                 let at = crate::time::now_secs(cx);
+                let result = result.map(|(data, fresh_for)| (data, at.saturating_add(fresh_for)));
                 if let Some(page) = this.pages.get_mut(&(session, key)) {
                     land(page, result, at);
                 }
@@ -2491,8 +2493,8 @@ mod tests {
                     path: format!("src/{index}.rs"),
                     previous_path: None,
                     kind: agent::FileChangeKind::Modify,
-                    additions: 1,
-                    deletions: 0,
+                    additions: Some(1),
+                    deletions: Some(0),
                     patch: PullRequestPatch::Hunks("@@ -1 +1,2 @@\n a\n+b\n".into()),
                     url: None,
                 })
@@ -2518,7 +2520,7 @@ mod tests {
         incoming: &async_channel::Sender<String>,
         id: u64,
         response: PullRequestReadResponse,
-        expires_at: u64,
+        fresh_for: u64,
     ) {
         incoming
             .try_send(
@@ -2526,17 +2528,12 @@ mod tests {
                     id,
                     result: Ok(QueryResponse::PullRequest {
                         response: Box::new(response),
-                        expires_at,
+                        fresh_for,
                     }),
                 })
                 .unwrap(),
             )
             .unwrap();
-    }
-
-    /// Now by the test's clock, in unix seconds.
-    fn now(cx: &mut VisualTestContext) -> u64 {
-        cx.update(|_, cx| crate::time::now_secs(cx))
     }
 
     struct Mounted<'a> {
@@ -2648,7 +2645,7 @@ mod tests {
 
     /// A wide view showing octo/repo#7, its first reads asked for and unanswered.
     fn mount(cx: &mut TestAppContext) -> Mounted<'_> {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let (to_host, requests) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
@@ -2714,12 +2711,12 @@ mod tests {
         }
     }
 
-    /// Answers a read other than a page of files, valid until `expires_at`.
+    /// Answers a read other than a page of files, current for `fresh_for` seconds.
     fn answer_other(
         incoming: &async_channel::Sender<String>,
         id: u64,
         read: PullRequestRead,
-        expires_at: u64,
+        fresh_for: u64,
     ) {
         let response = match read {
             PullRequestRead::Conversation => {
@@ -2733,7 +2730,7 @@ mod tests {
             }
             read => panic!("unexpected read {read:?}"),
         };
-        answer(incoming, id, response, expires_at);
+        answer(incoming, id, response, fresh_for);
     }
 
     #[gpui::test]
@@ -2750,7 +2747,7 @@ mod tests {
         // A read in flight shows a spinner, which rests only with motion
         // reduced.
         cx.update(|_, cx| cx.set_reduce_motion(true));
-        let later = now(cx) + 3600;
+        let later = 3600;
         let mut reread = None;
         for (id, read) in reads(&requests) {
             match read {
@@ -2759,7 +2756,7 @@ mod tests {
                     &incoming,
                     id,
                     PullRequestReadResponse::Files(files(0..100, Some("2"))),
-                    now(cx),
+                    0,
                 ),
                 read => answer_other(&incoming, id, read, later),
             }
@@ -2887,11 +2884,11 @@ mod tests {
                 .collect();
             PullRequestReadResponse::Conversation(Box::new(conversation))
         };
-        let later = now(cx) + 3600;
+        let later = 3600;
         for (id, read) in reads(&requests) {
             match read {
                 // Lands as its expiry passes, so the view reads it again at once.
-                PullRequestRead::Conversation => answer(&incoming, id, with_comments(40), now(cx)),
+                PullRequestRead::Conversation => answer(&incoming, id, with_comments(40), 0),
                 PullRequestRead::Files { cursor: None } => answer(
                     &incoming,
                     id,
@@ -2954,7 +2951,7 @@ mod tests {
                 _pump,
                 cx,
             } = mount(cx);
-            let later = now(cx) + 3600;
+            let later = 3600;
             for (id, read) in reads(&requests) {
                 let response = match read {
                     PullRequestRead::Conversation => {
@@ -3074,7 +3071,7 @@ mod tests {
             |cx: &mut VisualTestContext| view.read_with(cx, |view, cx| view.files_label(cx));
         assert_eq!(label(cx), "Files");
 
-        let later = now(cx) + 3600;
+        let later = 3600;
         let (id, _) = reads(&requests)
             .into_iter()
             .find(|(_, read)| *read == PullRequestRead::Files { cursor: None })
@@ -3104,7 +3101,7 @@ mod tests {
             _pump,
             cx,
         } = mount(cx);
-        let later = now(cx) + 3600;
+        let later = 3600;
         for (id, read) in reads(&requests) {
             match read {
                 PullRequestRead::Files { cursor: None } => answer(

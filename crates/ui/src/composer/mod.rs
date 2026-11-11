@@ -98,7 +98,7 @@ use crate::workspace_walk::filter_entries;
 use tcode_core::attachments::{mime_from_path, text_with_file_paths, validate_attachment};
 use tcode_core::provider_models::{FastLevel, FastMode};
 use tcode_core::ui::WorkspaceMode;
-use tcode_protocol::PathEntry;
+use tcode_protocol::WorkspaceListing;
 
 /// Context-meter colors, shared with provider usage bars.
 use crate::usage::{METER_BLUE, METER_RED};
@@ -231,7 +231,7 @@ pub struct Composer {
     /// Cached workspace listing for the active session cwd (for `@`-mentions),
     /// loaded lazily in the background the first time a mention trigger opens.
     /// The `@` menu's listing of a cwd, or why the host could not give it.
-    workspace: Option<(PathBuf, Result<Vec<PathEntry>, String>)>,
+    workspace: Option<(PathBuf, Result<WorkspaceListing, String>)>,
     workspace_loading: bool,
     /// Pending image attachments for the active session, validated + persisted to
     /// disk. Cleared on send and whenever the active session changes.
@@ -830,10 +830,19 @@ impl Composer {
         if terminal_contexts.is_empty()
             && let Some(later) = parse_later(&text, Local::now())
         {
-            let Ok((fire_at_unix_secs, message)) = later else {
-                window
-                    .push_notification(Notification::error(crate::tr!("composer.later_usage")), cx);
-                return;
+            let (fire_at_unix_secs, message) = match later {
+                Ok(later) => later,
+                Err(error) => {
+                    let text = match error {
+                        LaterError::SkippedTime { hour, minute } => crate::tr!(
+                            "composer.later_skipped_time",
+                            time = format!("{hour}:{minute:02}")
+                        ),
+                        _ => crate::tr!("composer.later_usage"),
+                    };
+                    window.push_notification(Notification::error(text), cx);
+                    return;
+                }
             };
             let attachment_paths = self
                 .pending_images
@@ -1610,13 +1619,10 @@ impl Composer {
         // subagent and offline states have nothing to add to.
         let attach_shown = !subagent
             && self.interactive(cx)
-            && (cfg!(feature = "native-dialogs")
-                || cx
-                    .try_global::<crate::remote::ClientAttachment>()
-                    .is_some_and(|client| {
-                        client.host().supports_image_picker()
-                            || client.host().supports_file_picker()
-                    }));
+            && (cfg!(feature = "native-dialogs") || {
+                let client = cx.global::<crate::remote::ClientAttachment>().host();
+                client.supports_image_picker() || client.supports_file_picker()
+            });
         // It narrows away when the host goes offline, and widens back.
         let attach_menu = self.motion.shown(
             self.motion_key("attach-menu"),
@@ -2265,7 +2271,7 @@ mod replica_tests {
         async_channel::Receiver<String>,
         SessionStatus,
     ) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let root = crate::store::tests::scratch_root("composer-replica");
         let host = tcode_runtime::pipe::spawn_host(
@@ -2895,7 +2901,7 @@ mod replica_tests {
         cx.update(|cx| cx.set_reduce_motion(true));
         use agent::ProviderKind;
 
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let root = crate::store::tests::scratch_root(name);
         let project = tcode_core::project::Project::from_root(root.clone());

@@ -469,13 +469,18 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             exit_code.hash(hash);
             std::mem::discriminant(status).hash(hash);
         }
-        EntryContent::Item(ItemContent::FileChange { changes, status }) => {
+        EntryContent::Item(ItemContent::FileChange {
+            changes,
+            status,
+            output,
+        }) => {
             changes.len().hash(hash);
             for change in changes {
                 change.path.len().hash(hash);
                 change.diff.as_ref().map(String::len).hash(hash);
             }
             std::mem::discriminant(status).hash(hash);
+            output.as_ref().map(String::len).hash(hash);
         }
         EntryContent::Item(ItemContent::ToolCall {
             name,

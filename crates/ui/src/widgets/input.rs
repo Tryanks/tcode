@@ -626,7 +626,7 @@ mod tests {
     // disabled field has to refuse the press to stay keyboard-free on a phone.
     #[gpui::test]
     fn a_press_focuses_an_enabled_field_but_not_a_disabled_one(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         for disabled in [false, true] {
             let (field, cx) = cx.add_window_view(|window, cx| {
                 Field(cx.new(|cx| TextareaState::new(window, cx)), disabled)
@@ -652,7 +652,7 @@ mod tests {
     fn blur_or_disable_commits_preedit_before_the_native_handler_is_removed(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         for disable in [false, true] {
             let (field, cx) = cx.add_window_view(|window, cx| {
                 Field(cx.new(|cx| TextareaState::new(window, cx)), false)

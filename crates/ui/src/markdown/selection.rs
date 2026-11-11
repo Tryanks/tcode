@@ -643,12 +643,11 @@ fn word_at(text: &str, offset: usize, cx: &App) -> Option<std::ops::Range<usize>
     if offset >= text.len() {
         return None;
     }
-    let segmenter = cx
-        .try_global::<crate::remote::ClientAttachment>()
-        .map_or_else(tcode_client::words::system, |attachment| {
-            attachment.host().word_segmenter()
-        });
-    let Some(segmenter) = segmenter else {
+    let Some(segmenter) = cx
+        .global::<crate::remote::ClientAttachment>()
+        .host()
+        .word_segmenter()
+    else {
         return word_range(text, offset);
     };
     let breaks = segmenter.breaks(text);
@@ -1204,7 +1203,7 @@ mod tests {
         &'a mut VisualTestContext,
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let text = text.to_string();
         let body = Rc::new(OnceCell::new());
@@ -1290,7 +1289,7 @@ mod tests {
     #[gpui::test]
     fn one_touch_selection_at_a_time_between_a_message_and_the_composer(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let page = Rc::new(OnceCell::new());
         let (_, cx) = cx.add_window_view({

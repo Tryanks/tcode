@@ -46,9 +46,7 @@ use crate::{
 /// needs a stable id that routes back to the right ACP method.
 pub(crate) use crate::ACP_MODE_OPTION_ID as MODE_OPTION_ID;
 const MODEL_OPTION_ID: &str = "acp:model";
-/// A thought-level option takes the id every native provider gives its
-/// reasoning effort, so it is presented, inherited and set like theirs.
-const EFFORT_OPTION_ID: &str = "reasoningEffort";
+use crate::EFFORT_OPTION_ID;
 const CONFIG_OPTION_PREFIX: &str = "acp:cfg:";
 
 /// The descriptor id of the session config option `config_id` in `category`.
@@ -970,6 +968,7 @@ async fn connected_actor<D: Dialect>(
                         unavailable: Some("Reported by the launch arguments".into()),
                         speed: None,
                         summary: None,
+                        approval: crate::approval_class(provider, &id, mode),
                     });
                 }
                 state
@@ -1581,9 +1580,13 @@ fn prompt_blocks(
     instructions: Option<&str>,
 ) -> Vec<acp::ContentBlock> {
     let mut blocks = Vec::with_capacity(2 + attachments.len());
-    blocks.push(acp::ContentBlock::Text(acp::TextContent::new(
-        text.to_string(),
-    )));
+    // A message of pictures alone carries no text block: the schema asks for
+    // none, and an ACP client sends a pasted picture as an image block alone.
+    if !text.is_empty() || attachments.is_empty() {
+        blocks.push(acp::ContentBlock::Text(acp::TextContent::new(
+            text.to_string(),
+        )));
+    }
     for attachment in attachments {
         blocks.push(acp::ContentBlock::Image(acp::ImageContent::new(
             attachment.data_base64.clone(),
@@ -1658,6 +1661,11 @@ impl OptionRegistry {
                             unavailable: None,
                             speed: None,
                             summary: None,
+                            approval: crate::approval_class(
+                                ProviderKind::Acp,
+                                MODE_OPTION_ID,
+                                &mode.id.0,
+                            ),
                         })
                         .collect(),
                     default_value: Some(modes.current_mode_id.0.to_string()),
@@ -1681,6 +1689,7 @@ impl OptionRegistry {
             // canonical ids (the runtime reads `acp:mode`); every option,
             // whatever its category, is set through `session/set_config_option`.
             let id = config_option_id(&option.id.0, option.category.as_ref());
+            let approval = |value: &str| crate::approval_class(ProviderKind::Acp, &id, value);
             match &option.kind {
                 acp::SessionConfigKind::Select(select) => {
                     let options = match &select.options {
@@ -1693,6 +1702,7 @@ impl OptionRegistry {
                                 unavailable: None,
                                 speed: None,
                                 summary: None,
+                                approval: approval(&option.value.0),
                             })
                             .collect(),
                         acp::SessionConfigSelectOptions::Grouped(groups) => groups
@@ -1705,6 +1715,7 @@ impl OptionRegistry {
                                     unavailable: None,
                                     speed: None,
                                     summary: None,
+                                    approval: approval(&option.value.0),
                                 })
                             })
                             .collect(),
@@ -2164,7 +2175,12 @@ impl State {
                 if changes.is_empty() {
                     tool_call_content(tool, status, self.tool_output(tool))
                 } else {
-                    ItemContent::FileChange { changes, status }
+                    let output = self.tool_output(tool);
+                    ItemContent::FileChange {
+                        changes,
+                        status,
+                        output: (!output.is_empty()).then_some(output),
+                    }
                 }
             }
             acp::ToolKind::Think => {
@@ -2284,7 +2300,12 @@ fn tool_call_content(tool: &ToolState, status: ItemStatus, output: String) -> It
     ItemContent::ToolCall {
         image_reads,
         name: tool.name.clone().unwrap_or_else(|| tool.title.clone()),
-        input: tool.raw_input.clone().unwrap_or(Value::Null),
+        input: match tool.raw_input.as_ref() {
+            Some(raw_input) => cursor_mcp_call(raw_input)
+                .map_or(raw_input, |(_, args)| args)
+                .clone(),
+            None => Value::Null,
+        },
         output: (!output.is_empty()).then_some(output),
         status,
         family: tool_family(tool).map(Box::new),
@@ -2327,9 +2348,29 @@ fn tool_name(meta: Option<&acp::Meta>, raw_input: Option<&Value>) -> Option<Stri
             });
         }
         Some(name) => Some(name),
-        None => input("_toolName"),
+        None => {
+            if let Some((name, _)) = raw_input.and_then(cursor_mcp_call) {
+                return Some(name);
+            }
+            input("_toolName")
+        }
     };
     name.map(str::to_owned)
+}
+
+/// A Cursor call of an MCP server's tool: `rawInput {providerIdentifier,
+/// toolName, args}` (cursor-agent 2026.10.01's `3351.index.js`, see the
+/// cursor fixtures' PROVENANCE.md), named `server/tool` with `args` as its
+/// input.
+fn cursor_mcp_call(raw_input: &Value) -> Option<(String, &Value)> {
+    let field = |key: &str| {
+        raw_input
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+    };
+    let name = format!("{}/{}", field("providerIdentifier")?, field("toolName")?);
+    Some((name, raw_input.get("args").unwrap_or(&Value::Null)))
 }
 
 /// `diff` content blocks → canonical [`FileChange`]s (with a unified diff, so
@@ -2994,6 +3035,7 @@ mod tests {
             }),
             instructions: None,
             processes: processes.clone(),
+            clock: Default::default(),
         };
         let start = smol::spawn(crate::start_session(ProviderKind::Acp, opts));
         asked.accept().unwrap();
@@ -3240,7 +3282,10 @@ mod tests {
             })));
             let [
                 AgentEvent::ItemStarted(ThreadItem {
-                    content: ItemContent::FileChange { changes, status },
+                    content:
+                        ItemContent::FileChange {
+                            changes, status, ..
+                        },
                     ..
                 }),
             ] = events.as_slice()

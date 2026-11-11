@@ -33,6 +33,8 @@ struct Phone {
     driver: LocalHostDriver,
     host: SpawnedHost,
     root: std::path::PathBuf,
+    /// The provider of `swipe-0`'s running turn.
+    provider: Option<crate::chat::tests::ScriptedHandles>,
 }
 
 fn phone<'a>(
@@ -40,17 +42,13 @@ fn phone<'a>(
     name: &str,
     threads: usize,
 ) -> (Phone, &'a mut VisualTestContext) {
-    cx.update(crate::theme::init);
+    cx.update(crate::test_client::init);
     let root = crate::store::tests::scratch_root(name);
-    let host = spawn_host(
-        SessionStore::open_at(root.clone()).unwrap(),
-        HostServices::default(),
-    )
-    .unwrap();
+    let disk = SessionStore::open_at(root.clone()).unwrap();
     let project = Project::from_root(root.clone());
     let sessions: Vec<_> = (0..threads)
         .map(|index| {
-            let mut meta = SessionMeta::new(agent::ProviderKind::Codex, root.clone(), None);
+            let mut meta = SessionMeta::new(agent::ProviderKind::ClaudeCode, root.clone(), None);
             meta.id = format!("swipe-{index}");
             meta.title = meta.id.clone();
             meta.project_id = Some(project.id.clone());
@@ -59,11 +57,11 @@ fn phone<'a>(
             meta
         })
         .collect();
-    smol::block_on(host.update_state_for_test(move |state, _| {
-        state.projects = vec![project];
-        state.sessions = sessions.into();
-    }))
-    .unwrap();
+    disk.upsert_project(&project).unwrap();
+    for meta in &sessions {
+        disk.upsert_meta(meta).unwrap();
+    }
+    let host = spawn_host(disk, HostServices::default()).unwrap();
     let mut driver = LocalHostDriver::new(&host);
     let store = cx.new(|cx| {
         WorkspaceStore::new_attached(
@@ -90,6 +88,7 @@ fn phone<'a>(
             driver,
             host,
             root,
+            provider: None,
         },
         cx,
     )
@@ -167,24 +166,35 @@ impl Phone {
         });
     }
 
-    /// `swipe-0`'s agent starts a turn, or ends it, as its provider reports
-    /// it, and the list hears of it.
+    /// `swipe-0`'s agent starts a turn the user sent it, or ends it, as its
+    /// provider reports it, and the list hears of it.
     fn turn(&mut self, cx: &mut VisualTestContext, running: bool) {
-        let event = if running {
-            agent::AgentEvent::TurnStarted {
-                turn_id: "busy".into(),
-            }
+        if running {
+            let provider = crate::chat::tests::scripted_turn(
+                &self.host,
+                &mut self.driver,
+                "swipe-0",
+                agent::ProviderKind::ClaudeCode,
+                cx,
+            );
+            provider
+                .1
+                .try_send(agent::AgentEvent::TurnStarted {
+                    turn_id: "busy".into(),
+                })
+                .unwrap();
+            self.provider = Some(provider);
         } else {
-            agent::AgentEvent::TurnCompleted {
-                turn_id: "busy".into(),
-                status: agent::TurnStatus::Completed,
-                usage: None,
-            }
-        };
-        smol::block_on(self.host.update_state_for_test(move |state, cx| {
-            state.provider_event_for_test("swipe-0", event, cx);
-        }))
-        .unwrap();
+            let provider = self.provider.as_ref().expect("a running turn");
+            provider
+                .1
+                .try_send(agent::AgentEvent::TurnCompleted {
+                    turn_id: "busy".into(),
+                    status: agent::TurnStatus::Completed,
+                    usage: None,
+                })
+                .unwrap();
+        }
         self.until(cx, "the turn to reach the list", |phone, cx| {
             phone
                 .store
@@ -317,14 +327,21 @@ fn a_row_does_what_its_thread_lets_it_when_the_finger_lifts(cx: &mut TestAppCont
 fn a_refused_settle_returns_the_row_and_leaves_the_thread_active(cx: &mut TestAppContext) {
     let (mut phone, cx) = phone(cx, "swipe-refused", 3);
     phone.open_first(cx);
-    // The host hears of the turn before the store does.
-    smol::block_on(phone.host.update_state_for_test(|state, cx| {
-        let event = agent::AgentEvent::TurnStarted {
-            turn_id: "busy".into(),
-        };
-        state.provider_event_for_test("swipe-0", event, cx);
+    // The user sends the thread a turn, which the host hears of before the
+    // store does: what the host answers is read only when the test pumps it.
+    let scripted = tcode_runtime::app::scripted_provider(agent::ProviderKind::ClaudeCode);
+    smol::block_on(phone.host.update_state_for_test(move |state, _| {
+        state.set_provider_launcher_for_test(scripted.launcher)
     }))
     .unwrap();
+    let _sent = phone
+        .driver
+        .link
+        .command(tcode_protocol::Command::SendTurn {
+            session_id: "swipe-0".into(),
+            text: "Go on.".into(),
+            attachment_paths: Vec::new(),
+        });
 
     swipe_away(cx, &phone, 0);
     draw_settled(cx);

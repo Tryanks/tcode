@@ -154,7 +154,7 @@ impl ToolView for Search<'_> {
         let raw = call
             .output
             .filter(|output| !output.trim().is_empty())
-            .map(|output| super::raw_section(call, output, ctx));
+            .map(|output| super::raw_section(call.entry, output, ctx));
         super::body(std::iter::once(list).chain(raw))
     }
 

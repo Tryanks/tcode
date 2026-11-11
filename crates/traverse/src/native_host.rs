@@ -38,7 +38,7 @@ pub struct NativeClientHost {
     machine_editor: Option<std::rc::Rc<dyn tcode_client::host::MachineEditor>>,
     multicast_lock: Option<Arc<MulticastLock>>,
     system_browser: Option<Arc<SystemBrowser>>,
-    device: OnceLock<Result<DeviceIdentity, String>>,
+    device: OnceLock<Result<DeviceIdentity, FileFailure>>,
 }
 
 impl NativeClientHost {
@@ -63,13 +63,12 @@ impl NativeClientHost {
     }
 
     /// The device's Traverse identity, carrying the current name and platform.
-    fn device(&self) -> Result<DeviceIdentity, String> {
+    fn device(&self) -> Result<DeviceIdentity, FileFailure> {
         let device = self
             .device
             .get_or_init(|| {
-                let device = DeviceIdentity::load_or_create(&self.data_dir).map_err(|error| {
-                    format!("could not open {}: {error}", crate::identity::DEVICE_FILE)
-                })?;
+                let device = DeviceIdentity::load_or_create(&self.data_dir)
+                    .map_err(|error| FileFailure::new(crate::identity::DEVICE_FILE, error))?;
                 device.set_lan_options(LanOptions {
                     browse: match &self.system_browser {
                         Some(browser) => Browse::System(browser.clone()),
@@ -247,13 +246,8 @@ impl ClientHost for NativeClientHost {
 
     /// The device's `EndpointId`; the machine authenticates it on every
     /// connection.
-    fn device_id(&self) -> String {
-        self.device()
-            .map(|device| device.endpoint_id().to_string())
-            .unwrap_or_else(|error| {
-                log::error!("{error}");
-                String::new()
-            })
+    fn device_id(&self) -> Result<String, FileFailure> {
+        self.device().map(|device| device.endpoint_id().to_string())
     }
 
     fn device_platform(&self) -> Option<String> {
@@ -340,8 +334,10 @@ impl ClientHost for NativeClientHost {
         }
     }
 
-    fn local_machine_id(&self) -> Option<String> {
-        crate::identity::existing_machine_id(&self.data_dir).map(|id| id.to_string())
+    fn local_machine_id(&self) -> Result<Option<String>, FileFailure> {
+        crate::identity::existing_machine_id(&self.data_dir)
+            .map(|id| id.map(|id| id.to_string()))
+            .map_err(|error| FileFailure::new(crate::identity::HOST_FILE, error))
     }
 
     /// None while mobile.json cannot be read; the window reports that file.
@@ -374,7 +370,7 @@ impl ClientHost for NativeClientHost {
     ) -> HostFuture<'_, Result<PairedHost, crate::PairError>> {
         let device = self.device();
         Box::pin(async move {
-            let device = device.map_err(crate::PairError::Device)?;
+            let device = device.map_err(|error| crate::PairError::Device(error.to_string()))?;
             let (done, result) = async_channel::bounded(1);
             crate::runtime().spawn(async move {
                 let _ = done
@@ -873,9 +869,9 @@ mod tests {
             host.last_host_id().as_deref(),
             Some("host-before-client-seam")
         );
-        let device_id = host.device_id();
+        let device_id = host.device_id().unwrap();
         assert!(tcode_client::host::valid_device_id(&device_id));
-        assert_eq!(host.device_id(), device_id);
+        assert_eq!(host.device_id().unwrap(), device_id);
         let identity: serde_json::Value =
             serde_json::from_slice(&fs::read(dir.0.join("device.json")).unwrap()).unwrap();
         assert_eq!(identity["v"], 1);
@@ -954,7 +950,7 @@ mod tests {
         host.set_last_host_id(Some("next-host"));
         assert_eq!(host.last_host_id().as_deref(), Some("next-host"));
         assert_eq!(host.device_name(), "Renamed");
-        assert_eq!(host.device_id(), device_id);
+        assert_eq!(host.device_id().unwrap(), device_id);
         // Check the write before reopening can refresh the identity's details.
         let identity: serde_json::Value =
             serde_json::from_slice(&fs::read(dir.0.join("device.json")).unwrap()).unwrap();
@@ -966,7 +962,7 @@ mod tests {
         assert_eq!(loaded.claim().name, "Renamed");
         assert_eq!(loaded.claim().platform.as_deref(), Some("Android 15"));
         let reopened = NativeClientHost::new(dir.0.clone(), "fallback").with_platform("Android 15");
-        assert_eq!(reopened.device_id(), device_id);
+        assert_eq!(reopened.device_id().unwrap(), device_id);
         assert_eq!(reopened.last_host_id().as_deref(), Some("next-host"));
         assert_eq!(reopened.device_name(), "Renamed");
     }

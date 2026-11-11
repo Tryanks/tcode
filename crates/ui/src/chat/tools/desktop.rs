@@ -630,7 +630,7 @@ impl ToolView for Desktop<'_> {
             if raw.is_empty() {
                 None
             } else if structured {
-                Some(super::raw_section(call, raw, ctx))
+                Some(super::raw_section(call.entry, raw, ctx))
             } else {
                 let body = bounded_text(call.entry, "output", raw, true, Bound::HEAD, ctx);
                 Some(section(&crate::tr!("tools.output"), body, ctx.app()).into_any_element())

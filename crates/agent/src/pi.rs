@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use smol::channel::{Receiver, Sender};
@@ -157,7 +158,7 @@ fn map_model(
             .filter(|level| levels.contains(level))
             .map(str::to_owned);
         options.push(OptionDescriptor::Select {
-            id: "reasoningEffort".into(),
+            id: crate::EFFORT_OPTION_ID.into(),
             label: "Thinking".into(),
             options: levels
                 .into_iter()
@@ -168,6 +169,7 @@ fn map_model(
                     unavailable: None,
                     speed: None,
                     summary: None,
+                    approval: None,
                 })
                 .collect(),
             default_value,
@@ -309,6 +311,7 @@ async fn run_actor(
     let _ = stderr_tail.spawn(stderr, "pi-rpc-stderr", "pi");
 
     let mut actor = PiActor {
+        clock: opts.clock.clone(),
         child,
         stdin,
         lines: line_rx,
@@ -317,6 +320,8 @@ async fn run_actor(
         next_request: 1,
         pending_approvals: HashSet::new(),
         pending_dialogs: HashSet::new(),
+        answered_by_pi_at: HashMap::new(),
+        early_requests: Vec::new(),
         pending_steers: HashMap::new(),
         requested_model: opts.model.clone(),
         pending_settings: None,
@@ -348,11 +353,15 @@ async fn run_actor(
         actor.stop();
         return;
     }
+    for (request, arrived) in std::mem::take(&mut actor.early_requests) {
+        actor.handle_extension_ui(&request, arrived).await;
+    }
 
     actor::run(actor, &commands).await;
 }
 
 struct PiActor {
+    clock: crate::Clock,
     child: ProcessTree<Child>,
     stdin: BufWriter<ChildStdin>,
     lines: Receiver<ChildOutput>,
@@ -361,6 +370,12 @@ struct PiActor {
     next_request: u64,
     pending_approvals: HashSet<String>,
     pending_dialogs: HashSet<String>,
+    /// When pi itself settles an open dialog or confirmation that gave a
+    /// `timeout`: it resolves it with its default and tells no client.
+    answered_by_pi_at: HashMap<String, Instant>,
+    /// Extension requests that arrived during the startup handshake, with
+    /// when they did, put to the user once it is done.
+    early_requests: Vec<(Value, Instant)>,
     /// Native prompt request id -> canonical steering request id. pi's prompt
     /// response is only an acceptance signal, but it is stronger than merely
     /// acknowledging the stdin write.
@@ -421,6 +436,50 @@ impl SessionActor for PiActor {
 
     fn events(&self) -> &Sender<AgentEvent> {
         &self.events
+    }
+
+    fn clock(&self) -> &crate::Clock {
+        &self.clock
+    }
+
+    fn wake_at(&self) -> Option<Instant> {
+        self.answered_by_pi_at
+            .iter()
+            .filter(|(id, _)| {
+                self.pending_dialogs.contains(*id) || self.pending_approvals.contains(*id)
+            })
+            .map(|(_, at)| *at)
+            .min()
+    }
+
+    /// pi resolved what timed out with its default (`rpc-mode.js`'s
+    /// `createDialogPromise`): no value, or not confirmed.
+    async fn wake(&mut self) -> Result<(), String> {
+        let now = self.clock.now();
+        let due: Vec<String> = self
+            .answered_by_pi_at
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in due {
+            self.answered_by_pi_at.remove(&id);
+            let event = if self.pending_dialogs.remove(&id) {
+                AgentEvent::UserInputResolved {
+                    request_id: id,
+                    answers: serde_json::Map::new(),
+                }
+            } else if self.pending_approvals.remove(&id) {
+                AgentEvent::ApprovalResolved {
+                    request_id: id,
+                    decision: ApprovalDecision::Cancel,
+                }
+            } else {
+                continue;
+            };
+            self.events.emit(event).await;
+        }
+        Ok(())
     }
 
     fn command_failure_reason(&self) -> &'static str {
@@ -497,7 +556,7 @@ impl SessionActor for PiActor {
                     .await;
                 Ok(())
             }
-            SessionCommand::SetOption { id, value } if id == "reasoningEffort" => {
+            SessionCommand::SetOption { id, value } if id == crate::EFFORT_OPTION_ID => {
                 let Some(level) = value.as_str() else {
                     return Ok(());
                 };
@@ -735,24 +794,18 @@ impl PiActor {
                         return Ok(message);
                     }
                     // Extensions load before this handshake completes, so a
-                    // notification such as one explaining a broken extension
-                    // arrives while we are still here. Everything else that
-                    // lands early belongs to the mapper, not to startup.
+                    // notification such as one explaining a broken extension,
+                    // or a question for the user, arrives while we are still
+                    // here. A question waits for the handshake to end and is
+                    // then the user's to answer.
                     if let Some(warning) = extension_notice(&message) {
                         self.events
                             .emit(AgentEvent::Warning { message: warning })
                             .await;
-                    } else if is_extension_dialog(&message)
-                        && let Some(request_id) = message.get("id").and_then(Value::as_str)
+                    } else if message.get("type").and_then(Value::as_str)
+                        == Some("extension_ui_request")
                     {
-                        send_json(
-                            &mut self.stdin,
-                            &json!({
-                                "type":"extension_ui_response",
-                                "id":request_id,
-                                "cancelled":true
-                            }),
-                        )?;
+                        self.early_requests.push((message, self.clock.now()));
                     }
                 }
                 Ok(ChildOutput::Error(err)) => return Err(AgentError::Protocol(err)),
@@ -1004,7 +1057,8 @@ impl PiActor {
             return;
         }
         if message.get("type").and_then(Value::as_str) == Some("extension_ui_request") {
-            self.handle_extension_ui(&message).await;
+            let arrived = self.clock.now();
+            self.handle_extension_ui(&message, arrived).await;
             return;
         }
         let events = self.mapper.on_message(&message);
@@ -1023,7 +1077,14 @@ impl PiActor {
         }
     }
 
-    async fn handle_extension_ui(&mut self, message: &Value) {
+    /// `arrived` is when pi sent it, which a `timeout` it gives counts from.
+    async fn handle_extension_ui(&mut self, message: &Value, arrived: Instant) {
+        if let Some(id) = message.get("id").and_then(Value::as_str)
+            && let Some(timeout) = message.get("timeout").and_then(Value::as_u64)
+        {
+            self.answered_by_pi_at
+                .insert(id.to_owned(), arrived + Duration::from_millis(timeout));
+        }
         let method = message.get("method").and_then(Value::as_str).unwrap_or("");
         if matches!(method, "select" | "input" | "editor") {
             let Some((id, question)) = extension_dialog_question(message) else {
@@ -1139,7 +1200,7 @@ impl PiActor {
                 json!({"id":id,"type":"set_model","provider":provider,"modelId":model_id}),
             ));
         }
-        if let Some(level) = crate::selection_str(selections, "reasoningEffort") {
+        if let Some(level) = crate::selection_str(selections, crate::EFFORT_OPTION_ID) {
             let id = self.request_id();
             requests.push((
                 id.clone(),
@@ -1654,6 +1715,7 @@ fn tool_item(id: &str, tool: &PiTool, status: ItemStatus) -> ThreadItem {
                 })
                 .unwrap_or_default(),
             status,
+            output: (!output.text.is_empty()).then(|| output.text.clone()),
         },
         _ => {
             let text = (!output.text.is_empty()).then(|| output.text.clone());
@@ -2031,7 +2093,7 @@ fn map_commands(response: &Value) -> Vec<ProviderCommand> {
 fn selected_thinking(selections: &[OptionSelection]) -> Option<&str> {
     selections
         .iter()
-        .find(|selection| selection.id == "reasoningEffort")
+        .find(|selection| selection.id == crate::EFFORT_OPTION_ID)
         .and_then(|selection| selection.value.as_str())
 }
 
@@ -2529,6 +2591,7 @@ mod tests {
                         ),
                     }],
                     status: ItemStatus::Completed,
+                    output: Some("Successfully replaced 1 block(s) in a.txt.".into()),
                 },
                 ItemContent::FileChange {
                     changes: vec![FileChange {
@@ -2537,6 +2600,7 @@ mod tests {
                         diff: Some("+fresh".into()),
                     }],
                     status: ItemStatus::Completed,
+                    output: Some("Successfully wrote to new.txt".into()),
                 },
                 ItemContent::ToolCall {
                     image_reads: vec![Attachment {

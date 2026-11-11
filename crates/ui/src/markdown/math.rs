@@ -96,7 +96,6 @@ pub(super) fn block(
         } else {
             (IconName::Code, crate::tr!("markdown.math_show_source"))
         };
-        #[cfg(test)]
         let selector = format!("markdown-math-toggle-{path}");
         let button = action_button(format!("math-toggle-{path}"), icon, label.into_owned(), cx)
             .touch(compact)
@@ -107,9 +106,7 @@ pub(super) fn block(
                     state.set_math_source(&path, !show_source, cx)
                 });
             });
-        #[cfg(test)]
-        let button = div().debug_selector(move || selector).child(button);
-        button
+        button.debug_selector(move || selector)
     });
     let copy = {
         let (view, path, latex) = (view.clone(), path.to_string(), latex.clone());
@@ -161,11 +158,6 @@ pub(super) fn block(
         .when(tree.is_some() && !show_source, |actions| {
             actions.opacity(reveal + (1. - reveal) * pinned)
         });
-    #[cfg(test)]
-    let actions = {
-        let path = path.to_string();
-        actions.debug_selector(move || format!("markdown-math-actions-{path}"))
-    };
 
     // The actions sit on the box that shows: the formula, or its source.
     let shown = match &tree {
@@ -213,12 +205,10 @@ pub(super) fn block(
             ),
         )
         .child(body);
-    #[cfg(test)]
-    let block = {
-        let path = path.to_string();
-        block.debug_selector(move || format!("markdown-math-{path}"))
-    };
-    block.into_any_element()
+    let path = path.to_string();
+    block
+        .debug_selector(move || format!("markdown-math-{path}"))
+        .into_any_element()
 }
 
 /// How far a block's hover actions are pinned by the window being compact,

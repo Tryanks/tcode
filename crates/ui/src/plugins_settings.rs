@@ -352,10 +352,11 @@ impl PluginsSettingsPanel {
 
     /// Harnesses whose plugins Tcode manages, with an enabled account.
     fn harnesses(&self, cx: &App) -> Vec<ProviderKind> {
-        let profiles = self.store.read(cx).enabled_profiles();
+        let store = self.store.read(cx);
+        let profiles = store.enabled_profiles();
         ProviderKind::NATIVE
             .into_iter()
-            .filter(|kind| kind.caps().plugin_management.manages())
+            .filter(|kind| plugins_of(store, *kind).manages())
             .filter(|kind| profiles.iter().any(|profile| profile.kind == *kind))
             .collect()
     }
@@ -416,7 +417,7 @@ impl PluginsSettingsPanel {
         let store = self.store.read(cx);
         let mut wanted = Vec::new();
         for profile in store.enabled_profiles() {
-            let management = profile.kind.caps().plugin_management;
+            let management = plugins_of(store, profile.kind);
             if !management.manages() {
                 continue;
             }
@@ -975,9 +976,9 @@ impl PluginsSettingsPanel {
             .into_iter()
             .filter(|kind| profiles.iter().any(|profile| profile.kind == *kind))
             .filter_map(|kind| {
-                let unmanaged = kind.caps().plugin_management.unmanaged?;
+                let unmanaged = plugins_of(self.store.read(cx), kind).unmanaged?;
                 let name = kind.display_name();
-                let line = match unmanaged.kind {
+                let line = match unmanaged {
                     UnmanagedPluginsKind::EditorOnly => {
                         crate::tr!("providers.plugins.unmanaged.editor_only", name = name)
                     }
@@ -1055,7 +1056,7 @@ impl PluginsSettingsPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let management = kind.caps().plugin_management;
+        let management = plugins_of(self.store.read(cx), kind);
         let accounts = self.accounts(kind, cx);
         let columns: Vec<Account> = if accounts.len() > MAX_COLUMNS && !compact {
             let shown = self
@@ -1203,17 +1204,13 @@ impl PluginsSettingsPanel {
                 name = kind.display_name()
             ))
             .on_click(cx.listener(move |this, _, _, cx| this.relist(kind, cx)));
-        let installs = kind
-            .caps()
-            .plugin_management
-            .supports(PluginActionKind::Install);
+        let installs = plugins_of(self.store.read(cx), kind).supports(PluginActionKind::Install);
         let browse = installs.then(|| {
             self.install_button("plugins-browse", kind, accounts, compact, cx)
                 .debug_selector(|| "plugins-browse".into())
         });
-        let description = div()
-            .text_secondary(self.touch, cx)
-            .child(if kind.caps().home_path {
+        let description = div().text_secondary(self.touch, cx).child(
+            if home_path_of(self.store.read(cx), kind) {
                 crate::tr!("providers.plugins.where_kept").into_owned()
             } else {
                 crate::tr!(
@@ -1221,7 +1218,8 @@ impl PluginsSettingsPanel {
                     name = kind.display_name()
                 )
                 .into_owned()
-            });
+            },
+        );
         if compact {
             v_flex()
                 .w_full()
@@ -1370,7 +1368,7 @@ impl PluginsSettingsPanel {
         compact: bool,
         cx: &mut Context<Self>,
     ) -> Button {
-        let management = kind.caps().plugin_management;
+        let management = plugins_of(self.store.read(cx), kind);
         let by_source = management.source_install;
         let accounts = accounts.to_vec();
         let project = management
@@ -1413,10 +1411,7 @@ impl PluginsSettingsPanel {
         accounts: &[Account],
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let installs = kind
-            .caps()
-            .plugin_management
-            .supports(PluginActionKind::Install);
+        let installs = plugins_of(self.store.read(cx), kind).supports(PluginActionKind::Install);
         material::grouped(
             vec![
                 material::group_row_stacked(cx)
@@ -2327,9 +2322,7 @@ impl PluginsSettingsPanel {
             }
         };
         let note = (project.is_some()
-            && kind
-                .caps()
-                .plugin_management
+            && plugins_of(self.store.read(cx), kind)
                 .scopes
                 .contains(&PluginScope::Local))
         .then(|| crate::tr!("providers.plugins.local_note").into_owned());
@@ -2810,9 +2803,7 @@ fn install_body(
     let scope = draft.scope;
     let muted = cx.theme().muted_foreground;
     // The scopes every ticked account can install to, in the Harness's order.
-    let offered: Vec<PluginScope> = kind
-        .caps()
-        .plugin_management
+    let offered: Vec<PluginScope> = plugins_of(this.store.read(cx), kind)
         .scopes
         .iter()
         .copied()
@@ -3348,6 +3339,21 @@ fn diagnostic_label(key: &str) -> String {
     }
 }
 
+/// What the host says Settings → Plugins does with `kind`'s plugins: nothing
+/// before its description arrives.
+fn plugins_of(store: &WorkspaceStore, kind: ProviderKind) -> tcode_protocol::PluginsDescription {
+    crate::harness_dialog::describe(store, &crate::harness_dialog::HarnessId::Native(kind))
+        .map(|description| description.plugins)
+        .unwrap_or_default()
+}
+
+/// Whether the host says each of `kind`'s accounts keeps its plugins in its
+/// own home.
+fn home_path_of(store: &WorkspaceStore, kind: ProviderKind) -> bool {
+    crate::harness_dialog::describe(store, &crate::harness_dialog::HarnessId::Native(kind))
+        .is_some_and(|description| description.home_path)
+}
+
 #[cfg(test)]
 mod tests {
     use agent::{PluginInstallation, PluginSource};
@@ -3412,6 +3418,11 @@ mod tests {
     fn providers(plugins: Vec<ProviderPluginCatalog>) -> ServerEvent {
         ServerEvent::ProvidersReplaced(ProvidersStatus {
             plugins,
+            // Every native harness, as a host describes it.
+            harnesses: ProviderKind::NATIVE
+                .into_iter()
+                .map(tcode_protocol::HarnessDescription::native)
+                .collect(),
             ..Default::default()
         })
     }
@@ -3598,7 +3609,7 @@ mod tests {
         catalogs: Vec<ProviderPluginCatalog>,
         cx: &mut TestAppContext,
     ) -> (Host, &mut VisualTestContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         send(

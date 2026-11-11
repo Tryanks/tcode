@@ -215,6 +215,18 @@ impl StoredEvent {
             _ => None,
         }
     }
+
+    /// What a connection whose line cannot carry this record, `bytes` long
+    /// on the wire, is sent in its place.
+    pub fn withheld(&self, bytes: u64) -> Self {
+        StoredEvent {
+            origin: self.origin,
+            author: self.author.clone(),
+            ts: self.ts,
+            event: AgentEvent::RecordWithheld { bytes },
+            elided: None,
+        }
+    }
 }
 
 impl From<AgentEvent> for StoredEvent {
@@ -1978,8 +1990,10 @@ impl Timeline {
     }
 
     fn upsert_item(&mut self, ts: Option<u64>, item: &ThreadItem) {
-        // Runtime reroutes native-subagent child items into mirror sessions;
-        // legacy logs still contain them inline — drop, never render.
+        // A subagent's items are its mirror thread's: the runtime reroutes
+        // them, and a row an older build wrote into the parent's log is read
+        // as it is stored (the store's `read_row`). Only a fold of decoded
+        // rows, as compaction makes, still meets one here.
         if item.parent_item_id.is_some() {
             return;
         }
@@ -2215,6 +2229,7 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
             EntryContent::Item(ItemContent::FileChange {
                 mut changes,
                 status,
+                output,
             }),
         ) => {
             for change in &mut changes {
@@ -2227,7 +2242,11 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
                     change.diff = Some(existing_diff.clone());
                 }
             }
-            EntryContent::Item(ItemContent::FileChange { changes, status })
+            EntryContent::Item(ItemContent::FileChange {
+                changes,
+                status,
+                output,
+            })
         }
         (
             EntryContent::Item(ItemContent::Subagent {
@@ -2998,6 +3017,7 @@ mod tests {
                                 diff: Some(diff.into()),
                             }],
                             status,
+                            output: None,
                         },
                     }),
                 );
@@ -3042,6 +3062,7 @@ mod tests {
                         diff: Some("+visible diff".into()),
                     }],
                     status: ItemStatus::InProgress,
+                    output: None,
                 },
             }),
             AgentEvent::ItemCompleted(ThreadItem {
@@ -3054,6 +3075,7 @@ mod tests {
                         diff: None,
                     }],
                     status: ItemStatus::Completed,
+                    output: None,
                 },
             }),
         ]);
@@ -3084,6 +3106,7 @@ mod tests {
                         diff: Some("-intermediate\n+value\n".into()),
                     }],
                     status: ItemStatus::Completed,
+                    output: None,
                 },
             }),
         ]);
@@ -3112,6 +3135,7 @@ mod tests {
                         diff: Some("+late\n".into()),
                     }],
                     status: ItemStatus::Completed,
+                    output: None,
                 },
             }),
         );

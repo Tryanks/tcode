@@ -1582,15 +1582,37 @@ impl TimelineView {
             let expanded =
                 self.auto_activity_expanded((turn, &entry.id), &key, enabled, recency, cx);
             let window_key = format!("{}-file-{file_index}", entry.id);
-            let detail = if file.row.counts.is_none() {
+            // What the harness gave back belongs to the edit, told once.
+            let output = edit.output.filter(|_| file_index == 0);
+            let detail = if file.row.counts.is_none() && output.is_none() {
                 tools::window::Detail::None
             } else {
                 match tools::window::fold(&self.motion, &window_key, expanded, window, cx) {
-                    Some(shown) => tools::window::Detail::Fold(
-                        shown,
-                        self.inline_diffs.render(&key, file, cx),
-                        0,
-                    ),
+                    Some(shown) => {
+                        let diff = file
+                            .row
+                            .counts
+                            .is_some()
+                            .then(|| self.inline_diffs.render(&key, file, cx));
+                        let output = output.map(|output| {
+                            tools::diff::edit_output(
+                                entry,
+                                output,
+                                edit.status,
+                                &mut tools::ToolCtx {
+                                    chat: self,
+                                    cx,
+                                    cwd,
+                                    images_inline: false,
+                                },
+                            )
+                        });
+                        tools::window::Detail::Fold(
+                            shown,
+                            tools::body(diff.into_iter().chain(output)),
+                            0,
+                        )
+                    }
                     None => tools::window::Detail::Shut,
                 }
             };
@@ -1599,6 +1621,11 @@ impl TimelineView {
             let elapsed_ms = (file_index == 0)
                 .then(|| tools::window::elapsed(&header, entry))
                 .flatten();
+            let error = tools::window::failure_line(&header, edit.status, output);
+            let mut copy = tools::diff::file_copy_items(file);
+            if let Some(output) = output {
+                tools::copy(&mut copy, "chat.copy_output", output);
+            }
             let toggle_key = key.clone();
             let entry_id = entry.id.clone();
             rows.push(tools::window::tool_window(
@@ -1606,10 +1633,10 @@ impl TimelineView {
                     key: window_key,
                     header,
                     status: edit.status,
-                    error: None,
+                    error,
                     elapsed_ms,
                     compact: false,
-                    copy: tools::diff::file_copy_items(file),
+                    copy,
                     whole_output: None,
                     path: Some((file.row.path.clone(), cwd.to_path_buf())),
                     hover: self.hover.clone(),
@@ -1672,9 +1699,7 @@ impl TimelineView {
         // background, as its own Ctrl+B does.
         let movable = thread.is_some_and(|status| {
             status
-                .provider
-                .caps()
-                .background
+                .background_control
                 .is_some_and(|control| control.move_running)
         }) && matches!(
             &entry.content,
@@ -2194,64 +2219,49 @@ mod tests {
         use gpui::{VisualTestContext, px, size};
         use tcode_protocol::Topic;
 
-        let (host, session_id, _) = seeded_chat_host(cx, Timeline::default(), false);
+        let mut threads = seed_two_threads(cx, Timeline::default(), Timeline::default());
         cx.update(|cx| cx.set_reduce_motion(true));
-        let seeded_id = session_id.clone();
-        let other_id = smol::block_on(host.update_state_for_test(move |state, cx| {
-            state.residents.live.get_mut(&seeded_id).unwrap().timeline = Timeline::default();
-            for (ts, event) in [
-                agent::AgentEvent::TurnStarted {
-                    turn_id: "turn".into(),
+        // A provider runs the command, and its output grows.
+        let turn = scripted_turn(
+            &threads.host,
+            &mut threads.driver,
+            &threads.first.clone(),
+            agent::ProviderKind::ClaudeCode,
+            cx,
+        );
+        for event in [
+            agent::AgentEvent::TurnStarted {
+                turn_id: "turn".into(),
+            },
+            agent::AgentEvent::ItemStarted(agent::ThreadItem {
+                id: "run".into(),
+                parent_item_id: None,
+                content: ItemContent::CommandExecution {
+                    command: "make".into(),
+                    output: String::new(),
+                    exit_code: None,
+                    status: ItemStatus::InProgress,
                 },
-                agent::AgentEvent::ItemCompleted(agent::ThreadItem {
-                    id: "user".into(),
-                    parent_item_id: None,
-                    content: ItemContent::UserMessage {
-                        text: "build it".into(),
-                        attachments: Vec::new(),
-                    },
-                }),
-                agent::AgentEvent::ItemStarted(agent::ThreadItem {
-                    id: "run".into(),
-                    parent_item_id: None,
-                    content: ItemContent::CommandExecution {
-                        command: "make".into(),
-                        output: String::new(),
-                        exit_code: None,
-                        status: ItemStatus::InProgress,
-                    },
-                }),
-            ]
-            .iter()
-            .enumerate()
-            {
-                state.record_event_for_replica_test(&seeded_id, ts as u64, event, cx);
-            }
-            let other = state.start_draft("other-thread".into(), std::env::temp_dir(), cx);
-            let active = state.residents.live.get_mut(&other).expect("second draft");
-            active.draft = false;
-            let meta = active.meta.clone();
-            state.sessions.push(meta);
-            other
-        }))
-        .expect("record the running command");
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                driver.link.clone(),
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        driver.wait_until(cx, "workspace baseline", |cx| {
-            store.read_with(cx, |store, _| store.baseline_ready())
-        });
-        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        driver.wait_until(cx, "chat baseline", |cx| {
+            }),
+        ] {
+            turn.1.try_send(event).unwrap();
+        }
+        let TwoThreads {
+            store,
+            mut driver,
+            host,
+            first: session_id,
+            second: other_id,
+        } = threads;
+        driver.wait_until(cx, "the running command", |cx| {
             store.read_with(cx, |store, cx| {
-                !store.chat_loading_for(store.sole_thread().as_deref(), cx)
+                store
+                    .with_timeline_for(
+                        store.sole_thread().as_deref(),
+                        |timeline| timeline.entries.iter().any(|entry| entry.id == "run"),
+                        cx,
+                    )
+                    .unwrap_or(false)
             })
         });
         let window_state = cx.new(|_| WindowState::default());
@@ -2300,13 +2310,7 @@ mod tests {
                           ready: &dyn Fn(&mut VisualTestContext) -> bool| {
             driver.settle_until(cx, what, ready);
         };
-        // Nothing drives this turn on the host, so its Work Log reads as
-        // finished and folded: open it and the command, as a reader would.
-        settle(cx, "the Work Log", &|cx| {
-            cx.debug_bounds("worklog-header-0-run").is_some()
-        });
-        let header = cx.debug_bounds("worklog-header-0-run").unwrap();
-        cx.simulate_click(header.center(), gpui::Modifiers::default());
+        // Open the command, as a reader would.
         settle(cx, "the command row", &|cx| {
             cx.debug_bounds("activity-row-run").is_some()
         });
@@ -2321,21 +2325,14 @@ mod tests {
         let subscribed = vec![(session_id.clone(), "run".to_string(), cols)];
         assert_eq!(output_topics(), subscribed);
 
-        for (index, text) in ["10%\n", "100%\n"].into_iter().enumerate() {
-            let seeded_id = session_id.clone();
-            smol::block_on(host.update_state_for_test(move |state, cx| {
-                state.record_event_for_replica_test(
-                    &seeded_id,
-                    10 + index as u64,
-                    &agent::AgentEvent::Delta {
-                        item_id: "run".into(),
-                        kind: agent::DeltaKind::CommandOutput,
-                        text: text.into(),
-                    },
-                    cx,
-                );
-            }))
-            .expect("grow the command output");
+        for text in ["10%\n", "100%\n"] {
+            turn.1
+                .try_send(agent::AgentEvent::Delta {
+                    item_id: "run".into(),
+                    kind: agent::DeltaKind::CommandOutput,
+                    text: text.into(),
+                })
+                .unwrap();
             settle(cx, "one host turn", &|_| true);
             assert_eq!(output_topics(), subscribed, "growth re-subscribed");
         }
@@ -2412,7 +2409,7 @@ mod tests {
             ]);
             // A preview the panel asks for starts a scripted provider.
             let (workspace_store, window_state, session_id, _driver, _scripted) =
-                seed_chat_scripted(cx, timeline, false, Some(provider), true);
+                seed_chat_scripted(cx, log_of(&timeline), false, Some(provider), true);
             let (_view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
             });
@@ -2483,8 +2480,13 @@ mod tests {
                 at_turn(entry("user-0", user_item("first")), 0),
                 at_turn(entry("assistant-0", assistant("One.")), 0),
             ]);
-            let (store, window_state, session_id, mut driver, scripted) =
-                seed_chat_scripted(cx, timeline, false, Some(ProviderKind::ClaudeCode), true);
+            let (store, window_state, session_id, mut driver, scripted) = seed_chat_scripted(
+                cx,
+                log_of(&timeline),
+                false,
+                Some(ProviderKind::ClaudeCode),
+                true,
+            );
             let (commands, events) = scripted.unwrap();
             let (_view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(store.clone(), window_state, Some(session_id), window, cx)
@@ -2582,17 +2584,76 @@ mod tests {
                     ..TurnMeta::default()
                 })
                 .collect();
-            timeline.turns[1].status = (!running).then_some(TurnStatus::Completed);
-            timeline.turns[1].running = running;
-            timeline.turn_running = running;
             timeline.entries.extend([
                 at_turn(entry("user-0", user_item("first")), 0),
                 at_turn(entry("assistant-0", assistant("One.")), 0),
-                at_turn(entry("user-1", user_item("second")), 1),
-                at_turn(entry("assistant-1", assistant("Two.")), 1),
             ]);
-            let (store, window_state, session_id, mut driver) =
-                seed_chat_with_history_on(cx, timeline, false, Some(provider));
+            if running {
+                timeline.turns.truncate(1);
+            } else {
+                timeline.entries.extend([
+                    at_turn(entry("user-1", user_item("second")), 1),
+                    at_turn(entry("assistant-1", assistant("Two.")), 1),
+                ]);
+            }
+            let (store, window_state, session_id, mut driver, scripted) =
+                seed_chat_scripted(cx, log_of(&timeline), false, Some(provider), running);
+            // The second turn runs: the user sent it and the provider answers.
+            let mut user = "user-1".to_owned();
+            if let Some((commands, events)) = &scripted {
+                driver.command(
+                    cx,
+                    tcode_protocol::Command::SendTurn {
+                        session_id: session_id.clone(),
+                        text: "second".into(),
+                        attachment_paths: Vec::new(),
+                    },
+                );
+                let delivery_id = loop {
+                    if let agent::SessionCommand::SendTurn { delivery_id, .. } =
+                        driver.recv(cx, commands)
+                    {
+                        break delivery_id;
+                    }
+                };
+                for event in [
+                    agent::AgentEvent::TurnAccepted { delivery_id },
+                    agent::AgentEvent::TurnStarted {
+                        turn_id: "turn-1".into(),
+                    },
+                    agent::AgentEvent::ItemStarted(agent::ThreadItem {
+                        id: "assistant-1".into(),
+                        parent_item_id: None,
+                        content: ItemContent::AssistantMessage {
+                            text: "Two.".into(),
+                            summarized: false,
+                        },
+                    }),
+                ] {
+                    events.try_send(event).unwrap();
+                }
+                let sent = |cx: &TestAppContext| {
+                    store.read_with(cx, |store, cx| {
+                        store
+                            .with_timeline_for(
+                                Some(session_id.as_str()),
+                                |timeline| {
+                                    let last = timeline.entries.last()?;
+                                    (last.id == "assistant-1").then(|| {
+                                        timeline.entries.iter().rev().find_map(|entry| {
+                                            crate::chat::model::user_content(&entry.content)
+                                                .map(|_| entry.id.clone())
+                                        })
+                                    })?
+                                },
+                                cx,
+                            )
+                            .flatten()
+                    })
+                };
+                driver.wait_until(cx, "the running turn", |cx| sent(cx).is_some());
+                user = sent(cx).unwrap();
+            }
             let (_view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(
                     store.clone(),
@@ -2606,11 +2667,11 @@ mod tests {
             window.simulate_resize(size(px(1_024.), px(700.)));
             draw_settled(window);
             let bubble = window
-                .debug_bounds("user-bubble-user-1")
+                .debug_bounds(format!("user-bubble-{user}").leak())
                 .expect("the user bubble is drawn");
             window.simulate_mouse_move(bubble.center(), None, Modifiers::default());
             draw_settled(window);
-            assert!(window.debug_bounds("fork-user-1").is_none());
+            assert!(window.debug_bounds(format!("fork-{user}").leak()).is_none());
             if let Some(copy) = window.debug_bounds("copy-assistant:assistant-1") {
                 window.simulate_mouse_move(copy.center(), None, Modifiers::default());
                 draw_settled(window);
@@ -2739,23 +2800,39 @@ mod tests {
                     },
                 }));
             }
-            let timeline = Timeline::fold_events(events);
-            let divider = timeline
-                .entries
-                .iter()
-                .rev()
-                .find(|entry| matches!(entry.content, EntryContent::Rewound(_)))
-                .map(|entry| entry.id.clone())
-                .unwrap();
             let (workspace_store, window_state, session_id, _driver) =
-                seed_chat_with_history_on(cx, timeline, false, Some(ProviderKind::OpenCode));
+                seed_chat_log_on(cx, events, Some(ProviderKind::OpenCode));
             cx.update(|cx| cx.set_reduce_motion(true));
             let (_view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-                ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
+                ChatView::new(
+                    workspace_store.clone(),
+                    window_state,
+                    Some(session_id),
+                    window,
+                    cx,
+                )
             });
             let window: &mut VisualTestContext = window;
             window.simulate_resize(size(px(1_024.), px(700.)));
             draw_settled(window);
+            // The divider the client folded from the host's records.
+            let divider = workspace_store
+                .read_with(window, |store, cx| {
+                    store.with_timeline_for(
+                        store.sole_thread().as_deref(),
+                        |timeline| {
+                            timeline
+                                .entries
+                                .iter()
+                                .rev()
+                                .find(|entry| matches!(entry.content, EntryContent::Rewound(_)))
+                                .map(|entry| entry.id.clone())
+                        },
+                        cx,
+                    )
+                })
+                .flatten()
+                .expect("the rewind's divider");
             let toggle = window
                 .debug_bounds(format!("rewound-toggle-{divider}").leak())
                 .unwrap_or_else(|| panic!("{later_history:?}: the removed turn can be read"));

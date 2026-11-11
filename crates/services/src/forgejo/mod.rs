@@ -203,8 +203,8 @@ impl Forgejo {
                             "renamed" => agent::FileChangeKind::Rename,
                             _ => agent::FileChangeKind::Modify,
                         },
-                        additions: row["additions"].as_u64()?,
-                        deletions: row["deletions"].as_u64()?,
+                        additions: Some(row["additions"].as_u64()?),
+                        deletions: Some(row["deletions"].as_u64()?),
                         patch: PullRequestPatch::Withheld,
                         url: None,
                     })

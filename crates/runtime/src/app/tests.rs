@@ -5101,11 +5101,7 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
         };
         assert_eq!(
             prompt.as_deref(),
-            Some(
-                active.queue[0]
-                    .wire_text(active.meta.provider, &[])
-                    .as_str()
-            )
+            Some(active.queue[0].wire_text(&[]).as_str())
         );
     });
 }
@@ -6456,57 +6452,6 @@ fn skill_mentions_use_the_providers_native_invocation() {
     );
     for text in ["$HOME is set", "please $review", "$"] {
         assert_eq!(native_skill_invocation(text.into(), &claude), text);
-    }
-}
-
-/// An image-only send keeps its empty text in the transcript (the bubble
-/// renders just the thumbnails) while the wire carries a placeholder.
-#[test]
-fn image_only_message_gets_placeholder_on_the_wire_only() {
-    let (commands, receiver) = smol::channel::unbounded();
-    let mut active = live_session(ProviderKind::Codex, commands);
-    let attachment = Attachment {
-        media_type: "image/png".into(),
-        data_base64: "AAAA".into(),
-        source_path: Some("/tmp/a.png".into()),
-    };
-    active.push_queued(String::new(), vec![attachment.clone()]);
-
-    assert_eq!(active.dispatch_next_pending(test_start()), Ok(true));
-    let delivery_id = match receiver.try_recv() {
-        Ok(SessionCommand::SendTurn {
-            delivery_id,
-            text,
-            attachments,
-            ..
-        }) => {
-            assert_eq!(text, tcode_core::attachments::IMAGE_ONLY_MESSAGE);
-            assert_eq!(attachments, vec![attachment]);
-            delivery_id
-        }
-        other => panic!("expected SendTurn, got {other:?}"),
-    };
-    // The accepted (recorded) message keeps the user's empty text and the
-    // local path for the timeline.
-    let recorded = active.accept_turn_delivery(delivery_id).unwrap();
-    assert_eq!(recorded.text, "");
-    assert_eq!(attachment_paths(&recorded.attachments), vec!["/tmp/a.png"]);
-}
-
-/// Claude Code and OpenCode drop the empty text part themselves, so an
-/// image-only message reaches them as the user wrote it.
-#[test]
-fn image_only_message_goes_as_written_to_harnesses_that_drop_empty_text() {
-    let attachment = Attachment {
-        media_type: "image/png".into(),
-        data_base64: "AAAA".into(),
-        source_path: None,
-    };
-    for provider in [ProviderKind::ClaudeCode, ProviderKind::OpenCode] {
-        assert_eq!(
-            wire_text_with_placeholder(String::new(), std::slice::from_ref(&attachment), provider),
-            ""
-        );
     }
 }
 
@@ -10893,7 +10838,7 @@ fn superseded_turn_changes_cross_without_diffs() {
         agent::file_changes_from_unified_diff(&format!(
             "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-{diff}\n+{diff}!\n"
         ))
-        .unwrap()
+        .changes
     };
     let update = |diff: &str| StoredEvent {
         origin: None,

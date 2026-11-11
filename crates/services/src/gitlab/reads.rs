@@ -812,8 +812,21 @@ pub(super) fn remarks(discussions: &[Value]) -> Vec<PullRequestRemark> {
 pub(super) fn file(row: &Value) -> Option<PullRequestFile> {
     let path = text(row, "new_path")?;
     let hunks = row["diff"].as_str().unwrap_or_default();
-    let count = |sign: char| hunks.lines().filter(|line| line.starts_with(sign)).count() as u64;
     let flag = |field: &str| row[field].as_bool() == Some(true);
+    let patch = if hunks.starts_with("Binary files ") {
+        PullRequestPatch::Binary
+    } else if hunks.is_empty() && flag("too_large") {
+        PullRequestPatch::Oversized
+    } else if hunks.is_empty() && flag("collapsed") {
+        PullRequestPatch::Withheld
+    } else {
+        PullRequestPatch::Hunks(hunks.to_owned())
+    };
+    // The hunks are the only count GitLab gives a file.
+    let count = |sign: char| {
+        matches!(patch, PullRequestPatch::Hunks(_))
+            .then(|| hunks.lines().filter(|line| line.starts_with(sign)).count() as u64)
+    };
     Some(PullRequestFile {
         previous_path: text(row, "old_path").filter(|old| flag("renamed_file") && *old != path),
         kind: if flag("new_file") {
@@ -827,15 +840,7 @@ pub(super) fn file(row: &Value) -> Option<PullRequestFile> {
         },
         additions: count('+'),
         deletions: count('-'),
-        patch: if hunks.starts_with("Binary files ") {
-            PullRequestPatch::Binary
-        } else if hunks.is_empty() && flag("too_large") {
-            PullRequestPatch::Oversized
-        } else if hunks.is_empty() && flag("collapsed") {
-            PullRequestPatch::Withheld
-        } else {
-            PullRequestPatch::Hunks(hunks.to_owned())
-        },
+        patch,
         url: None,
         path,
     })
@@ -981,7 +986,7 @@ mod tests {
         };
         let edited = row("README", "README", "@@ -1 +1 @@\n-Title\n+Readme\n", None);
         assert_eq!(edited.kind, agent::FileChangeKind::Modify);
-        assert_eq!((edited.additions, edited.deletions), (1, 1));
+        assert_eq!((edited.additions, edited.deletions), (Some(1), Some(1)));
         assert_eq!(
             edited.patch,
             PullRequestPatch::Hunks("@@ -1 +1 @@\n-Title\n+Readme\n".into())
@@ -998,7 +1003,7 @@ mod tests {
         );
         assert_eq!(
             (added.kind, added.additions, added.previous_path),
-            (agent::FileChangeKind::Create, 2, None)
+            (agent::FileChangeKind::Create, Some(2), None)
         );
         let gone = row(
             "b.rs",
@@ -1008,7 +1013,7 @@ mod tests {
         );
         assert_eq!(
             (gone.kind, gone.deletions),
-            (agent::FileChangeKind::Delete, 1)
+            (agent::FileChangeKind::Delete, Some(1))
         );
         assert_eq!(
             row("big.json", "big.json", "", Some("too_large")).patch,

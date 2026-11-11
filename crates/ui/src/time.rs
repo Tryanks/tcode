@@ -30,15 +30,22 @@ pub(crate) fn format_countdown(secs: u64) -> String {
     }
 }
 
-/// A span as its two largest whole units, floored: days and hours past a
-/// day, hours and minutes past an hour, else minutes ("1d 3h", "2h 15m",
-/// "0m").
+/// A span still ahead as its two largest units, the smaller rounded up so it
+/// never names a time already past, as [`humanize_in`] does: days and hours
+/// from a day, hours and minutes from an hour, else minutes ("1d 3h",
+/// "2h 15m", "1m").
 pub(crate) fn format_span(secs: u64) -> String {
-    let (days, hours, minutes) = (secs / 86_400, (secs % 86_400) / 3_600, (secs % 3_600) / 60);
-    if days > 0 {
-        crate::tr!("time.span_days", days = days, hours = hours).into_owned()
-    } else if hours > 0 {
-        crate::tr!("time.span_hours", hours = hours, minutes = minutes).into_owned()
+    let minutes = secs.div_ceil(60);
+    if minutes >= 1_440 {
+        let hours = secs.div_ceil(3_600);
+        crate::tr!("time.span_days", days = hours / 24, hours = hours % 24).into_owned()
+    } else if minutes >= 60 {
+        crate::tr!(
+            "time.span_hours",
+            hours = minutes / 60,
+            minutes = minutes % 60
+        )
+        .into_owned()
     } else {
         crate::tr!("time.span_minutes", minutes = minutes).into_owned()
     }

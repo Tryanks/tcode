@@ -3,7 +3,7 @@
 
 use crate::{
     ApprovalPolicy, ApprovalReviewer, ForkPoint, LaterHistory, PermissionSandbox,
-    PermissionSummary, RewindFailure, RewindFailureReason, RewindMode, Speed,
+    PermissionSummary, RewindFailure, RewindFailureReason, RewindMode, Speed, approval_class,
 };
 use std::collections::{HashMap, HashSet};
 use std::io::BufWriter;
@@ -37,6 +37,9 @@ pub use developer_instructions::PREVIEW_BROWSER_INSTRUCTIONS;
 
 /// The `additionalContext` key [`SessionOptions::instructions`] ride under.
 const INSTRUCTIONS_CONTEXT_KEY: &str = "tcode";
+
+/// The id of Codex's permission control ([`permission_control`]).
+const PERMISSIONS_OPTION_ID: &str = "permissions";
 
 const ELICITATION_URL_ACK_LABEL: &str = "I've opened the link";
 const ELICITATION_URL_CANCEL_LABEL: &str = "Cancel";
@@ -156,6 +159,7 @@ fn current_permission_option(effective: &str, settings: &Value) -> SelectOption 
             approval,
             reviewer,
         }),
+        approval: approval_class(ProviderKind::Codex, PERMISSIONS_OPTION_ID, effective),
     }
 }
 
@@ -190,7 +194,6 @@ fn permission_descriptor(
             continue;
         }
         options.push(SelectOption {
-            value,
             label: id.into(),
             description: profile
                 .get("description")
@@ -201,6 +204,8 @@ fn permission_descriptor(
                 .then(|| "Not allowed by your configuration".into()),
             speed: None,
             summary: None,
+            approval: approval_class(ProviderKind::Codex, PERMISSIONS_OPTION_ID, &value),
+            value,
         });
     }
     if !options.iter().any(|option| option.value == effective) {
@@ -410,6 +415,7 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
                     description,
                     speed: None,
                     summary: None,
+                    approval: None,
                 })
             })
             .collect();
@@ -423,7 +429,7 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
                 apply: Default::default(),
                 recommended: None,
                 permissive: None,
-                id: "reasoningEffort".into(),
+                id: crate::EFFORT_OPTION_ID.into(),
                 label: "Reasoning".into(),
                 options: select_options,
                 default_value,
@@ -447,6 +453,7 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
             description: None,
             speed: None,
             summary: None,
+            approval: None,
         });
         select_options.extend(tiers);
         options.push(OptionDescriptor::Select {
@@ -483,6 +490,7 @@ fn context_window_descriptor(windows: Option<&model_windows::ModelWindows>) -> O
             unavailable: None,
             speed: None,
             summary: None,
+            approval: None,
         }
     };
     let (options, default_value) = match windows {
@@ -533,6 +541,7 @@ fn service_tiers(model: &Value) -> Vec<SelectOption> {
                     label,
                     description,
                     summary: None,
+                    approval: None,
                 })
             })
             .collect();
@@ -592,7 +601,7 @@ fn reasoning_effort_label(effort: &str) -> String {
 
 /// Selected reasoning effort (option id `reasoningEffort`).
 fn codex_effort(selections: &[OptionSelection]) -> Option<String> {
-    selection_str(selections, "reasoningEffort")
+    selection_str(selections, crate::EFFORT_OPTION_ID)
 }
 
 /// What `model/list` says of each model's reasoning effort (`v2/Model.ts`).
@@ -750,6 +759,7 @@ enum ElicitFieldKind {
 }
 
 struct Actor {
+    clock: crate::Clock,
     child: ProcessTree<Child>,
     stderr_tail: StderrTail,
     stdin: BufWriter<ChildStdin>,
@@ -877,6 +887,7 @@ async fn run_actor(
     };
 
     let mut actor = Actor {
+        clock: opts.clock.clone(),
         child,
         stderr_tail,
         stdin,
@@ -971,6 +982,10 @@ impl SessionActor for Actor {
 
     fn events(&self) -> &Sender<AgentEvent> {
         &self.events
+    }
+
+    fn clock(&self) -> &crate::Clock {
+        &self.clock
     }
 
     fn command_failure_reason(&self) -> &'static str {
@@ -1253,7 +1268,7 @@ impl SessionActor for Actor {
                     let value = value.as_str().ok_or("Codex permissions must be a string")?;
                     permission_params(value, true)?;
                     self.requested_permission = value.into();
-                } else if id == "reasoningEffort" {
+                } else if id == crate::EFFORT_OPTION_ID {
                     self.effort = value.as_str().map(str::to_owned);
                 } else if id == "serviceTier" {
                     self.service_tier = value.as_str().map(str::to_owned);
@@ -2836,24 +2851,30 @@ impl Actor {
                     .get("diff")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                match file_changes_from_unified_diff(diff) {
-                    Ok(changes) => {
-                        self.events
-                            .emit(AgentEvent::TurnChangesUpdated {
-                                turn_id,
-                                changes,
-                                completeness: ChangeCompleteness::Exact,
-                            })
-                            .await;
-                    }
-                    Err(err) => {
-                        self.events
-                            .emit(AgentEvent::Warning {
-                                message: format!("Codex supplied an invalid turn diff: {err}"),
-                            })
-                            .await;
-                    }
+                let read = file_changes_from_unified_diff(diff);
+                // What Tcode could not read as a file's section reaches the
+                // user as Codex wrote it, and the snapshot no longer claims
+                // to be the turn's whole change.
+                for unread in &read.unread {
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: format!(
+                                "Codex sent part of the turn's diff that names no file:\n{unread}"
+                            ),
+                        })
+                        .await;
                 }
+                self.events
+                    .emit(AgentEvent::TurnChangesUpdated {
+                        turn_id,
+                        changes: read.changes,
+                        completeness: if read.unread.is_empty() {
+                            ChangeCompleteness::Exact
+                        } else {
+                            ChangeCompleteness::Partial
+                        },
+                    })
+                    .await;
             }
             "item/started" | "item/updated" | "item/completed" => {
                 let item_value = params.get("item");
@@ -3061,7 +3082,6 @@ impl Actor {
                 (
                     input
                         .get("agent_type")
-                        .or_else(|| input.get("subagent_type"))
                         .and_then(Value::as_str)
                         .unwrap_or_else(|| path.rsplit('/').next().unwrap_or("subagent"))
                         .to_owned(),
@@ -3534,7 +3554,12 @@ fn snake_case(value: &str) -> String {
 /// first, then one `image` entry per attachment carrying a
 /// `data:<mime>;base64,<data>` URL (the Codex app-server image-input shape).
 fn user_input(text: &str, attachments: &[Attachment]) -> Value {
-    let mut input = vec![json!({ "type": "text", "text": text, "text_elements": [] })];
+    // A message of pictures alone carries no text item, as ChatGPT.app and
+    // Codex's own TUI send one.
+    let mut input = Vec::with_capacity(1 + attachments.len());
+    if !text.is_empty() || attachments.is_empty() {
+        input.push(json!({ "type": "text", "text": text, "text_elements": [] }));
+    }
     for attachment in attachments {
         input.push(json!({
             "type": "image",
@@ -4039,6 +4064,9 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
                 .map(|changes| changes.iter().filter_map(map_file_change).collect())
                 .unwrap_or_default(),
             status: map_status(item.get("status").and_then(Value::as_str)),
+            // `FileChangeThreadItem` (v2, 0.167.1) says nothing of the patch's
+            // result beyond its status.
+            output: None,
         },
         "mcpToolCall" | "dynamicToolCall" => {
             let result = item
@@ -4087,9 +4115,32 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             path: string_field(item, "path"),
             image: None,
         },
-        "webSearch" => ItemContent::WebSearch {
-            query: string_field(item, "query"),
-        },
+        // `WebSearchThreadItem` (v2, 0.167.1) has no status: it runs from
+        // item/started to item/completed, as ChatGPT.app's web-search row
+        // streams until its item completes. Its `results` are opaque JSON.
+        "webSearch" => {
+            let query = string_field(item, "query");
+            let mut input = serde_json::Map::new();
+            input.insert("query".into(), query.clone().into());
+            if let Some(action) = item.get("action").filter(|action| !action.is_null()) {
+                input.insert("action".into(), action.clone());
+            }
+            ItemContent::ToolCall {
+                image_reads: Vec::new(),
+                name: provider_kind.into(),
+                input: Value::Object(input),
+                output: item
+                    .get("results")
+                    .filter(|results| {
+                        results
+                            .as_array()
+                            .is_some_and(|results| !results.is_empty())
+                    })
+                    .map(Value::to_string),
+                status: ItemStatus::InProgress,
+                family: Some(Box::new(ToolFamily::WebSearch { query, links: None })),
+            }
+        }
         // The display item of the `clock.sleep` call, which a rollout records
         // as that call with its arguments.
         "sleep" => ItemContent::ToolCall {
@@ -4300,6 +4351,18 @@ pub fn rollout_file_changes(changes: &Value) -> Vec<FileChange> {
     changes
 }
 
+/// What a rollout records apply_patch printing for a patch, its own
+/// `FileChange` item's or a legacy `patch_apply_end`'s `stdout` and then
+/// `stderr` (`protocol/src/protocol.rs` at `rust-v0.167.0`).
+pub fn rollout_patch_output(record: &Value) -> Option<String> {
+    let printed: Vec<&str> = ["stdout", "stderr"]
+        .into_iter()
+        .filter_map(|stream| record.get(stream).and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+        .collect();
+    (!printed.is_empty()).then(|| printed.join("\n"))
+}
+
 /// A rollout's snake_case status of a turn item, as its live item's.
 pub fn rollout_status(status: Option<&str>) -> ItemStatus {
     map_status(status)
@@ -4358,9 +4421,7 @@ fn item_status(content: &ItemContent) -> ItemStatus {
 
 fn item_summary(content: &ItemContent) -> Option<String> {
     match content {
-        ItemContent::ToolCall { output, .. } => output
-            .as_deref()
-            .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" ")),
+        ItemContent::ToolCall { output, .. } => output.clone(),
         _ => None,
     }
 }
@@ -4498,17 +4559,11 @@ fn map_file_change(change: &Value) -> Option<FileChange> {
     let kind_type = kind_value
         .get("type")
         .and_then(Value::as_str)
-        .or_else(|| kind_value.as_str())
         .unwrap_or("update");
     let kind = match kind_type {
-        "add" | "create" => FileChangeKind::Create,
+        "add" => FileChangeKind::Create,
         "delete" => FileChangeKind::Delete,
-        "update"
-            if kind_value
-                .get("move_path")
-                .or_else(|| kind_value.get("movePath"))
-                .is_some_and(|v| !v.is_null()) =>
-        {
+        "update" if kind_value.get("move_path").is_some_and(|v| !v.is_null()) => {
             FileChangeKind::Rename
         }
         _ => FileChangeKind::Modify,
@@ -4569,11 +4624,7 @@ fn map_usage(value: &Value) -> Option<TokenUsage> {
 
 /// `ModelReroutedNotification` (app-server protocol v2, codex-cli 0.167.1).
 fn model_reroute(params: &Value) -> Option<AgentEvent> {
-    let to = params
-        .get("toModel")
-        .or_else(|| params.get("to_model"))
-        .and_then(Value::as_str)?
-        .to_owned();
+    let to = params.get("toModel").and_then(Value::as_str)?.to_owned();
     let field = |name| params.get(name).and_then(Value::as_str).map(str::to_owned);
     Some(AgentEvent::ServedModel {
         model: to,
@@ -5250,6 +5301,7 @@ mod tests {
         let (event_tx, event_rx) = smol::channel::unbounded();
         (
             Actor {
+                clock: crate::Clock::default(),
                 child: ProcessTree::new(child),
                 stderr_tail: StderrTail::default(),
                 stdin,
@@ -7601,7 +7653,7 @@ mod tests {
                 matches!(events.try_recv().unwrap(), AgentEvent::TurnStarted { ref turn_id } if turn_id == "turn-1")
             );
             assert!(
-                matches!(events.try_recv().unwrap(), AgentEvent::ItemStarted(ThreadItem { content: ItemContent::FileChange { ref changes, status: ItemStatus::InProgress }, .. }) if changes[0].kind == FileChangeKind::Create)
+                matches!(events.try_recv().unwrap(), AgentEvent::ItemStarted(ThreadItem { content: ItemContent::FileChange { ref changes, status: ItemStatus::InProgress, .. }, .. }) if changes[0].kind == FileChangeKind::Create)
             );
             assert!(
                 matches!(events.try_recv().unwrap(), AgentEvent::ApprovalRequested(ApprovalRequest { ref id, kind: ApprovalKind::FileChange { ref changes, .. }, .. }) if id == "41" && changes.len() == 1)
@@ -7869,6 +7921,7 @@ mod tests {
                     acp: None,
                     instructions: None,
                     processes: Default::default(),
+                    clock: Default::default(),
                 };
                 let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
                     .await
@@ -7958,6 +8011,7 @@ mod tests {
                     acp: None,
                     instructions: None,
                     processes: Default::default(),
+                    clock: Default::default(),
                 };
                 let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
                     .await

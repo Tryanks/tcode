@@ -897,7 +897,7 @@ mod tests {
         let (to_host, _host_rx) = async_channel::unbounded::<String>();
         let (_host_tx, from_host) = async_channel::unbounded::<String>();
         let (attachments, _attachment_rx) = async_channel::unbounded();
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(|cx| {
             cx.set_global(RemoteController::new(
                 HostMux::new(attachments, from_host.clone()),

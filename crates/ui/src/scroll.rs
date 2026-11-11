@@ -980,7 +980,7 @@ mod tests {
     /// list does not start again from its top.
     #[gpui::test]
     fn a_live_list_keeps_the_readers_place_as_its_rows_change(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (view, cx) = cx.add_window_view(|_, _| Live((0..40).collect()));
         crate::test_frames::draw_settled(cx);
         let viewport = cx.debug_bounds("live").unwrap();

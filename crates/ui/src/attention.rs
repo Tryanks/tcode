@@ -135,7 +135,7 @@ mod tests {
     fn a_thread_starting_to_wait_while_tcode_is_away_asks_for_attention_once(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, _outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);

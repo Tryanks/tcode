@@ -933,7 +933,7 @@ mod tests {
     }
 
     fn open_viewer(cx: &mut TestAppContext, width: u32, height: u32) -> &mut VisualTestContext {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(init);
         let (_, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);

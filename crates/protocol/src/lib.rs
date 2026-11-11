@@ -45,12 +45,12 @@ pub use event::{
     GitStatusStatus, HarnessDescription, HarnessPermission, ImportFailure, IndexSnapshot,
     IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools,
     MergeWorktreeFailure, NoticeSeverity, PendingRewind, PluginCatalogState, PluginChallenge,
-    PluginChallengeKind, PluginOperationTarget, PluginStaleReason, ProviderDiskUsage,
-    ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus,
-    ProvidersStatus, QueuedMessageStatus, RewindBlocked, RewindStatus, RuntimeEffect, RuntimeError,
-    RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope,
-    ScopedProviderChoice, ServerEvent, SessionActivity, SessionPlan, SessionStatus,
-    StorageMigration, TcodeDiskUsage, TcodeUpdateStatus, TerminalContextStatus,
+    PluginChallengeKind, PluginOperationTarget, PluginStaleReason, PluginsDescription,
+    ProviderDiskUsage, ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun,
+    ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RewindBlocked, RewindStatus,
+    RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification, RuntimeOperationId,
+    RuntimeToast, Scope, ScopedProviderChoice, ServerEvent, SessionActivity, SessionPlan,
+    SessionStatus, StorageMigration, TcodeDiskUsage, TcodeUpdateStatus, TerminalContextStatus,
     TerminalSplitStatus, TerminalStatus, ThreadReferenceStatus, ThreadWakes, Topic,
 };
 pub use query::{
@@ -63,6 +63,7 @@ pub use query::{
     STORED_OUTPUT_ROWS, SessionContentHits, SessionSearchHit, SourceTool, SpaceAction, SpaceAgents,
     SpaceApproval, SpaceInfo, SpacePolicy, TraverseLookupState, TraverseLookupStatus,
     TraverseManifestState, TraverseManifestStatus, TraverseRelayStatus, TraverseSourceStatus,
+    WorkspaceListing,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
@@ -344,14 +345,17 @@ pub use wire::{
 // Command gains cancel_provider_update, RuntimeToast provider_update_cancelled.
 // ProvidersStatus gains secrets_unreadable.
 // The agent event stream gains unreadable_record {line}: a row of a thread's
-// log the host cannot read is sent as it is stored instead of left out.
+// log the host cannot read is sent as it is stored instead of left out, and so
+// is a subagent's item (with parent_item_id) a build before v0.1.42 wrote
+// into its parent's log.
 // The agent event stream loses plan_resolved, proposed_plan_delta,
 // proposed_plan, model_fallback_detected and turn_blocked, and
 // approval_resolved's decision no longer reads approve, approve_for_session
 // or deny: rows of them are unreadable_record.
 // The agent event stream gains record_withheld {bytes}: a history window or
 // page sends it for a record longer than the client's line, where the whole
-// reply was the history_record_too_large error.
+// reply was the history_record_too_large error, and a live session_event
+// carries it for such a record, where the connection closed.
 // OptionRole gains effort, context_window, speed and thinking. SelectOption
 // gains speed and summary (a PermissionSummary of profile, sandbox, approval
 // and reviewer); Codex's current permissions carry a summary, not a
@@ -367,6 +371,22 @@ pub use wire::{
 // web_search {query, links}, each link {title, url}; load_tools {query,
 // tools}; skill {name}.
 // The served_model event gains from, the model the harness named before it.
+// RuntimeError gains title_attachment_unreadable {path, error}.
+// PullRequestFile's additions and deletions may be absent: a binary or
+// oversized file whose host gave no count.
+// SelectOption gains approval, the ApprovalClass of a permission value.
+// SessionStatus gains background_control {stop, move_running} and
+// harness_option_labels.
+// HarnessDescription's plugins is a PluginsDescription {actions, marketplaces,
+// scopes, source_install, unmanaged} instead of a bool; it gains home_path.
+// The file_change item gains output, what the harness gave back for the
+// change: its tool's result, or why it failed.
+// QueryResponse::PullRequest carries fresh_for, the seconds the answer stays
+// current, instead of expires_at, a time by the host's clock.
+// QueryResponse::ActiveWorkspace carries a WorkspaceListing {entries,
+// truncated, unreadable}; ListActiveWorkspace lists a thread that is not
+// running too, and answers unknown_session or git's or the file system's error
+// where it was an empty list.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

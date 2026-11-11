@@ -244,7 +244,7 @@ pub enum QueryResponse {
         end: u64,
         truncated: bool,
     },
-    ActiveWorkspace(Vec<PathEntry>),
+    ActiveWorkspace(WorkspaceListing),
     IconImages {
         directory: PathBuf,
         parent: Option<PathBuf>,
@@ -278,8 +278,10 @@ pub enum QueryResponse {
     ReviewRecords(Vec<tcode_core::control::ReviewRecord>),
     PullRequest {
         response: Box<crate::PullRequestReadResponse>,
-        /// Unix seconds after which the host answers this read afresh.
-        expires_at: u64,
+        /// Seconds from this answer until the host answers this read afresh:
+        /// a client counts them from when it got the answer, never against
+        /// its own clock's idea of the host's.
+        fresh_for: u64,
     },
 }
 
@@ -351,6 +353,16 @@ pub struct IconImageEntry {
     pub path: PathBuf,
     pub name: String,
     pub is_dir: bool,
+}
+
+/// A thread's working directory as the `@` menu lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceListing {
+    pub entries: Vec<PathEntry>,
+    /// The listing stopped at its entry limit; there is more than `entries`.
+    pub truncated: bool,
+    /// A folder the listing could not read, and why, one per entry.
+    pub unreadable: Vec<String>,
 }
 
 /// One listable workspace entry (relative to the workspace root).
@@ -621,9 +633,10 @@ impl SpacePolicy {
     pub fn allows_provider(&self, provider: agent::ProviderKind) -> bool {
         self.allows_class(agent::ApprovalClass::Unrestricted)
             || match agent::permission_control(provider) {
-                Some(agent::OptionDescriptor::Select { id, options, .. }) => {
+                Some(agent::OptionDescriptor::Select { options, .. }) => {
                     options.iter().any(|option| {
-                        agent::approval_class(provider, &id, &option.value)
+                        option
+                            .approval
                             .is_some_and(|class| self.allows_class(class))
                     })
                 }

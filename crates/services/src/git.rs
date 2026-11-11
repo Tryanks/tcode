@@ -464,7 +464,7 @@ pub fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
 
 /// Whether `cwd` is inside a work tree: `false` where git says it is not a repository, and
 /// git's error, or why git could not run, otherwise.
-fn is_git_repo(cwd: &Path) -> Result<bool, String> {
+pub(crate) fn is_git_repo(cwd: &Path) -> Result<bool, String> {
     let args = ["rev-parse", "--is-inside-work-tree"];
     // Git's own words decide "not a repository", so they are read untranslated.
     let out = git_command(cwd)

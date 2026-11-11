@@ -749,7 +749,12 @@ impl SettingsPage {
             this.store
                 .update(cx, |store, _| store.clear_control_grant(id));
         }));
-        let no_mcp = !meta.provider.caps().mcp_servers;
+        let harness = match &meta.acp_agent_id {
+            Some(id) => crate::harness_dialog::HarnessId::Acp(id.clone()),
+            None => crate::harness_dialog::HarnessId::Native(meta.provider),
+        };
+        let no_mcp = crate::harness_dialog::describe(self.store.read(cx), &harness)
+            .is_some_and(|description| !description.mcp_servers);
         let mut title_line = gpui_base::h_flex()
             .w_full()
             .min_w_0()

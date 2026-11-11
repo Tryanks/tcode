@@ -701,13 +701,12 @@ pub(super) fn block(
     if shows(Layer::Source) {
         let failure = failed.as_ref().map(|message| {
             let text = crate::tr!("markdown.mermaid_error_detail", message = message).into_owned();
-            let line = div().pt_2().text_secondary(false, cx).child(text);
-            #[cfg(test)]
-            let line = {
-                let path = path.to_string();
-                line.debug_selector(move || format!("markdown-mermaid-error-{path}"))
-            };
-            line
+            let path = path.to_string();
+            div()
+                .pt_2()
+                .text_secondary(false, cx)
+                .child(text)
+                .debug_selector(move || format!("markdown-mermaid-error-{path}"))
         });
         let code = div()
             .w_full()
@@ -763,7 +762,6 @@ pub(super) fn block(
             .span()
             .render(pictures),
         );
-        #[cfg(test)]
         let diagram = {
             let path = path.to_string();
             diagram.debug_selector(move || format!("markdown-mermaid-{path}"))
@@ -798,12 +796,8 @@ pub(super) fn block(
                 .px_2()
                 .text_secondary(false, cx)
                 .child(crate::tr!("markdown.mermaid_drawing").into_owned());
-            #[cfg(test)]
-            let label = {
-                let path = path.to_string();
-                label.debug_selector(move || format!("markdown-mermaid-drawing-{path}"))
-            };
-            label
+            let path = path.to_string();
+            label.debug_selector(move || format!("markdown-mermaid-drawing-{path}"))
         });
     let toggle = (shown.is_some() && failed.is_none()).then(|| {
         let (icon, label) = if showing_source {
@@ -815,7 +809,6 @@ pub(super) fn block(
             (IconName::Code, crate::tr!("markdown.mermaid_show_source"))
         };
         let (view, path) = (view.clone(), path.to_string());
-        #[cfg(test)]
         let selector = format!("markdown-mermaid-toggle-{path}");
         let button = action_button(
             format!("mermaid-toggle-{path}"),
@@ -831,9 +824,7 @@ pub(super) fn block(
                 state.set_diagram_source(&path, !showing_source, cx)
             });
         });
-        #[cfg(test)]
-        let button = div().debug_selector(move || selector).child(button);
-        button
+        button.debug_selector(move || selector)
     });
     let copy = {
         let (view, path, code) = (view.clone(), path.to_string(), whole_code.clone());
@@ -1099,7 +1090,7 @@ mod tests {
         streaming: bool,
         cx: &'a mut TestAppContext,
     ) -> (Entity<MarkdownState>, &'a mut VisualTestContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let text = text.to_string();
         let (root, cx) = cx.add_window_view(|_, cx| Root {

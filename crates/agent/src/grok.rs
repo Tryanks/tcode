@@ -76,6 +76,7 @@ pub async fn list_models(
         acp: None,
         instructions: None,
         processes: Default::default(),
+        clock: Default::default(),
     };
     acp_session::query(
         ProviderKind::Grok,
@@ -1554,7 +1555,7 @@ mod tests {
             fork: None,
             binary_path: Some(PathBuf::from("/opt/grok/bin/grok")),
             option_selections: vec![OptionSelection {
-                id: "reasoningEffort".into(),
+                id: crate::EFFORT_OPTION_ID.into(),
                 value: json!("low"),
             }],
             mcp_servers: Vec::new(),
@@ -1563,6 +1564,7 @@ mod tests {
             acp: None,
             instructions: None,
             processes: Default::default(),
+            clock: Default::default(),
         };
         let launch = Grok::default().launch(&opts).unwrap();
         assert_eq!(launch.program, PathBuf::from("/opt/grok/bin/grok"));
@@ -1625,7 +1627,7 @@ mod tests {
 
         // The diff is the hunk Grok sent, placed at its `_meta` line.
         assert!(matches!(completed(&events, "call_35_0"),
-            ItemContent::FileChange { changes, status: ItemStatus::Completed }
+            ItemContent::FileChange { changes, status: ItemStatus::Completed, .. }
                 if changes.len() == 1 && changes[0].kind == FileChangeKind::Modify
                     && changes[0].path.ends_with("/in.txt")
                     && changes[0].diff.as_deref() == Some(
@@ -1819,6 +1821,7 @@ mod tests {
             acp: None,
             instructions: None,
             processes: Default::default(),
+            clock: Default::default(),
         };
         let before = |checkpoint_id: &str| ForkPoint::Before {
             checkpoint_id: checkpoint_id.into(),

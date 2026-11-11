@@ -115,13 +115,19 @@ impl ToolView for Ask<'_> {
                 }))
                 .into_any_element()
         });
-        v_flex()
+        let questions = v_flex()
             .w_full()
             .min_w_0()
             .gap_3()
             .text_secondary(false, cx)
             .children(questions)
-            .into_any_element()
+            .into_any_element();
+        // What the harness gave back, which the answers were read from.
+        let raw = call
+            .output
+            .filter(|output| !output.trim().is_empty())
+            .map(|output| super::raw_section(call.entry, output, ctx));
+        super::body(std::iter::once(questions).chain(raw))
     }
 
     fn copy_items(&self, call: &Call<'_>) -> Vec<(String, String)> {

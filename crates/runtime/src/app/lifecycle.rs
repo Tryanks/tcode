@@ -51,6 +51,7 @@ impl AppState {
         active.runtime = Runtime::Starting { generation };
         active.provider_processes = agent::SessionProcesses::default();
         let processes = active.provider_processes.clone();
+        let clock = agent::Clock::new(cx.clock().clone());
         active.mcp_servers_attached = true;
         active.idle_since = None;
         active.live_model = active.meta.model.clone();
@@ -143,6 +144,7 @@ impl AppState {
                 opts.mcp_servers.extend(pull_request_registration);
                 opts.instructions = instructions;
                 opts.processes = processes.clone();
+                opts.clock = clock.clone();
                 if transfer_failed.is_some() {
                     opts.resume = None;
                     opts.fork = None;

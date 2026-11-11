@@ -511,6 +511,7 @@ mod tests {
                     acp: None,
                     instructions: None,
                     processes: Default::default(),
+                    clock: Default::default(),
                 },
             ))
         };

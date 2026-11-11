@@ -144,10 +144,11 @@ enum Answer {
     Unreached(Instant),
 }
 
-/// When pull request media expires, and the validator to read it again with.
+/// When pull request media expires, by this window's clock from when the host's answer
+/// arrived, and the validator to read it again with.
 #[derive(Clone)]
 struct Expiry {
-    at: u64,
+    at: Instant,
     validator: Option<String>,
 }
 
@@ -209,7 +210,7 @@ enum Read {
         expiry: Option<Expiry>,
     },
     /// The copy the read's validator names is current until then.
-    NotModified(u64),
+    NotModified(Instant),
     External(String),
     Elsewhere,
     TooLarge,
@@ -218,6 +219,11 @@ enum Read {
 }
 
 type Reading = Pin<Box<dyn Future<Output = Read> + Send>>;
+
+/// A time no read is due by: a freshness too long to add to now.
+fn far_future() -> Instant {
+    Instant::now() + Duration::from_secs(100 * 365 * 24 * 3600)
+}
 
 /// Query errors `HostLink` raises before the host answered.
 const UNREACHED: [&str; 2] = ["transport_closed", "disconnected"];
@@ -351,7 +357,6 @@ fn images(cx: &mut App) -> &mut Images {
 fn answer(source: &Source, window: &mut Window, cx: &mut App) -> Option<Answer> {
     let view = window.current_view();
     let now = cx.background_executor().now();
-    let now_secs = crate::time::now_secs(cx);
     let state = images(cx);
     let after_frame = state.after_frame.clone();
     let entry = state
@@ -364,10 +369,7 @@ fn answer(source: &Source, window: &mut Window, cx: &mut App) -> Option<Answer> 
             Some(Answer::Unreached(failed)) => {
                 now.saturating_duration_since(*failed) >= RETRY_UNREACHED
             }
-            Some(_) => entry
-                .expiry
-                .as_ref()
-                .is_some_and(|expiry| expiry.at <= now_secs),
+            Some(_) => entry.expiry.as_ref().is_some_and(|expiry| expiry.at <= now),
         };
     let read = due && entry.read.is_none();
     if entry.answer.is_none() || read {
@@ -468,10 +470,10 @@ fn reading(source: &Source, validator: Option<String>, cx: &mut App) -> Reading 
         }
         Source::Media(host, request) => {
             let host = HostImages::link(host, cx);
+            let executor = cx.background_executor().clone();
             Box::pin(async move {
-                let unavailable = || Read::Unavailable("pull request media is unavailable".into());
                 let Some(host) = host else {
-                    return unavailable();
+                    return Read::Unreached(executor.now());
                 };
                 let query = Query::PullRequest {
                     session_id: request.session_id,
@@ -482,17 +484,32 @@ fn reading(source: &Source, validator: Option<String>, cx: &mut App) -> Reading 
                     },
                 };
                 use tcode_protocol::{PullRequestMedia, PullRequestReadResponse};
-                let response = match host.query(query).await {
-                    Ok(QueryResponse::PullRequest { response, .. }) => *response,
+                let (response, fresh_until) = match host.query(query).await {
+                    Ok(QueryResponse::PullRequest {
+                        response,
+                        fresh_for,
+                    }) => (
+                        *response,
+                        executor
+                            .now()
+                            .checked_add(Duration::from_secs(fresh_for))
+                            .unwrap_or_else(far_future),
+                    ),
                     Err(error) if error.code == "pull_request_too_large" => return Read::TooLarge,
-                    _ => return unavailable(),
+                    Err(error) if UNREACHED.contains(&error.code.as_str()) => {
+                        return Read::Unreached(executor.now());
+                    }
+                    Err(error) => return Read::Unavailable(error.message.into()),
+                    Ok(response) => {
+                        return Read::Unavailable(format!("unexpected {response:?}").into());
+                    }
                 };
                 match response {
                     PullRequestReadResponse::Media(PullRequestMedia::Image {
                         bytes,
                         mime,
                         validator,
-                        expires_at,
+                        ..
                     }) => {
                         // The host decided the type; an SVG is drawn as an image only.
                         match gpui::ImageFormat::from_mime_type(&mime) {
@@ -501,23 +518,25 @@ fn reading(source: &Source, validator: Option<String>, cx: &mut App) -> Reading 
                                 bytes,
                                 renderer,
                                 Some(Expiry {
-                                    at: expires_at,
+                                    at: fresh_until,
                                     validator,
                                 }),
                             ),
-                            None => unavailable(),
+                            None => {
+                                Read::Unavailable(format!("unsupported image type {mime}").into())
+                            }
                         }
                     }
-                    PullRequestReadResponse::Media(PullRequestMedia::NotModified {
-                        expires_at,
-                    }) => Read::NotModified(expires_at),
+                    PullRequestReadResponse::Media(PullRequestMedia::NotModified { .. }) => {
+                        Read::NotModified(fresh_until)
+                    }
                     PullRequestReadResponse::Media(PullRequestMedia::External { mime }) => {
                         Read::External(mime)
                     }
                     PullRequestReadResponse::Media(PullRequestMedia::Unsupported) => {
                         Read::Elsewhere
                     }
-                    _ => unavailable(),
+                    response => Read::Unavailable(format!("unexpected {response:?}").into()),
                 }
             })
         }
@@ -773,7 +792,8 @@ pub(crate) enum MediaState {
     /// Video or audio, by MIME type.
     External(String),
     TooLarge,
-    Unavailable,
+    /// The read failed, in the host's words when it answered.
+    Unavailable(Option<SharedString>),
 }
 
 /// The host's answer for a media URL; an image past its expiry keeps drawing while it is read
@@ -829,7 +849,8 @@ pub(crate) fn pull_request_media_state(
         Some(Answer::Image(_) | Answer::Elsewhere) => MediaState::Ready,
         Some(Answer::External(mime)) => MediaState::External(mime),
         Some(Answer::TooLarge) => MediaState::TooLarge,
-        Some(Answer::Unavailable(_) | Answer::Unreached(_)) => MediaState::Unavailable,
+        Some(Answer::Unavailable(reason)) => MediaState::Unavailable(Some(reason)),
+        Some(Answer::Unreached(_)) => MediaState::Unavailable(None),
     }
 }
 
@@ -1010,23 +1031,27 @@ mod tests {
         }
     }
 
+    /// The host's answer of an image, current for `fresh_for` seconds.
     fn media_image(
         bytes: Vec<u8>,
         validator: Option<&str>,
-        expires_at: u64,
+        fresh_for: u64,
     ) -> Result<QueryResponse, ProtocolError> {
-        media(PullRequestMedia::Image {
-            bytes,
-            mime: "image/bmp".into(),
-            validator: validator.map(Into::into),
-            expires_at,
-        })
+        media(
+            PullRequestMedia::Image {
+                bytes,
+                mime: "image/bmp".into(),
+                validator: validator.map(Into::into),
+                expires_at: 0,
+            },
+            fresh_for,
+        )
     }
 
-    fn media(media: PullRequestMedia) -> Result<QueryResponse, ProtocolError> {
+    fn media(media: PullRequestMedia, fresh_for: u64) -> Result<QueryResponse, ProtocolError> {
         Ok(QueryResponse::PullRequest {
             response: Box::new(PullRequestReadResponse::Media(media)),
-            expires_at: u64::MAX,
+            fresh_for,
         })
     }
 
@@ -1140,13 +1165,13 @@ mod tests {
 
         // Read once, already past its expiry.
         frame(cx);
-        let asked = host.answer(|_| media_image(bmp(4), Some("first"), 1));
+        let asked = host.answer(|_| media_image(bmp(4), Some("first"), 0));
         assert_eq!(validators(asked), [None]);
         cx.run_until_parked();
         // Drawn, and so read again with its validator.
         frame(cx);
         assert!(drawn.borrow().is_some(), "the picture is drawn");
-        let asked = host.answer(|_| media(PullRequestMedia::NotModified { expires_at: 1 }));
+        let asked = host.answer(|_| media(PullRequestMedia::NotModified { expires_at: 0 }, 0));
         assert_eq!(validators(asked), [Some("first".to_string())]);
         cx.run_until_parked();
         // Still current, and still past its expiry: drawn on while it is read again.
@@ -1251,7 +1276,7 @@ mod tests {
         use tcode_core::project::Project;
         use tcode_protocol::{EventEnvelope, IndexSnapshot, ServerEvent, Topic};
 
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, requests) = async_channel::unbounded();
         let (replies, from_host) = async_channel::unbounded();
         let link = HostLink::new(to_host, from_host);
@@ -1393,7 +1418,7 @@ mod tests {
 
     #[gpui::test]
     fn markdown_images_draw_host_previews_and_open_host_originals(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let (to_host, requests) = async_channel::unbounded();
         let (replies, from_host) = async_channel::unbounded();

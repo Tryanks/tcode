@@ -695,7 +695,7 @@ mod tests {
 
     #[gpui::test]
     fn all_popovers_consume_dismissal_release_even_after_redraw(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         for kind in [Kind::Popover, Kind::Sheet, Kind::Dropdown] {
             for redraw in [false, true] {
                 let clicks = Rc::new(Cell::new(0));
@@ -747,7 +747,7 @@ mod tests {
 
     #[gpui::test]
     fn a_dismissal_without_a_press_leaves_the_next_click_alone(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let clicks = Rc::new(Cell::new(0));
         let releases = Rc::new(Cell::new(0));
         let (_, cx) = cx.add_window_view({
@@ -778,7 +778,7 @@ mod tests {
 
     #[gpui::test]
     fn bottom_sheet_options_receive_clicks_above_the_backdrop(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let selected = Rc::new(Cell::new(0));
         let (_, window) = cx.add_window_view({
             let selected = selected.clone();

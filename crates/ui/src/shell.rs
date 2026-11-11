@@ -870,7 +870,12 @@ impl AppShell {
             DevicePreferences::install(client.clone(), cx);
             // The window lists no saved machines while they cannot be read.
             // Said once the window holds its overlays.
-            if let Err(error) = client.load_hosts() {
+            // Nor can the machine this data directory hosts be told from the
+            // saved ones while its own file cannot be read.
+            for error in [client.load_hosts().err(), client.local_machine_id().err()]
+                .into_iter()
+                .flatten()
+            {
                 let message =
                     crate::tr!("errors.file_unreadable", error = error.to_string()).into_owned();
                 cx.defer_in(window, move |_, window, cx| {
@@ -1258,7 +1263,9 @@ impl AppShell {
         let saved = client.load_hosts().unwrap_or_default();
         let preference = DevicePreferences::workspace(cx);
         let last_host_id = client.last_host_id();
-        let local_machine_id = client.local_machine_id();
+        // Unreadable, it was reported on opening; the group's roster is not
+        // saved meanwhile, so no saved machine is this one.
+        let local_machine_id = client.local_machine_id().ok().flatten();
         crate::workspace::members(&crate::workspace::Device {
             saved: &saved,
             preference: preference.as_ref(),
@@ -6716,8 +6723,8 @@ pub(crate) mod tests {
             "returning phone".into()
         }
 
-        fn device_id(&self) -> String {
-            "returning-phone".into()
+        fn device_id(&self) -> Result<String, tcode_client::host::FileFailure> {
+            Ok("returning-phone".into())
         }
 
         fn device_platform(&self) -> Option<String> {
@@ -6812,7 +6819,7 @@ pub(crate) mod tests {
         Rc<ReturningClient>,
         &'a mut VisualTestContext,
     ) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let (states, state) = async_channel::unbounded();
@@ -6915,8 +6922,8 @@ pub(crate) mod tests {
             "tablet".into()
         }
 
-        fn device_id(&self) -> String {
-            "tablet".into()
+        fn device_id(&self) -> Result<String, tcode_client::host::FileFailure> {
+            Ok("tablet".into())
         }
 
         fn device_platform(&self) -> Option<String> {
@@ -7115,7 +7122,7 @@ pub(crate) mod tests {
         Rc<WorkspaceClient>,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::window_seam::force_mobile_layout);
         let client = Rc::new(WorkspaceClient {
             saved: RefCell::new(saved.clone()),
@@ -8558,7 +8565,7 @@ pub(crate) mod tests {
                 Ok(())
             }
         }
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let (to_host, _outgoing) = async_channel::unbounded();
         let (_incoming, from_host) = async_channel::unbounded();
@@ -8927,7 +8934,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_reopened_window_is_where_the_closed_one_was(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let scripted = || {
             let (to_host, outgoing) = async_channel::unbounded();
             let (incoming, from_host) = async_channel::unbounded();
@@ -9494,7 +9501,7 @@ pub(crate) mod tests {
         let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
         for id in ["thread-a", "thread-b"] {
             let mut meta = tcode_core::project::SessionMeta::new(
-                agent::ProviderKind::Codex,
+                agent::ProviderKind::ClaudeCode,
                 root.clone(),
                 None,
             );
@@ -9517,8 +9524,22 @@ pub(crate) mod tests {
                 None,
                 cx,
             );
-            store.show_thread("thread-a".into(), cx);
+            store.show_thread("thread-b".into(), cx);
         });
+        driver.wait_until(cx, "the other thread", |cx| {
+            store.read_with(cx, |store, cx| {
+                store.baseline_ready() && !store.chat_loading_for(Some("thread-b"), cx)
+            })
+        });
+        // The user sent the other thread a turn, which its provider runs on.
+        let provider = crate::chat::tests::scripted_turn(
+            &host,
+            &mut driver,
+            "thread-b",
+            agent::ProviderKind::ClaudeCode,
+            cx,
+        );
+        store.update(cx, |store, cx| store.show_thread("thread-a".into(), cx));
         driver.wait_until(cx, "selected conversation", |cx| {
             store.read_with(cx, |store, cx| {
                 store.baseline_ready()
@@ -9543,6 +9564,8 @@ pub(crate) mod tests {
             "draft"
         );
 
+        // The other thread's provider reports a retry, a warning and an
+        // error.
         for event in [
             agent::AgentEvent::TurnRetry {
                 retry: Some(agent::TurnRetry {
@@ -9558,27 +9581,21 @@ pub(crate) mod tests {
                 fatal: false,
             },
         ] {
-            driver
-                .await_with_events(
-                    cx,
-                    host.update_state_for_test(move |state, cx| {
-                        state.provider_event_for_test("thread-b", event, cx);
-                    }),
-                )
-                .unwrap();
-            driver.step(cx);
-            draw(cx);
-            cx.update(|window, _| {
-                assert!(
-                    focus.is_focused(window),
-                    "background provider event stole composer focus"
-                );
-            });
-            assert_eq!(
-                composer.read_with(cx, |composer, cx| composer.draft(cx)),
-                "draft"
-            );
+            provider.1.try_send(event).unwrap();
         }
+        driver.settle_until(cx, "the error's notice", |cx| {
+            cx.debug_bounds("compact-toast").is_some()
+        });
+        cx.update(|window, _| {
+            assert!(
+                focus.is_focused(window),
+                "background provider events stole composer focus"
+            );
+        });
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            "draft"
+        );
         let toast = cx
             .debug_bounds("compact-toast")
             .expect("the notice remains visible");
@@ -9610,7 +9627,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn keyboard_cover_changes_keep_editor_focus_until_explicit_dismissal(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::window_seam::force_mobile_layout);
         let (shell, host, _, cx) =
             mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 393., "plan");
@@ -9656,7 +9673,7 @@ pub(crate) mod tests {
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         cx.update(|window, cx| focus.focus(window, cx));
         draw(cx);
-        crate::window_seam::occlude_for_test(
+        crate::test_frames::occlude(
             cx,
             gpui::Edges {
                 bottom: px(400.),
@@ -9664,7 +9681,7 @@ pub(crate) mod tests {
             },
         );
         draw(cx);
-        crate::window_seam::occlude_for_test(cx, gpui::Edges::default());
+        crate::test_frames::occlude(cx, gpui::Edges::default());
         draw(cx);
         cx.update(|window, _| {
             assert!(
@@ -9796,7 +9813,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_subagent_thread_composer_is_its_settings_read_only(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::window_seam::force_mobile_layout);
         let (shell, host, _, cx) =
             mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1200., "plan");
@@ -9894,7 +9911,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_subagent_thread_keeps_the_keyboard_in_its_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (shell, host, _, cx) =
             mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1200., "plan");
         restore_index(&shell, &host, true, cx);
@@ -10949,7 +10966,7 @@ pub(crate) mod tests {
                     "diff --git a/{file} b/{file}\n--- a/{file}\n+++ b/{file}\n\
                      @@ -1 +1 @@\n-fn old() {{}}\n+fn new() {{}}\n",
                 ))
-                .expect("one file section"),
+                .changes,
                 completeness: agent::ChangeCompleteness::Exact,
             },
             agent::AgentEvent::TurnCompleted {
@@ -12003,7 +12020,7 @@ pub(crate) mod tests {
                              --- a/src/lib.rs\n+++ b/src/lib.rs\n\
                              @@ -1 +1 @@\n-fn old() {}\n+fn new() {}\n",
                         )
-                        .expect("one file section"),
+                        .changes,
                         completeness: agent::ChangeCompleteness::Exact,
                     },
                     agent::AgentEvent::TurnCompleted {
@@ -13784,7 +13801,7 @@ pub(crate) mod tests {
     ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
         // As `run_shell` does before opening the window: the shell alone,
         // without the window root, initializes nothing of gpui-base itself.
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let (states, state) = async_channel::unbounded();
@@ -13891,8 +13908,8 @@ pub(crate) mod tests {
             fn device_name(&self) -> String {
                 "desk".into()
             }
-            fn device_id(&self) -> String {
-                "desk".into()
+            fn device_id(&self) -> Result<String, tcode_client::host::FileFailure> {
+                Ok("desk".into())
             }
             fn device_platform(&self) -> Option<String> {
                 None
@@ -13942,7 +13959,7 @@ pub(crate) mod tests {
         }
 
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let busy = "another Tcode host is already using the data directory /tmp/demo";
         let (local_transport, local_incoming) = transport();
         // Answered from the back: busy on the first Retry, up on the second.
@@ -14104,7 +14121,7 @@ pub(crate) mod tests {
                 );
             });
             // The status bar and the keyboard cover the window.
-            crate::window_seam::occlude_for_test(
+            crate::test_frames::occlude(
                 cx,
                 gpui::Edges {
                     top: px(47.),
@@ -14120,7 +14137,7 @@ pub(crate) mod tests {
                     "Back dismisses the keyboard first"
                 );
             });
-            crate::window_seam::occlude_for_test(cx, gpui::Edges::default());
+            crate::test_frames::occlude(cx, gpui::Edges::default());
             cx.update(|window, cx| {
                 shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
             });
@@ -14321,7 +14338,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn model_picker_focuses_its_search_only_off_phone(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let root = crate::store::tests::scratch_root("model-picker-focus");
         let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
         let project = tcode_core::project::Project::from_root(root.join("project"));
@@ -15228,6 +15245,8 @@ pub(crate) mod tests {
             goal: None,
             goal_control: None,
             manual_compaction: false,
+            background_control: None,
+            harness_option_labels: false,
             rewind: None,
             fork_at: None,
             queue_held: false,
@@ -15307,8 +15326,7 @@ pub(crate) mod tests {
                         },
                         agent::AgentEvent::TurnChangesUpdated {
                             turn_id: "turn-1".into(),
-                            changes: agent::file_changes_from_unified_diff(&diff)
-                                .expect("one file section"),
+                            changes: agent::file_changes_from_unified_diff(&diff).changes,
                             completeness: agent::ChangeCompleteness::Exact,
                         },
                     ]

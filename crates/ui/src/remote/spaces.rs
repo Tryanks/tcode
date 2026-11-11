@@ -2668,7 +2668,7 @@ mod tests {
     /// changed: the change stands, instead of going back until the next event.
     #[gpui::test]
     fn a_late_hosting_event_leaves_a_change_made_since(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.executor().allow_parking();
         let root = crate::store::tests::scratch_root("spaces-late-event");
         std::fs::create_dir_all(&root).unwrap();
@@ -2733,7 +2733,7 @@ mod tests {
     fn removing_a_member_regenerates_the_link_by_default(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         // The machine's host runs on its own threads and tells the window
         // of hosting changes from there, as it does in the app.
         cx.executor().allow_parking();

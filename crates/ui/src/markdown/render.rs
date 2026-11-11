@@ -361,20 +361,12 @@ fn render_root_item(
         ) => render_list(children, *ordered, *start, span, options, state, window, cx),
         (block, _) => render_block(block, options, state, window, cx),
     };
-    let block = div()
+    div()
         .w_full()
         .when(width > px(0.), |block| block.w(width))
-        .child(content);
-    #[cfg(test)]
-    {
-        block
-            .debug_selector(move || format!("markdown-block-{ix}"))
-            .into_any_element()
-    }
-    #[cfg(not(test))]
-    {
-        block.into_any_element()
-    }
+        .child(content)
+        .debug_selector(move || format!("markdown-block-{ix}"))
+        .into_any_element()
 }
 
 /// A full-height layout leaf backed by a viewport-sized GPUI list.
@@ -1352,9 +1344,8 @@ fn render_code_lines(
             .child(
                 Inline::new(ix, view.clone(), line_state, Vec::new(), runs, Vec::new())
                     .origin(Some(RunOrigin::new(path.clone()).line(ix as u32))),
-            );
-        #[cfg(test)]
-        let line = line.debug_selector(move || format!("markdown-code-line-{ix}"));
+            )
+            .debug_selector(move || format!("markdown-code-line-{ix}"));
         rendered_lines.push(line);
     }
     v_flex()
@@ -1550,12 +1541,8 @@ fn render_code_block(
             .rounded(crate::material::radius_card(cx))
             .bg(cx.theme().tokens.colors.muted)
             .child(button);
-        #[cfg(test)]
-        let corner = {
-            let path = options.path.clone();
-            corner.debug_selector(move || format!("markdown-code-copy-{path}"))
-        };
-        corner
+        let path = options.path.clone();
+        corner.debug_selector(move || format!("markdown-code-copy-{path}"))
     });
     let content = div()
         .id(span_id(&options.path, &span))
@@ -1710,16 +1697,17 @@ fn render_scroll_table(
                     let align = table.column_align(ix);
                     let width = widths.get(ix).copied().unwrap_or(CELL_MIN_PX);
                     let minimum = minimums.get(ix).copied().unwrap_or(CELL_MIN_PX);
-                    let cell_content = div().min_w_0().child(render_paragraph(
-                        &cell.children,
-                        &format!("{}-{row_ix}-{ix}", options.path),
-                        view,
-                        cx,
-                    ));
-                    #[cfg(test)]
-                    let cell_content = cell_content.debug_selector(move || {
-                        format!("markdown-table-cell-content-{row_ix}-{ix}")
-                    });
+                    let cell_content = div()
+                        .min_w_0()
+                        .child(render_paragraph(
+                            &cell.children,
+                            &format!("{}-{row_ix}-{ix}", options.path),
+                            view,
+                            cx,
+                        ))
+                        .debug_selector(move || {
+                            format!("markdown-table-cell-content-{row_ix}-{ix}")
+                        });
                     div()
                         .id(("table-cell", ix))
                         .flex_basis(px(width))

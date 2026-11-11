@@ -754,35 +754,6 @@ impl AppState {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn record_event_for_replica_test(
-        &mut self,
-        session_id: &str,
-        ts: u64,
-        event: &AgentEvent,
-        cx: &mut HostCx,
-    ) {
-        self.record_event_at(session_id, ts, event, Vec::new(), cx);
-    }
-
-    /// Deliver an event as a session's provider would.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn provider_event_for_test(
-        &mut self,
-        session_id: &str,
-        event: AgentEvent,
-        cx: &mut HostCx,
-    ) {
-        if let Some(session) = self.resident_mut(session_id)
-            && matches!(session.runtime, Runtime::Idle)
-        {
-            let (commands, receiver) = smol::channel::unbounded();
-            smol::spawn(async move { while receiver.recv().await.is_ok() {} }).detach();
-            session.runtime = Runtime::Live(commands);
-        }
-        self.on_event(session_id, event, cx);
-    }
-
     /// Give a new session an immediate first-message fallback, then ask a fresh
     /// background provider session for a concise title. The hidden request has
     /// no resume cursor or MCP servers, so it never enters the conversation or
@@ -880,6 +851,7 @@ impl AppState {
                         return Ok((
                             title_generation_prompt(&source, None, !attachments.is_empty()),
                             attachments,
+                            Vec::new(),
                         ));
                     }
                     let records = match records {
@@ -893,26 +865,42 @@ impl AppState {
                     if source.is_empty() {
                         return Err(RuntimeError::TitleGenerationEmpty);
                     }
-                    let attachments: Vec<_> = paths
-                        .into_iter()
-                        .filter_map(|path| {
-                            let bytes = fs::read(&path).ok()?;
-                            Some(Attachment {
+                    let mut attachments = Vec::new();
+                    let mut unreadable = Vec::new();
+                    for path in paths {
+                        match fs::read(&path) {
+                            Ok(bytes) => attachments.push(Attachment {
                                 media_type: mime_from_path(&path),
                                 data_base64: base64::engine::general_purpose::STANDARD
                                     .encode(bytes),
                                 source_path: Some(path.to_string_lossy().into_owned()),
-                            })
-                        })
-                        .collect();
+                            }),
+                            Err(error) => {
+                                unreadable.push(RuntimeError::TitleAttachmentUnreadable {
+                                    path,
+                                    error: error.to_string(),
+                                })
+                            }
+                        }
+                    }
                     Ok((
                         title_generation_prompt(&source, Some(&old_title), !attachments.is_empty()),
                         attachments,
+                        unreadable,
                     ))
                 })
                 .await;
             let (prompt, attachments) = match input {
-                Ok(input) => input,
+                Ok((prompt, attachments, unreadable)) => {
+                    if !unreadable.is_empty() {
+                        host_cx.enqueue(move |state, cx| {
+                            for error in unreadable {
+                                state.report_error(error, cx);
+                            }
+                        });
+                    }
+                    (prompt, attachments)
+                }
                 Err(error) => {
                     host_cx.enqueue(move |state, cx| {
                         if state.title_generation_ended(&session_id, run) {
@@ -936,6 +924,7 @@ impl AppState {
             let mut options =
                 session_options(&title_meta, &settings, launch_env, McpServers::default());
             options.processes = processes;
+            options.clock = agent::Clock::new(host_cx.clock().clone());
             let title = generate_ai_title(
                 provider_launcher,
                 title_meta.provider,
@@ -1022,7 +1011,7 @@ pub(super) fn title_session_meta(settings: &Settings, cwd: PathBuf) -> SessionMe
         .clone()
         .filter(|id| settings.resolved_profile(id).is_some());
     meta.option_selections.push(OptionSelection {
-        id: "reasoningEffort".into(),
+        id: agent::EFFORT_OPTION_ID.into(),
         value: serde_json::Value::String(AI_TITLE_REASONING_EFFORT.into()),
     });
     meta

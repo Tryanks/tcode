@@ -347,7 +347,6 @@ mod tests {
     use crate::chat::tests::*;
     use crate::test_frames::draw_settled;
     use gpui::TestAppContext;
-    use tcode_core::session::TurnMeta;
 
     /// A command's half-second is its own thread's: a collapse pending for a
     /// command in the thread the pane leaves neither closes nor shortens a
@@ -356,19 +355,7 @@ mod tests {
     fn a_pending_collapse_stays_with_its_thread(cx: &mut TestAppContext) {
         use gpui::{VisualTestContext, px, size};
 
-        let running = |commands: &[&str]| {
-            let mut timeline = Timeline::default();
-            timeline.turns = vec![TurnMeta {
-                running: true,
-                ..TurnMeta::default()
-            }];
-            timeline.entries = vec![entry("user", user_item("go"))];
-            timeline
-                .entries
-                .extend(commands.iter().map(|id| command_with_output(id)));
-            timeline
-        };
-        let mut threads = seed_two_threads(cx, running(&["shared"]));
+        let mut threads = seed_two_threads(cx, Timeline::default(), Timeline::default());
         cx.update(|cx| cx.set_reduce_motion(true));
         let window_state = cx.new(|_| WindowState::default());
         let store = threads.store.clone();
@@ -383,10 +370,54 @@ mod tests {
         });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(900.)));
-        let show = |thread: &str, commands: &[&str], cx: &mut VisualTestContext| {
-            store.update(cx, |store, cx| {
-                store.set_session_replica_for_test(thread.to_string(), running(commands), cx);
-                cx.notify();
+        let (first, second) = (threads.first.clone(), threads.second.clone());
+        // Each thread's turn is a provider's, which runs the commands.
+        let start = |threads: &mut TwoThreads, thread: &str, cx: &mut VisualTestContext| {
+            let turn = scripted_turn(
+                &threads.host,
+                &mut threads.driver,
+                thread,
+                agent::ProviderKind::ClaudeCode,
+                cx,
+            );
+            turn.1
+                .try_send(agent::AgentEvent::TurnStarted {
+                    turn_id: "turn".into(),
+                })
+                .unwrap();
+            turn
+        };
+        let run = |threads: &mut TwoThreads,
+                   turn: &ScriptedHandles,
+                   id: &str,
+                   cx: &mut VisualTestContext| {
+            let EntryContent::Item(content) = &command_with_output(id).content else {
+                unreachable!("a command is an item")
+            };
+            turn.1
+                .try_send(agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                    id: id.into(),
+                    parent_item_id: None,
+                    content: content.clone(),
+                }))
+                .unwrap();
+            let store = threads.store.clone();
+            threads.driver.wait_until(cx, "the command", |cx| {
+                store.read_with(cx, |store, cx| {
+                    store
+                        .with_timeline_for(
+                            store.sole_thread().as_deref(),
+                            |timeline| {
+                                timeline
+                                    .entries
+                                    .iter()
+                                    .filter(|entry| entry.id == id)
+                                    .count()
+                            },
+                            cx,
+                        )
+                        .is_some_and(|runs| runs > 0)
+                })
             });
             draw_settled(cx);
         };
@@ -394,22 +425,23 @@ mod tests {
             cx.executor().advance_clock(Duration::from_millis(duration));
             draw_settled(cx);
         };
-        let (first, second) = (threads.first.clone(), threads.second.clone());
 
+        let first_turn = start(&mut threads, &first, cx);
+        run(&mut threads, &first_turn, "shared", cx);
         // The first thread's command is superseded: it folds in half a second.
-        draw_settled(cx);
-        show(&first, &["shared", "newer"], cx);
+        run(&mut threads, &first_turn, "newer", cx);
         assert!(command_open(cx, "shared").is_some());
 
         // The pane moves to the second thread before it does, and a command
         // of the same id starts there later.
-        threads.bind(&view, &second, running(&[]), cx);
+        threads.bind(&view, &second, cx);
+        let second_turn = start(&mut threads, &second, cx);
         draw_settled(cx);
         wait(300, cx);
-        show(&second, &["shared"], cx);
+        run(&mut threads, &second_turn, "shared", cx);
         assert!(command_open(cx, "shared").is_some());
         wait(100, cx);
-        show(&second, &["shared", "next"], cx);
+        run(&mut threads, &second_turn, "next", cx);
         wait(200, cx);
         assert!(
             command_open(cx, "shared").is_some(),

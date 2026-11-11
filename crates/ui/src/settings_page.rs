@@ -2960,10 +2960,14 @@ impl SettingsPage {
                     ))
                     .child(crate::material::group(cx).children(rows))
                     .children(
-                        agent::ProviderKind::NATIVE
+                        self.store
+                            .read(cx)
+                            .harness_descriptions()
+                            .iter()
+                            .filter(|description| description.native_computer_use)
+                            .map(|description| description.provider)
+                            .collect::<Vec<_>>()
                             .into_iter()
-                            .chain([agent::ProviderKind::Acp])
-                            .filter(|kind| kind.caps().native_computer_use)
                             .map(|kind| {
                                 div()
                                     .pt(cx.theme().tokens.spacing.sm)
@@ -3451,7 +3455,7 @@ mod tests {
         async_channel::Sender<String>,
         gpui::Task<()>,
     ) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
@@ -3841,7 +3845,7 @@ mod tests {
 
     #[gpui::test]
     fn compact_list_groups_sections_omits_inapplicable_and_folds_advanced(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let root = crate::store::tests::scratch_root("settings-sections");
         let host = spawn_host(
             SessionStore::open_at(root.clone()).unwrap(),
@@ -4274,7 +4278,7 @@ mod tests {
     fn an_attachment_limit_the_field_cannot_take_shows_the_one_in_effect(cx: &mut TestAppContext) {
         use tcode_client::host::ClientHost as _;
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let root = crate::store::tests::scratch_root("attachment-limit-field");
         std::fs::create_dir_all(&root).unwrap();
         let device = std::rc::Rc::new(tcode_traverse::NativeClientHost::new(root.clone(), "phone"));
@@ -4338,7 +4342,7 @@ mod tests {
     fn switching_language_relocalizes_the_device_name_placeholder(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, _outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();

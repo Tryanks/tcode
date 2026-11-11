@@ -72,6 +72,12 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeError::TitleGenerationEmpty => {
                     crate::tr!("errors.title_generation_empty").into_owned()
                 }
+                RuntimeError::TitleAttachmentUnreadable { path, error } => crate::tr!(
+                    "errors.title_attachment_unreadable",
+                    path = path.display().to_string(),
+                    error = error
+                )
+                .into_owned(),
                 RuntimeError::ProcessGone => crate::tr!("errors.process_gone").into_owned(),
                 RuntimeError::SteerUnsupported { agent } => {
                     crate::tr!("composer.steer_unsupported", agent = agent).into_owned()

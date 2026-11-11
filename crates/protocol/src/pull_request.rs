@@ -23,7 +23,7 @@ pub fn max_pull_request_media_bytes(mime: &str, validator: Option<&str>) -> usiz
                 validator: validator.map(str::to_owned),
                 expires_at: u64::MAX,
             })),
-            expires_at: u64::MAX,
+            fresh_for: u64::MAX,
         }),
     };
     let envelope = crate::encode_line(&empty).map_or(crate::MAX_LINE_BYTES, |line| line.len());
@@ -93,8 +93,10 @@ pub struct PullRequestFile {
     pub path: String,
     pub previous_path: Option<String>,
     pub kind: FileChangeKind,
-    pub additions: u64,
-    pub deletions: u64,
+    /// Lines added and removed; `None` when the host gave no count and the
+    /// patch it gave has none, such as a binary or oversized file.
+    pub additions: Option<u64>,
+    pub deletions: Option<u64>,
     pub patch: PullRequestPatch,
     /// The file's page on the host: at the head, or at the base for a deleted file.
     pub url: Option<String>,

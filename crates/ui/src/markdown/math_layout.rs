@@ -3,10 +3,9 @@ use super::{
     selection::RunOrigin,
     state::MarkdownState,
 };
-#[cfg(test)]
-use gpui::InteractiveElement as _;
 use gpui::{
-    AnyElement, App, Entity, GlyphId, Hsla, IntoElement, ParentElement as _, Styled as _, div, px,
+    AnyElement, App, Entity, GlyphId, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, Styled as _, div, px,
 };
 use latex_rust::{BoxContent, Dim, MathBox};
 use std::sync::{Arc, Mutex};
@@ -135,9 +134,8 @@ fn emit(
                 .text_size(font_size)
                 .line_height(px(height))
                 .text_color(color)
-                .child(glyph);
-            #[cfg(test)]
-            let element = element.debug_selector(move || format!("math-glyph-{ix}"));
+                .child(glyph)
+                .debug_selector(move || format!("math-glyph-{ix}"));
             elements.push(element.into_any_element());
             glyphs.push(state);
         }

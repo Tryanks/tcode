@@ -1706,7 +1706,7 @@ impl AppState {
 pub(super) fn effort_selection(selections: &[OptionSelection]) -> Option<String> {
     selections
         .iter()
-        .find(|s| s.id == "reasoningEffort")
+        .find(|s| s.id == agent::EFFORT_OPTION_ID)
         .and_then(|s| s.value.as_str().map(str::to_string))
 }
 
@@ -1719,7 +1719,7 @@ pub(super) fn normalized_selections(
 ) -> Vec<(String, serde_json::Value)> {
     let mut out: Vec<(String, serde_json::Value)> = selections
         .iter()
-        .filter(|s| !(ignore_effort && s.id == "reasoningEffort"))
+        .filter(|s| !(ignore_effort && s.id == agent::EFFORT_OPTION_ID))
         .map(|s| (s.id.clone(), s.value.clone()))
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1988,6 +1988,7 @@ pub(super) fn session_options(
         }),
         instructions: None,
         processes: Default::default(),
+        clock: Default::default(),
     }
 }
 

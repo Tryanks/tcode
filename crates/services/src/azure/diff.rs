@@ -70,10 +70,13 @@ pub(super) fn file(
     };
     let (patch, additions, deletions) = match (side(old), side(new)) {
         (Err(PullRequestFileText::Oversized), _) | (_, Err(PullRequestFileText::Oversized)) => {
-            (PullRequestPatch::Oversized, 0, 0)
+            (PullRequestPatch::Oversized, None, None)
         }
-        (Err(_), _) | (_, Err(_)) => (PullRequestPatch::Binary, 0, 0),
-        (Ok(old), Ok(new)) => hunks(&old, &new),
+        (Err(_), _) | (_, Err(_)) => (PullRequestPatch::Binary, None, None),
+        (Ok(old), Ok(new)) => {
+            let (patch, additions, deletions) = hunks(&old, &new);
+            (patch, Some(additions), Some(deletions))
+        }
     };
     PullRequestFile {
         path: change.path.clone(),

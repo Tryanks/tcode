@@ -493,7 +493,7 @@ mod tests {
     /// leaves the hub and one it adds joins it.
     #[gpui::test]
     fn start_hub_projects_fold_in_and_out_as_the_host_changes_them(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, _outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let project = |name: &str| {

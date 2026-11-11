@@ -69,7 +69,7 @@ impl Render for PlanPanel {
             .store
             .read(cx)
             .session_plan_for(self.session_id.as_deref(), cx)
-            .filter(|plan| !plan.steps.is_empty())
+            .filter(|plan| shown(plan))
             .map(|plan| (explanation(plan), plan.steps.clone()));
         // The plan and the empty state cross-fade; a plan that empties
         // leaves as it last stood.
@@ -106,28 +106,30 @@ impl Render for PlanPanel {
                     window,
                     cx,
                 ))
-                .child(
-                    v_flex()
-                        .w_full()
-                        .gap_1()
-                        .child(
-                            div()
-                                .pt_1()
-                                .text_caption(cx)
-                                .child(crate::tr!("tasks.steps")),
-                        )
-                        .child(material::rail_detail(
-                            render_steps(
-                                "plan-steps",
-                                &steps,
-                                compact,
-                                StepLayout::Marked,
-                                window,
+                .when(!steps.is_empty(), |column| {
+                    column.child(
+                        v_flex()
+                            .w_full()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .pt_1()
+                                    .text_caption(cx)
+                                    .child(crate::tr!("tasks.steps")),
+                            )
+                            .child(material::rail_detail(
+                                render_steps(
+                                    "plan-steps",
+                                    &steps,
+                                    compact,
+                                    StepLayout::Marked,
+                                    window,
+                                    cx,
+                                ),
                                 cx,
-                            ),
-                            cx,
-                        )),
-                );
+                            )),
+                    )
+                });
             layers.push((
                 1,
                 v_flex()
@@ -149,6 +151,12 @@ impl Render for PlanPanel {
         }
         v_flex().size_full().child(fade.render(layers).size_full())
     }
+}
+
+/// Whether `plan` has anything to show: steps, or only what the agent said
+/// of it.
+pub(crate) fn shown(plan: &tcode_protocol::SessionPlan) -> bool {
+    !plan.steps.is_empty() || explanation(plan).is_some()
 }
 
 /// What the agent said of `plan` when it set it, when it said something.

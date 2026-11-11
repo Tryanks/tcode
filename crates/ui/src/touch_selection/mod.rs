@@ -200,7 +200,7 @@ mod tests {
     }
 
     fn mount(cx: &mut TestAppContext, multiline: bool) -> (Entity<Probe>, &mut VisualTestContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (probe, cx) = cx.add_window_view(|window, cx| Probe {
             input: cx.new(|cx| InputState::new(window, cx).default_value("quick select value")),
             textarea: cx

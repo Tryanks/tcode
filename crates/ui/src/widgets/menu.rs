@@ -927,7 +927,7 @@ mod tests {
     /// selected, its leading indentation and trailing newline included.
     #[gpui::test]
     fn the_selection_menu_copies_the_selection_as_selected(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (_, cx) = cx.add_window_view(|_, _| SelectionHarness);
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let at = cx.debug_bounds("selected-text").unwrap().center();
@@ -1022,7 +1022,7 @@ mod tests {
 
     #[gpui::test]
     fn named_desktop_dropdown_press_opens_menu(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let press = Press::default();
         let node = Rc::new(std::cell::RefCell::new(None));
         let (_, cx) = cx.add_window_view({
@@ -1072,7 +1072,7 @@ mod tests {
 
     #[gpui::test]
     fn a_touch_dropdown_delivers_its_action(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (_, cx) = cx.add_window_view(|_, _| MoreMenu);
         cx.simulate_resize(size(px(393.), px(852.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));

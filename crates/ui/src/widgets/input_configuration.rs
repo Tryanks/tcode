@@ -166,7 +166,7 @@ mod tests {
 
     #[gpui::test]
     fn native_selection_replaces_the_word_after_an_emoji(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (input, cx) = cx.add_window_view(|window, cx| {
             TextareaState::new(window, cx).default_value("😀 exmple here")
         });

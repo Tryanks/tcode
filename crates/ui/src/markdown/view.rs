@@ -683,7 +683,7 @@ mod tests {
         source: &str,
         cx: &'a mut TestAppContext,
     ) -> (Entity<OuterListRoot>, &'a mut VisualTestContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let source = source.to_string();
         let (view, cx) = cx.add_window_view(|_, cx| OuterListRoot::new(&source, cx));
@@ -708,7 +708,7 @@ mod tests {
 
     #[gpui::test]
     fn a_drag_and_drop_across_the_text_leaves_nothing_selected(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let (view, cx) = cx.add_window_view(|_, cx| DropRoot {
             markdown: cx.new(|cx| MarkdownState::new("Hello world", cx)),
@@ -771,7 +771,7 @@ mod tests {
 
     #[gpui::test]
     fn the_selection_goes_when_the_focus_leaves_the_text(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let (view, cx) = cx.add_window_view(|_, cx| FocusRoot {
             markdown: cx.new(|cx| MarkdownState::new("Hello world", cx)),
@@ -817,7 +817,7 @@ mod tests {
 
     #[gpui::test]
     fn cross_view_drag_copies_in_document_order(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let (_, cx) = cx.add_window_view(|_, cx| CrossViewRoot::new(cx));
         let cx: &mut VisualTestContext = cx;
@@ -847,7 +847,7 @@ mod tests {
 
     #[gpui::test]
     fn drag_across_mixed_blocks_copies_every_block_kind(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         for (source, expected) in [
             ("Alpha beta\n\nGamma delta", "Alpha beta\nGamma delta"),
@@ -893,7 +893,7 @@ mod tests {
 
     #[gpui::test]
     fn link_click_survives_pixel_jitter_but_not_a_drag(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let (view, cx) = cx.add_window_view(|_, cx| RightClickRoot::new(cx));
         let cx: &mut VisualTestContext = cx;
@@ -946,7 +946,7 @@ mod tests {
 
     #[gpui::test]
     fn link_context_menu_action_opens_the_url(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         cx.update(crate::widgets::menu::init);
         let (view, cx) = right_click_window(cx);
@@ -981,7 +981,7 @@ mod tests {
 
     #[gpui::test]
     fn right_click_on_text_opens_the_selection_menu_and_is_swallowed(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         cx.update(crate::widgets::menu::init);
         let (view, cx) = right_click_window(cx);
@@ -1062,7 +1062,7 @@ mod tests {
 
     #[gpui::test]
     fn copy_from_the_menu_of_a_right_click_on_the_selection_copies_it(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         cx.update(crate::widgets::menu::init);
         let (view, cx) = right_click_window(cx);
@@ -1121,7 +1121,7 @@ mod tests {
 
     #[gpui::test]
     fn inline_formula_menu_copies_latex_and_switches_to_source(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         cx.update(crate::widgets::menu::init);
         let (view, cx) = right_click_window(cx);

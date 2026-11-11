@@ -47,7 +47,7 @@ use tcode_core::ui::{
 use tcode_protocol::{
     AcpMarketplaceItem, ArchivedSessions, EventEnvelope, ExternalHistory, ExternalImportState,
     ExternalImportStatus, ExternalThread, ForkAvailability, GitActionRequest, GitStatusStatus,
-    ImportFailure, IndexSnapshot, IndexSummary, MergeWorktreeFailure, PathEntry, ProtocolError,
+    ImportFailure, IndexSnapshot, IndexSummary, MergeWorktreeFailure, ProtocolError,
     ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueryResponse,
     QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
     RuntimeNotification as RuntimeEvent, RuntimeOperationId, RuntimeToast, ServerEvent,
@@ -296,7 +296,7 @@ mod tests;
 pub use active_session::{ActiveSession, QueuedMessage};
 use active_session::{
     PendingRelay, PendingSteer, ReportHandover, Runtime, SendRouting, attachment_paths,
-    conversation_destination, wire_text_with_placeholder,
+    conversation_destination,
 };
 use orchestrate::McpWiring;
 pub use providers::NewEndpointProfile;

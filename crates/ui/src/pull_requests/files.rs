@@ -885,7 +885,10 @@ impl PullRequestView {
             let tooltip = if unknown || host_marks.is_none() {
                 crate::tr!("pull_requests.files.viewed_unknown")
             } else if host_marks == Some(true) {
-                crate::tr!("pull_requests.files.viewed_owner_anonymous")
+                crate::tr!(
+                    "pull_requests.files.viewed_owner_anonymous",
+                    host_name = self.host_name(cx)
+                )
             } else {
                 crate::tr!(
                     "pull_requests.files.viewed_owner_tcode_tooltip",
@@ -1190,21 +1193,25 @@ impl PullRequestView {
                 ),
         )
         .children(availability.map(|(icon, color)| Icon::new(icon).text_color(color)))
-        .child(
-            h_flex()
-                .flex_none()
-                .gap_1()
-                .text_meta_mono(false, cx)
-                .child(
-                    div()
-                        .text_color(cx.theme().success)
-                        .child(format!("+{}", file.additions)),
-                )
-                .child(
-                    div()
-                        .text_color(cx.theme().danger)
-                        .child(format!("−{}", file.deletions)),
-                ),
+        .children(
+            file.additions
+                .zip(file.deletions)
+                .map(|(additions, deletions)| {
+                    h_flex()
+                        .flex_none()
+                        .gap_1()
+                        .text_meta_mono(false, cx)
+                        .child(
+                            div()
+                                .text_color(cx.theme().success)
+                                .child(format!("+{additions}")),
+                        )
+                        .child(
+                            div()
+                                .text_color(cx.theme().danger)
+                                .child(format!("−{deletions}")),
+                        )
+                }),
         )
         .children(
             self.viewed_box(index, false, cx)
@@ -1529,14 +1536,17 @@ impl PullRequestView {
             ),
             PullRequestPatch::Oversized => (
                 IconName::FileX,
-                crate::tr!(
-                    "pull_requests.files.oversized",
-                    size = crate::tr!(
-                        "pull_requests.files.line_changes",
-                        count = (entry.additions + entry.deletions).to_string()
-                    )
-                    .into_owned()
-                )
+                match entry.additions.zip(entry.deletions) {
+                    Some((additions, deletions)) => crate::tr!(
+                        "pull_requests.files.oversized",
+                        size = crate::tr!(
+                            "pull_requests.files.line_changes",
+                            count = (additions + deletions).to_string()
+                        )
+                        .into_owned()
+                    ),
+                    None => crate::tr!("pull_requests.files.oversized_unsized"),
+                }
                 .into_owned(),
             ),
             PullRequestPatch::Withheld => (

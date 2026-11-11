@@ -398,6 +398,7 @@ impl AppState {
         });
         let task = cx.unblock(move || forge.read(&key, read));
         let host = cx.clone();
+        let clock = cx.clock().clone();
         cx.spawn_background(async move {
             let answer = task.await;
             host.enqueue(|state, cx| state.refresh_host_credentials(cx));
@@ -414,8 +415,8 @@ impl AppState {
             answer
                 .map(|(response, expires_at)| QueryResponse::PullRequest {
                     response: Box::new(response),
-                    expires_at: expires_at
-                        .duration_since(UNIX_EPOCH)
+                    fresh_for: expires_at
+                        .duration_since(clock.wall())
                         .unwrap_or_default()
                         .as_secs(),
                 })

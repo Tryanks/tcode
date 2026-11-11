@@ -20,6 +20,10 @@ mod claude_goal;
 mod claude_manifest;
 #[cfg(feature = "process")]
 mod claude_plugins;
+#[cfg(feature = "process")]
+mod clock;
+#[cfg(feature = "process")]
+pub use clock::{Clock, Timekeeper};
 mod plugin_command;
 #[cfg(feature = "process")]
 mod source_plugins;
@@ -108,7 +112,7 @@ pub enum BackgroundKind {
 }
 
 /// What a harness lets a client do with the background work it lists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackgroundControl {
     pub stop: BackgroundStop,
     /// The harness moves a running command or agent call into the
@@ -118,7 +122,8 @@ pub struct BackgroundControl {
 
 /// Which of its background work a harness stops on request
 /// ([`SessionCommand::StopBackgroundTask`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BackgroundStop {
     None,
     /// One piece at a time; a stop for all of it is one stop for each.
@@ -492,7 +497,7 @@ impl ProviderKind {
                 goals: None,
                 per_turn_effort: false,
                 options_apply_live: false,
-                live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
+                live_option_push: LiveOptionPush::Only(&[EFFORT_OPTION_ID]),
                 background: None,
                 live_settings: true,
                 mcp_servers: false,
@@ -705,7 +710,8 @@ pub struct UnmanagedPlugins {
     pub kind: UnmanagedPluginsKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum UnmanagedPluginsKind {
     /// Plugins installed only from the harness's own editor.
     EditorOnly,
@@ -1212,6 +1218,9 @@ pub struct SessionOptions {
     /// stop them whatever the session is waiting on.
     #[cfg(feature = "process")]
     pub processes: SessionProcesses,
+    /// The host's time, which the session's waits on its harness read.
+    #[cfg(feature = "process")]
+    pub clock: Clock,
 }
 
 /// The per-provider environment configured in Settings → Harnesses, applied to
@@ -1463,6 +1472,10 @@ pub struct SelectOption {
     /// place of a description.
     #[serde(default)]
     pub summary: Option<PermissionSummary>,
+    /// Who settles what the harness would stop to ask under this value of
+    /// its permission control; `None` for a value of any other option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalClass>,
 }
 
 type PermissionTable = (
@@ -1637,13 +1650,14 @@ pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
         label: "Permissions".into(),
         options: values
             .iter()
-            .map(|(value, label, description, _)| SelectOption {
+            .map(|(value, label, description, class)| SelectOption {
                 value: (*value).into(),
                 label: (*label).into(),
                 description: Some((*description).into()),
                 unavailable: None,
                 speed: None,
                 summary: None,
+                approval: Some(*class),
             })
             .collect(),
         default_value: Some(default.into()),
@@ -1653,6 +1667,12 @@ pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
         permissive: Some(permissive.into()),
     })
 }
+
+/// The id every adapter gives the option of [`OptionRole::Effort`], an ACP
+/// agent's thought level included. A stored [`OptionSelection`] carries no
+/// role, so the host knows a thread's effort, to inherit it, mirror it and
+/// send it with each turn, by this id.
+pub const EFFORT_OPTION_ID: &str = "reasoningEffort";
 
 /// The ACP session option that carries the agent's mode, which ACP agents use for their
 /// approval modes.
@@ -3040,6 +3060,10 @@ pub enum ItemContent {
     FileChange {
         changes: Vec<FileChange>,
         status: ItemStatus,
+        /// What the harness gave back for the change, as written: the text
+        /// its tool returned, or why it failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
     },
     ToolCall {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3204,89 +3228,94 @@ pub enum FileChangeKind {
     Rename,
 }
 
+/// A provider-supplied, multi-file Git-style unified diff, split into the
+/// files it changes.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct UnifiedDiff {
+    /// One change per `diff --git` section whose file could be read, each
+    /// keeping its whole section for rendering.
+    pub changes: Vec<FileChange>,
+    /// What could not be read as a file's section, exactly as the provider
+    /// wrote it: text before the first section, or a section naming no file.
+    pub unread: Vec<String>,
+}
+
 /// Split a provider-supplied, multi-file Git-style unified diff into canonical
 /// file changes. This parses only file boundaries and operation kinds; each
-/// returned change retains its complete diff section for rendering.
-pub fn file_changes_from_unified_diff(diff: &str) -> Result<Vec<FileChange>, String> {
-    if diff.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-
+/// change retains its complete diff section, and what is not a readable
+/// section is kept as written.
+pub fn file_changes_from_unified_diff(diff: &str) -> UnifiedDiff {
     let mut sections = Vec::new();
     let mut current = String::new();
-    for line in diff.lines() {
+    for line in diff.split_inclusive('\n') {
         if line.starts_with("diff --git ") && !current.is_empty() {
             sections.push(std::mem::take(&mut current));
         }
-        if !current.is_empty() || line.starts_with("diff --git ") {
-            current.push_str(line);
-            current.push('\n');
-        }
+        current.push_str(line);
     }
     if !current.is_empty() {
         sections.push(current);
     }
-    if sections.is_empty() {
-        return Err("turn diff contains no `diff --git` file sections".into());
-    }
-
-    sections
-        .into_iter()
-        .map(|section| {
-            let mut old_path = None;
-            let mut new_path = None;
-            for line in section.lines() {
-                if let Some(path) = line.strip_prefix("rename from ") {
-                    old_path = Some(path.to_string());
-                } else if let Some(path) = line.strip_prefix("rename to ") {
-                    new_path = Some(path.to_string());
-                } else if let Some(path) = line.strip_prefix("--- a/") {
-                    old_path.get_or_insert_with(|| path.to_string());
-                } else if let Some(path) = line.strip_prefix("+++ b/") {
-                    new_path.get_or_insert_with(|| path.to_string());
-                }
-            }
-            if old_path.is_none() || new_path.is_none() {
-                let header = section
-                    .lines()
-                    .next()
-                    .and_then(|line| line.strip_prefix("diff --git a/"))
-                    .ok_or_else(|| "turn diff section has no valid header".to_string())?;
-                if let Some((old, new)) = header.rsplit_once(" b/") {
-                    old_path.get_or_insert_with(|| old.to_string());
-                    new_path.get_or_insert_with(|| new.to_string());
-                }
-            }
-
-            let creates = section
-                .lines()
-                .any(|line| line.starts_with("new file mode ") || line == "--- /dev/null");
-            let deletes = section
-                .lines()
-                .any(|line| line.starts_with("deleted file mode ") || line == "+++ /dev/null");
-            let kind = if creates {
-                FileChangeKind::Create
-            } else if deletes {
-                FileChangeKind::Delete
-            } else if old_path != new_path {
-                FileChangeKind::Rename
-            } else {
-                FileChangeKind::Modify
-            };
-            let path = match kind {
-                FileChangeKind::Delete => old_path,
-                _ => new_path.or(old_path),
-            }
-            .filter(|path| !path.is_empty())
-            .ok_or_else(|| "turn diff section has no file path".to_string())?;
-
-            Ok(FileChange {
+    let mut read = UnifiedDiff::default();
+    for section in sections {
+        if section.trim().is_empty() {
+            continue;
+        }
+        match diff_section(&section) {
+            Some((path, kind)) => read.changes.push(FileChange {
                 path,
                 kind,
                 diff: Some(section),
-            })
-        })
-        .collect()
+            }),
+            None => read.unread.push(section),
+        }
+    }
+    read
+}
+
+/// The file a `diff --git` section changes, and how.
+fn diff_section(section: &str) -> Option<(String, FileChangeKind)> {
+    let header = section.lines().next()?.strip_prefix("diff --git a/")?;
+    let mut old_path = None;
+    let mut new_path = None;
+    for line in section.lines() {
+        if let Some(path) = line.strip_prefix("rename from ") {
+            old_path = Some(path.to_string());
+        } else if let Some(path) = line.strip_prefix("rename to ") {
+            new_path = Some(path.to_string());
+        } else if let Some(path) = line.strip_prefix("--- a/") {
+            old_path.get_or_insert_with(|| path.to_string());
+        } else if let Some(path) = line.strip_prefix("+++ b/") {
+            new_path.get_or_insert_with(|| path.to_string());
+        }
+    }
+    if (old_path.is_none() || new_path.is_none())
+        && let Some((old, new)) = header.rsplit_once(" b/")
+    {
+        old_path.get_or_insert_with(|| old.to_string());
+        new_path.get_or_insert_with(|| new.to_string());
+    }
+    let creates = section
+        .lines()
+        .any(|line| line.starts_with("new file mode ") || line == "--- /dev/null");
+    let deletes = section
+        .lines()
+        .any(|line| line.starts_with("deleted file mode ") || line == "+++ /dev/null");
+    let kind = if creates {
+        FileChangeKind::Create
+    } else if deletes {
+        FileChangeKind::Delete
+    } else if old_path != new_path {
+        FileChangeKind::Rename
+    } else {
+        FileChangeKind::Modify
+    };
+    let path = match kind {
+        FileChangeKind::Delete => old_path,
+        _ => new_path.or(old_path),
+    }
+    .filter(|path| !path.is_empty())?;
+    Some((path, kind))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3723,7 +3752,8 @@ mod turn_diff_tests {
             "rename to after.rs\n",
         );
 
-        let changes = file_changes_from_unified_diff(diff).unwrap();
+        let UnifiedDiff { changes, unread } = file_changes_from_unified_diff(diff);
+        assert!(unread.is_empty());
         assert_eq!(changes.len(), 4);
         assert_eq!(changes[0].path, "src/lib.rs");
         assert_eq!(changes[0].kind, FileChangeKind::Modify);
@@ -3738,9 +3768,15 @@ mod turn_diff_tests {
     }
 
     #[test]
-    fn empty_diff_is_an_exact_empty_snapshot_but_malformed_diff_is_rejected() {
-        assert!(file_changes_from_unified_diff("\n").unwrap().is_empty());
-        assert!(file_changes_from_unified_diff("--- a/file\n+++ b/file\n").is_err());
+    fn an_empty_diff_changes_nothing_and_what_is_no_files_section_is_kept_as_written() {
+        assert_eq!(file_changes_from_unified_diff("\n"), UnifiedDiff::default());
+        let read = file_changes_from_unified_diff(concat!(
+            "--- a/file\n+++ b/file\n",
+            "diff --git a/kept.rs b/kept.rs\n--- a/kept.rs\n+++ b/kept.rs\n",
+        ));
+        assert_eq!(read.unread, ["--- a/file\n+++ b/file\n"]);
+        assert_eq!(read.changes.len(), 1);
+        assert_eq!(read.changes[0].path, "kept.rs");
     }
 }
 

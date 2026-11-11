@@ -375,12 +375,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(host) = cx
-            .try_global::<crate::remote::ClientAttachment>()
-            .map(crate::remote::ClientAttachment::host)
-        else {
-            return;
-        };
+        let host = cx.global::<crate::remote::ClientAttachment>().host();
         self.sync_images_session(cx);
         let remaining =
             MAX_IMAGES.saturating_sub(self.pending_images.len() + self.pending_image_loads);
