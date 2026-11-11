@@ -2084,14 +2084,6 @@ pub(crate) mod tests {
             Some(before)
         }
 
-        /// The host records `event` and streams it, as it does while the
-        /// agent works.
-        pub(in crate::chat) fn live(&mut self, event: agent::AgentEvent) {
-            let record = StoredEvent::from(event);
-            self.records.push(record.clone());
-            self.event(events_topic(), ServerEvent::SessionEvent(record));
-        }
-
         /// Deliver what the host sent.
         pub(in crate::chat) fn deliver(&self, cx: &mut VisualTestContext) {
             cx.run_until_parked();

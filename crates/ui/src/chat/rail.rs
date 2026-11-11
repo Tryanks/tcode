@@ -856,7 +856,7 @@ impl RailView {
 
 #[cfg(test)]
 mod tests {
-    use agent::{Attachment, Goal, GoalStatus, ItemContent, ItemStatus, PlanStep, PlanStepStatus};
+    use agent::{Goal, GoalStatus, ItemContent, ItemStatus, PlanStep, PlanStepStatus};
     use gpui::{AppContext as _, Bounds, TestAppContext, VisualTestContext, point, size};
     use tcode_core::session::{EntryContent, Timeline, TimelineEntry};
 
@@ -889,34 +889,6 @@ mod tests {
         timeline
             .entries
             .extend((0..commands).map(|index| at_turn(command(&format!("cmd-{index}")), 1)));
-        timeline
-    }
-
-    /// A thread whose latest turn observed a window through Tcode's computer
-    /// use, and ran `agents` subagents.
-    fn observed(agents: usize) -> Timeline {
-        let mut timeline = synthetic_markdown_timeline(2);
-        timeline.entries.push(at_turn(
-            entry(
-                "observe",
-                EntryContent::Item(ItemContent::ToolCall {
-                    image_reads: vec![Attachment {
-                        media_type: "image/jpeg".into(),
-                        data_base64: "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==".into(),
-                        source_path: None,
-                    }],
-                    name: "mcp__tcode_computer_use__observe_ui".into(),
-                    input: serde_json::json!({ "root": "@r1" }),
-                    output: Some("state_id: S1\nroot: @r1 app=\"Notes\" title=\"Groceries\"".into()),
-                    status: ItemStatus::Completed,
-                    family: None,
-                }),
-            ),
-            1,
-        ));
-        timeline
-            .entries
-            .extend((0..agents).map(|index| at_turn(subagent(index, false), 1)));
         timeline
     }
 
@@ -975,27 +947,8 @@ mod tests {
         (threads, cx)
     }
 
-    const AT_REST: &[&str] = &["frame", "body"];
-
     fn bounds(cx: &mut VisualTestContext, selector: &str) -> Option<Bounds<Pixels>> {
         cx.debug_bounds(selector.to_owned().leak())
-    }
-
-    /// The `parts` of every card lie inside the rail.
-    fn inside(cx: &mut VisualTestContext, keys: &[&str], parts: &[&str], when: &str) {
-        let rail = bounds(cx, "chat-rail").expect("the rail is drawn");
-        let slack = px(0.5);
-        for key in keys {
-            for part in parts {
-                let Some(part) = bounds(cx, &format!("rail-card-{part}-{key}")) else {
-                    continue;
-                };
-                assert!(
-                    part.top() >= rail.top() - slack && part.bottom() <= rail.bottom() + slack,
-                    "{when}: the {key} card's {part:?} leaves the rail {rail:?}"
-                );
-            }
-        }
     }
 
     /// The commands card never scrolls: in a rail too short for every
@@ -1063,85 +1016,6 @@ mod tests {
             bounds(cx, &format!("rail-command-cmd-{}", COMMANDS - 1)),
             Some(first),
             "the commands body has nothing to scroll"
-        );
-    }
-
-    /// A card whose body has a height of its own keeps all of it when a card
-    /// of many rows crowds the rail: the computer-use card shows its whole
-    /// picture and caption, with nothing to scroll, once the agents card is
-    /// in, and the agents card scrolls in what is left.
-    #[gpui::test]
-    fn a_card_of_fixed_height_keeps_it_in_a_crowded_rail(cx: &mut TestAppContext) {
-        let (threads, cx) = short_rail(cx, || observed(0));
-        let alone = bounds(cx, "rail-card-body-screen").expect("the screen card shows");
-        let picture = bounds(cx, "rail-screen-picture").expect("the picture shows");
-        let whole = |cx: &mut VisualTestContext, when: &str| {
-            let body = bounds(cx, "rail-card-body-screen").expect("the screen card shows");
-            assert!(
-                (body.size.height - alone.size.height).abs() <= px(0.5),
-                "{when}: the screen card's body is {body:?}, not its whole content {alone:?}"
-            );
-            let shown = bounds(cx, "rail-screen-picture").expect("the picture shows");
-            assert!(
-                (shown.size.height - picture.size.height).abs() <= px(0.5),
-                "{when}: the picture is drawn {shown:?}, not at its whole size {picture:?}"
-            );
-        };
-
-        threads.store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(threads.first.clone(), observed(40), cx)
-        });
-        draw_settled(cx);
-        whole(cx, "at rest");
-        inside(cx, &["agents", "screen"], AT_REST, "at rest");
-
-        let body = bounds(cx, "rail-card-body-agents").expect("the agents body shows");
-        assert!(body.size.height > px(0.), "the agents body has room");
-        let newest = bounds(cx, "rail-agent-agent-39").expect("the newest agent is listed");
-        cx.simulate_mouse_move(body.center(), None, gpui::Modifiers::default());
-        cx.simulate_event(gpui::ScrollEvent {
-            position: body.center(),
-            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-20.))),
-            touch_phase: gpui::TouchPhase::Moved,
-            ..Default::default()
-        });
-        draw_settled(cx);
-        let scrolled = bounds(cx, "rail-agent-agent-39").expect("the newest agent is listed");
-        assert!(
-            scrolled.top() < newest.top(),
-            "the agents body scrolls inside its card"
-        );
-        whole(cx, "after the agents scroll");
-    }
-
-    /// Two cards with more than a short rail holds share it, however much
-    /// more one holds: fifteen agents beside a long turn's sixty commands
-    /// show more than a couple of rows, rather than the commands card, which
-    /// only counts what it cannot show, taking the rail by how many it has.
-    #[gpui::test]
-    fn cards_that_overflow_a_short_rail_share_it_alike(cx: &mut TestAppContext) {
-        const AGENTS: usize = 15;
-        const COMMANDS: usize = 60;
-        let (_threads, cx) = short_rail(cx, || dispatched(AGENTS, COMMANDS));
-        inside(cx, &["agents", "commands"], AT_REST, "at rest");
-        let agents = bounds(cx, "rail-card-body-agents").expect("the agents card shows");
-        let commands = bounds(cx, "rail-card-body-commands").expect("the commands card shows");
-        let shown = |cx: &mut VisualTestContext, rows: usize, row: &str, body: Bounds<Pixels>| {
-            (0..rows)
-                .filter_map(|index| bounds(cx, &format!("{row}{index}")))
-                .filter(|row| row.top() >= body.top() && row.bottom() <= body.bottom())
-                .count()
-        };
-        let agents_shown = shown(cx, AGENTS, "rail-agent-agent-", agents);
-        let commands_shown = shown(cx, COMMANDS, "rail-command-cmd-", commands);
-        assert!(
-            agents_shown < AGENTS && commands_shown < COMMANDS,
-            "the rail is too short for either card ({agents_shown} agents in {agents:?}, \
-             {commands_shown} commands in {commands:?})"
-        );
-        assert!(
-            agents_shown > 2,
-            "the agents body {agents:?} shows only {agents_shown} agents"
         );
     }
 

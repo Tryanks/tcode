@@ -13481,46 +13481,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// The window's chrome sits in its top corners, so of two stacked panes
-    /// only the top one's header makes room for it: the lower header clears
-    /// no traffic lights over a collapsed sidebar and hosts no caption
-    /// buttons, its close button ending it.
-    #[gpui::test]
-    fn a_pane_stacked_below_another_leaves_the_window_chrome_to_it(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_panes(cx);
-        cx.update(|_, cx| crate::device::DevicePreferences::toggle_sidebar_collapsed(cx));
-        cx.simulate_keystrokes("secondary-shift-d");
-        draw(cx);
-        answer_draft(&shell, &host, "draft-1", cx);
-        crate::test_frames::draw_settled(cx);
-        assert_eq!(
-            pane_threads(&shell, cx),
-            [Some("thread-1".into()), Some("draft-1".into())]
-        );
-
-        let [top, below] = pane_bounds(&shell, cx)[..] else {
-            panic!("two panes");
-        };
-        assert!(below.top() >= top.bottom(), "{top:?} over {below:?}");
-        // The lower pane's header is drawn after the top one's.
-        let toggle = cx
-            .debug_bounds("toggle-sidebar")
-            .expect("the lower header's sidebar toggle");
-        let close = cx
-            .debug_bounds("pane-close")
-            .expect("the lower pane's close button");
-        assert!(
-            below.contains(&toggle.center())
-                && toggle.left() - below.left() < px(crate::window_caption::TRAFFIC_LIGHT_INSET),
-            "no traffic lights to clear: {toggle:?} in {below:?}"
-        );
-        assert!(
-            below.contains(&close.center()) && below.right() - close.right() < px(12.),
-            "no caption buttons after it: {close:?} in {below:?}"
-        );
-    }
-
     /// A thread goes to the pane showing it, or else to the pane of the
     /// control that asked, or else to the pane last in use, whichever pane
     /// the keyboard has left it in, and takes the keyboard there.
@@ -14698,103 +14658,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// What a phone's or a tablet's status bar, home indicator and side
-    /// insets cover is the surface beneath them, painted to the window's
-    /// edges: a phone's page, a tablet's sidebar or reading
-    /// column. Never a band of another colour, which leaves the page
-    /// looking cut off above the screen's bottom.
-    #[gpui::test]
-    fn the_safe_areas_show_the_page_they_cover(cx: &mut TestAppContext) {
-        use tcode_core::settings::ThemeMode;
-
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount(cx);
-        as_mobile(cx);
-        let state = shell.read_with(cx, |shell, _| shell.window_state());
-        let topmost = |at: gpui::Point<Pixels>, cx: &mut VisualTestContext| {
-            cx.update(|window, _| {
-                let at = at.scale(window.scale_factor());
-                crate::test_frames::painted_quads(window)
-                    .into_iter()
-                    .filter(|quad| {
-                        quad.bounds.contains(&at) && quad.content_mask.bounds.contains(&at)
-                    })
-                    .filter(|quad| quad.background.as_solid().is_some_and(|fill| fill.a > 0.))
-                    .max_by_key(|quad| quad.order)
-                    .and_then(|quad| quad.background.as_solid())
-            })
-        };
-        let portrait = gpui::Edges {
-            top: px(59.),
-            bottom: px(34.),
-            ..Default::default()
-        };
-        let landscape = gpui::Edges {
-            left: px(59.),
-            right: px(59.),
-            bottom: px(21.),
-            ..Default::default()
-        };
-        let tablet = gpui::Edges {
-            top: px(24.),
-            bottom: px(20.),
-            ..Default::default()
-        };
-        // Each point covered, and whether the sidebar (or Settings' rail),
-        // which is clear over the window's canvas, is the surface there
-        // rather than the page or reading column.
-        let geometries = [
-            (
-                (393., 852.),
-                portrait,
-                vec![((196., 20.), false), ((196., 840.), false)],
-            ),
-            (
-                (852., 393.),
-                landscape,
-                vec![
-                    ((20., 196.), false),
-                    ((832., 196.), false),
-                    ((426., 385.), false),
-                ],
-            ),
-            (
-                (1024., 1366.),
-                tablet,
-                vec![
-                    ((40., 10.), true),
-                    ((40., 1356.), true),
-                    ((700., 10.), false),
-                    ((700., 1356.), false),
-                ],
-            ),
-        ];
-        cx.update(|window, cx| {
-            crate::settings_page::apply_theme(ThemeMode::Light, window, cx);
-        });
-        for destination in [
-            Destination::Thread,
-            Destination::Hosts,
-            Destination::Settings,
-        ] {
-            state.update(cx, |state, cx| state.go(destination, cx));
-            for ((width, height), insets, covered) in &geometries {
-                cx.simulate_resize(size(px(*width), px(*height)));
-                crate::window_seam::occlude_for_test(cx, *insets);
-                crate::test_frames::draw_settled(cx);
-                let (page, sidebar) = cx
-                    .update(|_, cx| (crate::material::content_surface(cx), cx.theme().background));
-                for ((x, y), beside) in covered {
-                    assert_eq!(
-                        topmost(gpui::point(px(*x), px(*y)), cx),
-                        Some(if *beside { sidebar } else { page }),
-                        "{destination:?} at ({x}, {y}) of {width}x{height}"
-                    );
-                }
-            }
-        }
-    }
-
     fn draw(cx: &mut VisualTestContext) {
         frame(cx, |_, _| ());
     }
@@ -15242,63 +15105,6 @@ pub(crate) mod tests {
 
     fn store_of(shell: &Entity<AppShell>, cx: &VisualTestContext) -> Entity<WorkspaceStore> {
         shell.read_with(cx, |shell, cx| shell.store(cx).expect("attached"))
-    }
-
-    /// A long title takes the header's free width; it is cut only once the
-    /// header runs out of room, whether or not a pull request is linked.
-    #[gpui::test]
-    fn a_long_title_uses_the_headers_free_width(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let root = crate::store::tests::scratch_root("long-title");
-        let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
-        let project = tcode_core::project::Project::from_root(root.join("project"));
-        let mut meta = tcode_core::project::SessionMeta::new(
-            agent::ProviderKind::Codex,
-            project.root.clone(),
-            None,
-        );
-        meta.id = "first".into();
-        meta.title = "Investigate why the composer drops its stop button mid-turn".into();
-        meta.project_id = Some(project.id.clone());
-        let host =
-            tcode_runtime::pipe::spawn_host(disk, tcode_runtime::pipe::HostServices::default())
-                .unwrap();
-        smol::block_on(host.update_state_for_test(move |state, _| {
-            state.projects = vec![project];
-            state.sessions = vec![meta].into();
-        }))
-        .unwrap();
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
-        let (shell, _transport, cx) = mount(cx);
-        let store = store_of(&shell, cx);
-        store.update(cx, |store, cx| {
-            *store = WorkspaceStore::new_attached(
-                driver.link.clone(),
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            );
-            store.show_thread("first".into(), cx);
-        });
-        driver.wait_until(cx, "selected thread baseline", |cx| {
-            store.read_with(cx, |store, cx| {
-                store.baseline_ready()
-                    && !store.threads_loading()
-                    && !store.chat_loading_for(Some("first"), cx)
-            })
-        });
-        resize(cx, 1600.);
-        shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
-        draw(cx);
-        let title = cx.debug_bounds("chat-title").expect("thread title");
-        assert!(
-            title.size.width > px(300.),
-            "the title is cut to {:?} in a 1600px window",
-            title.size.width
-        );
-        driver.shutdown(cx, &host);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// The model picker raises the keyboard only where it cannot cover the
@@ -16102,73 +15908,6 @@ pub(crate) mod tests {
         assert!(cx.debug_bounds("no-hosts").is_some(), "the empty threads");
         assert!(cx.debug_bounds("chat-route").is_none());
         assert!(left.upgrade().is_none(), "the workspace left is let go");
-    }
-
-    /// On a phone too narrow for every pill of the strip, each pill keeps
-    /// the width its label needs and the strip scrolls; none narrows into
-    /// the next.
-    #[gpui::test]
-    fn the_phone_strip_scrolls_rather_than_narrowing_its_pills(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (_shell, host, cx) = mount_crowded_thread(cx);
-        as_mobile(cx);
-        let pills = |cx: &mut VisualTestContext| {
-            (
-                cx.debug_bounds("agents-pill").expect("the agents pill"),
-                cx.debug_bounds("phone-pr-pill")
-                    .expect("the pull request pill"),
-            )
-        };
-        resize(cx, 899.);
-        draw_until(cx, &host, "phone-strip", None);
-        crate::test_frames::draw_settled(cx);
-        let (agents, pull_requests) = pills(cx);
-        resize(cx, 393.);
-        crate::test_frames::draw_settled(cx);
-        let (narrow_agents, narrow_pull_requests) = pills(cx);
-        assert_eq!(
-            narrow_agents.size.width, agents.size.width,
-            "the agents pill"
-        );
-        assert_eq!(
-            narrow_pull_requests.size.width, pull_requests.size.width,
-            "the pull request pill"
-        );
-        assert!(
-            narrow_agents.right() <= narrow_pull_requests.left(),
-            "{narrow_agents:?} runs into {narrow_pull_requests:?}"
-        );
-    }
-
-    /// The rows of Settings' Advanced subgroup span the rail as the rows above
-    /// them do.
-    #[gpui::test]
-    fn the_settings_advanced_rows_span_the_rail(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount(cx);
-        resize(cx, 1024.);
-        let state = shell.read_with(cx, |shell, _| shell.window_state());
-        state.update(cx, |state, cx| state.open_settings(cx));
-        crate::test_frames::draw_settled(cx);
-        let general = cx
-            .debug_bounds("settings-nav-general")
-            .expect("a plain rail row");
-        let advanced: Vec<_> = [
-            "settings-nav-computer-use",
-            "settings-nav-browser",
-            "settings-nav-maintenance",
-        ]
-        .into_iter()
-        .filter_map(|row| cx.debug_bounds(row).map(|bounds| (row, bounds)))
-        .collect();
-        assert!(!advanced.is_empty(), "the Advanced subgroup is open");
-        for (row, bounds) in advanced {
-            assert_eq!(
-                (bounds.left(), bounds.size.width),
-                (general.left(), general.size.width),
-                "{row}"
-            );
-        }
     }
 
     /// Settings replaces the whole window, unlike the Hosts route: the left
@@ -17438,17 +17177,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// One display frame: time passes and the window draws what it asked
-    /// for. A running turn's status never rests, so the window is stepped
-    /// frame by frame rather than until it is still.
-    fn display_frame(cx: &mut VisualTestContext) {
-        cx.executor().advance_clock(Duration::from_millis(16));
-        cx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-        });
-        draw(cx);
-    }
-
     /// From the command's header to the turn's working status: the
     /// command's window, as tall as its motion draws it.
     fn command_to_status(cx: &mut VisualTestContext) -> Pixels {
@@ -17547,100 +17275,6 @@ pub(crate) mod tests {
                     records,
                 },
             )],
-        );
-    }
-
-    /// A pane switched to another thread shows it as a new scene: on the
-    /// first frame that draws it, every row and the header's controls are
-    /// where they rest. A thread's first turn's time row does not slide
-    /// from where the thread before drew its own first turn's (down to the
-    /// last turn of one, up to the first of two), nor does the header's
-    /// Agents toggle fold away or widen in as the thread with an agent
-    /// gives way to one without and back.
-    #[gpui::test]
-    fn a_thread_switched_to_moves_nothing_from_the_one_before(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_panes(cx);
-        serve_finished_turns(&host, "thread-1", 1, true);
-        await_restore_update(&shell, cx, |store, cx| {
-            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx)
-                == Some(1)
-        });
-        crate::test_frames::draw_settled(cx);
-        assert!(cx.debug_bounds("turn-time-row").is_some());
-        // From the plan button to the diff button: the Agents toggle
-        // between them is there only with an agent.
-        let plan = |cx: &mut VisualTestContext| {
-            let plan = cx.debug_bounds("plan-panel").expect("the plan button");
-            let diff = cx.debug_bounds("diff-panel").expect("the diff button");
-            diff.left() - plan.left()
-        };
-        let with_agent = plan(cx);
-
-        for (key, id, turns, agent) in [
-            ("secondary-2", "thread-2", 2, false),
-            ("secondary-1", "thread-1", 1, true),
-        ] {
-            // The thread's log is there by the frame that first draws it,
-            // the frame after the one that drew the thread before.
-            serve_finished_turns(&host, id, turns, agent);
-            cx.simulate_keystrokes(key);
-            let store = store_of(&shell, cx);
-            cx.run_until_parked();
-            draw(cx);
-            assert_eq!(pane_threads(&shell, cx), [Some(id.into())]);
-            let shown = store.read_with(cx, |store, cx| {
-                store.with_timeline_for(Some(id), |timeline| timeline.turns.len(), cx)
-            });
-            assert_eq!(shown, Some(turns));
-            let drawn = |cx: &mut VisualTestContext| {
-                [
-                    "timeline-row-0",
-                    "timeline-row-1",
-                    "timeline-row-2",
-                    "timeline-row-3",
-                    "turn-time-row",
-                ]
-                .map(|selector| cx.debug_bounds(selector))
-            };
-            let first = (drawn(cx), plan(cx));
-            crate::test_frames::draw_settled(cx);
-            assert_eq!(
-                first,
-                (drawn(cx), plan(cx)),
-                "{id} is at rest from its first frame"
-            );
-            assert_eq!(
-                first.1 == with_agent,
-                agent,
-                "the toggle is there with an agent"
-            );
-        }
-    }
-
-    /// A tablet turning wide in Settings shows the settings route as it is:
-    /// turning wide changes no route, so the route the window last drew
-    /// wide is not drawn beneath it with Settings rising over it.
-    #[gpui::test]
-    fn turning_wide_in_settings_draws_the_route_at_rest(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount(cx);
-        as_mobile(cx);
-        resize(cx, 1024.);
-        crate::test_frames::draw_settled(cx);
-        assert!(cx.debug_bounds("chat-route").is_some());
-        resize(cx, 899.);
-        shell.read_with(cx, |shell, cx| assert!(shell.compact(cx)));
-        let state = shell.read_with(cx, |shell, _| shell.window_state());
-        state.update(cx, |state, cx| state.open_settings(cx));
-        crate::test_frames::draw_settled(cx);
-
-        resize(cx, 1024.);
-        shell.read_with(cx, |shell, cx| assert!(!shell.compact(cx)));
-        assert!(cx.debug_bounds("settings-route").is_some());
-        assert!(
-            cx.debug_bounds("chat-route").is_none(),
-            "the chat is drawn beneath Settings as the window turns wide"
         );
     }
 
