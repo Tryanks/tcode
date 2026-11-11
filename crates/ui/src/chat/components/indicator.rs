@@ -267,7 +267,6 @@ fn turn_time_footer(
         .gap_1p5()
         .items_center()
         .text_meta_mono(false, cx)
-        .debug_selector(|| "turn-time-row".into())
         .children(actions.map(|actions| div().flex_none().child(actions)))
         .child(
             h_flex()

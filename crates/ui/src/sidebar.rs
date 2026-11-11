@@ -3910,11 +3910,7 @@ impl SessionsSidebar {
             .relative()
             .flex_none()
             .w(px(GLYPH_WIDTH))
-            .h(px(GLYPH_HEIGHT))
-            .debug_selector({
-                let id = id.clone();
-                move || id.to_string()
-            });
+            .h(px(GLYPH_HEIGHT));
         for cell in shown.value.iter() {
             let fill = transition(
                 (id.clone(), format!("cell-{}", cell.pane.as_u64())),

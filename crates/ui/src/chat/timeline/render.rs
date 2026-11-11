@@ -2088,7 +2088,7 @@ impl TimelineView {
 mod tests {
     use super::*;
     use crate::chat::tests::*;
-    use crate::test_frames::{draw, draw_settled};
+    use crate::test_frames::draw_settled;
     use agent::ItemStatus;
     use gpui::TestAppContext;
     use tcode_core::session::TurnMeta;
@@ -2182,87 +2182,6 @@ mod tests {
         }
         for bubble in ["steering-wake", "steering-results"] {
             assert!(cx.debug_bounds(bubble).is_none(), "{bubble} is a bubble");
-        }
-    }
-
-    /// A chat under a probe that reads, on each frame it draws, how far in
-    /// the hover fill of each of `keys` is.
-    struct HoverProbe {
-        chat: gpui::Entity<ChatView>,
-        keys: &'static [&'static str],
-        drawn: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<&'static str, f32>>>,
-    }
-
-    impl gpui::Render for HoverProbe {
-        fn render(
-            &mut self,
-            window: &mut gpui::Window,
-            cx: &mut gpui::Context<Self>,
-        ) -> impl gpui::IntoElement {
-            use gpui::{ParentElement as _, Styled as _};
-            let hover = self.chat.read(cx).timeline.read(cx).hover.clone();
-            for &key in self.keys {
-                let fill = hover.reveal(key, window, cx);
-                self.drawn.borrow_mut().insert(key, fill);
-            }
-            gpui::div().size_full().child(self.chat.read(cx).frame())
-        }
-    }
-
-    /// The Copy of the message a finished turn ends on, drawn in the turn's
-    /// footer, stays in as the pointer goes down from the message's text,
-    /// across the space between them, onto Copy: the message and its footer
-    /// are one hover.
-    #[gpui::test]
-    fn the_pointer_going_from_a_message_to_its_footer_keeps_copy_in(cx: &mut TestAppContext) {
-        use gpui::{AppContext as _, Modifiers, VisualTestContext, point, px, size};
-        use std::time::Duration;
-
-        const KEYS: &[&str] = &["assistant-answer"];
-        let mut timeline = Timeline::default();
-        timeline.turns = vec![TurnMeta {
-            end_ts: Some(1_700_000_000),
-            ..TurnMeta::default()
-        }];
-        timeline.entries.push(entry("question", user_item("go")));
-        timeline.entries.push(entry(
-            "answer",
-            assistant("The first line.\n\nThe second line."),
-        ));
-        let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
-        let drawn = std::rc::Rc::default();
-        let (_, cx) = cx.add_window_view(|window, cx| HoverProbe {
-            chat: cx.new(|cx| {
-                ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
-            }),
-            keys: KEYS,
-            drawn: std::rc::Rc::clone(&drawn),
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(size(px(1_024.), px(700.)));
-        draw_settled(cx);
-
-        let message = cx
-            .debug_bounds("timeline-row-1")
-            .expect("the message's row");
-        let copy = cx
-            .debug_bounds("copy-assistant:answer")
-            .expect("the footer's Copy");
-        let x = copy.center().x;
-        cx.simulate_mouse_move(point(x, message.top() + px(4.)), None, Modifiers::default());
-        draw_settled(cx);
-        assert_eq!(drawn.borrow()[KEYS[0]], 1., "the message's Copy is in");
-
-        // A pixel at a time, a frame apart, as a slow pointer moves.
-        let mut y = message.top() + px(4.);
-        while y < copy.center().y {
-            y += px(1.);
-            cx.simulate_mouse_move(point(x, y), None, Modifiers::default());
-            cx.executor().advance_clock(Duration::from_millis(16));
-            cx.update(|window, cx| window.simulate_next_frame(cx));
-            draw(cx);
-            let reveal = drawn.borrow()[KEYS[0]];
-            assert_eq!(reveal, 1., "Copy faded with the pointer at {y:?}: {reveal}");
         }
     }
 

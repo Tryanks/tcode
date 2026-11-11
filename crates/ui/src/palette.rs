@@ -1168,7 +1168,6 @@ impl CommandPalette {
                     this.child(
                         div()
                             .flex_none()
-                            .debug_selector(move || format!("palette-row-{index}-key"))
                             .text_secondary(compact, cx)
                             .child(key.appearance(false)),
                     )

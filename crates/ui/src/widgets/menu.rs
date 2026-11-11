@@ -527,7 +527,6 @@ impl Render for PopupMenu {
                         .when_some(key, |el, key| {
                             el.child(
                                 div()
-                                    .debug_selector(move || format!("menu-item-{index}-key"))
                                     .flex_none()
                                     .ml_auto()
                                     .pl(cx.theme().tokens.spacing.md)

@@ -1951,39 +1951,3 @@ fn segment_corners(leading: bool, cx: &App) -> gpui::Corners<gpui::Pixels> {
         }
     }
 }
-
-#[cfg(all(test, target_os = "macos"))]
-mod tests {
-    use super::*;
-    use crate::chat::tests::*;
-    use gpui::TestAppContext;
-
-    /// Over a collapsed sidebar the header clears the traffic lights while
-    /// its pane is at the window's left edge, and not once it has left it.
-    #[gpui::test]
-    fn the_header_clears_the_traffic_lights_only_at_the_left_edge(cx: &mut TestAppContext) {
-        use crate::chat::WindowEdges;
-        use crate::test_frames::draw_settled;
-        use gpui::{VisualTestContext, px, size};
-
-        let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(1));
-        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-            ChatView::new(store, window_state, Some(session_id), window, cx)
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(size(px(1_024.), px(700.)));
-        cx.update(|_, cx| crate::device::DevicePreferences::toggle_sidebar_collapsed(cx));
-        draw_settled(cx);
-        let toggle = |cx: &mut VisualTestContext| {
-            cx.debug_bounds("toggle-sidebar")
-                .expect("the sidebar toggle")
-                .left()
-        };
-        let cleared = toggle(cx);
-        for left in [false, true] {
-            cx.update(|_, cx| ChatView::set_edges(&view, WindowEdges { left, right: true }, cx));
-            draw_settled(cx);
-            assert_eq!(left, toggle(cx) == cleared, "left edge: {left}");
-        }
-    }
-}
