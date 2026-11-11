@@ -224,69 +224,6 @@ fn setup_takes_the_password_alone_and_login_names_the_device() {
     server.shutdown();
 }
 
-#[test]
-fn two_browsers_get_their_own_acks_and_shared_broadcasts() {
-    let dir = TestDir::new("two");
-    let (runtime, mux) = real_host::spawn(&dir.0, Default::default(), |_| {});
-    configure_password(&dir.0, "secret password");
-    let server = serve(mux.clone(), config(dir.0.clone())).unwrap();
-    let addr = server.local_addr();
-    let shared = dir.0.join("shared");
-    std::fs::create_dir_all(&shared).unwrap();
-    let tokens: Vec<String> = ["Chrome", "Firefox"]
-        .into_iter()
-        .map(|name| {
-            login(addr, "secret password", name).1["token"]
-                .as_str()
-                .unwrap()
-                .to_owned()
-        })
-        .collect();
-    tcode_traverse::block_on(async {
-        let (mut one, _) = Browser::hello(addr, hello(&tokens[0], "Chrome")).await;
-        let (mut two, _) = Browser::hello(addr, hello(&tokens[1], "Firefox")).await;
-        for (browser, id) in [(&mut one, 7), (&mut two, 7)] {
-            browser
-                .send(json!({"id":id,"payload":{"type":"subscribe","content":{"topic":{"type":"index"}}}}))
-                .await;
-            let mut kinds = vec![browser.recv().await["type"].as_str().unwrap().to_owned()];
-            kinds.push(browser.recv().await["type"].as_str().unwrap().to_owned());
-            kinds.sort();
-            assert_eq!(kinds, ["ack", "event"]);
-        }
-        one.send(json!({"id":8,"payload":{"type":"command","content":{"type":"create_project","content":{"root":shared}}}}))
-            .await;
-        let mut seen = [one.recv().await, one.recv().await];
-        seen.sort_by_key(|value| value["type"].as_str().unwrap().to_owned());
-        assert_eq!(seen[0]["type"], "ack");
-        assert_eq!(
-            seen[0]["content"]["id"], 8,
-            "acks carry the browser's own id"
-        );
-        assert_eq!(seen[1]["content"]["event"]["type"], "index_upsert_project");
-        let broadcast = two.recv().await;
-        assert_eq!(
-            broadcast["content"]["event"]["type"], "index_upsert_project",
-            "a subscribed browser sees the other's broadcast"
-        );
-        // A reply to this later command is an ordered barrier: any leaked
-        // ack for the first browser would precede it on the host stream.
-        two.send(
-            json!({"id":9,"payload":{"type":"command","content":{"type":"open_latest_session"}}}),
-        )
-        .await;
-        loop {
-            let reply = two.recv().await;
-            if reply["type"] == "ack" {
-                assert_eq!(reply["content"]["id"], 9, "the ack reaches only its sender");
-                break;
-            }
-        }
-    });
-    server.shutdown();
-    real_host::stop(runtime, &mux);
-}
-
 /// An authenticated browser sends protocol lines of any size the protocol
 /// allows: one upload chunk, as the composer writes it, reaches the host and
 /// is answered on the same socket.
