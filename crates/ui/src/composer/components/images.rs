@@ -523,8 +523,8 @@ impl Composer {
     ) -> bool {
         let name = path
             .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "image".to_string());
+            .map_or_else(|| path.to_string_lossy(), |name| name.to_string_lossy())
+            .into_owned();
         let mime = mime_from_path(&path);
         self.add_image(name, mime, PendingImageSource::Path(path), window, cx)
     }

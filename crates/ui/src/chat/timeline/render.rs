@@ -334,8 +334,9 @@ impl TimelineView {
                                     Some(components::error_card::LimitResume::Scheduled {
                                         resets_at,
                                         on_cancel: Box::new(cx.listener(move |this, _, _, cx| {
-                                            let session_id =
-                                                this.session_id.clone().unwrap_or_default();
+                                            let Some(session_id) = this.session_id.clone() else {
+                                                return;
+                                            };
                                             this.workspace_store.update(cx, |store, _| {
                                                 store.drop_queued_for(session_id, id)
                                             });
@@ -346,8 +347,10 @@ impl TimelineView {
                                     Some(components::error_card::LimitResume::Offer {
                                         on_schedule: Box::new(cx.listener(
                                             move |this, _, _, cx| {
-                                                let session_id =
-                                                    this.session_id.clone().unwrap_or_default();
+                                                let Some(session_id) = this.session_id.clone()
+                                                else {
+                                                    return;
+                                                };
                                                 this.workspace_store.update(cx, |store, _| {
                                                     store.schedule_turn_for(
                                                         session_id,
@@ -404,13 +407,17 @@ impl TimelineView {
                             components::error_card::LimitResume::Retry {
                                 retry_at: retry.retry_at,
                                 on_retry: Box::new(cx.listener(move |this, _, _, cx| {
-                                    let session_id = this.session_id.clone().unwrap_or_default();
+                                    let Some(session_id) = this.session_id.clone() else {
+                                        return;
+                                    };
                                     this.workspace_store.update(cx, |store, _| {
                                         store.retry_turn_for(session_id, turn_id.clone())
                                     });
                                 })),
                                 on_cancel: Box::new(cx.listener(move |this, _, _, cx| {
-                                    let session_id = this.session_id.clone().unwrap_or_default();
+                                    let Some(session_id) = this.session_id.clone() else {
+                                        return;
+                                    };
                                     this.workspace_store
                                         .update(cx, |store, _| store.interrupt_for(session_id));
                                 })),
@@ -975,8 +982,8 @@ impl TimelineView {
                 let path = PathBuf::from(path);
                 let title = path
                     .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "image".to_string());
+                    .map_or_else(|| path.to_string_lossy(), |name| name.to_string_lossy())
+                    .into_owned();
                 Box::new(cx.listener(move |_, _, window, cx| {
                     crate::image_viewer::open(
                         crate::image_viewer::ViewerSource::original(
@@ -1088,16 +1095,17 @@ impl TimelineView {
                 && !store.native_subagent_readonly_for(self.session_id.as_deref(), cx)
                 && store.connection_state().is_connected()
         });
-        let session_id = self.session_id.clone().unwrap_or_default();
+        let session_id = self.session_id.clone();
         let store_entity = self.workspace_store.clone();
         let request_id = request.as_ref().map(|request| request.id.clone());
         let on_choose: components::plan::ChooseOption = Rc::new(move |option, _, cx| {
-            let Some(request_id) = request_id.clone() else {
+            let (Some(session_id), Some(request_id)) = (session_id.clone(), request_id.clone())
+            else {
                 return;
             };
             store_entity.update(cx, |store, _| {
                 store.respond_approval_for(
-                    session_id.clone(),
+                    session_id,
                     request_id,
                     agent::ApprovalDecision::Option(option.to_owned()),
                 )
