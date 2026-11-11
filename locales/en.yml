@@ -3210,10 +3210,6 @@ tools:
       running: "Launching skill"
       done: "Launched skill"
       asked: "Launch skill"
-    propose_plan:
-      running: "Proposing a plan"
-      done: "Proposed a plan"
-      asked: "Propose a plan"
     review:
       running: "Reviewing"
       done: "Reviewed"
@@ -3297,7 +3293,6 @@ tools:
   tools_one: "1 tool"
   tools: "%{count} tools"
   loaded: "Loaded"
-  plan: "Plan"
   rationale: "Rationale"
   risk: "Risk: %{level}"
   questions: "%{count} questions"

@@ -3203,10 +3203,6 @@ tools:
       running: "启动技能中"
       done: "已启动技能"
       asked: "启动技能"
-    propose_plan:
-      running: "提出计划中"
-      done: "已提出计划"
-      asked: "提出计划"
     review:
       running: "审查中"
       done: "已审查"
@@ -3290,7 +3286,6 @@ tools:
   tools_one: "1 个工具"
   tools: "%{count} 个工具"
   loaded: "已加载"
-  plan: "计划"
   rationale: "审查理由"
   risk: "风险：%{level}"
   questions: "%{count} 个问题"

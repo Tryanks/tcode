@@ -1,6 +1,6 @@
 //! Windows for the harness's own calls about the session rather than the
-//! workspace: the tools it loaded, the skill it launched, a plan it
-//! proposed as a call, and its automatic reviewer's verdict on an action.
+//! workspace: the tools it loaded, the skill it launched, and its automatic
+//! reviewer's verdict on an action.
 
 use std::path::Path;
 
@@ -30,12 +30,6 @@ struct Skill<'a> {
     skill: &'a str,
 }
 
-#[derive(Deserialize)]
-struct ProposedPlan<'a> {
-    #[serde(borrow)]
-    plan: &'a str,
-}
-
 /// A reviewer's verdict on an action: the action, and the risk it rated
 /// when it rated one. Its rationale is the call's output.
 #[derive(Deserialize)]
@@ -49,7 +43,6 @@ struct Review<'a> {
 enum Kind<'a> {
     LoadTools(&'a str),
     Skill(&'a str),
-    Plan(&'a str),
     Review(Review<'a>),
 }
 
@@ -58,8 +51,6 @@ pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView
         Kind::LoadTools(call.input::<ToolSearch<'a>>()?.query)
     } else if call.named(&["skill"]) {
         Kind::Skill(call.input::<Skill<'a>>()?.skill)
-    } else if call.named(&["exitplanmode", "exit_plan_mode"]) {
-        Kind::Plan(call.input::<ProposedPlan<'a>>()?.plan)
     } else if call.named(&["auto-reviewer"]) {
         Kind::Review(call.input::<Review<'a>>()?)
     } else {
@@ -86,15 +77,6 @@ fn loaded_tools(output: &str) -> Vec<String> {
         .collect()
 }
 
-/// The plan's title: its first heading, else its first line.
-fn plan_title(plan: &str) -> String {
-    let heading = plan
-        .lines()
-        .find_map(|line| line.trim_start().strip_prefix('#'))
-        .map(|line| line.trim_start_matches('#').trim().to_owned());
-    one_line(&heading.or_else(|| first_line(plan)).unwrap_or_default())
-}
-
 impl ToolView for Harness<'_> {
     fn header(&self, call: &Call<'_>, _cwd: &Path) -> Header {
         let output = call.output.unwrap_or_default();
@@ -111,8 +93,6 @@ impl ToolView for Harness<'_> {
             Kind::Skill(skill) => {
                 Header::with_icon("icons/puzzle.svg", Verb("skill")).argument(Argument::mono(skill))
             }
-            Kind::Plan(plan) => Header::new(IconName::ListOrdered, Verb("propose_plan"))
-                .argument(Argument::plain(plan_title(plan))),
             Kind::Review(Review { summary, risk }) => {
                 let verb = match call.status {
                     ItemStatus::InProgress => Verb("review"),
@@ -162,12 +142,6 @@ impl ToolView for Harness<'_> {
                     .children(names);
                 super::body([section(&crate::tr!("tools.loaded"), list, cx).into_any_element()])
             }
-            Kind::Plan(plan) => {
-                let text = bounded_text(call.entry, "plan", plan, false, Bound::HEAD, ctx);
-                let plan = section(&crate::tr!("tools.plan"), text, ctx.app()).into_any_element();
-                let output = output_section(call, Bound::HEAD, ctx);
-                super::body(std::iter::once(plan).chain(output))
-            }
             Kind::Review(_) => {
                 let rationale = output.trim();
                 let text = (!rationale.is_empty()).then(|| {
@@ -184,7 +158,6 @@ impl ToolView for Harness<'_> {
     fn copy_items(&self, call: &Call<'_>) -> Vec<(String, String)> {
         let mut items = Vec::new();
         match self.kind {
-            Kind::Plan(plan) => copy(&mut items, "tools.copy_plan", plan),
             Kind::LoadTools(_) => copy(
                 &mut items,
                 "chat.copy_output",

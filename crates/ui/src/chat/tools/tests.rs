@@ -1514,8 +1514,8 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
 }
 
 /// The harness's calls about the session read as what they did: the tools
-/// a search loaded, the skill launched, a plan proposed as a call, a
-/// question asked and the answer it got, the reviewer's verdict with its
+/// a search loaded, the skill launched, a question asked and the answer it
+/// got, the reviewer's verdict with its
 /// risk and, when it denied, its rationale. Codex's wait and generated image
 /// read as such, and the image it viewed and the one it generated show as
 /// their images.
@@ -1554,15 +1554,6 @@ fn a_harness_call_reads_as_what_it_did_to_the_session(cx: &mut TestAppContext) {
         (
             "toolu_010000000000000000000110",
             read("Launched skill", None, Some("pr"), None),
-        ),
-        (
-            "toolu_010000000000000000000111",
-            read(
-                "Proposed a plan",
-                None,
-                Some("Migrate the settings page in one pass"),
-                None,
-            ),
         ),
         (
             ask,

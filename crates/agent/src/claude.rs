@@ -1798,11 +1798,19 @@ pub(crate) enum ToolItem {
 }
 
 impl ToolItem {
-    /// The in-progress item for a call that is not an `Agent` spawn,
-    /// `TodoWrite` or `ExitPlanMode`, and the state its result completes.
-    /// Calls made at the top level and inside a subagent map alike.
+    /// The in-progress item for a call that is not an `Agent` spawn or a
+    /// `TodoWrite`, and the state its result completes. Calls made at the
+    /// top level and inside a subagent map alike.
     pub(crate) fn started(name: String, input: Value) -> (Self, ItemContent) {
-        if is_command_tool(&name) {
+        if name == EXIT_PLAN_MODE {
+            let markdown = plan_markdown(&input);
+            (
+                ToolItem::Plan {
+                    markdown: markdown.clone(),
+                },
+                ItemContent::Plan { markdown },
+            )
+        } else if is_command_tool(&name) {
             let command = input
                 .get("command")
                 .and_then(Value::as_str)
@@ -1947,8 +1955,9 @@ impl ToolItem {
 }
 
 /// A call a transcript records, mapped as a live session maps the same call:
-/// a command as a command, an edit as a file change, anything else as the
-/// tool call it is. The importer reads transcripts through this.
+/// a command as a command, an edit as a file change, a proposed plan as the
+/// plan, anything else as the tool call it is. The importer reads
+/// transcripts through this.
 pub struct TranscriptCall(ToolItem);
 
 impl TranscriptCall {
@@ -3592,14 +3601,6 @@ impl Mapper {
             let content = spawned_subagent(&input);
             let item = ToolItem::subagent(&content, None).expect("a spawn snapshot is a Subagent");
             (item, content)
-        } else if name == EXIT_PLAN_MODE {
-            let markdown = plan_markdown(&input);
-            (
-                ToolItem::Plan {
-                    markdown: markdown.clone(),
-                },
-                ItemContent::Plan { markdown },
-            )
         } else {
             ToolItem::started(name, input)
         };
