@@ -2381,8 +2381,8 @@ fn tool_family(
                 })) => (
                     Some(ToolFamily::Read {
                         path,
-                        first_line,
-                        note,
+                        first_line: Some(first_line),
+                        note: note.map(str::to_owned),
                     }),
                     Some(lines),
                 ),
@@ -2563,41 +2563,49 @@ fn grep_matches(text: &str) -> Vec<SearchHit> {
 /// A page `read` returned (`toModelContent` in `read.ts`): a file's
 /// `Read file <path>, lines S-E` header, then each line as `N: text`, then
 /// `[Output truncated. …]` when the file goes on; or a directory's
-/// `Read directory` header, then its entries by name.
-enum Page {
+/// `Read directory <path>, entries S-E` header, then its entries by name and
+/// the same notice. Only a page laid out exactly so is read: the header then
+/// says nothing the page's own lines do not, and any other text stays the
+/// call's output as the harness wrote it.
+enum Page<'a> {
     File {
-        first_line: Option<u64>,
+        first_line: u64,
         lines: String,
-        note: Option<String>,
+        note: Option<&'a str>,
     },
-    Directory(Vec<String>),
+    Directory(Vec<&'a str>),
 }
 
-fn read_page(text: &str) -> Option<Page> {
-    let mut rows = text.lines();
-    let header = rows.next()?;
-    if header.starts_with("Read directory ") {
-        return Some(Page::Directory(
-            rows.filter(|row| !row.starts_with("[Output truncated."))
-                .map(str::to_owned)
-                .collect(),
-        ));
+fn read_page(text: &str) -> Option<Page<'_>> {
+    let mut rows: Vec<&str> = text.split('\n').collect();
+    let header = rows.remove(0);
+    let note = rows
+        .last()
+        .copied()
+        .filter(|row| row.starts_with("[Output truncated. Continue reading with offset: "));
+    if note.is_some() {
+        rows.pop();
     }
-    header.strip_prefix("Read file ")?;
-    let mut first_line = None;
-    let mut lines = Vec::new();
-    let mut note = None;
-    for row in rows {
-        match row.split_once(": ") {
-            Some((number, line)) if number.bytes().all(|byte| byte.is_ascii_digit()) => {
-                first_line.get_or_insert_with(|| number.parse().ok());
-                lines.push(line);
-            }
-            _ => note = Some(row.to_owned()),
-        }
+    // `S-E`, the numbers of the first and last row the page holds.
+    let span = |range: &str| -> Option<u64> {
+        let (first, last) = range.split_once('-')?;
+        let (first, last) = (first.parse::<u64>().ok()?, last.parse::<u64>().ok()?);
+        (last.checked_sub(first)? + 1 == rows.len() as u64).then_some(first)
+    };
+    if let Some(rest) = header.strip_prefix("Read directory ") {
+        let (_, range) = rest.rsplit_once(", entries ")?;
+        span(range)?;
+        return Some(Page::Directory(rows));
     }
+    let (_, range) = header.strip_prefix("Read file ")?.rsplit_once(", lines ")?;
+    let first_line = span(range)?;
+    let lines = rows
+        .iter()
+        .zip(first_line..)
+        .map(|(row, number)| row.strip_prefix(&format!("{number}: ")))
+        .collect::<Option<Vec<_>>>()?;
     Some(Page::File {
-        first_line: first_line.flatten(),
+        first_line,
         lines: lines.join("\n"),
         note,
     })
@@ -3225,6 +3233,25 @@ mod tests {
                     note: Some("[Output truncated. Continue reading with offset: 42]".into()),
                 }),
                 Some("fn main() {\n}".into()),
+            )
+        );
+        // A page laid out any other way is the call's output as written.
+        let past_the_end =
+            "Read file src/lib.rs, lines 90-90 (offset 95 is past the end; the file has 90 lines)\n90: }";
+        assert_eq!(
+            tool_family(
+                "read",
+                &json!({"path": "src/lib.rs", "offset": 95}),
+                Some(past_the_end.into()),
+                None
+            ),
+            (
+                Some(ToolFamily::Read {
+                    path: "src/lib.rs".into(),
+                    first_line: None,
+                    note: None,
+                }),
+                Some(past_the_end.into()),
             )
         );
         let listing = "Read directory src, entries 1-2\nlib.rs\nbin/";
