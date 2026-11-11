@@ -178,24 +178,3 @@ impl Global for MobileOverride {}
 pub fn force_mobile_layout(cx: &mut App) {
     cx.set_global(MobileOverride);
 }
-
-/// Occlude a test window the way a phone would: the visual viewport shrinks
-/// to the viewport minus `insets`. GPUI's test window exposes only the visual
-/// viewport to tests, and [`Window::fully_visible_bounds`] intersects it with
-/// the safe area exactly as it does for native insets, so this drives every
-/// seam consumer through the same path. Pass zero edges to clear it.
-#[cfg(test)]
-pub(crate) fn occlude_for_test(cx: &mut gpui::VisualTestContext, insets: Edges<Pixels>) {
-    let (handle, viewport) =
-        cx.update(|window, _| (window.window_handle(), window.viewport_size()));
-    cx.simulate_window_visual_viewport_change(
-        handle,
-        gpui::Bounds::from_corners(
-            gpui::point(insets.left, insets.top),
-            gpui::point(
-                viewport.width - insets.right,
-                viewport.height - insets.bottom,
-            ),
-        ),
-    );
-}

@@ -9663,7 +9663,7 @@ pub(crate) mod tests {
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         cx.update(|window, cx| focus.focus(window, cx));
         draw(cx);
-        crate::window_seam::occlude_for_test(
+        crate::test_frames::occlude(
             cx,
             gpui::Edges {
                 bottom: px(400.),
@@ -9671,7 +9671,7 @@ pub(crate) mod tests {
             },
         );
         draw(cx);
-        crate::window_seam::occlude_for_test(cx, gpui::Edges::default());
+        crate::test_frames::occlude(cx, gpui::Edges::default());
         draw(cx);
         cx.update(|window, _| {
             assert!(
@@ -14111,7 +14111,7 @@ pub(crate) mod tests {
                 );
             });
             // The status bar and the keyboard cover the window.
-            crate::window_seam::occlude_for_test(
+            crate::test_frames::occlude(
                 cx,
                 gpui::Edges {
                     top: px(47.),
@@ -14127,7 +14127,7 @@ pub(crate) mod tests {
                     "Back dismisses the keyboard first"
                 );
             });
-            crate::window_seam::occlude_for_test(cx, gpui::Edges::default());
+            crate::test_frames::occlude(cx, gpui::Edges::default());
             cx.update(|window, cx| {
                 shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
             });

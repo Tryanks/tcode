@@ -45,3 +45,23 @@ pub(crate) fn draw_settled(cx: &mut VisualTestContext) {
         cx.executor().advance_clock(FRAME);
     }
 }
+
+/// Occlude a test window the way a phone would: the visual viewport shrinks
+/// to the viewport minus `insets`. GPUI's test window exposes only the visual
+/// viewport to tests, and [`gpui::Window::fully_visible_bounds`] intersects it with
+/// the safe area exactly as it does for native insets, so this drives every
+/// seam consumer through the same path. Pass zero edges to clear it.
+pub(crate) fn occlude(cx: &mut VisualTestContext, insets: gpui::Edges<gpui::Pixels>) {
+    let (handle, viewport) =
+        cx.update(|window, _| (window.window_handle(), window.viewport_size()));
+    cx.simulate_window_visual_viewport_change(
+        handle,
+        gpui::Bounds::from_corners(
+            gpui::point(insets.left, insets.top),
+            gpui::point(
+                viewport.width - insets.right,
+                viewport.height - insets.bottom,
+            ),
+        ),
+    );
+}
