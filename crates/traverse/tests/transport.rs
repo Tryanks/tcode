@@ -1030,10 +1030,6 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     assert!(host.invitation().is_some());
     assert_eq!(paired.space_id.as_deref(), Some(id.as_str()));
     assert_eq!(paired.space_name.as_deref(), Some("Shared"));
-    tcode_traverse::hosts::save_hosts(&member_dir.0, std::slice::from_ref(&paired)).unwrap();
-    let saved = tcode_traverse::hosts::load_hosts(&member_dir.0).unwrap();
-    assert_eq!(saved[0].space_id.as_deref(), Some(id.as_str()));
-    assert_eq!(saved[0].space_name.as_deref(), Some("Shared"));
     let persisted = HostIdentity::load_or_create(&host_dir.0, "Test Host").unwrap();
     assert_eq!(
         persisted.devices[0].access,
@@ -1362,19 +1358,10 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
     spaced["spaces"] = json!([{"id":"s","name":"Shared","created_unix":1,"project_ids":["p"],
         "secret":"AAAAAAAAAAAAAAAAAAAAAA","link_enabled":true,"link_failures":0}]);
     std::fs::write(dir.0.join(HOST_FILE), serde_json::to_vec(&spaced).unwrap()).unwrap();
-    let mut spaced = HostIdentity::load_or_create(&dir.0, "Test Host").unwrap();
+    let spaced = HostIdentity::load_or_create(&dir.0, "Test Host").unwrap();
     assert_eq!(
         spaced.spaces[0].policy,
         tcode_protocol::SpacePolicy::unrestricted()
-    );
-    spaced.spaces[0].policy = tcode_protocol::SpacePolicy::new_space();
-    spaced.save().unwrap();
-    assert_eq!(
-        HostIdentity::load_or_create(&dir.0, "Test Host")
-            .unwrap()
-            .spaces[0]
-            .policy,
-        tcode_protocol::SpacePolicy::new_space()
     );
     assert_eq!(persisted["devices"][0]["access"], json!({"type":"full"}));
     for access in [

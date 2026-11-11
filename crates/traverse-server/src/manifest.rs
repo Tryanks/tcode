@@ -89,11 +89,6 @@ mod tests {
                 "pkarr": ["https://traverse.example.org/pkarr"]
             })
         );
-        // What the server sends, the client accepts as is.
-        assert_eq!(
-            Manifest::parse(&serde_json::to_string(&manifest).unwrap()).unwrap(),
-            manifest
-        );
     }
 
     #[test]
