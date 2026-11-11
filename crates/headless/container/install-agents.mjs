@@ -62,11 +62,16 @@ for (const [name, spec] of Object.entries(agents)) {
   const wanted = selected.includes(name);
   try {
     if (spec.package) {
-      const installed = await exists(path.join(prefix, 'lib', 'node_modules', spec.package));
+      const installed = async (pkg) => exists(path.join(prefix, 'lib', 'node_modules', pkg));
+      // A package the CLI no longer ships as (OpenCode 1's opencode-ai) owns
+      // the same command; a volume that still holds it would keep running it.
+      for (const old of spec.replaces ?? []) {
+        if (await installed(old)) run('npm', ['uninstall', '--global', '--no-audit', '--no-fund', old]);
+      }
       if (!wanted) {
         // Off PATH means uninstalled: the prefix's bin is on PATH. Logins
         // and configuration stay under HOME for a later reinstall.
-        if (installed) run('npm', ['uninstall', '--global', '--no-audit', '--no-fund', spec.package]);
+        if (await installed(spec.package)) run('npm', ['uninstall', '--global', '--no-audit', '--no-fund', spec.package]);
         continue;
       }
       console.log(`Preparing ${name}`);
