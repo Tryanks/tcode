@@ -346,6 +346,77 @@ impl DomainDiff {
     }
 }
 
+/// The value each of `descriptors` runs at, and the ids of those whose value
+/// is only what Tcode sent. With no process, it is what a launch sends: the
+/// thread's choice, else the option's default. A running harness says itself
+/// for the options it reports, and until it has, those have no value here.
+fn running_options(
+    session: &ActiveSession,
+    descriptors: &[OptionDescriptor],
+) -> (Vec<OptionSelection>, Vec<String>) {
+    let find = |selections: &[OptionSelection], id: &str| {
+        selections
+            .iter()
+            .find(|selection| selection.id == id)
+            .cloned()
+    };
+    let idle = matches!(session.runtime, Runtime::Idle);
+    let mut running = if idle {
+        session.meta.option_selections.clone()
+    } else {
+        Vec::new()
+    };
+    let mut unconfirmed = Vec::new();
+    let confirmed = session.meta.provider.caps().confirmed_options;
+    for descriptor in descriptors {
+        let (id, default) = match descriptor {
+            OptionDescriptor::Select {
+                id, default_value, ..
+            } => (id, default_value.clone().map(serde_json::Value::String)),
+            OptionDescriptor::Boolean {
+                id, default_value, ..
+            } => (id, Some(serde_json::Value::Bool(*default_value))),
+        };
+        if idle {
+            if find(&session.meta.option_selections, id).is_none()
+                && let Some(value) = default
+            {
+                running.push(OptionSelection {
+                    id: id.clone(),
+                    value,
+                });
+            }
+            continue;
+        }
+        let reported = confirmed
+            .supports(id)
+            .then(|| find(&session.confirmed_option_selections, id));
+        match reported {
+            Some(Some(selection)) if !selection.value.is_null() => running.push(selection),
+            Some(None) => {}
+            _ => {
+                unconfirmed.push(id.clone());
+                running.extend(find(&session.live_option_selections, id));
+            }
+        }
+    }
+    (running, unconfirmed)
+}
+
+/// The model the session runs, and whether that is only what Tcode sent: with
+/// no process, the thread's; else what the harness reported, nothing until it
+/// has, and what was sent when it reports none.
+fn running_model(session: &ActiveSession) -> (Option<String>, bool) {
+    if matches!(session.runtime, Runtime::Idle) {
+        return (session.meta.model.clone(), false);
+    }
+    match &session.confirmed_model {
+        Some(Some(model)) => (Some(model.clone()), false),
+        Some(None) => (session.live_model.clone(), true),
+        None => (None, false),
+    }
+}
+
 fn index_changes(old: &IndexSnapshot, new: &IndexSnapshot) -> Vec<ServerEvent> {
     let mut events = Vec::new();
     let old_projects: HashMap<_, _> = old.projects.iter().map(|p| (p.id.as_str(), p)).collect();
@@ -1280,22 +1351,9 @@ impl AppState {
             });
             provider_option_descriptors.push(descriptor.clone());
         }
-        let mut provider_option_selections = meta.option_selections.clone();
-        if !matches!(session.runtime, Runtime::Idle)
-            && let Some(descriptor) = session.permission_descriptor()
-        {
-            let id = match descriptor {
-                OptionDescriptor::Select { id, .. } | OptionDescriptor::Boolean { id, .. } => id,
-            };
-            provider_option_selections.retain(|selection| selection.id != id);
-            provider_option_selections.extend(
-                session
-                    .confirmed_option_selections
-                    .iter()
-                    .filter(|selection| selection.id == id)
-                    .cloned(),
-            );
-        }
+        let (provider_option_selections, provider_option_unconfirmed) =
+            running_options(session, &provider_option_descriptors);
+        let (running_model, model_unconfirmed) = running_model(session);
         let relay_confirmation = session.pending_relay.as_ref().and_then(|pending| {
             has_meaningful_history(&session.timeline).then(|| {
                 (
@@ -1307,10 +1365,8 @@ impl AppState {
         let (approvals, user_input) = self.open_requests(session_id, session);
         // The provider reports the window it was launched with; a selection
         // made since then caps the meter until the restart that applies it.
-        let selected_window = agent::context_window::selected(
-            &provider_option_descriptors,
-            &provider_option_selections,
-        );
+        let selected_window =
+            agent::context_window::selected(&provider_option_descriptors, &meta.option_selections);
         let context_window = session
             .timeline
             .usage
@@ -1401,7 +1457,10 @@ impl AppState {
             steering_supported: session.can_steer(),
             provider_option_descriptors,
             provider_option_selections,
+            provider_option_unconfirmed,
             provider_option_requested_selections: meta.option_selections.clone(),
+            running_model,
+            model_unconfirmed,
             provider_commands: session.provider_commands.clone(),
             git_branch: session.git_branch.clone(),
             branches: session.branches.clone(),

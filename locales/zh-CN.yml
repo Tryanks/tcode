@@ -1110,6 +1110,8 @@ composer:
   fast_mode: "快速模式"
   fast_mode_unsupported: "当前模型无法启用快速模式"
   option_default: "（默认）"
+  option_sent: "%{harness} 不回报这一项，显示的是发送的值"
+  option_unknown: "%{harness} 不回报这一项"
   effort: "推理强度"
   context_window_custom: "自定义"
   context_window_custom_placeholder: "%{min}–%{max}"

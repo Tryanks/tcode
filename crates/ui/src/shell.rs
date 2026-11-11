@@ -15193,7 +15193,10 @@ pub(crate) mod tests {
                 .into_iter()
                 .collect(),
             provider_option_selections: Vec::new(),
+            provider_option_unconfirmed: Vec::new(),
             provider_option_requested_selections: Vec::new(),
+            running_model: None,
+            model_unconfirmed: false,
             provider_commands: Vec::new(),
             git_branch: None,
             branches: Vec::new(),

@@ -1117,6 +1117,8 @@ composer:
   fast_mode: "高速モード"
   fast_mode_unsupported: "現在のモデルでは高速モードを有効にできません"
   option_default: "（デフォルト）"
+  option_sent: "%{harness} はこの値を報告しないため、送信した値を表示しています"
+  option_unknown: "%{harness} はこの値を報告しません"
   effort: "推論レベル"
   context_window_custom: "カスタム"
   context_window_custom_placeholder: "%{min}–%{max}"

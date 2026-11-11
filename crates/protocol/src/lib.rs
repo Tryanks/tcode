@@ -423,6 +423,11 @@ pub use wire::{
 // history window names and a live session_event leaves out; OriginalTarget
 // gains record {session_id, row}, that record as JSON, read whole on the
 // original stream by whoever may read the thread's history.
+// SessionStatus's provider_option_selections are, while a harness runs, the
+// values it reported (only the permission's were); it gains
+// provider_option_unconfirmed, the options it does not report, running_model
+// and model_unconfirmed. The agent event stream gains session_model {model},
+// and a provider_options selection may be null: the harness reports no value.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

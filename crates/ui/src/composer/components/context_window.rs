@@ -83,22 +83,20 @@ impl Render for ContextWindowDialog {
         let Some((id, options, default_value)) = context_window_descriptor(&composer) else {
             return div().into_any_element();
         };
-        let selected = composer
-            .active_option_selections
-            .iter()
-            .find(|selection| selection.id == id)
-            .and_then(|selection| context_window::parse_tokens(&selection.value))
-            .or_else(|| {
-                default_value
-                    .as_ref()
-                    .and_then(|value| context_window::parse_tokens(&serde_json::json!(value)))
-            });
+        let states = OptionStates::of(&composer);
+        let selected = states.running(&id).and_then(context_window::parse_tokens);
+        let pending = states.pending(&id).and_then(context_window::parse_tokens);
+        let note = states.unconfirmed_note(&id);
         let tokens_of = |value: &str| context_window::parse_tokens(&serde_json::json!(value));
-        let custom_selected = selected.is_some_and(|selected| {
-            !options
-                .iter()
-                .any(|option| tokens_of(&option.value) == Some(selected))
-        });
+        let is_custom = |tokens: Option<u64>| {
+            tokens.is_some_and(|tokens| {
+                !options
+                    .iter()
+                    .any(|option| tokens_of(&option.value) == Some(tokens))
+            })
+        };
+        let custom_selected = is_custom(selected);
+        let pending_suffix = format!(" · {}", crate::tr!("permission.pending"));
         let compact = crate::window_seam::window_is_compact(window, cx);
         let invalid = crate::motion::shown(
             "context-window-invalid",
@@ -130,10 +128,16 @@ impl Render for ContextWindowDialog {
         };
 
         let mut list = v_flex().w_full().gap_0p5();
+        if let Some(note) = note {
+            list = list.child(div().px_2().pb_1().text_secondary(compact, cx).child(note));
+        }
         for (index, option) in options.iter().enumerate() {
             let mut label = option.label.clone();
             if default_value.as_deref() == Some(option.value.as_str()) {
                 label.push_str(&default_suffix);
+            }
+            if pending.is_some() && tokens_of(&option.value) == pending {
+                label.push_str(&pending_suffix);
             }
             let checked = selected.is_some() && tokens_of(&option.value) == selected;
             let store = self.store.clone();
@@ -159,6 +163,13 @@ impl Render for ContextWindowDialog {
         let mut custom_label = crate::tr!("composer.context_window_custom").into_owned();
         if let Some(selected) = selected.filter(|_| custom_selected) {
             custom_label.push_str(&format!(" ({})", context_window::format(selected)));
+        }
+        if let Some(pending) = pending.filter(|_| is_custom(pending)) {
+            custom_label.push_str(&format!(
+                " · {} {}",
+                context_window::format(pending),
+                crate::tr!("permission.pending")
+            ));
         }
         let custom = self.custom.clone();
         list.child(

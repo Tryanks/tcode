@@ -6412,6 +6412,110 @@ fn native_permission_selection_stays_pending_until_provider_confirmation() {
     }
 }
 
+/// While a harness runs, an option it reports runs at what it reported and
+/// at nothing until it has, never at its default; one it does not report runs
+/// at what Tcode sent, and says so. What it reports leaves the thread's own
+/// choice as it was.
+#[test]
+fn a_running_harness_options_are_what_it_reported_or_what_was_sent() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-confirmed-options");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let chosen = |id: &str, value: serde_json::Value| OptionSelection {
+        id: id.into(),
+        value,
+    };
+    let value = |status: &SessionStatus, id: &str| {
+        status
+            .provider_option_selections
+            .iter()
+            .find(|selection| selection.id == id)
+            .map(|selection| selection.value.clone())
+    };
+    state.update(cx, |state, cx| {
+        let mut session = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);
+        session.meta.id = "confirmed".into();
+        session.meta.option_selections = vec![
+            chosen(agent::EFFORT_OPTION_ID, serde_json::json!("high")),
+            chosen("thinking", serde_json::json!(true)),
+        ];
+        session
+            .live_option_selections
+            .clone_from(&session.meta.option_selections);
+        state.sessions.push(session.meta.clone());
+        state.install_selected(session);
+        let level = |value: &str| agent::SelectOption {
+            value: value.into(),
+            label: value.into(),
+            description: None,
+            unavailable: None,
+            speed: None,
+            summary: None,
+            approval: None,
+        };
+        state.on_event(
+            "confirmed",
+            AgentEvent::ProviderOptions {
+                descriptors: vec![
+                    OptionDescriptor::Select {
+                        id: agent::EFFORT_OPTION_ID.into(),
+                        label: "Effort".into(),
+                        options: vec![level("medium"), level("high")],
+                        default_value: Some("medium".into()),
+                        role: agent::OptionRole::Effort,
+                        apply: Default::default(),
+                        recommended: None,
+                        permissive: None,
+                        minimum: None,
+                    },
+                    OptionDescriptor::Boolean {
+                        id: "thinking".into(),
+                        label: "Thinking".into(),
+                        default_value: false,
+                        role: agent::OptionRole::Thinking,
+                        apply: Default::default(),
+                        recommended: None,
+                        permissive: None,
+                    },
+                ],
+                selections: Vec::new(),
+            },
+            cx,
+        );
+        let before = state.session_status_snapshot("confirmed").unwrap();
+        assert_eq!(value(&before, agent::EFFORT_OPTION_ID), None);
+        assert_eq!(value(&before, "thinking"), Some(serde_json::json!(true)));
+        assert_eq!(before.provider_option_unconfirmed, ["thinking"]);
+        assert_eq!(before.running_model, None);
+
+        state.on_event(
+            "confirmed",
+            AgentEvent::ProviderOptions {
+                descriptors: Vec::new(),
+                selections: vec![chosen(agent::EFFORT_OPTION_ID, serde_json::json!("medium"))],
+            },
+            cx,
+        );
+        state.on_event(
+            "confirmed",
+            AgentEvent::SessionModel {
+                model: "claude-test".into(),
+            },
+            cx,
+        );
+        let after = state.session_status_snapshot("confirmed").unwrap();
+        assert_eq!(
+            value(&after, agent::EFFORT_OPTION_ID),
+            Some(serde_json::json!("medium"))
+        );
+        assert_eq!(
+            after.provider_option_requested_selections[0],
+            chosen(agent::EFFORT_OPTION_ID, serde_json::json!("high"))
+        );
+        assert_eq!(after.running_model.as_deref(), Some("claude-test"));
+    });
+}
+
 #[test]
 fn queued_message_stamps_live_context_window_change() {
     let mut active = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);

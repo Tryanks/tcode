@@ -1117,6 +1117,8 @@ composer:
   fast_mode: "Fast mode"
   fast_mode_unsupported: "Current model cannot enable fast mode"
   option_default: " (default)"
+  option_sent: "%{harness} doesn't report this; it shows what was sent"
+  option_unknown: "%{harness} doesn't report this"
   effort: "Effort"
   context_window_custom: "Custom"
   context_window_custom_placeholder: "%{min}–%{max}"

@@ -155,6 +155,7 @@ async fn run_actor(
     };
 
     let model_id = setup.model.as_ref().map(ModelRef::id);
+    let reported_variant = setup.model.as_ref().and_then(|model| model.variant.clone());
     let mut mapper = Mapper::new(
         setup.session_id.clone(),
         setup.mcp_servers,
@@ -171,6 +172,7 @@ async fn run_actor(
         mapper,
         model: setup.model,
         variant: crate::selection_str(&opts.option_selections, EFFORT),
+        reported_variant,
         agent: setup.agent,
         agents: setup.agents,
         commands: setup.commands.clone(),
@@ -576,6 +578,9 @@ struct OpenCodeActor {
     mapper: Mapper,
     model: Option<ModelRef>,
     variant: Option<String>,
+    /// The variant the session runs, as OpenCode last reported it: its
+    /// model's, which has none until one is chosen (2.2.7).
+    reported_variant: Option<String>,
     agent: Option<String>,
     agents: Vec<AgentInfo>,
     commands: Vec<ProviderCommand>,
@@ -918,6 +923,15 @@ impl OpenCodeActor {
             id: PERMISSION_MODE.into(),
             value: json!(if self.auto_approve { "auto" } else { "normal" }),
         }];
+        // OpenCode names no variant for a model run at its own settings, and
+        // reports no effort for those.
+        selections.push(OptionSelection {
+            id: EFFORT.into(),
+            value: self
+                .reported_variant
+                .as_ref()
+                .map_or(Value::Null, |variant| json!(variant)),
+        });
         if self.agents.len() > 1 {
             descriptors.push(OptionDescriptor::Select {
                 id: AGENT.into(),
@@ -1229,9 +1243,28 @@ impl OpenCodeActor {
             }
             "session.step.started" if data["sessionID"] == self.mapper.root.as_str() => {
                 // A session without an agent of its own runs the configured default.
-                if let Some(agent) = data["agent"].as_str()
-                    && self.agent.as_deref() != Some(agent)
-                {
+                let agent = data["agent"].as_str().map(str::to_owned);
+                let variant = ModelRef::from_wire(&data["model"]).and_then(|model| model.variant);
+                if (agent.is_some() && agent != self.agent) || variant != self.reported_variant {
+                    if agent.is_some() {
+                        self.agent = agent;
+                    }
+                    self.reported_variant = variant;
+                    self.emit_options().await;
+                }
+            }
+            // What a switch recorded for the session's next steps (2.2.7).
+            "session.model.selected" if data["sessionID"] == self.mapper.root.as_str() => {
+                if let Some(model) = ModelRef::from_wire(&data["model"]) {
+                    self.reported_variant.clone_from(&model.variant);
+                    self.events
+                        .emit(AgentEvent::SessionModel { model: model.id() })
+                        .await;
+                    self.emit_options().await;
+                }
+            }
+            "session.agent.selected" if data["sessionID"] == self.mapper.root.as_str() => {
+                if let Some(agent) = data["agent"].as_str() {
                     self.agent = Some(agent.to_owned());
                     self.emit_options().await;
                 }

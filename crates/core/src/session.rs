@@ -1741,7 +1741,9 @@ impl Timeline {
                 }));
             }
             // Composer metadata belongs to the runtime, not the timeline.
-            AgentEvent::ProviderCommands { .. } | AgentEvent::ProviderOptions { .. } => {}
+            AgentEvent::ProviderCommands { .. }
+            | AgentEvent::ProviderOptions { .. }
+            | AgentEvent::SessionModel { .. } => {}
         }
     }
 

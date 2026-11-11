@@ -213,6 +213,20 @@ fn thinking_label(level: &str) -> String {
         .unwrap_or_default()
 }
 
+/// pi's thinking level in effect, as `get_state` and `thinking_level_changed`
+/// give it (1.5.2): pi clamps a level the model lacks, and says so only by
+/// these.
+fn thinking_level(level: Option<&Value>) -> Option<AgentEvent> {
+    let level = level?.as_str()?;
+    Some(AgentEvent::ProviderOptions {
+        descriptors: Vec::new(),
+        selections: vec![OptionSelection {
+            id: crate::EFFORT_OPTION_ID.into(),
+            value: json!(level),
+        }],
+    })
+}
+
 fn model_wire_id(model: Option<&Value>) -> Option<String> {
     let model = model?;
     Some(format!(
@@ -755,6 +769,9 @@ impl PiActor {
                 model,
             })
             .await;
+        if let Some(event) = thinking_level(data.get("thinkingLevel")) {
+            self.events.emit(event).await;
+        }
 
         // Restore points are the user messages entered from here on.
         send_json(
@@ -851,6 +868,9 @@ impl PiActor {
                 model: model_wire_id(data.get("model")),
             })
             .await;
+        if let Some(event) = thinking_level(data.get("thinkingLevel")) {
+            self.events.emit(event).await;
+        }
     }
 
     /// Read the entries after the cursor; `turn` names the turn that just
@@ -1035,6 +1055,13 @@ impl PiActor {
         };
         if message.get("type").and_then(Value::as_str) == Some("response") {
             let success = message.get("success").and_then(Value::as_bool) == Some(true);
+            // `set_model` answers with the model it set (1.5.2).
+            if success
+                && message.get("command").and_then(Value::as_str) == Some("set_model")
+                && let Some(model) = model_wire_id(message.get("data"))
+            {
+                self.events.emit(AgentEvent::SessionModel { model }).await;
+            }
             if let Some(event) = message
                 .get("id")
                 .and_then(Value::as_str)
@@ -1406,6 +1433,7 @@ impl PiMapper {
                     ),
                 }]
             }
+            "thinking_level_changed" => thinking_level(message.get("level")).into_iter().collect(),
             "extension_error" => vec![AgentEvent::Warning {
                 message: format!(
                     "pi extension error in {}: {}",

@@ -262,11 +262,21 @@ impl AppState {
                                 OptionDescriptor::Select { id, .. }
                                 | OptionDescriptor::Boolean { id, .. } => id,
                             });
+                    // An agent's own option is set by the agent, and the thread
+                    // follows it. A catalog option is the user's choice, which
+                    // Tcode sends; what the harness reports does not replace it.
+                    let wire = matches!(
+                        active.meta.provider.caps().option_descriptors,
+                        OptionDescriptors::Wire
+                    );
                     for selection in selections {
                         active
                             .confirmed_option_selections
                             .retain(|value| value.id != selection.id);
                         active.confirmed_option_selections.push(selection.clone());
+                        if !wire || selection.value.is_null() {
+                            continue;
+                        }
                         active
                             .live_option_selections
                             .retain(|value| value.id != selection.id);
@@ -291,6 +301,13 @@ impl AppState {
                     )
                 }) {
                     self.persist_meta(&meta, cx);
+                }
+                return;
+            }
+
+            AgentEvent::SessionModel { model } => {
+                if let Some(resident) = self.resident_mut(session_id) {
+                    resident.confirmed_model = Some(Some(model.clone()));
                 }
                 return;
             }
@@ -328,8 +345,11 @@ impl AppState {
                     let meta = meta.clone();
                     self.persist_meta(&meta, cx);
                 }
-                if filled_default_model && let Some(resident) = self.resident_mut(session_id) {
-                    resident.live_model = model.clone();
+                if let Some(resident) = self.resident_mut(session_id) {
+                    if filled_default_model {
+                        resident.live_model = model.clone();
+                    }
+                    resident.confirmed_model = Some(model.clone());
                 }
             }
             AgentEvent::TurnRetry { retry } => {
