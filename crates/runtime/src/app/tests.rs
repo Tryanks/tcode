@@ -2772,6 +2772,10 @@ fn draft_defaults_follow_project_history_then_global_history_without_persisting_
                 id: "reasoningEffort".into(),
                 value: serde_json::json!("high"),
             },
+            OptionSelection {
+                id: "permissions".into(),
+                value: serde_json::json!("ask"),
+            },
         ];
         meta
     };
@@ -2877,7 +2881,8 @@ fn draft_defaults_follow_project_history_then_global_history_without_persisting_
             expected.extend(
                 match provider {
                     ProviderKind::ClaudeCode => Some(("permissionMode", "auto")),
-                    ProviderKind::Codex => Some(("permissions", "auto_review")),
+                    // The project's last thread ran Codex at "ask".
+                    ProviderKind::Codex => Some(("permissions", "ask")),
                     _ => None,
                 }
                 .map(|(id, value)| OptionSelection {
@@ -6311,7 +6316,7 @@ fn a_new_threads_permission_is_its_projects_then_its_harness_then_the_recommende
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let value = |state: &AppState| {
         state
-            .initial_permission_selection(Some("project"), ProviderKind::ClaudeCode)
+            .initial_permission_selection(Some("project"), ProviderKind::ClaudeCode, None)
             .unwrap()
             .value
     };

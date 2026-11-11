@@ -2048,10 +2048,11 @@ impl AppState {
     }
 
     /// The provider + model a new draft should start with: the most recently
-    /// updated, non-archived session in this project. Only reasoning effort is
-    /// inherited from its model options. Projects without active history fall
-    /// back to the most recently updated non-archived global session (or the
-    /// Claude default), without inheriting model options.
+    /// updated, non-archived session in this project. Of its options, the
+    /// reasoning effort and the permission are inherited. Projects without
+    /// active history fall back to the most recently updated non-archived
+    /// global session (or the Claude default), without inheriting options.
+    #[allow(clippy::type_complexity)]
     pub(super) fn draft_defaults(
         &self,
         project_id: &str,
@@ -2060,6 +2061,7 @@ impl AppState {
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<OptionSelection>,
         Option<OptionSelection>,
     ) {
         if let Some(meta) = self
@@ -2070,11 +2072,18 @@ impl AppState {
             })
             .max_by_key(|meta| meta.updated_at)
         {
-            let reasoning_effort = meta
-                .option_selections
-                .iter()
-                .find(|selection| selection.id == agent::EFFORT_OPTION_ID)
-                .cloned();
+            let selection = |id: &str| {
+                meta.option_selections
+                    .iter()
+                    .find(|selection| selection.id == id)
+                    .cloned()
+            };
+            let permission = match permission_control(meta.provider) {
+                Some(
+                    OptionDescriptor::Select { id, .. } | OptionDescriptor::Boolean { id, .. },
+                ) => selection(&id),
+                None => None,
+            };
             return (
                 meta.provider,
                 meta.model.clone(),
@@ -2083,7 +2092,8 @@ impl AppState {
                 // same third-party endpoint instead of falling back to the
                 // built-in provider (which would reject the profile's model).
                 meta.profile_id.clone(),
-                reasoning_effort,
+                selection(agent::EFFORT_OPTION_ID),
+                permission,
             );
         }
 
@@ -2099,17 +2109,20 @@ impl AppState {
                 meta.acp_agent_id.clone(),
                 meta.profile_id.clone(),
                 None,
+                None,
             ),
-            None => (ProviderKind::ClaudeCode, None, None, None, None),
+            None => (ProviderKind::ClaudeCode, None, None, None, None, None),
         }
     }
 
     /// The permission a new conversation with `provider` starts at: the
-    /// project's configured value, otherwise the provider's recommended one.
+    /// project's configured value, else the Harness's, else `inherited` (the
+    /// one the thread it follows ran with), else the provider's recommended one.
     pub(super) fn initial_permission_selection(
         &self,
         project_id: Option<&str>,
         provider: ProviderKind,
+        inherited: Option<OptionSelection>,
     ) -> Option<OptionSelection> {
         let descriptor = permission_control(provider)?;
         let configured = project_id
@@ -2126,6 +2139,11 @@ impl AppState {
                     .resolved_profile(Settings::builtin_profile_id(provider))?;
                 builtin.settings.default_permission
             });
+        if configured.is_none()
+            && let Some(inherited) = inherited
+        {
+            return Some(inherited);
+        }
         match descriptor {
             OptionDescriptor::Select {
                 id, recommended, ..
@@ -2204,7 +2222,7 @@ impl AppState {
             self.refresh_git_status(&session_id, cx);
             return session_id;
         }
-        let (provider, model, acp_agent_id, profile_id, reasoning_effort) =
+        let (provider, model, acp_agent_id, profile_id, reasoning_effort, permission) =
             self.draft_defaults(&project_id);
         let provider_commands =
             self.cached_provider_commands(provider, profile_id.as_deref(), acp_agent_id.as_deref());
@@ -2219,9 +2237,11 @@ impl AppState {
         draft.draft_device_id = device_id;
         draft.meta.profile_id = profile_id;
         draft.meta.option_selections = reasoning_effort.into_iter().collect();
-        if let Some(selection) =
-            self.initial_permission_selection(draft.meta.project_id.as_deref(), provider)
-        {
+        if let Some(selection) = self.initial_permission_selection(
+            draft.meta.project_id.as_deref(),
+            provider,
+            permission,
+        ) {
             draft.meta.option_selections.push(selection);
         }
         self.restore_terminal_workspace(&mut draft);

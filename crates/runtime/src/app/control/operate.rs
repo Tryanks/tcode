@@ -368,7 +368,7 @@ impl AppState {
             ));
         } else {
             meta.option_selections
-                .extend(self.initial_permission_selection(Some(&project.id), provider));
+                .extend(self.initial_permission_selection(Some(&project.id), provider, None));
         }
         if let Some(space) = &caller.space {
             self.fit_to_policy(&space.policy, &mut meta)
