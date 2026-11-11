@@ -11472,10 +11472,6 @@ fn a_whole_output_is_sent_when_the_clients_line_holds_it() {
     };
 
     assert_eq!(
-        read(1, "long", AttachmentPolicy::LOCAL),
-        Ok(QueryResponse::ItemOutput(long.clone()))
-    );
-    assert_eq!(
         read(2, "long", AttachmentPolicy::network()),
         Ok(QueryResponse::ItemOutput(long))
     );

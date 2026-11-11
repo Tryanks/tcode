@@ -208,15 +208,19 @@ mod tests {
 
     /// A finished command's output longer than a screen keeps what scrolled
     /// off it, oldest first, ahead of the screen, so a window holds all of
-    /// it: five thousand lines, all there.
+    /// it: more lines than a running command's window keeps, all there.
     #[test]
     fn a_long_output_carries_what_scrolled_off_its_screen() {
-        let output: String = (1..=5_000).map(|line| format!("line {line}\n")).collect();
+        let lines = tcode_protocol::terminal::HISTORY_LIMIT + 100;
+        let output: String = (1..=lines).map(|line| format!("line {line}\n")).collect();
         let frame = super::render(&output, 80, false);
         let rows = rows(&frame);
         assert_eq!(rows.first().map(String::as_str), Some("line 1"));
-        assert_eq!(rows.last().map(String::as_str), Some("line 5000"));
-        assert_eq!((rows.len(), frame.lines_evicted), (5_000, 0));
+        assert_eq!(
+            rows.last().map(String::as_str),
+            Some(format!("line {lines}").as_str())
+        );
+        assert_eq!((rows.len(), frame.lines_evicted), (lines, 0));
     }
 
     /// Past the ceiling, the frame holds the output's end and counts the
