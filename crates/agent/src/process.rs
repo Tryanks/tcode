@@ -494,13 +494,11 @@ pub(crate) fn refuse_batch_line_breaks<'a>(
     Ok(())
 }
 
-/// Run a harness's management command to its end and collect what it wrote.
-/// Its stdin is null, so a prompt can never wait on input; dropping the
-/// future stops the command and everything it started, as a cancelled
-/// plugin change does.
-pub(crate) async fn tree_output(
-    command: std::process::Command,
-) -> std::io::Result<std::process::Output> {
+/// Run a command to its end and collect what it wrote. Its stdin is null, so
+/// a prompt can never wait on input; dropping the future stops the command
+/// and everything it started, as a cancelled plugin change or harness update
+/// does.
+pub async fn tree_output(command: std::process::Command) -> std::io::Result<std::process::Output> {
     held_output(command, &SessionProcesses::default()).await
 }
 

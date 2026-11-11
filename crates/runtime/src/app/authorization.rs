@@ -495,6 +495,7 @@ impl AppState {
                 | Command::CheckProviderVersions
                 | Command::MeasureDiskUsage
                 | Command::UpdateProviders { .. }
+                | Command::CancelProviderUpdate
                 | Command::RefreshAcpRegistry
                 | Command::InstallAcpAgent { .. }
                 | Command::CancelAcpInstall { .. }

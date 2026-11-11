@@ -1161,6 +1161,11 @@ pub enum RuntimeToast {
         operation: RuntimeOperationId,
         run: ProviderUpdateRun,
     },
+    /// The user stopped it during `run.current`'s update; the rest were not run.
+    ProviderUpdateCancelled {
+        operation: RuntimeOperationId,
+        run: ProviderUpdateRun,
+    },
     GitBusy,
     GitStarted {
         operation: RuntimeOperationId,

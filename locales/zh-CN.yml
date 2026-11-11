@@ -691,6 +691,8 @@ providers:
   updates_available_one: "有可用更新：%{provider} v%{version}"
   updates_available_many: "有 %{count} 个 Harness 可更新"
   update_progress: "正在更新 %{provider}… %{completed}/%{total}"
+  cancel_update: "取消"
+  update_stopped: "已停止更新 %{provider}"
   updated_count: "已更新 %{count} 个 Harness"
   update_result: "已更新 %{updated} 个，%{failed} 个更新失败：%{providers}"
   update_failures: "无法更新 %{providers}。请检查安装和更新命令，或手动更新。"

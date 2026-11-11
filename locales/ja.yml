@@ -695,6 +695,8 @@ providers:
   updates_available_one: "更新があります：%{provider} v%{version}"
   updates_available_many: "%{count} 個のハーネスに更新があります"
   update_progress: "%{provider} を更新中… %{completed}/%{total}"
+  cancel_update: "キャンセル"
+  update_stopped: "%{provider} の更新を中止しました"
   updated_count: "更新したハーネス：%{count} 個"
   update_result: "%{updated} 個を更新、%{failed} 個が失敗：%{providers}"
   update_failures: "%{providers} を更新できませんでした。インストールと更新コマンドを確認するか、手動で更新してください。"

@@ -750,6 +750,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::CheckProviderVersions => app.check_provider_versions(cx),
         Command::MeasureDiskUsage => app.measure_disk_usage(cx),
         Command::UpdateProviders { providers } => app.update_providers(providers, cx),
+        Command::CancelProviderUpdate => app.cancel_provider_update(cx),
         Command::SetSidebarCollapsed { collapsed } => app.set_sidebar_collapsed(collapsed, cx),
         Command::RunGitAction {
             session_id,

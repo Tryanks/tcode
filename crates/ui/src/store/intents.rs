@@ -69,6 +69,7 @@ impl WorkspaceStore {
                 | Command::CheckProviderVersions
                 | Command::MeasureDiskUsage
                 | Command::UpdateProviders { .. }
+                | Command::CancelProviderUpdate
                 | Command::RefreshAcpRegistry
                 | Command::InstallAcpAgent { .. }
                 | Command::CancelAcpInstall { .. }
@@ -1367,6 +1368,9 @@ impl WorkspaceStore {
     }
     pub fn update_providers(&mut self, providers: Vec<ProviderKind>) {
         self.dispatch(Command::UpdateProviders { providers });
+    }
+    pub fn cancel_provider_update(&mut self) {
+        self.dispatch(Command::CancelProviderUpdate);
     }
     pub fn set_active_model_for(
         &mut self,

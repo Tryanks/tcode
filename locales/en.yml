@@ -695,6 +695,8 @@ providers:
   updates_available_one: "Update available: %{provider} v%{version}"
   updates_available_many: "Updates available for %{count} Harnesses"
   update_progress: "Updating %{provider}… %{completed}/%{total}"
+  cancel_update: "Cancel"
+  update_stopped: "Stopped updating %{provider}"
   updated_count: "Harnesses updated: %{count}"
   update_result: "%{updated} updated, %{failed} failed: %{providers}"
   update_failures: "Could not update %{providers}. Check the installation and update command, or update manually."

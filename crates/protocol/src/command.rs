@@ -215,6 +215,8 @@ pub enum Command {
     UpdateProviders {
         providers: Vec<ProviderKind>,
     },
+    /// Stop the running harness updates.
+    CancelProviderUpdate,
     SetSidebarCollapsed {
         collapsed: bool,
     },
