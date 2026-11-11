@@ -3312,6 +3312,7 @@ tools:
   actions_one: "1 次操作"
   actions: "%{count} 次操作"
   actions_failed: "%{count} 次失败"
+  actions_declined: "%{count} 次被拒绝"
   outcome:
     worked: "成功"
     didnt: "未生效"

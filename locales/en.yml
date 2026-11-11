@@ -3319,6 +3319,7 @@ tools:
   actions_one: "1 action"
   actions: "%{count} actions"
   actions_failed: "%{count} failed"
+  actions_declined: "%{count} declined"
   outcome:
     worked: "worked"
     didnt: "didn't work"

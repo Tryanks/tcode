@@ -3319,6 +3319,7 @@ tools:
   actions_one: "1 件の操作"
   actions: "%{count} 件の操作"
   actions_failed: "%{count} 件失敗"
+  actions_declined: "%{count} 件拒否"
   outcome:
     worked: "成功"
     didnt: "効果なし"

@@ -91,14 +91,14 @@ impl TimelineView {
         let running = calls
             .iter()
             .any(|call| call.status == ItemStatus::InProgress);
-        let failed = calls
-            .iter()
-            .filter(|call| call.status == ItemStatus::Failed)
-            .count();
+        let count = |status: ItemStatus| calls.iter().filter(|call| call.status == status).count();
+        let (failed, declined) = (count(ItemStatus::Failed), count(ItemStatus::Declined));
+        // A run ends as its last call did: interrupted, declined or failed
+        // shows as such, not as completed.
         let status = if running {
             ItemStatus::InProgress
         } else {
-            ItemStatus::Completed
+            latest.status
         };
         let latest_activity = super::activity(latest.entry, false, cwd);
         let step = latest_activity.header.label(latest.status);
@@ -110,6 +110,9 @@ impl TimelineView {
             ))))
             .chip((failed > 0).then(|| {
                 Chip::Warning(crate::tr!("tools.actions_failed", count = failed).into_owned())
+            }))
+            .chip((declined > 0).then(|| {
+                Chip::Warning(crate::tr!("tools.actions_declined", count = declined).into_owned())
             }));
         let elapsed_ms = match (first.ts, run.last().and_then(|entry| entry.finished_ts)) {
             (Some(start), Some(end)) if !running => Some(end.saturating_sub(start)),
