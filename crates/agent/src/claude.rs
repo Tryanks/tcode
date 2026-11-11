@@ -59,20 +59,6 @@ const WORKTREE_REMOVE_CALLBACK: &str = "tcode-worktree-remove";
 /// subagent, before its agent id (the `task_started` `task_id`).
 const SUBAGENT_WORKTREE_PREFIX: &str = "agent-";
 
-/// First Claude Code build whose headless control protocol is verified to
-/// expose `rewind_conversation` alongside the SDK's `rewind_files` request.
-const NATIVE_REWIND_MIN_VERSION: (u32, u32, u32) = (2, 1, 214);
-/// The release whose `rewind_files` `dry_run` was read to restore nothing.
-/// An older CLI that ignored the flag would restore files when the panel
-/// merely opens, so it is not asked.
-const REWIND_PREVIEW_MIN_VERSION: (u32, u32, u32) = (2, 1, 318);
-/// The release whose print mode has `--resume-session-at`.
-const FORK_AT_MIN_VERSION: (u32, u32, u32) = (2, 1, 223);
-
-/// First Claude Code release with `--append-system-prompt-file` (a hidden
-/// option in the published 2.0.33 `cli.js`; 2.0.32 lacks it).
-const APPEND_SYSTEM_PROMPT_FILE_MIN_VERSION: (u32, u32, u32) = (2, 0, 33);
-
 /// Resolve the last permission-mode value on the effective argv. Provider
 /// launch arguments intentionally follow internal arguments and may use either
 /// CLI spelling, so the mode tracker must honor both.
@@ -309,27 +295,12 @@ fn inherit_settings(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// Start (or resume) a Claude Code session.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    let version = claude_version(
-        opts.binary_path.as_deref(),
-        &opts.launch_env,
-        &opts.processes,
-    )
-    .await;
-    let native_rewind = version.is_some_and(|version| version >= NATIVE_REWIND_MIN_VERSION);
-    let rewind_preview = version.is_some_and(|version| version >= REWIND_PREVIEW_MIN_VERSION);
     let fork_anchor = match &opts.fork {
-        Some(ForkPoint::Before { checkpoint_id }) => {
-            if version.is_some_and(|version| version < FORK_AT_MIN_VERSION) {
-                return Err(AgentError::Provider(
-                    "forking from a message needs Claude Code 2.1.223 or later".into(),
-                ));
-            }
-            Some(fork_anchor(
-                &opts.resume,
-                config_dir(&opts.launch_env).as_deref(),
-                checkpoint_id,
-            )?)
-        }
+        Some(ForkPoint::Before { checkpoint_id }) => Some(fork_anchor(
+            &opts.resume,
+            config_dir(&opts.launch_env).as_deref(),
+            checkpoint_id,
+        )?),
         Some(ForkPoint::Branch { .. }) => {
             return Err(AgentError::Provider(
                 "Claude Code keeps no branches to go on in".into(),
@@ -356,35 +327,24 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         effective_permission_mode(launch_permission_mode, &opts.extra_args);
 
     let mut cmd = crate::process::async_harness_command(&binary);
-    if native_rewind {
-        // SDK file checkpointing is opt-in for print/stream-json hosts even
-        // though the interactive CLI enables it automatically.
-        cmd.env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true");
-    }
+    // SDK file checkpointing is opt-in for print/stream-json hosts even
+    // though the interactive CLI enables it automatically.
+    cmd.env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true");
     // Passed on every launch: the CLI records the rendered system prompt with the conversation
     // and renders it again from the current launch after a compaction.
-    // A file keeps the argument on one line for a Windows batch launcher; an
-    // older CLI, or one whose version is unknown, gets the text itself.
-    let file_supported =
-        version.is_some_and(|version| version >= APPEND_SYSTEM_PROMPT_FILE_MIN_VERSION);
-    let instructions_file = match opts.instructions.as_deref() {
-        Some(text) if file_supported => Some(
-            InstructionsFile::write(text)
-                .map_err(|err| AgentError::Spawn(format!("writing Tcode's instructions: {err}")))?,
-        ),
-        _ => None,
-    };
-    let system_prompt = match &instructions_file {
-        Some(file) => Some(SystemPrompt::File(&file.0)),
-        None => opts.instructions.as_deref().map(SystemPrompt::Text),
-    };
+    // A file keeps the argument on one line for a Windows batch launcher.
+    let instructions_file = opts
+        .instructions
+        .as_deref()
+        .map(InstructionsFile::write)
+        .transpose()
+        .map_err(|err| AgentError::Spawn(format!("writing Tcode's instructions: {err}")))?;
     cmd.args(launch_args(
         launch_permission_mode,
-        native_rewind,
         &launch,
         resume_args(&opts.resume, opts.fork.is_some(), fork_anchor.as_deref()),
         &opts.mcp_servers,
-        system_prompt,
+        instructions_file.as_ref().map(|file| file.0.as_path()),
         &opts.extra_args,
     ));
     log::debug!(
@@ -491,7 +451,6 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         event_tx,
         session_config,
         applied_permission_mode,
-        (native_rewind, rewind_preview),
         stderr_tail,
         stderr_task,
     ))
@@ -504,22 +463,14 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     })
 }
 
-/// How Tcode's instructions reach the system prompt.
-enum SystemPrompt<'a> {
-    /// The text itself, for a CLI without `--append-system-prompt-file`.
-    Text(&'a str),
-    /// A file holding the text.
-    File(&'a Path),
-}
-
-/// The arguments a session launches Claude Code with.
+/// The arguments a session launches Claude Code with; `instructions` is the
+/// file holding Tcode's part of the system prompt.
 fn launch_args(
     permission_mode: &str,
-    native_rewind: bool,
     launch: &ClaudeLaunchOptions,
     resume: Vec<String>,
     mcp_servers: &[crate::McpRegistration],
-    system_prompt: Option<SystemPrompt<'_>>,
+    instructions: Option<&Path>,
     extra_args: &[String],
 ) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = [
@@ -535,14 +486,12 @@ fn launch_args(
         "--permission-mode",
         permission_mode,
         "--allow-dangerously-skip-permissions",
+        // User-message UUIDs are Claude's native checkpoint ids.
+        "--replay-user-messages",
     ]
     .into_iter()
     .map(Into::into)
     .collect();
-    if native_rewind {
-        // User-message UUIDs are Claude's native checkpoint ids.
-        args.push("--replay-user-messages".into());
-    }
     for (flag, value) in [
         ("--model", &launch.model_id),
         ("--effort", &launch.effort),
@@ -555,14 +504,8 @@ fn launch_args(
     args.extend(resume.into_iter().map(Into::into));
     // Tokens ride in Authorization headers inside the merged `--mcp-config` JSON.
     args.extend(mcp_args(mcp_servers).into_iter().map(Into::into));
-    match system_prompt {
-        Some(SystemPrompt::Text(text)) => {
-            args.extend(["--append-system-prompt".into(), text.into()]);
-        }
-        Some(SystemPrompt::File(path)) => {
-            args.extend(["--append-system-prompt-file".into(), path.into()]);
-        }
-        None => {}
+    if let Some(path) = instructions {
+        args.extend(["--append-system-prompt-file".into(), path.into()]);
     }
     // Settings → Harnesses "Launch arguments", last so the user can override
     // anything Tcode set.
@@ -953,12 +896,10 @@ async fn actor_loop(
     event_tx: smol::channel::Sender<AgentEvent>,
     config: SessionConfig,
     applied_permission_mode: String,
-    (native_rewind, rewind_preview): (bool, bool),
     stderr_tail: crate::process::StderrTail,
     stderr_task: smol::Task<()>,
 ) {
-    let mut mapper = Mapper::new_configured(applied_permission_mode, native_rewind);
-    mapper.rewind_preview = rewind_preview;
+    let mut mapper = Mapper::new_configured(applied_permission_mode);
     mapper.applied_settings = config.launch.clone();
     mapper.launch_cwd = Some(config.cwd.clone());
     mapper.cwd = Some(config.cwd.clone());
@@ -1477,27 +1418,22 @@ async fn handle_command(
             checkpoint_id,
             mode,
         } => {
-            let failure =
-                if !mapper.native_rewind || (mode.includes_files() && !mapper.rewind_preview) {
-                    Some(RewindFailure::new(RewindFailureReason::Unsupported, None))
-                } else {
-                    match mapper.begin_preview(checkpoint_id.clone(), mode) {
-                        Some(request) => write_line(stdin, &request).await.err().map(|error| {
-                            RewindFailure::new(RewindFailureReason::ProcessGone, error.to_string())
-                        }),
-                        // Restoring the conversation alone changes no file.
-                        None => {
-                            let _ = event_tx
-                                .send(AgentEvent::RewindPreviewed {
-                                    checkpoint_id: checkpoint_id.clone(),
-                                    mode,
-                                    result: RewindPreviewResult::Ready(RewindPreview::default()),
-                                })
-                                .await;
-                            None
-                        }
-                    }
-                };
+            let failure = match mapper.begin_preview(checkpoint_id.clone(), mode) {
+                Some(request) => write_line(stdin, &request).await.err().map(|error| {
+                    RewindFailure::new(RewindFailureReason::ProcessGone, error.to_string())
+                }),
+                // Restoring the conversation alone changes no file.
+                None => {
+                    let _ = event_tx
+                        .send(AgentEvent::RewindPreviewed {
+                            checkpoint_id: checkpoint_id.clone(),
+                            mode,
+                            result: RewindPreviewResult::Ready(RewindPreview::default()),
+                        })
+                        .await;
+                    None
+                }
+            };
             if let Some(failure) = failure {
                 let _ = event_tx
                     .send(AgentEvent::RewindPreviewed {
@@ -1513,29 +1449,18 @@ async fn handle_command(
             checkpoint_id,
             mode,
         } => {
-            match mapper.begin_rewind(checkpoint_id.clone(), mode) {
-                Ok(request) if write_line(stdin, &request).await.is_ok() => {}
-                Ok(_) => {
-                    let _ = event_tx
-                        .send(AgentEvent::RewindFailed {
-                            checkpoint_id,
-                            mode,
-                            failure: RewindFailure::new(
-                                RewindFailureReason::ProcessGone,
-                                "failed to write rewind request to provider stdin".to_owned(),
-                            ),
-                        })
-                        .await;
-                }
-                Err(error) => {
-                    let _ = event_tx
-                        .send(AgentEvent::RewindFailed {
-                            checkpoint_id,
-                            mode,
-                            failure: RewindFailure::new(RewindFailureReason::Unsupported, error),
-                        })
-                        .await;
-                }
+            let request = mapper.begin_rewind(checkpoint_id.clone(), mode);
+            if write_line(stdin, &request).await.is_err() {
+                let _ = event_tx
+                    .send(AgentEvent::RewindFailed {
+                        checkpoint_id,
+                        mode,
+                        failure: RewindFailure::new(
+                            RewindFailureReason::ProcessGone,
+                            "failed to write rewind request to provider stdin".to_owned(),
+                        ),
+                    })
+                    .await;
             }
             ControlFlow::Continue(())
         }
@@ -1557,15 +1482,9 @@ async fn handle_command(
             let mut msg = user_message(&text, &attachments);
             // A steer sent under its own uuid comes back in the replayed
             // echo under it, which makes it a conversation restore point.
-            let uuid = mapper
-                .native_rewind
-                .then(|| uuid::Uuid::new_v4().to_string());
-            if let Some(uuid) = &uuid {
-                msg["uuid"] = json!(uuid);
-            }
-            if write_steering_message(stdin, &msg, request_id.clone(), mapper, event_tx).await
-                && let Some(uuid) = uuid
-            {
+            let uuid = uuid::Uuid::new_v4().to_string();
+            msg["uuid"] = json!(uuid);
+            if write_steering_message(stdin, &msg, request_id.clone(), mapper, event_tx).await {
                 mapper.steer_uuids.insert(uuid, request_id);
             }
             ControlFlow::Continue(())
@@ -2140,9 +2059,6 @@ pub(crate) struct Mapper {
     /// The uuids steers were sent under, to the steer's request id. Their
     /// replayed echo makes them conversation restore points.
     steer_uuids: HashMap<String, String>,
-    native_rewind: bool,
-    /// The CLI's `rewind_files` `dry_run` is known to restore nothing.
-    rewind_preview: bool,
     /// Last assistant model published to the canonical event stream.
     last_served_model: Option<String>,
     /// Reset time reported for a rejected usage window in the active turn.
@@ -2154,10 +2070,10 @@ pub(crate) struct Mapper {
 impl Mapper {
     #[cfg(test)]
     pub(crate) fn new() -> Self {
-        Self::new_configured("default".to_owned(), false)
+        Self::new_configured("default".to_owned())
     }
 
-    fn new_configured(applied_permission_mode: String, native_rewind: bool) -> Self {
+    fn new_configured(applied_permission_mode: String) -> Self {
         Mapper {
             session_id: None,
             current_message_id: None,
@@ -2201,8 +2117,6 @@ impl Mapper {
             pending_rewinds: HashMap::new(),
             rewind_previews: HashMap::new(),
             steer_uuids: HashMap::new(),
-            native_rewind,
-            rewind_preview: native_rewind,
             last_served_model: None,
             limit_resets_at: None,
             warned_stop_reason: None,
@@ -2229,7 +2143,7 @@ impl Mapper {
         self.turn_counter += 1;
         let id = format!("turn-{}", self.turn_counter);
         self.current_turn_id = Some(id.clone());
-        self.awaiting_turn_checkpoint = self.native_rewind;
+        self.awaiting_turn_checkpoint = true;
         self.warned_stop_reason = None;
         id
     }
@@ -2239,10 +2153,7 @@ impl Mapper {
         format!("tcode-ctrl-{}", self.control_counter)
     }
 
-    fn begin_rewind(&mut self, checkpoint_id: String, mode: RewindMode) -> Result<Value, String> {
-        if !self.native_rewind {
-            return Err("this Claude Code version does not expose native rewind controls".into());
-        }
+    fn begin_rewind(&mut self, checkpoint_id: String, mode: RewindMode) -> Value {
         let step = if !mode.includes_files() {
             RewindStep::Conversation
         } else if self.current_turn_id.is_some() {
@@ -2250,13 +2161,13 @@ impl Mapper {
         } else {
             RewindStep::Files
         };
-        Ok(self.rewind_request(PendingRewind {
+        self.rewind_request(PendingRewind {
             checkpoint_id,
             mode,
             step,
             files: None,
             files_failure: None,
-        }))
+        })
     }
 
     /// A dry run of the files a rewind would restore; `None` when `mode`
@@ -2865,10 +2776,9 @@ impl Mapper {
                 model,
             },
             self.permission_options(),
-            // A CLI older than the rewind controls has none for this session.
-            AgentEvent::RewindAvailability {
-                unavailable: (!self.native_rewind).then_some(RewindFailureReason::Unsupported),
-            },
+            // A thread an older CLI ran was recorded as having no rewind
+            // controls; this session has them.
+            AgentEvent::RewindAvailability { unavailable: None },
         ];
         // The `slash_commands` (Command) and `skills` (Skill) arrays feed the
         // composer's `/` and `$` menus. Both are arrays of names (no descriptions).
@@ -5315,7 +5225,7 @@ mod tests {
             "the provider's explicit auto unavailability must reach the picker: {events:?}"
         );
 
-        let mut auto = Mapper::new_configured("auto".into(), false);
+        let mut auto = Mapper::new_configured("auto".into());
         let events = auto.on_message(json!({"type":"system", "subtype":"init", "session_id":"native", "permissionMode":"default"}));
         let descriptor = events
             .iter()
@@ -5335,7 +5245,7 @@ mod tests {
                 if options.iter().any(|option| option.value == "plan" && option.unavailable.is_some())))
         );
 
-        let mut supported = Mapper::new_configured("auto".into(), false);
+        let mut supported = Mapper::new_configured("auto".into());
         supported.on_message(json!({"type":"system", "subtype":"init", "session_id":"supported", "permissionMode":"auto"}));
         let events = supported.on_message(json!({"type":"system", "subtype":"init", "session_id":"supported", "permissionMode":"plan"}));
         assert!(
@@ -5347,7 +5257,7 @@ mod tests {
         );
 
         for confirmation in ["control_response", "init"] {
-            let mut recovered = Mapper::new_configured("auto".into(), false);
+            let mut recovered = Mapper::new_configured("auto".into());
             recovered.on_message(json!({"type":"system", "subtype":"init", "session_id":"recovered", "permissionMode":"default"}));
             let message = if confirmation == "init" {
                 json!({"type":"system", "subtype":"init", "session_id":"recovered", "permissionMode":"auto"})
@@ -5704,8 +5614,8 @@ mod tests {
 
     /// A launch asks for the native permission prompt in the selected mode
     /// with a live switch to bypass allowed, puts Tcode's instructions in the
-    /// system prompt (a file, or the text for a CLI without the file option),
-    /// and leaves the user's launch arguments last so they win.
+    /// system prompt from a file, and leaves the user's launch arguments last
+    /// so they win.
     #[test]
     fn a_launch_passes_the_selected_mode_and_leaves_the_users_arguments_last() {
         let base = [
@@ -5757,32 +5667,11 @@ mod tests {
         assert_eq!(
             launch_args(
                 "auto",
-                true,
                 &launch,
                 vec!["--resume".into(), "native".into()],
                 &mcp,
-                Some(SystemPrompt::File(Path::new("/tmp/instructions.md"))),
+                Some(Path::new("/tmp/instructions.md")),
                 &["--permission-mode".into(), "plan".into()],
-            ),
-            expected
-        );
-
-        let mut expected = os(&base);
-        expected.extend(os(&[
-            "default",
-            "--allow-dangerously-skip-permissions",
-            "--append-system-prompt",
-            "Link every PR.",
-        ]));
-        assert_eq!(
-            launch_args(
-                "default",
-                false,
-                &ClaudeLaunchOptions::default(),
-                Vec::new(),
-                &[],
-                Some(SystemPrompt::Text("Link every PR.")),
-                &[],
             ),
             expected
         );
@@ -5984,7 +5873,6 @@ mod tests {
     #[test]
     fn replayed_user_message_exposes_native_turn_checkpoint() {
         let mut mapper = Mapper::new();
-        mapper.native_rewind = true;
         let turn_id = mapper.start_turn();
         let events = feed(
             &mut mapper,
@@ -6028,11 +5916,9 @@ mod tests {
     #[test]
     fn a_running_turn_is_stopped_before_files_and_a_files_failure_still_rewinds_the_conversation() {
         let mut mapper = Mapper::new();
-        mapper.native_rewind = true;
         mapper.start_turn();
-        let interrupt = mapper
-            .begin_rewind("checkpoint-2".into(), RewindMode::FilesAndConversation)
-            .unwrap();
+        let interrupt =
+            mapper.begin_rewind("checkpoint-2".into(), RewindMode::FilesAndConversation);
         assert_eq!(interrupt["request"], json!({ "subtype": "interrupt" }));
         assert!(rewind_response(&mut mapper, &interrupt, json!({})).is_empty());
         let files = mapper.take_outgoing().remove(0);
@@ -6109,11 +5995,8 @@ mod tests {
     #[test]
     fn a_conversation_rewind_during_a_running_turn_ends_it_interrupted() {
         let mut mapper = Mapper::new();
-        mapper.native_rewind = true;
         mapper.start_turn();
-        mapper
-            .begin_rewind("checkpoint-2".into(), RewindMode::Conversation)
-            .unwrap();
+        mapper.begin_rewind("checkpoint-2".into(), RewindMode::Conversation);
         let events = feed(
             &mut mapper,
             r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"stopped"}"#,
