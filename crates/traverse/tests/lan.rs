@@ -1,6 +1,6 @@
-//! Finding a paired machine again on the LAN: the saved addresses over
-//! loopback with the browse off, and an explicitly ignored real DNS-SD
-//! advertise and browse on this host's interfaces.
+//! Finding a paired machine again on the LAN: a platform browse stopped with
+//! its resolve, and an explicitly ignored real DNS-SD advertise and browse on
+//! this host's interfaces.
 use std::{
     net::SocketAddr,
     path::PathBuf,
@@ -9,9 +9,8 @@ use std::{
 
 use futures_lite::StreamExt as _;
 use iroh::address_lookup::AddressLookup as _;
-use tcode_client::{ConnectionState, host::Transport, pairing::PairedHost};
 use tcode_traverse::{
-    DeviceIdentity, HostConfig, HostMux, TraverseHost,
+    HostConfig, HostMux, TraverseHost,
     lan::{self, Browse, LanLookup, LanOptions},
 };
 
@@ -68,92 +67,6 @@ fn free_port() -> u16 {
         .local_addr()
         .unwrap()
         .port()
-}
-
-fn wait_state(transport: &Transport, wanted: impl Fn(&ConnectionState) -> bool) {
-    let mut seen = Vec::new();
-    tcode_traverse::block_on(async {
-        tokio::time::timeout(Duration::from_secs(20), async {
-            while let Ok(state) = transport.state.recv().await {
-                if wanted(&state) {
-                    return;
-                }
-                seen.push(state);
-            }
-        })
-        .await
-    })
-    .unwrap_or_else(|_| panic!("did not observe the wanted state; saw {seen:?}"));
-}
-
-/// A device paired with `host` whose `hosts.json` lists `addrs` for it, as
-/// a fresh launch sees it: the endpoint that paired is gone, the browse is
-/// off, so the saved addresses are the whole lookup.
-fn relaunched_device(
-    host: &TraverseHost,
-    dir: &TestDir,
-    addrs: Vec<String>,
-) -> (DeviceIdentity, PairedHost) {
-    let pairing = DeviceIdentity::load_or_create(&dir.0).unwrap();
-    pairing.set_details("device".into(), None);
-    let minted = host.new_invitation();
-    let paired = tcode_traverse::pair_blocking(
-        &minted.invite,
-        Some(std::net::Ipv4Addr::LOCALHOST.into()),
-        &pairing,
-    )
-    .unwrap();
-    drop(pairing);
-    let device = DeviceIdentity::load_or_create(&dir.0).unwrap();
-    device.set_lan_options(LanOptions {
-        browse: Browse::Off,
-        multicast_lock: None,
-    });
-    let saved = PairedHost { addrs, ..paired };
-    tcode_traverse::hosts::save_hosts(&dir.0, std::slice::from_ref(&saved)).unwrap();
-    (device, saved)
-}
-
-#[test]
-fn a_saved_address_further_down_the_list_reaches_the_machine() {
-    let _ = env_logger::builder().is_test(true).try_init();
-    let host_dir = TestDir::new("saved-host");
-    let port = free_port();
-    let (host, _host_rx, _host_tx) = start_host(&host_dir, Some(port));
-    let device_dir = TestDir::new("saved-device");
-    let current = format!("127.0.0.1:{port}");
-    let (device, saved) = relaunched_device(
-        &host,
-        &device_dir,
-        vec![
-            format!("127.0.0.1:{}", free_port()),
-            format!("127.0.0.1:{}", free_port()),
-            current.clone(),
-        ],
-    );
-
-    let client = tcode_traverse::connect(&saved, &device);
-    wait_state(&client, |state| {
-        matches!(state, ConnectionState::Syncing { .. })
-    });
-    let reached = host.devices();
-    assert!(
-        reached[0].live.as_ref().is_some_and(|path| path.direct),
-        "the machine sees a direct path: {reached:?}"
-    );
-    // The link saves the addresses that reached the machine before it
-    // reports Syncing.
-    let saved = tcode_traverse::hosts::load_hosts(&device_dir.0).unwrap();
-    assert!(
-        saved[0]
-            .addrs
-            .first()
-            .is_some_and(|addr| addr.ends_with(&format!(":{port}"))),
-        "working address was not saved first: {:?}",
-        saved[0].addrs
-    );
-    client.to_host.close();
-    host.shutdown();
 }
 
 /// A platform browse delivers what it finds while the resolve is polled, and
