@@ -1135,10 +1135,13 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             );
         }
         Command::Interrupt { session_id } => {
-            return CommandOutcome::Immediate(
-                app.interrupt(&session_id, cx)
-                    .map(|()| CommandResponse::Unit),
-            );
+            return CommandOutcome::Immediate(app.interrupt(&session_id, true, cx).map(|unsent| {
+                if unsent.is_empty() {
+                    CommandResponse::Unit
+                } else {
+                    CommandResponse::Unsent(unsent)
+                }
+            }));
         }
         Command::ForceTerminate { session_id } => {
             return CommandOutcome::Immediate(

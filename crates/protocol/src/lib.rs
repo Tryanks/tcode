@@ -35,7 +35,7 @@ mod wire;
 
 pub use command::{
     ChildSettlement, Command, CommandResponse, ForkAt, SettingsPatch, SettleChildrenResult,
-    TerminalSelection, ThreadExportFormat, TurnDue,
+    TerminalSelection, ThreadExportFormat, TurnDue, UnsentMessage,
 };
 pub use event::{
     AccountDiskUsage, AcpMarketplaceItem, AgentStatus, ArchivedSessions, BackgroundActivity,
@@ -396,6 +396,8 @@ pub use wire::{
 // a LeftOrphan {path, error}.
 // TokenCheck gains unreadable {status, error}: a host took the token but its
 // answer could not be read.
+// CommandResponse gains unsent, the UnsentMessage {text, attachments} list an
+// Interrupt answers with when the next turn had not reached the provider.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

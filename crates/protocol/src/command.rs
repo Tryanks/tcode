@@ -751,6 +751,16 @@ pub enum CommandResponse {
     /// `VerifyHostToken`: what the host answered; the token was saved only when accepted.
     TokenCheck(tcode_core::settings::TokenCheck),
     RewindPreview(agent::RewindPreviewResult),
+    /// `Interrupt` before the next turn reached the provider: the messages
+    /// that were waiting for it, taken out of the queue for the composer.
+    Unsent(Vec<UnsentMessage>),
+}
+
+/// A message the user sent that Stop took back before the provider had it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnsentMessage {
+    pub text: String,
+    pub attachments: Vec<agent::Attachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

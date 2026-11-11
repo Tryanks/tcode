@@ -23,37 +23,42 @@ const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 /// A running turn's working indicator, drawn by a view whose clock ticks
 /// only while a frame draws it: the view is the element's state, so a turn
 /// scrolled out of the timeline's rows drops it, and its clock with it.
+/// What a working indicator's clock was made for: its start, and whether it stops.
+type Shown = (Option<u64>, bool);
+
 #[derive(IntoElement)]
 struct WorkingIndicator {
     id: ElementId,
     started_at: Option<u64>,
+    /// Stop was pressed and the turn has not ended: it says so, without a time.
+    stopping: bool,
 }
 
 impl RenderOnce for WorkingIndicator {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let started_at = self.started_at;
+        let started_at = (!self.stopping).then_some(self.started_at).flatten();
+        let stopping = self.stopping;
         // The view is kept with the start it shows, so it is placed without
         // reading it: what draws the indicator is not built again with it.
         window.with_global_id(self.id, |id, window| {
-            window.with_element_state(
-                id,
-                |held: Option<(Option<u64>, Entity<WorkingClock>)>, _| {
-                    let view = match held {
-                        Some((held_at, view)) if held_at == started_at => view,
-                        _ => cx.new(|_| WorkingClock {
-                            started_at,
-                            tick: None,
-                        }),
-                    };
-                    (view.clone(), (started_at, view))
-                },
-            )
+            window.with_element_state(id, |held: Option<(Shown, Entity<WorkingClock>)>, _| {
+                let view = match held {
+                    Some((held, view)) if held == (started_at, stopping) => view,
+                    _ => cx.new(|_| WorkingClock {
+                        started_at,
+                        stopping,
+                        tick: None,
+                    }),
+                };
+                (view.clone(), ((started_at, stopping), view))
+            })
         })
     }
 }
 
 struct WorkingClock {
     started_at: Option<u64>,
+    stopping: bool,
     tick: Option<Task<()>>,
 }
 
@@ -76,7 +81,7 @@ impl Render for WorkingClock {
                 }
             }));
         }
-        working_indicator("working".into(), self.started_at, window, cx)
+        working_indicator("working".into(), self.started_at, self.stopping, window, cx)
     }
 }
 
@@ -125,6 +130,7 @@ pub(crate) fn shimmer_label(id: SharedString, label: Cow<'static, str>, cx: &App
 pub(crate) fn working_indicator(
     id: SharedString,
     started_at: Option<u64>,
+    stopping: bool,
     window: &mut Window,
     cx: &App,
 ) -> AnyElement {
@@ -155,7 +161,11 @@ pub(crate) fn working_indicator(
         );
     }
 
-    let label = crate::tr!("chat.working");
+    let label = if stopping {
+        crate::tr!("background.stopping")
+    } else {
+        crate::tr!("chat.working")
+    };
     // A turn whose start is not known has no time to show.
     let timer = started_at.map(|start| {
         let elapsed = format_elapsed(now_millis(cx).saturating_sub(start));
@@ -199,6 +209,7 @@ pub(crate) fn working_indicator(
 pub(crate) fn turn_working_indicator(
     turn: usize,
     started_at: Option<u64>,
+    stopping: bool,
     served_model: Option<String>,
     motion: &crate::motion::owned::Owned,
     cx: &App,
@@ -213,6 +224,7 @@ pub(crate) fn turn_working_indicator(
         .child(WorkingIndicator {
             id: SharedString::from(format!("working-{turn}")).into(),
             started_at,
+            stopping,
         })
         .child(crate::motion::Sampled::new(move |window, cx| {
             let id = SharedString::from(format!("served-model-{turn}"));

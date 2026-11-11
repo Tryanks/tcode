@@ -528,6 +528,13 @@ impl TimelineView {
             let served_model =
                 divergent_served_model(turn.served_model.as_deref(), requested_model.as_deref())
                     .map(str::to_owned);
+            // After Stop the turn says it is stopping until it ends, however
+            // long its harness takes to take the stop.
+            let stopping = self
+                .workspace_store
+                .read(cx)
+                .session_status_for(self.session_id.as_deref(), cx)
+                .is_some_and(|status| status.stopping);
             let turn = turn.clone();
             trailing = true;
             // The status moves with the trailer when the turn gains a last
@@ -562,6 +569,7 @@ impl TimelineView {
                                 .child(components::indicator::turn_working_indicator(
                                     number,
                                     turn.start_ts,
+                                    stopping,
                                     served_model.clone(),
                                     &indicator_motion,
                                     cx,

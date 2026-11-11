@@ -1281,6 +1281,8 @@ async fn handle_command(
             let _ = event_tx.send(AgentEvent::TurnStarted { turn_id }).await;
             ControlFlow::Continue(())
         }
+        // The CLI reads its stdin in order: an interrupt written while it is
+        // still starting reaches it after the turn's message, once it is up.
         SessionCommand::Interrupt => {
             let msg = mapper.interrupt_request();
             let _ = write_line(stdin, &msg).await;
@@ -4222,10 +4224,15 @@ impl Mapper {
             .current_turn_id
             .take()
             .unwrap_or_else(|| format!("turn-{}", self.turn_counter.max(1)));
+        // A turn stopped before the model wrote anything: the CLI may close
+        // it as a success, with nothing in it.
+        let answered = !self.assistant_messages.is_empty();
         // No message outlives its turn, so the block counters can go.
         self.assistant_messages.clear();
         let mut status = result_status(msg);
-        if std::mem::take(&mut self.interrupt_pending) && status != TurnStatus::Completed {
+        if std::mem::take(&mut self.interrupt_pending)
+            && (status != TurnStatus::Completed || !answered)
+        {
             status = TurnStatus::Interrupted;
         }
         let usage = msg.get("usage").map(|u| {

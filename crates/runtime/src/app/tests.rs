@@ -4879,7 +4879,7 @@ fn native_retry_keeps_queue_waiting_and_cancellation_releases_it() {
                 "queued text must not race the native retry"
             );
             if automatic {
-                state.interrupt("retry", cx).unwrap();
+                state.interrupt("retry", true, cx).unwrap();
                 assert!(matches!(
                     next_command(&receiver),
                     Ok(SessionCommand::Interrupt)
@@ -7402,15 +7402,16 @@ fn force_terminate_kills_a_harness_that_does_not_answer_a_stop() {
     });
 }
 
-/// A provider still starting has no turn to interrupt: Stop kills it, which
-/// ends the start it was waiting on, and the message waits in the queue. The
-/// provider is an ACP agent that reads its stdin and never answers
-/// `initialize` (cline 3.0.39 does the same).
+/// A provider still starting has no turn to interrupt: Stop leaves the start
+/// alone (the harness may already hold the conversation), hands the message it
+/// waited for back to whoever pressed Stop, and the thread reads as stopping;
+/// a start that never ends is ended by Force quit. The provider is an ACP
+/// agent that reads its stdin and never answers `initialize` (cline 3.0.39
+/// does the same).
 #[test]
-fn a_stop_while_the_provider_starts_kills_it_and_keeps_the_message() {
+fn a_stop_while_the_provider_starts_hands_the_message_back_and_force_quit_ends_the_start() {
     const ROLE: &str = "TCODE_TEST_SILENT_AGENT";
-    const NAME: &str =
-        "app::tests::a_stop_while_the_provider_starts_kills_it_and_keeps_the_message";
+    const NAME: &str = "app::tests::a_stop_while_the_provider_starts_hands_the_message_back_and_force_quit_ends_the_start";
     if std::env::var_os(ROLE).is_some() {
         let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
         return;
@@ -7469,18 +7470,37 @@ fn a_stop_while_the_provider_starts_kills_it_and_keeps_the_message() {
             .is_some_and(|status| status.preparing_turn)
     });
 
-    state.dispatch_command(
+    let stopped = through_pipe(
+        &state,
         cx,
         3,
-        Command::Interrupt {
+        tcode_protocol::ClientPayload::Command(Command::Interrupt {
+            session_id: session_id.clone(),
+        }),
+    );
+    assert!(stopped.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack { id: 3, result: Ok(CommandResponse::Unsent(unsent)) }
+            if unsent.len() == 1 && unsent[0].text == "start"
+    )));
+    assert!(ended.try_recv().is_err(), "the start goes on");
+    state.read(|state| {
+        let status = state.session_status_snapshot(&session_id).unwrap();
+        assert!(status.stopping);
+        assert!(status.queued_messages.is_empty());
+    });
+
+    state.dispatch_command(
+        cx,
+        4,
+        Command::ForceTerminate {
             session_id: session_id.clone(),
         },
     );
     assert_eq!(ended.recv_blocking(), Ok(true));
     state.read(|state| {
         let status = state.session_status_snapshot(&session_id).unwrap();
-        assert!(!status.preparing_turn && !status.activity.working);
-        assert_eq!(status.queued_messages.len(), 1);
+        assert!(!status.preparing_turn && !status.stopping && !status.activity.working);
     });
 }
 
@@ -8702,7 +8722,7 @@ fn stop_then_new_thread_keeps_the_first_message_visible() {
 
         // Stop. The provider reports an error and an interrupted turn while
         // preserving the complete multi-line error for later presentation.
-        state.host.interrupt(state.selected.as_deref().unwrap_or_default(), cx).expect("interrupt delivered");
+        state.host.interrupt(state.selected.as_deref().unwrap_or_default(), true, cx).expect("interrupt delivered");
         assert!(matches!(
             commands_a.try_recv(),
             Ok(SessionCommand::Interrupt)
@@ -10281,7 +10301,7 @@ fn computer_use_registrations_survive_stop_but_are_replaced_after_provider_shutd
             first.bearer_token != second.bearer_token,
             "provider sessions must not share one cancellation scope"
         );
-        state.host.interrupt(&meta.id, cx).unwrap();
+        state.host.interrupt(&meta.id, true, cx).unwrap();
         assert!(matches!(commands.try_recv(), Ok(SessionCommand::Interrupt)));
         assert!(
             state
@@ -10329,7 +10349,7 @@ fn interrupt_reports_stopping_until_the_turn_completes() {
     active.turn_in_flight = true;
     assert!(!state.session_status_snapshot(&id).unwrap().stopping);
 
-    state.interrupt(&id, &mut cx).unwrap();
+    state.interrupt(&id, true, &mut cx).unwrap();
     assert!(state.session_status_snapshot(&id).unwrap().stopping);
 
     state.on_event(

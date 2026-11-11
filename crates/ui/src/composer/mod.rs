@@ -1078,11 +1078,7 @@ impl Composer {
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if stop {
-                            if this.interactive(cx) {
-                                this.workspace_store.update(cx, |store, _cx| {
-                                    store.interrupt_for(this.session_id.clone().unwrap_or_default())
-                                });
-                            }
+                            this.stop(window, cx);
                             return;
                         }
                         let input = this.input.clone();
@@ -1164,14 +1160,77 @@ impl Composer {
             .aria_label(crate::tr!("composer.stop"))
             .disabled(!self.interactive(cx) || self.composer_state(cx).stopping)
             .child(div().size(px(11.)).rounded(px(2.)).bg(cx.theme().danger))
-            .on_click(cx.listener(|this, _, _, cx| {
-                if !this.interactive(cx) {
-                    return;
+            .on_click(cx.listener(|this, _, window, cx| this.stop(window, cx)))
+    }
+
+    /// Stop the thread's turn. A message the provider had not been given yet
+    /// comes back from the host, and is put back here to send again.
+    fn stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.interactive(cx) {
+            return;
+        }
+        let Some(session_id) = self.session_id.clone() else {
+            return;
+        };
+        let request = self.workspace_store.update(cx, |store, cx| {
+            store.command(tcode_protocol::Command::Interrupt { session_id }, cx)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = request.await;
+            let _ = this.update_in(cx, |this, window, cx| match answer {
+                Ok(tcode_protocol::CommandResponse::Unsent(messages)) => {
+                    this.take_back_unsent(messages, window, cx)
                 }
-                this.workspace_store.update(cx, |store, _cx| {
-                    store.interrupt_for(this.session_id.clone().unwrap_or_default())
-                });
-            }))
+                Ok(_) => {}
+                Err(error) => window.push_notification(Notification::error(error.message), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Put messages Stop took back before delivery into the composer: their
+    /// text after what is typed, their images in the strip.
+    fn take_back_unsent(
+        &mut self,
+        messages: Vec<tcode_protocol::UnsentMessage>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use base64::Engine as _;
+        let typed = self.input.read(cx).value().to_string();
+        let text = std::iter::once(typed)
+            .chain(messages.iter().map(|message| message.text.clone()))
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        self.input.update(cx, |state, cx| {
+            state.replace_all(text, window, cx);
+            if !crate::window_seam::is_mobile(cx) {
+                state.focus(window, cx);
+            }
+        });
+        for attachment in messages.into_iter().flat_map(|message| message.attachments) {
+            let name = attachment
+                .source_path
+                .as_deref()
+                .and_then(|path| std::path::Path::new(path).file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| attachment.media_type.clone());
+            match base64::engine::general_purpose::STANDARD.decode(&attachment.data_base64) {
+                Ok(bytes) => {
+                    self.add_image_bytes(name, attachment.media_type, bytes, window, cx);
+                }
+                Err(error) => window.push_notification(
+                    Notification::error(crate::tr!(
+                        "attach.read_failed",
+                        name = name,
+                        error = error.to_string()
+                    )),
+                    cx,
+                ),
+            }
+        }
+        self.recompute_trigger(cx);
     }
 
     /// The desktop send control. A running turn widens it into a spinner,
