@@ -415,6 +415,8 @@ pub use wire::{
 // CommandResponse gains unsent, the UnsentMessage {text, attachments} list an
 // Interrupt answers with when the next turn had not reached the provider.
 // Settings gains shorten_long_commands with the ShortenLongCommands patch.
+// Settings gains background_commands_on_steer with the
+// BackgroundCommandsOnSteer patch.
 // SessionContentHits gains truncated: more messages matched than the limit
 // asked for. SearchSessionContent's limit is no longer capped at 50.
 pub const PROTOCOL_VERSION: u32 = 27;

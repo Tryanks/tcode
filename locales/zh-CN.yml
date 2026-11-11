@@ -601,6 +601,9 @@ settings:
   inactive_frame_throttle:
     title: "后台帧率限制"
     description: "窗口失焦时降低刷新率以节省能耗。重启后生效。"
+  background_commands_on_steer:
+    title: "引导时把运行中的命令转入后台"
+    description: "发送引导消息时，如果本轮正在等一条命令跑完，自动把它转入后台，让引导消息尽快送达。仅在 Harness 能把命令转入后台时生效。"
   resume_on_limit_reset:
     title: "用量上限重置后继续"
     description: "当 Claude Code 因达到用量上限而停止本轮时，Tcode 会在上限重置时自动继续。关闭后，错误卡片上会提供一个按钮供手动安排。"

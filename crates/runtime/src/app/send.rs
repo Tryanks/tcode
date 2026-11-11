@@ -833,6 +833,8 @@ impl AppState {
                 if !self.hand_over_steer(target_id, steer, wire_text, cx) {
                     self.report_error(RuntimeError::ProcessGone, cx);
                     self.send_turn_assembled(target_id, text, attachments, cx);
+                } else if self.settings.background_commands_on_steer {
+                    self.background_awaited_commands(&session_id);
                 }
             }
         }
@@ -1076,6 +1078,50 @@ impl AppState {
         self.clear_approvals(&session_id);
         self.close_abandoned_turn(&session_id, cx);
         Ok(())
+    }
+
+    /// Move the commands the thread's running turn is waiting on into the
+    /// background, where its harness can: a steer the harness holds until the
+    /// running command returns then reaches the model at once. The user asks
+    /// for it in Settings (`background_commands_on_steer`).
+    fn background_awaited_commands(&mut self, session_id: &str) {
+        let movable = self.resident(session_id).is_some_and(|active| {
+            active
+                .meta
+                .provider
+                .caps()
+                .background
+                .is_some_and(|control| control.move_running)
+        });
+        if !movable {
+            return;
+        }
+        let Some(records) = self.event_records.get(session_id) else {
+            return;
+        };
+        let timeline = records.fold();
+        let running = timeline.turns.len().saturating_sub(1);
+        let awaited: Vec<String> = timeline
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.turn == running
+                    && !entry.background
+                    && matches!(
+                        &entry.content,
+                        EntryContent::Item(ItemContent::CommandExecution {
+                            status: agent::ItemStatus::InProgress,
+                            ..
+                        })
+                    )
+            })
+            .map(|entry| entry.id.clone())
+            .collect();
+        for item_id in awaited {
+            if let Err(error) = self.move_to_background(session_id, item_id) {
+                log::warn!("steer: could not move a running command to the background: {error:?}");
+            }
+        }
     }
 
     /// Move the thread's running call `item_id` into the background.

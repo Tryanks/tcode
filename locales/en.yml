@@ -601,6 +601,9 @@ settings:
   inactive_frame_throttle:
     title: "Background frame throttle"
     description: "Lower the frame rate while the window is unfocused to save energy. Takes effect after restart."
+  background_commands_on_steer:
+    title: "Move running commands to the background when steering"
+    description: "When you steer while the turn is waiting on a command, move that command to the background so the steer reaches the model sooner. Applies where the harness can move a command to the background."
   resume_on_limit_reset:
     title: "Resume when the usage limit resets"
     description: "When Claude Code stops a turn because a usage limit was reached, Tcode resumes it when the limit resets. Off: the error card offers a button to schedule it by hand."

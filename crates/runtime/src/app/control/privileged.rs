@@ -29,6 +29,7 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::SkipDeleteConfirmation(_)
         | SettingsPatch::ProviderUpdateChecksDisabled(_)
         | SettingsPatch::ResumeOnLimitReset(_)
+        | SettingsPatch::BackgroundCommandsOnSteer(_)
         | SettingsPatch::AutoSettleAfterDays(_)
         | SettingsPatch::AutoSettleOnMerge(_)
         | SettingsPatch::ProjectSettlement { .. }

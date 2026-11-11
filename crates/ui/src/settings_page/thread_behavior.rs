@@ -109,6 +109,13 @@ impl SettingsPage {
                 this.dispatch_settings(|store| store.set_shorten_long_commands(true), cx)
             }),
         );
+        let background_on_steer_reset = crate::settings_rows::reset_action(
+            "reset-background-commands-on-steer",
+            settings.background_commands_on_steer,
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_background_commands_on_steer(false), cx)
+            }),
+        );
         let resume_on_limit_reset_reset = crate::settings_rows::reset_action(
             "reset-resume-on-limit-reset",
             !settings.resume_on_limit_reset,
@@ -144,6 +151,15 @@ impl SettingsPage {
                 shorten_commands_reset,
                 cx,
                 WorkspaceStore::set_shorten_long_commands,
+            ),
+            self.toggle_row(
+                "background-commands-on-steer",
+                crate::tr!("settings.background_commands_on_steer.title"),
+                crate::tr!("settings.background_commands_on_steer.description"),
+                settings.background_commands_on_steer,
+                background_on_steer_reset,
+                cx,
+                WorkspaceStore::set_background_commands_on_steer,
             ),
             self.toggle_row(
                 "resume-on-limit-reset",

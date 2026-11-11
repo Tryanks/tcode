@@ -211,6 +211,9 @@ impl WorkspaceStore {
     pub fn set_shorten_long_commands(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ShortenLongCommands(value));
     }
+    pub fn set_background_commands_on_steer(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::BackgroundCommandsOnSteer(value));
+    }
     pub fn set_resume_on_limit_reset(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ResumeOnLimitReset(value));
     }

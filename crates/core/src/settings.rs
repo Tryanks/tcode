@@ -679,6 +679,7 @@ pub enum SettingsPatch {
     ScrollToLatestOnSend(bool),
     ShortenLongCommands(bool),
     ResumeOnLimitReset(bool),
+    BackgroundCommandsOnSteer(bool),
     AutoSettleAfterDays(Option<f64>),
     AutoSettleOnMerge(bool),
     ProjectSettlement {
@@ -960,6 +961,11 @@ pub struct Settings {
     pub shorten_long_commands: bool,
     #[serde(default = "default_true")]
     pub resume_on_limit_reset: bool,
+    /// Whether a steer moves the commands the turn is waiting on into the
+    /// background, where the thread's harness can, so the steer reaches the
+    /// model without waiting for them. Off unless the user turns it on.
+    #[serde(default)]
+    pub background_commands_on_steer: bool,
     #[serde(default = "default_auto_settle_after_days")]
     pub auto_settle_after_days: Option<f64>,
     #[serde(default)]
@@ -1127,6 +1133,7 @@ impl Default for Settings {
             scroll_to_latest_on_send: true,
             shorten_long_commands: true,
             resume_on_limit_reset: true,
+            background_commands_on_steer: false,
             auto_settle_after_days: default_auto_settle_after_days(),
             auto_settle_on_merge: false,
             project_settlement_overrides: BTreeMap::new(),
@@ -1227,6 +1234,9 @@ impl Settings {
             }
             SettingsPatch::ShortenLongCommands(value) => {
                 self.shorten_long_commands = value;
+            }
+            SettingsPatch::BackgroundCommandsOnSteer(value) => {
+                self.background_commands_on_steer = value;
             }
             SettingsPatch::ResumeOnLimitReset(value) => {
                 self.resume_on_limit_reset = value;
