@@ -3777,26 +3777,6 @@ impl WorkspaceStore {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_session_replica_for_test(
-        &mut self,
-        session_id: String,
-        timeline: Timeline,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.is_thread_open(&session_id) {
-            self.open_thread(&session_id, cx);
-            self.put_back_thread(session_id.clone(), cx);
-        }
-        self.threads
-            .get_mut(&session_id)
-            .expect("the selected thread is held")
-            .timeline = Some(timeline);
-        // As every change the host's events make: what draws the thread
-        // hears of it and folds its rows again.
-        cx.notify();
-    }
-
     pub fn with_composer_destination_for<R>(
         &self,
         session_id: Option<&str>,
