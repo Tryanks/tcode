@@ -781,7 +781,7 @@ impl ClaudeLaunchOptions {
     ) -> Self {
         let entry = model.and_then(|model| catalog.model(model));
         let spec = entry.map(|entry| &entry.spec);
-        let raw_effort = selection_str(selections, "reasoningEffort");
+        let raw_effort = selection_str(selections, crate::EFFORT_OPTION_ID);
         let resolved_effort = resolve_claude_effort(spec, raw_effort.as_deref());
         let ultracode = resolved_effort.as_deref() == Some("ultracode");
         let effort = match (entry, resolved_effort.as_deref()) {
@@ -5166,7 +5166,7 @@ fn resolve_claude_effort(spec: Option<&ModelSpec>, raw: Option<&str>) -> Option<
             options,
             default_value,
             ..
-        } if id == "reasoningEffort" => Some((options, default_value)),
+        } if id == crate::EFFORT_OPTION_ID => Some((options, default_value)),
         _ => None,
     })?;
     if let Some(raw) = raw

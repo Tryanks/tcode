@@ -41,7 +41,7 @@ const SUPPORTED_VERSION: u64 = 1;
 /// keys on `reasoningEffort`. Translated once here, at the boundary.
 fn option_id(id: &str) -> &str {
     match id {
-        "effort" => "reasoningEffort",
+        "effort" => crate::EFFORT_OPTION_ID,
         other => other,
     }
 }

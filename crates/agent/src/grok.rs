@@ -1554,7 +1554,7 @@ mod tests {
             fork: None,
             binary_path: Some(PathBuf::from("/opt/grok/bin/grok")),
             option_selections: vec![OptionSelection {
-                id: "reasoningEffort".into(),
+                id: crate::EFFORT_OPTION_ID.into(),
                 value: json!("low"),
             }],
             mcp_servers: Vec::new(),

@@ -2049,7 +2049,7 @@ impl AppState {
             let reasoning_effort = meta
                 .option_selections
                 .iter()
-                .find(|selection| selection.id == "reasoningEffort")
+                .find(|selection| selection.id == agent::EFFORT_OPTION_ID)
                 .cloned();
             return (
                 meta.provider,
@@ -2144,7 +2144,7 @@ impl AppState {
             .and_then(|meta| {
                 meta.option_selections
                     .iter()
-                    .find(|selection| selection.id == "reasoningEffort")
+                    .find(|selection| selection.id == agent::EFFORT_OPTION_ID)
                     .cloned()
             })
     }

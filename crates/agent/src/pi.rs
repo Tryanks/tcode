@@ -157,7 +157,7 @@ fn map_model(
             .filter(|level| levels.contains(level))
             .map(str::to_owned);
         options.push(OptionDescriptor::Select {
-            id: "reasoningEffort".into(),
+            id: crate::EFFORT_OPTION_ID.into(),
             label: "Thinking".into(),
             options: levels
                 .into_iter()
@@ -498,7 +498,7 @@ impl SessionActor for PiActor {
                     .await;
                 Ok(())
             }
-            SessionCommand::SetOption { id, value } if id == "reasoningEffort" => {
+            SessionCommand::SetOption { id, value } if id == crate::EFFORT_OPTION_ID => {
                 let Some(level) = value.as_str() else {
                     return Ok(());
                 };
@@ -1140,7 +1140,7 @@ impl PiActor {
                 json!({"id":id,"type":"set_model","provider":provider,"modelId":model_id}),
             ));
         }
-        if let Some(level) = crate::selection_str(selections, "reasoningEffort") {
+        if let Some(level) = crate::selection_str(selections, crate::EFFORT_OPTION_ID) {
             let id = self.request_id();
             requests.push((
                 id.clone(),
@@ -2032,7 +2032,7 @@ fn map_commands(response: &Value) -> Vec<ProviderCommand> {
 fn selected_thinking(selections: &[OptionSelection]) -> Option<&str> {
     selections
         .iter()
-        .find(|selection| selection.id == "reasoningEffort")
+        .find(|selection| selection.id == crate::EFFORT_OPTION_ID)
         .and_then(|selection| selection.value.as_str())
 }
 

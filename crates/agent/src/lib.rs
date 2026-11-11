@@ -493,7 +493,7 @@ impl ProviderKind {
                 goals: None,
                 per_turn_effort: false,
                 options_apply_live: false,
-                live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
+                live_option_push: LiveOptionPush::Only(&[EFFORT_OPTION_ID]),
                 background: None,
                 live_settings: true,
                 mcp_servers: false,
@@ -1660,6 +1660,12 @@ pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
         permissive: Some(permissive.into()),
     })
 }
+
+/// The id every adapter gives the option of [`OptionRole::Effort`], an ACP
+/// agent's thought level included. A stored [`OptionSelection`] carries no
+/// role, so the host knows a thread's effort, to inherit it, mirror it and
+/// send it with each turn, by this id.
+pub const EFFORT_OPTION_ID: &str = "reasoningEffort";
 
 /// The ACP session option that carries the agent's mode, which ACP agents use for their
 /// approval modes.

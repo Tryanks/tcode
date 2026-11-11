@@ -38,7 +38,7 @@ pub fn data_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
 }
 
 const PERMISSION_MODE: &str = "permission_mode";
-const EFFORT: &str = "reasoningEffort";
+const EFFORT: &str = crate::EFFORT_OPTION_ID;
 const AGENT: &str = "agent";
 /// Tcode's entry among the session's API-managed instructions.
 const INSTRUCTIONS_KEY: &str = "tcode";

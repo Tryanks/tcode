@@ -429,7 +429,7 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
                 apply: Default::default(),
                 recommended: None,
                 permissive: None,
-                id: "reasoningEffort".into(),
+                id: crate::EFFORT_OPTION_ID.into(),
                 label: "Reasoning".into(),
                 options: select_options,
                 default_value,
@@ -601,7 +601,7 @@ fn reasoning_effort_label(effort: &str) -> String {
 
 /// Selected reasoning effort (option id `reasoningEffort`).
 fn codex_effort(selections: &[OptionSelection]) -> Option<String> {
-    selection_str(selections, "reasoningEffort")
+    selection_str(selections, crate::EFFORT_OPTION_ID)
 }
 
 /// What `model/list` says of each model's reasoning effort (`v2/Model.ts`).
@@ -1262,7 +1262,7 @@ impl SessionActor for Actor {
                     let value = value.as_str().ok_or("Codex permissions must be a string")?;
                     permission_params(value, true)?;
                     self.requested_permission = value.into();
-                } else if id == "reasoningEffort" {
+                } else if id == crate::EFFORT_OPTION_ID {
                     self.effort = value.as_str().map(str::to_owned);
                 } else if id == "serviceTier" {
                     self.service_tier = value.as_str().map(str::to_owned);

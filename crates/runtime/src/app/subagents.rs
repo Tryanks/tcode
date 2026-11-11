@@ -183,7 +183,7 @@ impl AppState {
                     .meta
                     .option_selections
                     .iter_mut()
-                    .find(|selection| selection.id == "reasoningEffort")
+                    .find(|selection| selection.id == agent::EFFORT_OPTION_ID)
                 {
                     if selection.value != value {
                         selection.value = value;
@@ -191,7 +191,7 @@ impl AppState {
                     }
                 } else {
                     mirror.meta.option_selections.push(OptionSelection {
-                        id: "reasoningEffort".into(),
+                        id: agent::EFFORT_OPTION_ID.into(),
                         value,
                     });
                     settings_changed = true;

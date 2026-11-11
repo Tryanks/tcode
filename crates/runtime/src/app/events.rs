@@ -1039,7 +1039,7 @@ pub(super) fn title_session_meta(settings: &Settings, cwd: PathBuf) -> SessionMe
         .clone()
         .filter(|id| settings.resolved_profile(id).is_some());
     meta.option_selections.push(OptionSelection {
-        id: "reasoningEffort".into(),
+        id: agent::EFFORT_OPTION_ID.into(),
         value: serde_json::Value::String(AI_TITLE_REASONING_EFFORT.into()),
     });
     meta

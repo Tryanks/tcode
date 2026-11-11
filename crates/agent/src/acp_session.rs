@@ -46,9 +46,7 @@ use crate::{
 /// needs a stable id that routes back to the right ACP method.
 pub(crate) use crate::ACP_MODE_OPTION_ID as MODE_OPTION_ID;
 const MODEL_OPTION_ID: &str = "acp:model";
-/// A thought-level option takes the id every native provider gives its
-/// reasoning effort, so it is presented, inherited and set like theirs.
-const EFFORT_OPTION_ID: &str = "reasoningEffort";
+use crate::EFFORT_OPTION_ID;
 const CONFIG_OPTION_PREFIX: &str = "acp:cfg:";
 
 /// The descriptor id of the session config option `config_id` in `category`.
