@@ -329,7 +329,7 @@ impl Azure {
             pr.authority(),
             Request {
                 accept: "application/octet-stream",
-                limit: FILE_BYTES,
+                limit: Some(FILE_BYTES),
                 ..Request::get(
                     pr.repository_path(&format!(
                         "/items?path={}&versionDescriptor.version={revision}&versionDescriptor.versionType=commit&$format=octetStream",

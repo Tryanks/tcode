@@ -47,7 +47,6 @@ const ANONYMOUS: &str = "anonymous";
 /// index line names a missing side.
 const DELETED: &str = "0000000000000000000000000000000000000000";
 
-
 pub struct GitLab {
     api: Arc<Api>,
     viewed: Arc<ViewedMarks>,
@@ -181,7 +180,7 @@ impl GitLab {
             mr.authority(),
             Request {
                 accept: "application/octet-stream",
-                limit: FILE_BYTES,
+                limit: Some(FILE_BYTES),
                 ..Request::get(
                     mr.project_path(&format!(
                         "/repository/files/{}/raw?ref={revision}",

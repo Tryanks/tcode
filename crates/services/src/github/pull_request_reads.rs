@@ -34,7 +34,6 @@ const MERGED_TTL: Duration = Duration::from_secs(600);
 const VIEWED_TTL: Duration = Duration::from_secs(15);
 /// Text at a commit never changes; the bound is only on how long it holds memory.
 const TEXT_TTL: Duration = Duration::from_secs(600);
-const DIFF_BYTES: usize = 8 * 1024 * 1024;
 const FILE_BYTES: usize = 1024 * 1024;
 const FILES_PER_PAGE: usize = 100;
 /// Past this many requests a list is reported incomplete rather than read on.
@@ -116,7 +115,7 @@ impl Reader<'_> {
         )
     }
 
-    fn long_read(&self, operation: &'static str, body_limit: usize) -> RequestOptions {
+    fn long_read(&self, operation: &'static str, body_limit: Option<usize>) -> RequestOptions {
         RequestOptions {
             operation,
             timeout: DEADLINE_CAP,
@@ -188,8 +187,8 @@ impl Reader<'_> {
         Ok((revisions, ttl))
     }
 
-    /// GitHub refuses a whole diff past its own limits, and this read cuts one past 8 MiB; both
-    /// read the files a page at a time instead. A failing page reports the original refusal.
+    /// GitHub refuses a whole diff past its own limits; the files are then read a page at a
+    /// time instead. A failing page reports the original refusal.
     fn whole_diff(&self, revisions: &Revisions) -> Result<Files, GitHubError> {
         let path = self.rest_path(&format!("pulls/{}", self.key.number));
         let answer = self.api.rest(
@@ -198,10 +197,10 @@ impl Reader<'_> {
                 accept: Some("application/vnd.github.diff"),
                 ..RestRequest::get(&path)
             },
-            &self.long_read("PullRequestDiff", DIFF_BYTES),
+            &self.long_read("PullRequestDiff", None),
         );
         match answer {
-            Ok(response) if !response.truncated => Ok(Files {
+            Ok(response) => Ok(Files {
                 base: revisions.base.clone(),
                 head: revisions.head.clone(),
                 files: diff_files(&String::from_utf8_lossy(&response.body))
@@ -210,7 +209,6 @@ impl Reader<'_> {
                 complete: true,
                 changed_files: revisions.changed_files,
             }),
-            Ok(_) => self.files_page(revisions, 1),
             Err(refusal @ GitHubError::Response { .. }) => {
                 self.files_page(revisions, 1).map_err(|_| refusal)
             }
@@ -228,7 +226,7 @@ impl Reader<'_> {
             .rest(
                 &self.key.host,
                 RestRequest::get(&path),
-                &self.long_read("PullRequestFiles", DIFF_BYTES),
+                &self.long_read("PullRequestFiles", None),
             )?
             .json()?;
         let next_page = (rows.len() >= FILES_PER_PAGE).then_some(page + 1);
@@ -255,7 +253,7 @@ impl Reader<'_> {
                 accept: Some("application/vnd.github.raw"),
                 ..RestRequest::get(&self.rest_path(&format!("contents/{encoded}?ref={revision}")))
             },
-            &self.long_read("PullRequestFileText", FILE_BYTES),
+            &self.long_read("PullRequestFileText", Some(FILE_BYTES)),
         );
         Ok(match answer {
             Ok(response) if response.truncated => PullRequestFileText::Oversized,

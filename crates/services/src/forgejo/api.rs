@@ -17,7 +17,6 @@ use tcode_core::{
     settings::{CredentialSource, HostProblem, HostSettings, TokenCheck},
 };
 
-const BODY_LIMIT: usize = 8 * 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(60);
 /// The environment token tea itself reads, for the server its companion variable names.
 pub(super) const ENV_TOKEN: &str = "GITEA_TOKEN";
@@ -94,7 +93,9 @@ pub(super) struct Request<'a> {
     pub(super) operation: &'static str,
     /// A write goes only with a credential.
     pub(super) write: bool,
-    pub(super) limit: usize,
+    /// The most of a body read; a longer one is cut and marked truncated. `None` reads it
+    /// whole.
+    pub(super) limit: Option<usize>,
 }
 
 impl<'a> Request<'a> {
@@ -106,7 +107,7 @@ impl<'a> Request<'a> {
             accept: "application/json",
             operation,
             write: false,
-            limit: BODY_LIMIT,
+            limit: None,
         }
     }
     pub(super) fn write(
@@ -496,15 +497,16 @@ impl Api {
                     .map(|value| (name.to_ascii_lowercase(), value.to_owned()))
             })
             .collect();
-        let limit = request.limit.min(BODY_LIMIT);
         let mut body = Vec::new();
         response
             .into_reader()
-            .take(limit as u64 + 1)
+            .take(request.limit.map_or(u64::MAX, |limit| limit as u64 + 1))
             .read_to_end(&mut body)
             .map_err(|_| error(ForgeErrorKind::Uncertain, "Forgejo response cut off"))?;
-        let truncated = body.len() > limit;
-        body.truncate(limit);
+        let truncated = request.limit.is_some_and(|limit| body.len() > limit);
+        if let Some(limit) = request.limit {
+            body.truncate(limit);
+        }
         if status == 429 {
             let named = headers
                 .get("retry-after")
