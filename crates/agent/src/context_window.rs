@@ -9,10 +9,6 @@ use crate::{OptionDescriptor, OptionSelection};
 
 pub const OPTION_ID: &str = "contextWindow";
 
-/// The smallest window a user can ask for; a provider's largest preset caps
-/// the other end.
-pub const MIN_TOKENS: u64 = 100_000;
-
 /// Parse a context-window value (`200k`, `1m`, `500000`, `500`) into tokens.
 pub fn parse_tokens(value: &Value) -> Option<u64> {
     let tokens = match value {
@@ -34,7 +30,7 @@ pub fn parse_tokens(value: &Value) -> Option<u64> {
         }
         _ => return None,
     };
-    (tokens >= MIN_TOKENS).then_some(tokens)
+    Some(tokens)
 }
 
 /// Format a context-window token count for display.
@@ -100,7 +96,6 @@ mod tests {
         assert_eq!(parse_tokens(&json!("500000")), Some(500_000));
         assert_eq!(parse_tokens(&json!("500")), Some(500_000));
         assert_eq!(parse_tokens(&json!(750_000)), Some(750_000));
-        assert_eq!(parse_tokens(&json!(99_999)), None);
         assert_eq!(parse_tokens(&json!("garbage")), None);
         assert_eq!(parse_tokens(&json!(-200_000)), None);
         assert_eq!(parse_tokens(&json!(null)), None);
@@ -139,6 +134,7 @@ mod tests {
             apply: Default::default(),
             recommended: None,
             permissive: None,
+            minimum: None,
         }];
         assert_eq!(selected(&descriptors, &[]), Some(272_000));
         let selection = [OptionSelection {

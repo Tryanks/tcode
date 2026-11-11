@@ -317,15 +317,17 @@ fn descriptor(option: &Value) -> Option<OptionDescriptor> {
                     approval: None,
                 });
             }
+            let role = option_role(&id);
             OptionDescriptor::Select {
                 id: option_id(&id).to_owned(),
                 label: non_empty(&label)?,
                 options: mapped,
                 default_value,
-                role: option_role(&id),
+                role,
                 apply: crate::ApplyTiming::Live,
                 recommended: None,
                 permissive: None,
+                minimum: (role == crate::OptionRole::ContextWindow).then_some(AUTO_COMPACT_MINIMUM),
             }
         }
         OptionFile::Boolean { id, label } => OptionDescriptor::Boolean {
@@ -340,6 +342,11 @@ fn descriptor(option: &Value) -> Option<OptionDescriptor> {
         OptionFile::Unknown => return None,
     })
 }
+
+/// The smallest auto-compact window Claude Code takes, which is how a window
+/// below the model's own reaches it: "in tokens (100000 to 1000000)", in the
+/// settings schema of Claude Code 2.1.322.
+const AUTO_COMPACT_MINIMUM: u64 = 100_000;
 
 /// A `contextWindow` selector whose only preset is the model's fixed window.
 fn fixed_context_window_descriptor(tokens: u64) -> OptionDescriptor {
@@ -362,6 +369,7 @@ fn fixed_context_window_descriptor(tokens: u64) -> OptionDescriptor {
         apply: crate::ApplyTiming::Live,
         recommended: None,
         permissive: None,
+        minimum: Some(AUTO_COMPACT_MINIMUM),
     }
 }
 
@@ -926,6 +934,7 @@ mod tests {
                     apply: crate::ApplyTiming::Live,
                     recommended: None,
                     permissive: None,
+                    minimum: None,
                 },
                 OptionDescriptor::Select {
                     id: "contextWindow".into(),
@@ -955,6 +964,7 @@ mod tests {
                     apply: crate::ApplyTiming::Live,
                     recommended: None,
                     permissive: None,
+                    minimum: Some(AUTO_COMPACT_MINIMUM),
                 },
             ],
             "unknown descriptor types and prompt-injected values are dropped"
@@ -992,6 +1002,7 @@ mod tests {
                 apply: crate::ApplyTiming::Live,
                 recommended: None,
                 permissive: None,
+                minimum: Some(AUTO_COMPACT_MINIMUM),
             }
         );
         // No window data at all offers no selector.

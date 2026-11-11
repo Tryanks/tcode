@@ -1372,6 +1372,10 @@ pub enum OptionDescriptor {
         recommended: Option<String>,
         #[serde(default)]
         permissive: Option<String>,
+        /// The smallest value the harness takes beyond the presets, for a
+        /// select that also takes one of its own (a context window).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        minimum: Option<u64>,
     },
     Boolean {
         id: String,
@@ -1677,6 +1681,7 @@ pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
         apply,
         recommended: Some(recommended.into()),
         permissive: Some(permissive.into()),
+        minimum: None,
     })
 }
 

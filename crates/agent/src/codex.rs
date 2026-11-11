@@ -446,6 +446,7 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
                 label: "Reasoning".into(),
                 options: select_options,
                 default_value,
+                minimum: None,
             });
         }
     }
@@ -478,6 +479,7 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
             label: "Service Tier".into(),
             options: select_options,
             default_value: Some(default_value),
+            minimum: None,
         });
     }
     options.push(context_window_descriptor(windows));
@@ -526,6 +528,7 @@ fn context_window_descriptor(windows: Option<&model_windows::ModelWindows>) -> O
         label: "Context Window".into(),
         options,
         default_value,
+        minimum: None,
     }
 }
 
@@ -6138,6 +6141,7 @@ mod tests {
                 apply: _,
                 recommended: _,
                 permissive: _,
+                minimum: _,
                 id,
                 label: _,
                 options,

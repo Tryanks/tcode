@@ -181,6 +181,7 @@ fn map_model(
             apply: crate::ApplyTiming::Live,
             recommended: None,
             permissive: None,
+            minimum: None,
         });
     }
     Some(ModelSpec {

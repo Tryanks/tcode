@@ -1364,6 +1364,7 @@ pub(crate) mod tests {
                     apply: Default::default(),
                     recommended: None,
                     permissive: None,
+                    minimum: None,
                 }],
             }],
         )

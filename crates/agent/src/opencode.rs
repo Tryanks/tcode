@@ -527,6 +527,7 @@ fn map_models(models: &Value, default: &Value) -> Vec<ModelSpec> {
                     apply: crate::ApplyTiming::Live,
                     recommended: None,
                     permissive: None,
+                    minimum: None,
                 })
                 .into_iter()
                 .collect();
@@ -939,6 +940,7 @@ impl OpenCodeActor {
                 apply: crate::ApplyTiming::Live,
                 recommended: None,
                 permissive: None,
+                minimum: None,
             });
             if let Some(agent) = &self.agent {
                 selections.push(OptionSelection {

@@ -376,6 +376,9 @@ pub use wire::{
 // PullRequestFile's additions and deletions may be absent: a binary or
 // oversized file whose host gave no count.
 // SelectOption gains approval, the ApprovalClass of a permission value.
+// A select OptionDescriptor gains minimum, the smallest value of its own the
+// harness takes (Claude's context window); a context window has no other
+// lower bound.
 // SessionStatus gains background_control {stop, move_running} and
 // harness_option_labels.
 // HarnessDescription's plugins is a PluginsDescription {actions, marketplaces,

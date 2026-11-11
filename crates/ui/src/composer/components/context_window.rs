@@ -25,13 +25,8 @@ impl ContextWindowDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let placeholder = match largest_window(&store, session_id.as_deref(), cx) {
-            Some(max) => crate::tr!(
-                "composer.context_window_custom_placeholder",
-                max = context_window::format(max)
-            ),
-            None => crate::tr!("composer.context_window_custom_placeholder_open"),
-        };
+        let (min, max) = custom_range(&store, session_id.as_deref(), cx);
+        let placeholder = range_text(false, min, max);
         let custom = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         let custom_events =
             cx.subscribe_in(&custom, window, |this, _, event, window, cx| match event {
@@ -53,7 +48,7 @@ impl ContextWindowDialog {
 
     fn apply_custom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let value = self.custom.read(cx).value().to_string();
-        let max = largest_window(&self.store, self.session_id.as_deref(), cx);
+        let (min, max) = custom_range(&self.store, self.session_id.as_deref(), cx);
         let id = self
             .store
             .read(cx)
@@ -61,9 +56,9 @@ impl ContextWindowDialog {
         let Some((id, ..)) = context_window_descriptor(&id) else {
             return;
         };
-        match context_window::parse_tokens(&serde_json::Value::String(value))
-            .filter(|tokens| max.is_none_or(|max| *tokens <= max))
-        {
+        match context_window::parse_tokens(&serde_json::Value::String(value)).filter(|tokens| {
+            min.is_none_or(|min| *tokens >= min) && max.is_none_or(|max| *tokens <= max)
+        }) {
             Some(tokens) => {
                 let session_id = self.session_id.clone().unwrap_or_default();
                 self.store.update(cx, |store, _cx| {
@@ -184,15 +179,11 @@ impl Render for ContextWindowDialog {
                             .pt_1()
                             .text_secondary(compact, cx)
                             .text_color(cx.theme().danger)
-                            .child(
-                                match largest_window(&self.store, self.session_id.as_deref(), cx) {
-                                    Some(max) => crate::tr!(
-                                        "composer.context_window_invalid",
-                                        max = context_window::format(max)
-                                    ),
-                                    None => crate::tr!("composer.context_window_invalid_open"),
-                                },
-                            ),
+                            .child({
+                                let (min, max) =
+                                    custom_range(&self.store, self.session_id.as_deref(), cx);
+                                range_text(true, min, max)
+                            }),
                     )
                 })),
         )
@@ -216,21 +207,56 @@ pub(in super::super) fn context_window_descriptor(
     }
 }
 
-/// The largest preset of the active model: a custom size cannot exceed the
-/// window the model can launch with. `None` when the model names no preset:
-/// then nothing here caps the size, and the harness holds it to what the
-/// model takes.
-fn largest_window(
+/// The sizes a custom window can take: at least the smallest the harness
+/// says it takes, and at most the active model's largest preset, the window
+/// it can launch with. An end the harness and the model leave open is open
+/// here too, and the harness holds the size to what the model takes.
+fn custom_range(
     store: &Entity<WorkspaceStore>,
     session_id: Option<&str>,
     cx: &App,
-) -> Option<u64> {
-    context_window::largest(
-        &store
-            .read(cx)
-            .composer_state_for(session_id, cx)
-            .active_option_descriptors,
-    )
+) -> (Option<u64>, Option<u64>) {
+    let composer = store.read(cx).composer_state_for(session_id, cx);
+    let descriptors = &composer.active_option_descriptors;
+    let min = match context_window::descriptor(descriptors) {
+        Some(OptionDescriptor::Select { minimum, .. }) => *minimum,
+        _ => None,
+    };
+    (min, context_window::largest(descriptors))
+}
+
+/// The custom field's placeholder, or the error under it, for a range.
+fn range_text(invalid: bool, min: Option<u64>, max: Option<u64>) -> String {
+    let (min, max) = (
+        min.map(context_window::format),
+        max.map(context_window::format),
+    );
+    match (invalid, min, max) {
+        (false, Some(min), Some(max)) => {
+            crate::tr!(
+                "composer.context_window_custom_placeholder",
+                min = min,
+                max = max
+            )
+        }
+        (false, Some(min), None) => {
+            crate::tr!("composer.context_window_custom_placeholder_open", min = min)
+        }
+        (false, None, Some(max)) => {
+            crate::tr!(
+                "composer.context_window_custom_placeholder_up_to",
+                max = max
+            )
+        }
+        (false, None, None) => crate::tr!("composer.context_window_custom_placeholder_any"),
+        (true, Some(min), Some(max)) => {
+            crate::tr!("composer.context_window_invalid", min = min, max = max)
+        }
+        (true, Some(min), None) => crate::tr!("composer.context_window_invalid_open", min = min),
+        (true, None, Some(max)) => crate::tr!("composer.context_window_invalid_up_to", max = max),
+        (true, None, None) => crate::tr!("composer.context_window_invalid_any"),
+    }
+    .into_owned()
 }
 
 /// Open the context-window dialog for the model of `session_id`'s thread.
