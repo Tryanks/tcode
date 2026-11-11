@@ -3178,6 +3178,20 @@ pub enum ToolFamily {
     Skill { name: String },
 }
 
+impl ToolFamily {
+    /// What the call is about, as its family names it.
+    pub fn subject(&self) -> Option<&str> {
+        match self {
+            Self::Read { path, .. } => Some(path),
+            Self::Search { pattern, path, .. } => pattern.as_deref().or(path.as_deref()),
+            Self::Question { questions } => questions.first().map(|asked| asked.question.as_str()),
+            Self::Fetch { url, .. } => Some(url),
+            Self::WebSearch { query, .. } | Self::LoadTools { query, .. } => Some(query),
+            Self::Skill { name } => Some(name),
+        }
+    }
+}
+
 /// A page a web search found.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebLink {
