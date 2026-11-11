@@ -1246,6 +1246,7 @@ diff:
   expand_gap_down: "Show 20 lines below"
   expand_gap_all: "Expand all hidden lines"
   created: "new"
+  modified: "modified"
   deleted: "deleted"
   renamed: "renamed"
   unmodified_lines: "%{count} unmodified lines"

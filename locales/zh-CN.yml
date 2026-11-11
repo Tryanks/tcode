@@ -1239,6 +1239,7 @@ diff:
   expand_gap_down: "展开下方 20 行"
   expand_gap_all: "展开全部隐藏行"
   created: "新增"
+  modified: "已修改"
   deleted: "已删除"
   renamed: "已重命名"
   unmodified_lines: "%{count} 行未修改"

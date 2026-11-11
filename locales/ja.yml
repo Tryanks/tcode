@@ -1246,6 +1246,7 @@ diff:
   expand_gap_down: "下の 20 行を表示"
   expand_gap_all: "非表示の行をすべて展開"
   created: "新規"
+  modified: "変更"
   deleted: "削除"
   renamed: "名前変更"
   unmodified_lines: "変更のない %{count} 行"

@@ -452,12 +452,12 @@ pub(super) fn context_label(usage: Option<TokenUsage>) -> String {
     }
 }
 
-pub(super) fn file_change_kind_label(kind: FileChangeKind) -> &'static str {
+pub(super) fn file_change_kind_label(kind: FileChangeKind) -> std::borrow::Cow<'static, str> {
     match kind {
-        FileChangeKind::Create => "create",
-        FileChangeKind::Modify => "modify",
-        FileChangeKind::Delete => "delete",
-        FileChangeKind::Rename => "rename",
+        FileChangeKind::Create => crate::tr!("diff.created"),
+        FileChangeKind::Modify => crate::tr!("diff.modified"),
+        FileChangeKind::Delete => crate::tr!("diff.deleted"),
+        FileChangeKind::Rename => crate::tr!("diff.renamed"),
     }
 }
 
