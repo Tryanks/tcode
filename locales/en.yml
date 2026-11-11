@@ -3006,10 +3006,6 @@ tools:
       running: "Running"
       done: "Ran"
       asked: "Run"
-    send_input:
-      running: "Sending input"
-      done: "Sent input"
-      asked: "Send input"
     think:
       running: "Thinking…"
       done: "Thought"
@@ -3255,7 +3251,6 @@ tools:
   open_thread: "Open thread"
   copy_task: "Copy task"
   copy_summary: "Copy summary"
-  session: "session %{id}"
   copy_diff: "Copy diff"
   line_range: "L%{first}–%{last}"
   copy_content: "Copy content"

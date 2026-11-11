@@ -2999,10 +2999,6 @@ tools:
       running: "运行中"
       done: "已运行"
       asked: "运行"
-    send_input:
-      running: "发送输入中"
-      done: "已发送输入"
-      asked: "发送输入"
     think:
       running: "正在思考…"
       done: "已思考"
@@ -3248,7 +3244,6 @@ tools:
   open_thread: "打开线程"
   copy_task: "复制任务"
   copy_summary: "复制摘要"
-  session: "会话 %{id}"
   copy_diff: "复制 Diff"
   line_range: "第 %{first}–%{last} 行"
   copy_content: "复制内容"

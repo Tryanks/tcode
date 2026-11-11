@@ -3006,10 +3006,6 @@ tools:
       running: "実行中"
       done: "実行済み"
       asked: "実行"
-    send_input:
-      running: "入力を送信中"
-      done: "入力を送信済み"
-      asked: "入力を送信"
     think:
       running: "思考中…"
       done: "思考済み"
@@ -3255,7 +3251,6 @@ tools:
   open_thread: "スレッドを開く"
   copy_task: "タスクをコピー"
   copy_summary: "概要をコピー"
-  session: "セッション %{id}"
   copy_diff: "差分をコピー"
   line_range: "%{first}–%{last} 行目"
   copy_content: "内容をコピー"

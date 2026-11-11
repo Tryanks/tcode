@@ -1,8 +1,9 @@
 //! Tool windows: what each tool call did, drawn from its canonical item.
 //!
 //! A window is chosen from what the item carries, never from the provider
-//! that produced it (Principle 4): first its `ItemContent` kind — a command,
-//! a file change — and then, for a `ToolCall`, by its tool name
+//! that produced it (Principle 4): first its `ItemContent` kind — a command
+//! and a file change are only ever those items — and then, for a
+//! `ToolCall`, by its tool name
 //! ([`agent::ToolName::parse`], so `mcp__s__t` and `s/t` name one tool)
 //! and the shape of its input. Each family view tries its names and
 //! deserializes the input into its own typed fields; a call no family
@@ -145,7 +146,6 @@ type Matcher = for<'a> fn(&Call<'a>) -> Option<Box<dyn ToolView + 'a>>;
 /// Every family that claims calls by name and shape, in the order they are
 /// asked. The generic window takes whatever none accepts.
 const FAMILIES: &[Matcher] = &[
-    shell::tool_call,
     read::tool_call,
     search::tool_call,
     web::tool_call,
@@ -202,11 +202,7 @@ pub(in crate::chat) fn family(entry: &TimelineEntry) -> Option<Family> {
         }
         ItemContent::ToolCall { .. } => {
             let call = Call::of(entry)?;
-            if shell::tool_call(&call).is_some() {
-                Family::Command
-            } else if let Some(edit) = diff::edit(entry, Path::new("")) {
-                Family::Edit(edit.files.into_iter().map(|file| file.row.path).collect())
-            } else if read::tool_call(&call).is_some() {
+            if read::tool_call(&call).is_some() {
                 Family::Read
             } else if search::tool_call(&call).is_some() {
                 Family::Search
@@ -691,16 +687,6 @@ pub(in crate::chat) fn full_output<'a>(
     ctx: &mut ToolCtx<'_, '_>,
 ) -> (HeldOutput<'a>, Option<AnyElement>) {
     held_output(call.entry, call.output.unwrap_or_default(), ctx)
-}
-
-/// [`full_output`] for any item's output text.
-pub(in crate::chat) fn full_text(
-    entry: &TimelineEntry,
-    output: &str,
-    ctx: &mut ToolCtx<'_, '_>,
-) -> (String, Option<AnyElement>) {
-    let (text, control) = held_output(entry, output, ctx);
-    (text.to_string(), control)
 }
 
 fn held_output<'a>(

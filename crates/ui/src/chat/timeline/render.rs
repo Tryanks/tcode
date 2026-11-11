@@ -1549,7 +1549,7 @@ impl TimelineView {
         let mut rows = Vec::new();
         for (file_index, file) in edit.files.iter().enumerate() {
             let key = format!("activity-{}-file-{file_index}", entry.id);
-            let enabled = auto_expand && edit.live && file.row.counts.is_some();
+            let enabled = auto_expand && file.row.counts.is_some();
             let expanded =
                 self.auto_activity_expanded((turn, &entry.id), &key, enabled, recency, cx);
             let window_key = format!("{}-file-{file_index}", entry.id);
@@ -1566,9 +1566,8 @@ impl TimelineView {
                 }
             };
             let header = tools::diff::file_header(file);
-            // The call's failure and its time belong to it, told once.
-            let first = file_index == 0;
-            let elapsed_ms = first
+            // The edit's time belongs to it, told once.
+            let elapsed_ms = (file_index == 0)
                 .then(|| tools::window::elapsed(&header, entry))
                 .flatten();
             let toggle_key = key.clone();
@@ -1578,7 +1577,7 @@ impl TimelineView {
                     key: window_key,
                     header,
                     status: edit.status,
-                    error: first.then(|| edit.failure.clone()).flatten(),
+                    error: None,
                     elapsed_ms,
                     compact: false,
                     copy: tools::diff::file_copy_items(file),
@@ -1876,9 +1875,7 @@ impl TimelineView {
                 tools::shell::ShellRun {
                     entry,
                     command,
-                    workdir: None,
                     output,
-                    hosted: true,
                     running: *status == agent::ItemStatus::InProgress,
                 },
                 &mut tools::ToolCtx {

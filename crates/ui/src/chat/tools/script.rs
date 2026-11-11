@@ -50,10 +50,52 @@ struct Script<'a> {
     title: Option<String>,
 }
 
+/// A script's result as its harness reports it: some put a header of
+/// `Key: value` lines (`Wall time: …`) before an `Output:` line, then what
+/// the script printed.
+struct Report<'o> {
+    wall_ms: Option<u64>,
+    output: &'o str,
+}
+
+fn report(output: &str) -> Report<'_> {
+    let mut report = Report {
+        wall_ms: None,
+        output,
+    };
+    let mut offset = 0;
+    for (index, line) in output.split_inclusive('\n').enumerate() {
+        let text = line.trim_end();
+        if text == "Output:" {
+            report.output = &output[offset + line.len()..];
+            return report;
+        }
+        // A header is a handful of short lines; anything else is output.
+        if index >= 8 || !text.contains(':') && !text.starts_with("Process ") {
+            break;
+        }
+        if let Some(seconds) = text
+            .strip_prefix("Wall time: ")
+            .and_then(|rest| rest.strip_suffix(" seconds"))
+        {
+            report.wall_ms = seconds
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .map(|seconds| (seconds * 1_000.) as u64);
+        }
+        offset += line.len();
+    }
+    Report {
+        wall_ms: None,
+        output,
+    }
+}
+
 /// What the script printed: an imported call keeps its harness's report
 /// (`Wall time: …` then `Output:`) before it.
 fn printed(output: &str) -> &str {
-    super::shell::report(output).output
+    report(output).output
 }
 
 impl ToolView for Script<'_> {
@@ -69,7 +111,7 @@ impl ToolView for Script<'_> {
             None => header,
         };
         let output = call.output.unwrap_or_default();
-        header.elapsed_ms = super::shell::report(output).wall_ms;
+        header.elapsed_ms = report(output).wall_ms;
         header.error(first_line(printed(output)))
     }
 

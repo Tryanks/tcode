@@ -295,10 +295,7 @@ fn a_call_no_family_claims_names_its_server_tool_and_argument(cx: &mut TestAppCo
 
 /// A command reads as the command it ran and how it exited: a failure by
 /// its exit code alone, with no line of what it printed under it while
-/// shut, a declined one as asked for and declined, never run. A
-/// shell run as a tool — Codex's `exec_command` and `write_stdin`, a
-/// subagent's `Bash` — reads the same, its exit code taken from the report
-/// its harness wraps the output in, and opens on that output alone.
+/// shut, a declined one as asked for and declined, never run.
 #[gpui::test]
 fn a_command_reads_as_what_it_ran_and_how_it_exited(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
@@ -309,8 +306,6 @@ fn a_command_reads_as_what_it_ran_and_how_it_exited(cx: &mut TestAppContext) {
         ..read("Ran", None, Some(argument), error)
     };
     let declined = "exec-0000000c-0000-0000-0000-00000000000c";
-    let exec = "call_000000000000000000000013";
-    let stdin = "call_000000000000000000000014";
     for (id, expected) in [
         (
             "toolu_010000000000000000000009",
@@ -344,14 +339,6 @@ fn a_command_reads_as_what_it_ran_and_how_it_exited(cx: &mut TestAppContext) {
                 None,
             ),
         ),
-        (exec, ran("git status --short", vec![], None)),
-        (
-            stdin,
-            Read {
-                chips: vec![Chip::Exit(-1)],
-                ..read("Sent input", None, Some("session 17856"), None)
-            },
-        ),
         (
             "tool_000000000000000000000015",
             ran("ls -la /home/user/project", vec![], None),
@@ -359,40 +346,12 @@ fn a_command_reads_as_what_it_ran_and_how_it_exited(cx: &mut TestAppContext) {
     ] {
         assert_eq!(thread.header(id, cx), expected, "{id}");
     }
-    let child = "toolu_010000000000000000000016:toolu_010000000000000000000017";
-    let header = thread.header(child, cx);
-    assert_eq!(header.verb.as_deref(), Some("Ran"));
-    assert!(
-        header
-            .argument
-            .is_some_and(|argument| argument.starts_with("cd /home/user/project/vendor/")),
-    );
-
-    // Every one of them is a command to the run that holds them.
-    let entries = thread.entries(cx);
-    let refs: Vec<&TimelineEntry> = entries.iter().map(Arc::as_ref).collect();
-    let counts = crate::chat::model::work_log_counts(&refs);
-    assert_eq!((counts.commands, counts.tools), (8, 0));
 
     thread.open_work_log("toolu_010000000000000000000009", cx);
     assert!(shows(cx, &format!("tool-status-chip-{declined}")));
     let failed = "toolu_010000000000000000000010";
     assert!(shows(cx, &format!("tool-chip-{failed}")));
     assert!(!shows(cx, &format!("tool-error-{failed}")));
-    // A shell run as a tool opens on the same terminal window as a command:
-    // its command line over what it printed, verbatim, its harness's report
-    // included, all of it in the grid, with nothing more to open.
-    let pi = "tool_000000000000000000000015";
-    for shell in [exec, child, pi] {
-        click(cx, &format!("activity-row-{shell}"));
-        assert!(shows(cx, &format!("tool-shell-{shell}")), "{shell}");
-        assert!(shows(cx, &format!("command-output-{shell}")), "{shell}");
-        assert!(
-            !shows(cx, &format!("tool-text-{shell}-output-more")),
-            "{shell}"
-        );
-        click(cx, &format!("activity-row-{shell}"));
-    }
     thread.shutdown(cx);
 }
 
@@ -423,10 +382,8 @@ impl StoredThread {
 }
 
 /// An edit reads as a window per file: what happened to it, its path and
-/// the lines it added and removed, opening on its diff. A harness's own diff
-/// keeps its line numbers; an edit made as a tool call — Codex's imported
-/// `apply_patch`, a subagent's `Edit` — is drawn from what it asked for and
-/// numbers no lines, since it never said which.
+/// the lines it added and removed, opening on its diff. A diff keeps its
+/// line numbers; one whose hunks say no lines numbers none.
 #[gpui::test]
 fn an_edit_reads_as_its_files_and_opens_on_each_diff(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
@@ -435,7 +392,7 @@ fn an_edit_reads_as_its_files_and_opens_on_each_diff(cx: &mut TestAppContext) {
     let file = |verb: &str, path: &str, counts, numbered| {
         (verb.to_owned(), path.to_owned(), counts, numbered)
     };
-    let patch = "call_000000000000000000000006";
+    let unnumbered = "toolu_010000000000000000000002";
     let codex = "exec-00000004-0000-0000-0000-000000000004";
     for (id, expected) in [
         (
@@ -448,7 +405,7 @@ fn an_edit_reads_as_its_files_and_opens_on_each_diff(cx: &mut TestAppContext) {
             )],
         ),
         (
-            "toolu_010000000000000000000002",
+            unnumbered,
             vec![file(
                 "Edited",
                 "crates/ui/src/state/mod.rs",
@@ -481,24 +438,6 @@ fn an_edit_reads_as_its_files_and_opens_on_each_diff(cx: &mut TestAppContext) {
                 ),
             ],
         ),
-        (
-            patch,
-            vec![file(
-                "Edited",
-                "crates/example-core/src/storage/ops.rs",
-                Some((4, 0)),
-                false,
-            )],
-        ),
-        (
-            "toolu_010000000000000000000007:toolu_010000000000000000000008",
-            vec![file(
-                "Edited",
-                "/tmp/example-app-locales/locales/pages/settings.yml",
-                Some((0, 3)),
-                false,
-            )],
-        ),
     ] {
         assert_eq!(thread.files(id, cx), expected, "{id}");
     }
@@ -518,7 +457,7 @@ fn an_edit_reads_as_its_files_and_opens_on_each_diff(cx: &mut TestAppContext) {
     click(cx, &format!("activity-row-{codex}-file-0"));
     assert!(!shows(cx, "file-edit-diff"));
 
-    click(cx, &format!("activity-row-{patch}-file-0"));
+    click(cx, &format!("activity-row-{unnumbered}-file-0"));
     assert!(shows(cx, "file-edit-diff-line-0"));
     assert!(!shows(cx, "file-edit-diff-gutter-0"));
     thread.shutdown(cx);
@@ -998,33 +937,16 @@ fn numbered(lines: usize) -> String {
         .join("\n")
 }
 
-/// A log of one turn whose shell call `id` printed `lines` numbered lines.
+/// A log of one turn whose command `id` printed `lines` numbered lines, a
+/// command execution whose screen the host renders.
 fn shell_log(id: &str, lines: usize) -> String {
-    shell_log_of(id, lines, false)
-}
-
-/// [`shell_log`], the command run by its harness's own shell (`hosted`, a
-/// command execution whose screen the host renders) or as a tool call.
-fn shell_log_of(id: &str, lines: usize, hosted: bool) -> String {
-    let output = numbered(lines);
-    let command = format!("seq 1 {lines}");
-    let content = if hosted {
-        serde_json::json!({
-            "kind": "command_execution",
-            "command": command,
-            "output": output,
-            "exit_code": 0,
-            "status": "completed",
-        })
-    } else {
-        serde_json::json!({
-            "kind": "tool_call",
-            "name": "Bash",
-            "input": { "command": command },
-            "output": output,
-            "status": "completed",
-        })
-    };
+    let content = serde_json::json!({
+        "kind": "command_execution",
+        "command": format!("seq 1 {lines}"),
+        "output": numbered(lines),
+        "exit_code": 0,
+        "status": "completed",
+    });
     let call = serde_json::json!({
         "ts": 2_000,
         "event": { "type": "item_completed", "id": id, "content": content },
@@ -1080,10 +1002,12 @@ fn scroll_output(id: &str, lines: f32, cx: &mut VisualTestContext) {
 fn a_long_commands_output_scrolls_within_its_grid(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
-    let (thread, cx) = StoredThread::open(cx, &shell_log("count", 150), 1_024.);
+    let (mut thread, cx) = StoredThread::open(cx, &shell_log("count", 150), 1_024.);
     thread.open_work_log("count", cx);
     click(cx, "activity-row-count");
-    assert!(shows(cx, "command-output-count"));
+    step_until(&mut thread, "the host's screen", cx, |cx| {
+        copied_output("count", cx).ends_with("line 150 of the run")
+    });
     assert!(!shows(cx, "tool-text-count-output-more"), "no show-all");
     assert!(!shows(cx, "tool-text-count-output"), "no text view");
     let grid = cx.debug_bounds("command-output-count").expect("drawn");
@@ -1112,38 +1036,6 @@ fn a_long_commands_output_scrolls_within_its_grid(cx: &mut TestAppContext) {
     thread.shutdown(cx);
 }
 
-/// A command whose output came as a preview, its first part, loads the rest
-/// into the same grid: once loaded, the grid ends on the last line the
-/// command printed, which the preview did not hold, and still scrolls back to
-/// the first.
-#[gpui::test]
-fn a_shortened_commands_output_loads_into_its_grid(cx: &mut TestAppContext) {
-    let _locale = crate::settings::TestLocaleGuard::acquire();
-    crate::set_locale("en");
-    let log = shell_log("long", 600);
-    let (mut thread, cx) = StoredThread::open(cx, &log, 1_024.);
-    thread.open_work_log("long", cx);
-    click(cx, "activity-row-long");
-    let preview = copied_output("long", cx);
-    assert!(
-        !preview.contains("line 600 of the run"),
-        "the preview holds the start: {preview}"
-    );
-    click(cx, "load-output-long");
-    // Loaded, the grid ends on the command's last line.
-    step_until(&mut thread, "the output in the grid", cx, |cx| {
-        copied_output("long", cx).ends_with("line 600 of the run")
-    });
-    assert!(!shows(cx, "tool-text-long-output"), "no text view");
-    scroll_output("long", 1_000., cx);
-    let start = copied_output("long", cx);
-    assert!(
-        start.starts_with("line 1 of the run\n"),
-        "it scrolls back to the first line: {start}"
-    );
-    thread.shutdown(cx);
-}
-
 /// Steps the host until the window drawn at rest shows `what`.
 fn step_until(
     thread: &mut StoredThread,
@@ -1162,7 +1054,7 @@ fn step_until(
 fn a_five_thousand_line_command_scrolls_to_its_first_line(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
-    let log = shell_log_of("count", 5_000, true);
+    let log = shell_log("count", 5_000);
     assert!(numbered(5_000).len() > tcode_protocol::OUTPUT_PREVIEW_BYTES);
     let (mut thread, cx) = StoredThread::open(cx, &log, 1_024.);
     thread.open_work_log("count", cx);
@@ -1180,10 +1072,10 @@ fn a_five_thousand_line_command_scrolls_to_its_first_line(cx: &mut TestAppContex
     thread.shutdown(cx);
 }
 
-/// An output longer than a grid holds says so where its first lines would
-/// be, and its window's Copy output copies all of it, loading it first.
+/// A command whose record holds a preview of its output copies all of it
+/// from its window's Copy output, loading it first.
 #[gpui::test]
-fn an_output_past_the_grids_ceiling_says_so_and_copies_whole(cx: &mut TestAppContext) {
+fn a_shortened_commands_copy_output_copies_whole(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let lines = tcode_protocol::STORED_OUTPUT_HISTORY + 5_000;
@@ -1208,19 +1100,6 @@ fn an_output_past_the_grids_ceiling_says_so_and_copies_whole(cx: &mut TestAppCon
             .as_deref()
             == Some(whole.as_str())
     });
-
-    click(cx, "activity-row-long");
-    scroll_output("long", (lines * 2) as f32, cx);
-    let start = copied_output("long", cx);
-    let left_out = lines - tcode_protocol::STORED_OUTPUT_HISTORY - 16;
-    assert!(
-        start.starts_with(&format!(
-            "… {left_out} earlier lines not shown here — Copy output copies all of them\n"
-        )),
-        "the grid says what it leaves out: {start}"
-    );
-    scroll_output("long", -((lines * 2) as f32), cx);
-    assert!(copied_output("long", cx).ends_with(&format!("line {lines} of the run")));
     thread.shutdown(cx);
 }
 

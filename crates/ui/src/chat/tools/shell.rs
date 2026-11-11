@@ -4,12 +4,10 @@
 //! terminal emulator: the output is the screen the host renders at the width
 //! the panel subscribed to, and what scrolled off it, pushed again while the
 //! command runs; both parts paint as terminal grids, and the output's scrolls
-//! within the window's height. A shell run as a tool call (Codex's
-//! `exec_command`, a subagent's `Bash` recorded before subagents mapped like
-//! their parent) has only the text its harness returned, laid out into the
-//! same grid under the same command line.
+//! within the window's height. A command is only ever a `CommandExecution`:
+//! the adapter or importer that knows its harness's shell tool says so.
 
-use std::{borrow::Cow, collections::HashMap, rc::Rc, sync::Arc};
+use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use agent::{ItemContent, ItemStatus};
 use gpui::{
@@ -19,7 +17,6 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_base::{ElementExt as _, v_flex};
-use serde::Deserialize;
 use tcode_core::session::{EntryContent, TimelineEntry};
 use tcode_protocol::{
     MAX_STORED_OUTPUT_COLS,
@@ -29,7 +26,7 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
 
 use super::window::{Argument, Chip, Header, Verb, first_line};
-use super::{Call, ToolCtx, ToolView, copy};
+use super::{ToolCtx, copy};
 use crate::chat::model::one_line_with_break_markers;
 use crate::highlight;
 use crate::icon::IconName;
@@ -59,27 +56,7 @@ pub(in crate::chat) fn command_header(
                 .filter(|code| *code != 0 && status != ItemStatus::InProgress)
                 .map(Chip::Exit),
         )
-        .error(failure_line(output))
-}
-
-/// The line a failed command is told by: its output's first, past the
-/// `Exit code N` some harnesses put first, which the exit chip already says.
-fn failure_line(output: &str) -> Option<String> {
-    let mut lines = output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty());
-    let first = lines.next()?;
-    if first
-        .strip_prefix("Exit code ")
-        .is_some_and(|code| code.parse::<i32>().is_ok())
-    {
-        return lines
-            .next()
-            .map(str::to_owned)
-            .or_else(|| first_line(first));
-    }
-    Some(first.to_owned())
+        .error(first_line(output))
 }
 
 pub(in crate::chat) fn command_copy_items(command: &str, output: &str) -> Vec<(String, String)> {
@@ -89,246 +66,54 @@ pub(in crate::chat) fn command_copy_items(command: &str, output: &str) -> Vec<(S
     items
 }
 
-/// Tools that run a command line in a shell.
-const SHELLS: &[&str] = &[
-    "bash",
-    "shell",
-    "exec_command",
-    "run_terminal_command",
-    "run_shell_command",
-    "powershell",
-];
-/// Tools that type into a command still running.
-const STDIN: &[&str] = &["write_stdin"];
-
-#[derive(Deserialize)]
-struct ShellInput<'a> {
-    #[serde(alias = "cmd")]
-    command: CommandLine,
-    #[serde(
-        default,
-        borrow,
-        alias = "cwd",
-        alias = "workingDirectory",
-        alias = "current_dir"
-    )]
-    workdir: Option<&'a str>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum CommandLine {
-    Line(String),
-    Argv(Vec<String>),
-}
-
-impl CommandLine {
-    fn text(&self) -> String {
-        match self {
-            Self::Line(line) => line.clone(),
-            Self::Argv(argv) => argv.join(" "),
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct StdinInput<'a> {
-    session_id: serde_json::Value,
-    #[serde(default, borrow)]
-    chars: Option<&'a str>,
-}
-
-/// A command line an entry ran, how it stands and the code it exited with:
-/// a `CommandExecution`, or a shell run as a tool call.
+/// A command line an entry ran, how it stands and the code it exited with.
 pub(in crate::chat) struct Ran {
     pub(in crate::chat) command: String,
     pub(in crate::chat) status: ItemStatus,
     pub(in crate::chat) exit_code: Option<i32>,
 }
 
-/// The command `entry` ran, when it ran one; input typed into a command
-/// already running is not one.
+/// The command `entry` ran, when it is a `CommandExecution`.
 pub(in crate::chat) fn ran(entry: &TimelineEntry) -> Option<Ran> {
-    if let EntryContent::Item(ItemContent::CommandExecution {
+    let EntryContent::Item(ItemContent::CommandExecution {
         command,
         exit_code,
         status,
         ..
     }) = &entry.content
-    {
-        return Some(Ran {
-            command: command.clone(),
-            status: *status,
-            exit_code: *exit_code,
-        });
-    }
-    let call = Call::of(entry)?;
-    if !call.named(SHELLS) {
+    else {
         return None;
-    }
-    let input = call.input::<ShellInput<'_>>()?;
-    Some(Ran {
-        command: input.command.text(),
-        status: call.status,
-        exit_code: report(call.output.unwrap_or_default()).exit_code,
-    })
-}
-
-/// A shell call made as a tool, when its input is a command line or input
-/// typed into a running one.
-pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView + 'a>> {
-    if call.named(SHELLS)
-        && let Some(input) = call.input::<ShellInput<'a>>()
-    {
-        return Some(Box::new(ToolShell {
-            command: input.command.text(),
-            workdir: input.workdir,
-            stdin: false,
-        }));
-    }
-    if call.named(STDIN)
-        && let Some(input) = call.input::<StdinInput<'a>>()
-    {
-        let session = match &input.session_id {
-            serde_json::Value::String(id) => id.clone(),
-            other => other.to_string(),
-        };
-        return Some(Box::new(ToolShell {
-            command: match input.chars.filter(|chars| !chars.is_empty()) {
-                Some(chars) => format!("{chars:?}"),
-                None => crate::tr!("tools.session", id = session).into_owned(),
-            },
-            workdir: None,
-            stdin: true,
-        }));
-    }
-    None
-}
-
-struct ToolShell<'a> {
-    command: String,
-    workdir: Option<&'a str>,
-    stdin: bool,
-}
-
-/// A tool shell's result as its harness reports it: some put a header of
-/// `Key: value` lines (`Process exited with code 0`, `Wall time: …`) before
-/// an `Output:` line, then what the command printed.
-pub(in crate::chat) struct Report<'o> {
-    pub(in crate::chat) exit_code: Option<i32>,
-    pub(in crate::chat) wall_ms: Option<u64>,
-    pub(in crate::chat) output: &'o str,
-}
-
-pub(in crate::chat) fn report(output: &str) -> Report<'_> {
-    let mut report = Report {
-        exit_code: None,
-        wall_ms: None,
-        output,
     };
-    let mut offset = 0;
-    for (index, line) in output.split_inclusive('\n').enumerate() {
-        let text = line.trim_end();
-        if text == "Output:" {
-            report.output = &output[offset + line.len()..];
-            return report;
-        }
-        // A header is a handful of short lines; anything else is output.
-        if index >= 8 || !text.contains(':') && !text.starts_with("Process ") {
-            break;
-        }
-        if let Some(code) = text
-            .strip_prefix("Process exited with code ")
-            .or_else(|| text.strip_prefix("Exit code: "))
-        {
-            report.exit_code = code.trim().parse().ok();
-        } else if let Some(seconds) = text
-            .strip_prefix("Wall time: ")
-            .and_then(|rest| rest.strip_suffix(" seconds"))
-        {
-            report.wall_ms = seconds
-                .trim()
-                .parse::<f64>()
-                .ok()
-                .map(|seconds| (seconds * 1_000.) as u64);
-        }
-        offset += line.len();
-    }
-    Report {
-        exit_code: None,
-        wall_ms: None,
-        output,
-    }
-}
-
-impl ToolView for ToolShell<'_> {
-    fn header(&self, call: &Call<'_>, _cwd: &std::path::Path) -> Header {
-        let report = report(call.output.unwrap_or_default());
-        let mut header =
-            command_header(&self.command, report.output, report.exit_code, call.status);
-        if self.stdin {
-            header.verb = Some(Verb("send_input"));
-        }
-        header.elapsed_ms = report.wall_ms;
-        header
-    }
-
-    fn body(&self, call: &Call<'_>, ctx: &mut ToolCtx<'_, '_>) -> AnyElement {
-        shell_body(
-            ShellRun {
-                entry: call.entry,
-                command: &self.command,
-                workdir: self.workdir,
-                output: call.output.unwrap_or_default(),
-                hosted: false,
-                running: call.status == ItemStatus::InProgress,
-            },
-            ctx,
-        )
-    }
-
-    fn copy_items(&self, call: &Call<'_>) -> Vec<(String, String)> {
-        command_copy_items(&self.command, call.output.unwrap_or_default())
-    }
+    Some(Ran {
+        command: command.clone(),
+        status: *status,
+        exit_code: *exit_code,
+    })
 }
 
 /// One run of a command line, as its window's body shows it.
 pub(in crate::chat) struct ShellRun<'a> {
     pub(in crate::chat) entry: &'a TimelineEntry,
     pub(in crate::chat) command: &'a str,
-    pub(in crate::chat) workdir: Option<&'a str>,
     /// What the command printed, as its harness returned it.
     pub(in crate::chat) output: &'a str,
-    /// The host renders the command's screen (a `CommandExecution`); a shell
-    /// run as a tool call has only its text, laid out here into the same grid.
-    pub(in crate::chat) hosted: bool,
     pub(in crate::chat) running: bool,
 }
 
-/// Every shell window's body: where it ran, the command line and what it
-/// printed, all of it, in the terminal grid, which scrolls through it inside
-/// the window's height and follows its end while it grows.
+/// Every shell window's body: the command line and what it printed, all of
+/// it, in the terminal grid, which scrolls through it inside the window's
+/// height and follows its end while it grows. The host lays its screen out
+/// from the whole output it holds, so there is nothing to load.
 pub(in crate::chat) fn shell_body(run: ShellRun<'_>, ctx: &mut ToolCtx<'_, '_>) -> AnyElement {
     let ShellRun {
         entry,
         command,
-        workdir,
         output,
-        hosted,
         running,
     } = run;
-    // The host lays its screen out from the whole output it holds, so a
-    // hosted run has nothing to load. A tool call's text is laid out here:
-    // the record's preview, until the reader loads the rest into the grid.
-    let (full, elided) = if hosted {
-        (Cow::Borrowed(output), None)
-    } else {
-        let (full, elided) = super::full_text(entry, output, ctx);
-        (Cow::Owned(full), elided)
-    };
     let id = entry.id.clone();
     let handlers = output_handlers(&id, ctx);
-    let panel = if hosted {
+    let panel = {
         let session_id = ctx.chat.session_id.clone();
         let panel_id = id.clone();
         let on_cols_change = ctx.cx.listener(move |_this, cols: &u16, window, cx| {
@@ -360,43 +145,15 @@ pub(in crate::chat) fn shell_body(run: ShellRun<'_>, ctx: &mut ToolCtx<'_, '_>) 
             handlers,
             ctx.cx,
         )
-    } else {
-        let panel_id = id.clone();
-        let on_cols_change = ctx.cx.listener(move |_this, cols: &u16, window, cx| {
-            let cols = *cols;
-            let panel_id = panel_id.clone();
-            cx.defer_in(window, move |this, _window, cx| {
-                this.command_panels
-                    .borrow_mut()
-                    .set_local_cols(&panel_id, cols);
-                cx.notify();
-            });
-        });
-        ctx.chat.command_panels.borrow_mut().render_local(
-            entry,
-            command,
-            &full,
-            Box::new(on_cols_change),
-            handlers,
-            ctx.cx,
-        )
     };
     let cx = ctx.app();
-    let workdir = workdir.map(|workdir| {
-        div()
-            .text_meta_mono(false, cx)
-            .child(super::display_path(workdir, ctx.cwd))
-            .into_any_element()
-    });
-    let silent = full.trim().is_empty() && !running;
+    let silent = output.trim().is_empty() && !running;
     v_flex()
         .w_full()
         .min_w_0()
         .gap_1()
         .debug_selector(move || format!("tool-shell-{id}"))
-        .children(workdir)
         .child(panel)
-        .children(elided)
         .when(silent, |body| {
             body.child(
                 div()
@@ -491,9 +248,6 @@ fn output_handlers(id: &str, ctx: &mut ToolCtx<'_, '_>) -> OutputHandlers {
 const DEFAULT_COLS: u16 = 80;
 /// Grid rows one panel shows, command line included.
 const MAX_ROWS: usize = 16;
-/// Rows of output a panel lays out from text at most: a screen and the
-/// scrollback a host's frame of a finished command carries.
-const FRAME_ROWS: usize = MAX_ROWS + tcode_protocol::STORED_OUTPUT_HISTORY;
 
 pub(crate) type ColsChangeHandler = Box<dyn Fn(&u16, &mut Window, &mut App) + 'static>;
 
@@ -560,49 +314,6 @@ impl CommandPanelCache {
             panel.command_model = None;
         }
         panel.render(id, output, screen, on_cols_change, handlers, cx)
-    }
-
-    /// A command whose output is text this client holds, laid out into the
-    /// grid at the width the panel measured.
-    pub(crate) fn render_local(
-        &mut self,
-        entry: &TimelineEntry,
-        command: &str,
-        output: &str,
-        on_cols_change: ColsChangeHandler,
-        handlers: OutputHandlers,
-        cx: &App,
-    ) -> AnyElement {
-        let id = entry.id.as_str();
-        let panel = self.entries.entry(entry.id.clone()).or_default();
-        panel.turn = entry.turn;
-        panel.rendered = true;
-        if panel.command != command {
-            panel.command = command.to_string();
-            panel.command_model = None;
-        }
-        let cols = panel.local_cols.unwrap_or(DEFAULT_COLS);
-        let stamp = (output.len(), cols);
-        if panel
-            .local_frame
-            .as_ref()
-            .is_none_or(|(built, _)| *built != stamp)
-        {
-            panel.local_frame = Some((stamp, Rc::new(text_frame(output, cols))));
-        }
-        let frame = panel.local_frame.as_ref().map(|(_, frame)| frame.clone());
-        let screen = OutputScreen {
-            watched: panel.local_cols,
-            frame: frame.as_ref().filter(|_| !output.is_empty()),
-        };
-        panel.render(id, output, screen, Some(on_cols_change), handlers, cx)
-    }
-
-    /// The width a locally laid-out panel measured itself at.
-    pub(crate) fn set_local_cols(&mut self, id: &str, cols: u16) {
-        if let Some(panel) = self.entries.get_mut(id) {
-            panel.local_cols = Some(cols);
-        }
     }
 
     /// Scrolls `id`'s output by `delta`, up into what scrolled off for a
@@ -747,9 +458,6 @@ struct Panel {
     output_model: Option<OutputModel>,
     shown_rows: Option<usize>,
     resized: bool,
-    /// For a panel laid out here: the width it measured, and its grid.
-    local_cols: Option<u16>,
-    local_frame: Option<((usize, u16), Rc<TerminalFrame>)>,
     /// Where the output's grid was laid out, in the window.
     output_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// Held by the output once a press selects in it, so Copy reaches it.
@@ -931,88 +639,6 @@ impl Panel {
         crate::motion::SizeGlide::new(&self.glide, panel)
             .on_change(landed)
             .into_any_element()
-    }
-}
-
-/// Plain text as a terminal of `cols` columns would show it: wrapped, without
-/// interpreting anything in it, as many of its last rows as a host's frame
-/// carries.
-fn text_frame(text: &str, cols: u16) -> TerminalFrame {
-    let cols = usize::from(cols.max(2));
-    // As a host frames a finished command: its last bytes, from a line's
-    // start, and what comes before counted.
-    let cut = text
-        .len()
-        .saturating_sub(tcode_protocol::STORED_OUTPUT_BYTES);
-    let start = if cut == 0 {
-        0
-    } else {
-        text[text.ceil_char_boundary(cut)..]
-            .find('\n')
-            .map_or(text.len(), |at| text.ceil_char_boundary(cut) + at + 1)
-    };
-    let mut evicted = text[..start].matches('\n').count();
-    let lines: Vec<&str> = text[start..].lines().collect();
-    evicted += lines.len().saturating_sub(FRAME_ROWS);
-    let tail = &lines[lines.len().saturating_sub(FRAME_ROWS)..];
-    let mut visible = Vec::new();
-    for &line in tail {
-        let mut row = TerminalRow::default();
-        let mut col = 0usize;
-        let mut push = |row: &mut TerminalRow, col: &mut usize, text: &str, width: usize| {
-            if *col + width > cols {
-                visible.push(std::mem::replace(
-                    row,
-                    TerminalRow {
-                        wrapped: true,
-                        ..TerminalRow::default()
-                    },
-                ));
-                *col = 0;
-            }
-            row.cells.push(TerminalCell {
-                text: text.to_string(),
-                width: if width == 2 {
-                    CellWidth::Wide
-                } else {
-                    CellWidth::Narrow
-                },
-                ..TerminalCell::default()
-            });
-            if width == 2 {
-                row.cells.push(TerminalCell {
-                    width: CellWidth::Spacer,
-                    ..TerminalCell::default()
-                });
-            }
-            *col += width;
-        };
-        for grapheme in line.graphemes(true) {
-            if grapheme == "\t" {
-                for _ in 0..(8 - col % 8) {
-                    push(&mut row, &mut col, " ", 1);
-                }
-                continue;
-            }
-            let width = grapheme.width().min(2);
-            if width > 0 {
-                push(&mut row, &mut col, grapheme, width);
-            }
-        }
-        visible.push(row);
-    }
-    while visible.last().is_some_and(|row| row.cells.is_empty()) {
-        visible.pop();
-    }
-    let wrapped = visible.len().saturating_sub(FRAME_ROWS);
-    visible.drain(..wrapped);
-    TerminalFrame {
-        cols: cols.min(u16::MAX as usize) as u16,
-        rows: visible.len().min(u16::MAX as usize) as u16,
-        styles: vec![TerminalStyle::default()],
-        visible,
-        lines_evicted: (evicted + wrapped) as u64,
-        ..TerminalFrame::default()
     }
 }
 
