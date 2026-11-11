@@ -5,7 +5,7 @@ mod original_fixture;
 mod real_host;
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::{Value, json};
 use tcode_client::host::{StreamTarget, Transport};
@@ -373,13 +373,8 @@ fn cache_manifest(path: &std::path::Path, name: &str) {
 }
 
 fn wait_relays(device: &DeviceIdentity, wanted: &[&str]) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut seen = device.relays();
-    while seen != wanted && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-        seen = device.relays();
-    }
-    assert_eq!(seen, wanted);
+    let mut relays = device.relay_changes();
+    tcode_traverse::block_on(relays.wait_for(|seen| seen == wanted)).unwrap();
 }
 
 /// A device's relays are those of its machines' Traverse instances: a
@@ -512,7 +507,7 @@ fn an_unreachable_self_hosted_instance_still_lets_the_lan_pair_and_connect() {
     recv_type(&client, "ack", Some(1));
     wait_state(&client, connected_directly);
     assert!(
-        phone.relays().is_empty(),
+        phone.relay_changes().borrow().is_empty(),
         "the device took no relay from anywhere"
     );
     client.to_host.close();
@@ -562,7 +557,10 @@ fn a_parked_link_closes_the_endpoint_and_the_return_delivers_what_was_written_me
     client.to_host.wake(Wake::Reconnect);
     wait_state(&client, syncing_directly);
     recv_type(&client, "ack", Some(2));
-    assert_eq!(phone.relays(), ["https://official.relay.test/"]);
+    assert_eq!(
+        *phone.relay_changes().borrow(),
+        ["https://official.relay.test/"]
+    );
     host.shutdown();
     real_host::stop(runtime, &mux);
 }
