@@ -25,7 +25,10 @@ use latex_rust::{MathBox, MathFont, MathStyle, layout, parse};
 /// How long a value drawn here takes to glide to a new one.
 const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 
-type FormulaCache = RecentCache<(String, bool), Option<Arc<MathBox>>>;
+/// A laid-out formula, or why latex-rust could not parse or lay it out.
+type Formula = Result<Arc<MathBox>, SharedString>;
+
+type FormulaCache = RecentCache<(String, bool), Formula>;
 
 thread_local! {
     static FONT: MathFont = MathFont::stix_two_math().expect("embedded math font must parse");
@@ -40,7 +43,7 @@ pub(super) fn is_math(lang: Option<&str>) -> bool {
     })
 }
 
-fn formula(source: &str, display: bool) -> Option<Arc<MathBox>> {
+fn formula(source: &str, display: bool) -> Formula {
     FORMULAS.with(|cache| {
         cache
             .borrow_mut()
@@ -51,7 +54,10 @@ fn formula(source: &str, display: bool) -> Option<Arc<MathBox>> {
                     } else {
                         MathStyle::Text
                     };
-                    layout(&parse(source).ok()?, font, style).ok().map(Arc::new)
+                    let node = parse(source).map_err(|error| error.to_string())?;
+                    layout(&node, font, style)
+                        .map(Arc::new)
+                        .map_err(|error| error.to_string().into())
                 })
             })
     })
@@ -79,7 +85,10 @@ pub(super) fn block(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let tree = formula(source, true);
+    let (tree, error) = match formula(source, true) {
+        Ok(tree) => (Some(tree), None),
+        Err(error) => (None, Some(error)),
+    };
     selection.set_active(false);
     let show_source = view.read(cx).math_sources.contains(path);
     let compact = crate::window_seam::window_is_compact(window, cx);
@@ -146,11 +155,11 @@ pub(super) fn block(
         .block_mouse_except_scroll()
         .rounded(crate::material::radius_card(cx))
         .bg(cx.theme().tokens.colors.muted)
-        .when(tree.is_none(), |actions| {
+        .when_some(error, |actions, error| {
             actions.pl_2().child(
                 div()
                     .text_secondary(false, cx)
-                    .child(crate::tr!("markdown.math_error").into_owned()),
+                    .child(crate::tr!("markdown.math_error", error = error).into_owned()),
             )
         })
         .children(toggle)
@@ -242,7 +251,7 @@ pub(super) fn inline(
 ) -> AnyElement {
     let show_source = view.read(cx).math_sources.contains(path);
     math.selection.set_active(false);
-    let tree = formula(&math.source, false);
+    let tree = formula(&math.source, false).ok();
     let body = if !show_source && let Some(tree) = &tree {
         math_layout::render(tree, &math.selection, Some(origin), view, cx)
     } else {

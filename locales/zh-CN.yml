@@ -244,7 +244,7 @@ markdown:
   math_show_rendered: "显示渲染结果"
   math_show_source: "显示 LaTeX 源码"
   math_copy: "复制 LaTeX"
-  math_error: "无法渲染"
+  math_error: "无法渲染：%{error}"
   open_image: "打开图片"
   link_open: "打开链接"
   link_copy_address: "复制链接地址"

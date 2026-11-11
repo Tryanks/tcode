@@ -244,7 +244,7 @@ markdown:
   math_show_rendered: "Show rendered formula"
   math_show_source: "Show LaTeX source"
   math_copy: "Copy LaTeX"
-  math_error: "Unable to render"
+  math_error: "Unable to render: %{error}"
   open_image: "Open image"
   link_open: "Open link"
   link_copy_address: "Copy link address"

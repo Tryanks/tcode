@@ -244,7 +244,7 @@ markdown:
   math_show_rendered: "レンダリング結果を表示"
   math_show_source: "LaTeX ソースを表示"
   math_copy: "LaTeX をコピー"
-  math_error: "レンダリングできません"
+  math_error: "レンダリングできません：%{error}"
   open_image: "画像を開く"
   link_open: "リンクを開く"
   link_copy_address: "リンクのアドレスをコピー"
