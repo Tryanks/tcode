@@ -281,22 +281,36 @@ fn instructions_reach_the_provider_at_launch_and_no_turn_carries_them() {
 #[test]
 fn the_agent_tools_are_disclosed_before_the_first_turn() {
     let store = TestStore::new("tcode-pr-tools-disclosed");
+    let threads = [(ProviderKind::ClaudeCode, true), (ProviderKind::Pi, false)].map(
+        |(provider, disclosed)| {
+            let meta = SessionMeta::new(provider, PathBuf::from("/tmp/synthetic-checkout"), None);
+            store.upsert_meta(&meta).unwrap();
+            (provider, meta.id, disclosed)
+        },
+    );
     let mut services = crate::pipe::HostServices::default();
     services.start_mcp_servers(false);
     assert_eq!(services.mcp_unavailable, None);
     let host = crate::pipe::spawn_host((*store).clone(), services).unwrap();
-    for (provider, disclosed) in [(ProviderKind::ClaudeCode, true), (ProviderKind::Pi, false)] {
-        let tools = smol::block_on(host.update_state_for_test(move |state, _| {
-            let meta = SessionMeta::new(provider, PathBuf::from("/tmp/synthetic-checkout"), None);
-            let id = meta.id.clone();
-            state.sessions.push(meta.clone());
-            state
-                .residents
-                .live
-                .insert(id.clone(), ActiveSession::new(meta, false, Vec::new()));
-            state.session_status_snapshot(&id).unwrap().injected_tools
-        }))
+    let link = host.link();
+    let events = crate::pipe::p4b_tests::observed_events(&link);
+    for (provider, id, disclosed) in threads {
+        let topic = Topic::SessionStatus { session_id: id };
+        link.subscribe(tcode_protocol::Subscription {
+            known_index: None,
+            topic: topic.clone(),
+            after: None,
+        })
         .unwrap();
+        let status = loop {
+            let event = events.recv_blocking().unwrap();
+            if event.topic == topic
+                && let tcode_protocol::ServerEvent::SessionStatusReplaced(status) = event.event
+            {
+                break status;
+            }
+        };
+        let tools = status.injected_tools;
         assert_eq!(
             tools.is_some(),
             disclosed,

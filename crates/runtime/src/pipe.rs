@@ -2007,7 +2007,15 @@ mod tests {
             .expect("append empty command output");
         store.upsert_meta(&meta).expect("write meta");
 
-        let host = spawn_host(store, HostServices::default()).expect("spawn host");
+        let provider = crate::app::scripted_provider(agent::ProviderKind::ClaudeCode);
+        let host = spawn_host(
+            store,
+            HostServices {
+                provider_launcher: provider.launcher.clone(),
+                ..HostServices::default()
+            },
+        )
+        .expect("spawn host");
         let link = host.link();
         let events = super::p4b_tests::observed_events(&link);
         let session_topic = Topic::SessionEvents {
@@ -2084,16 +2092,34 @@ mod tests {
         }
         assert_eq!(reply(&topic("empty-output", 40)).rows, 0);
 
-        let session_id = meta.id.clone();
-        let record = |events: Vec<agent::AgentEvent>| {
-            let session_id = session_id.clone();
-            smol::block_on(host.update_state_for_test(move |state, cx| {
-                for (ts, event) in events.iter().enumerate() {
-                    state.record_event_for_replica_test(&session_id, 10 + ts as u64, event, cx);
-                }
-            }))
-            .expect("record provider events");
+        // The thread's harness runs a turn, and what it says is recorded:
+        // the client holding the thread is sent each record.
+        link.command_blocking(Command::SendTurn {
+            session_id: meta.id.clone(),
+            text: "build it".into(),
+            attachment_paths: Vec::new(),
+        })
+        .expect("send");
+        assert!(matches!(
+            crate::app::next_command_blocking(&provider.commands),
+            Ok(agent::SessionCommand::SendTurn { .. })
+        ));
+        let play = |played: Vec<agent::AgentEvent>| {
+            for event in played {
+                provider.events.try_send(event).expect("play the provider");
+            }
         };
+        let record = |played: Vec<agent::AgentEvent>| {
+            let count = played.len();
+            play(played);
+            for _ in 0..count {
+                next_event(&events, |event| {
+                    event.topic == session_topic
+                        && matches!(event.event, ServerEvent::SessionEvent(_))
+                });
+            }
+        };
+
         let delta = |text: &str| agent::AgentEvent::Delta {
             item_id: "run-1".into(),
             kind: agent::DeltaKind::CommandOutput,
@@ -2120,7 +2146,7 @@ mod tests {
             .collect::<Vec<_>>();
         growth.push(delta("100%\n\u{1b}[32mok\u{1b}[0m\n"));
         let deltas = growth.len();
-        record(growth);
+        play(growth);
         // The subscriber holds the answer, so each push is what changed.
         let mut pushes = 0;
         let latest = loop {
