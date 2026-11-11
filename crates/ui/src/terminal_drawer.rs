@@ -923,7 +923,6 @@ impl TerminalDrawer {
         }
     }
 
-    #[cfg(not(test))]
     fn blink(mut interval: Duration, cx: &mut Context<Self>) -> Option<Task<()>> {
         Some(cx.spawn(async move |this, cx| {
             loop {
@@ -944,13 +943,6 @@ impl TerminalDrawer {
                 }
             }
         }))
-    }
-
-    // GPUI's deterministic test scheduler rejects the async-io timer's
-    // background-thread wakeup during window teardown.
-    #[cfg(test)]
-    fn blink(_interval: Duration, _cx: &mut Context<Self>) -> Option<Task<()>> {
-        None
     }
 
     /// The whole lines `pixels` of scrolling (positive toward the history)
