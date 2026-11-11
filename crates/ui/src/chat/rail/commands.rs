@@ -95,13 +95,19 @@ pub(in crate::chat) struct Commands {
 }
 
 impl Commands {
-    /// Lists again the thread's background work but its subagents (the
-    /// Agents card's), from `tasks`, and the commands of `timeline`'s latest
-    /// turn that are not part of it.
+    /// Lists again the thread's background work that is not an agent, from
+    /// `tasks`, and the commands of `timeline`'s latest turn that are not
+    /// part of it. A piece is an agent when its harness says so, whether or
+    /// not it has named the call yet, or when its call is a subagent's: the
+    /// Agents card lists the thread's own, and one a subagent started stands
+    /// in that subagent's thread.
     pub(in crate::chat) fn sync(&mut self, timeline: &Timeline, tasks: &[BackgroundTaskStatus]) {
         let mut background = Vec::new();
         for row in tasks.iter().rev() {
             let task = &row.task;
+            if task.kind == BackgroundKind::Agent {
+                continue;
+            }
             let entry = task
                 .item_id
                 .as_deref()
@@ -427,18 +433,6 @@ fn row(
         line.command.clone()
     };
     let call = line.call.clone();
-    // An agent one of the thread's subagents started, which the harness
-    // lists with the thread's own background work, has no call here: its
-    // row opens its thread.
-    let transcript = line
-        .background
-        .as_ref()
-        .filter(|row| row.task.kind == BackgroundKind::Agent && standing == Some(Standing::Running))
-        .and_then(|row| row.task.item_id.as_deref())
-        .zip(background)
-        .and_then(|(item, (_, place))| {
-            crate::chat::background::transcript(place.store.read(cx), &place.session_id, item)
-        });
     let selector = key.clone();
     crate::material::accessible_clickable(
         h_flex(),
@@ -484,22 +478,8 @@ fn row(
             .children(trailing)
             .child(mark),
     )
-    .map(|row| match (transcript, call) {
-        (Some(mirror), _) => {
-            row.cursor_pointer()
-                .on_click(cx.listener(move |rail, _, window, cx| {
-                    let host = rail.agent_host(cx);
-                    crate::agents_panel::open_agent(
-                        &rail.workspace_store,
-                        mirror.clone(),
-                        host,
-                        None,
-                        window,
-                        cx,
-                    );
-                }))
-        }
-        (None, Some((turn, entry_id))) => {
+    .map(|row| match call {
+        Some((turn, entry_id)) => {
             let background = line.mark == Mark::Background;
             row.cursor_pointer()
                 .on_click(cx.listener(move |rail, _, _, cx| {
@@ -514,7 +494,7 @@ fn row(
                     });
                 }))
         }
-        (None, None) => row,
+        None => row,
     })
     .into_any_element()
 }
@@ -628,5 +608,42 @@ mod tests {
             "{marks:?}"
         );
         assert_eq!(commands.failed, 1);
+    }
+
+    /// The card lists commands only: background work its harness reports as
+    /// an agent is not among them, whether the harness has not named its
+    /// call yet or its call is not in this thread, as for an agent one of
+    /// the thread's subagents started.
+    #[test]
+    fn an_agent_in_the_background_is_not_a_command() {
+        let task = |id: &str, kind, item_id: Option<&str>| BackgroundTaskStatus {
+            task: agent::BackgroundTask {
+                id: id.into(),
+                name: id.into(),
+                kind,
+                item_id: item_id.map(str::to_owned),
+                started_at: 1,
+                started_reported: false,
+            },
+            listed: true,
+            stopping_since: None,
+            ended: false,
+        };
+        let mut commands = Commands::default();
+        commands.sync(
+            &Timeline::default(),
+            &[
+                task("a-unnamed", BackgroundKind::Agent, None),
+                task("a-nested", BackgroundKind::Agent, Some("toolu_nested")),
+                task("b-dev", BackgroundKind::Command, None),
+            ],
+        );
+        let keys: Vec<_> = commands
+            .lines
+            .iter()
+            .map(|line| line.key.as_str())
+            .collect();
+        assert_eq!(keys, ["b-dev"]);
+        assert_eq!(commands.background, 1);
     }
 }
