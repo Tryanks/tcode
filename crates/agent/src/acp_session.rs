@@ -1580,9 +1580,13 @@ fn prompt_blocks(
     instructions: Option<&str>,
 ) -> Vec<acp::ContentBlock> {
     let mut blocks = Vec::with_capacity(2 + attachments.len());
-    blocks.push(acp::ContentBlock::Text(acp::TextContent::new(
-        text.to_string(),
-    )));
+    // A message of pictures alone carries no text block: the schema asks for
+    // none, and an ACP client sends a pasted picture as an image block alone.
+    if !text.is_empty() || attachments.is_empty() {
+        blocks.push(acp::ContentBlock::Text(acp::TextContent::new(
+            text.to_string(),
+        )));
+    }
     for attachment in attachments {
         blocks.push(acp::ContentBlock::Image(acp::ImageContent::new(
             attachment.data_base64.clone(),

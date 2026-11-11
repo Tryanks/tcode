@@ -3554,7 +3554,12 @@ fn snake_case(value: &str) -> String {
 /// first, then one `image` entry per attachment carrying a
 /// `data:<mime>;base64,<data>` URL (the Codex app-server image-input shape).
 fn user_input(text: &str, attachments: &[Attachment]) -> Value {
-    let mut input = vec![json!({ "type": "text", "text": text, "text_elements": [] })];
+    // A message of pictures alone carries no text item, as ChatGPT.app and
+    // Codex's own TUI send one.
+    let mut input = Vec::with_capacity(1 + attachments.len());
+    if !text.is_empty() || attachments.is_empty() {
+        input.push(json!({ "type": "text", "text": text, "text_elements": [] }));
+    }
     for attachment in attachments {
         input.push(json!({
             "type": "image",
