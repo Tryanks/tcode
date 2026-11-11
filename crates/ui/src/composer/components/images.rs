@@ -22,6 +22,9 @@ pub(in super::super) struct PendingImage {
     pub(in super::super) name: String,
     /// Set when fitting shrank the picture the user attached.
     pub(in super::super) scaled: Option<Scaled>,
+    /// Where the user added it among the others: loads finish in any order,
+    /// and the strip and the message keep the order they were given in.
+    pub(in super::super) order: u64,
 }
 
 /// An image's size in pixels before and after fitting shrank it.
@@ -71,6 +74,8 @@ struct PreparedImage {
     bytes: Vec<u8>,
     ext: String,
     scaled: Option<Scaled>,
+    /// The image's place among the pending ones ([`PendingImage::order`]).
+    order: u64,
 }
 
 /// Guess a file extension for a persisted attachment from its MIME type,
@@ -237,6 +242,7 @@ impl Composer {
         let link = store.attachment_link();
         let remote_limit = crate::device::DevicePreferences::remote_attachment_limit_bytes(cx);
         self.pending_image_loads += 1;
+        let order = self.next_image_order();
         cx.notify();
         let generation = self.image_load_generation;
         let result_name = name.clone();
@@ -277,6 +283,7 @@ impl Composer {
                         bytes,
                         ext,
                         scaled,
+                        order,
                     })
                 })
                 .await;
@@ -352,6 +359,21 @@ impl Composer {
         true
     }
 
+    /// The place of the next image the user adds.
+    pub(in super::super) fn next_image_order(&mut self) -> u64 {
+        let order = self.next_image_order;
+        self.next_image_order += 1;
+        order
+    }
+
+    /// Put an image in its place among the pending ones.
+    pub(in super::super) fn insert_pending_image(&mut self, image: PendingImage) {
+        let at = self
+            .pending_images
+            .partition_point(|pending| pending.order < image.order);
+        self.pending_images.insert(at, image);
+    }
+
     /// Whether a load started under `generation` for `session_id` still
     /// belongs to the strip on screen.
     pub(super) fn owns_image_load(&self, generation: u64, session_id: &Option<String>) -> bool {
@@ -396,6 +418,7 @@ impl Composer {
             bytes,
             ext,
             scaled,
+            order,
         } = prepared;
         let task = self.workspace_store.update(cx, |store, cx| {
             store.save_attachment_to_dir(dir, bytes, ext, cx)
@@ -409,9 +432,12 @@ impl Composer {
                 composer.pending_image_loads = composer.pending_image_loads.saturating_sub(1);
                 cx.notify();
                 match result {
-                    Ok(path) => composer
-                        .pending_images
-                        .push(PendingImage { path, name, scaled }),
+                    Ok(path) => composer.insert_pending_image(PendingImage {
+                        path,
+                        name,
+                        scaled,
+                        order,
+                    }),
                     Err(err) => {
                         composer.notify_add_image_error(AddImageError::Persist(err), window, cx)
                     }

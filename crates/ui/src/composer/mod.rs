@@ -244,6 +244,8 @@ pub struct Composer {
     image_load_generation: u64,
     /// Reserved strip slots for image jobs that have not completed yet.
     pending_image_loads: usize,
+    /// The order the next added image takes ([`PendingImage::order`]).
+    next_image_order: u64,
     queued_refill: Option<(String, u64, String)>,
     queue_drag: Option<components::queue_strip::QueueDrag>,
     /// Redraws the composer when an unanswered stop has waited long enough to
@@ -494,6 +496,7 @@ impl Composer {
             images_session: None,
             image_load_generation: 0,
             pending_image_loads: 0,
+            next_image_order: 0,
             queued_refill: None,
             queue_drag: None,
             stop_wait: None,
@@ -606,10 +609,12 @@ impl Composer {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            self.pending_images.push(components::images::PendingImage {
+            let order = self.next_image_order();
+            self.insert_pending_image(components::images::PendingImage {
                 path,
                 name,
                 scaled: None,
+                order,
             });
         }
         let typed = self.input.read(cx).value().trim().to_owned();
