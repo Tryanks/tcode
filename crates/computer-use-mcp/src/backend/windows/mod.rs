@@ -1009,7 +1009,7 @@ fn locate_target(
     }
     if let Some(expected_title) = expected_title.filter(|title| !title.is_empty()) {
         let actual = element.get_name().unwrap_or_default();
-        if !actual.is_empty() && actual != expected_title {
+        if actual != expected_title {
             return Err(backend_error(
                 BackendErrorCode::OperationFailed,
                 "target title changed; call observe_ui again",
