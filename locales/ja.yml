@@ -1566,6 +1566,8 @@ git:
     confirm: "コミット"
     confirm_push: "コミットしてプッシュ"
     confirm_feature: "%{branch} にコミット"
+dialog:
+  ok: "OK"
 toast:
   show_details: "詳細を表示"
   hide_details: "詳細を隠す"

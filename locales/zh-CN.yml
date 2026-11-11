@@ -1559,6 +1559,8 @@ git:
     confirm: "提交"
     confirm_push: "提交并推送"
     confirm_feature: "提交到 %{branch}"
+dialog:
+  ok: "确定"
 toast:
   show_details: "展开详情"
   hide_details: "收起详情"

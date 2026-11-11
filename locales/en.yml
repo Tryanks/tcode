@@ -1566,6 +1566,8 @@ git:
     confirm: "Commit"
     confirm_push: "Commit & push"
     confirm_feature: "Commit on %{branch}"
+dialog:
+  ok: "OK"
 toast:
   show_details: "Show details"
   hide_details: "Hide details"
