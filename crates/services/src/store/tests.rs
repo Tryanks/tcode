@@ -45,15 +45,20 @@ impl Drop for DataDir {
 }
 
 /// A log as older builds wrote it, with every irregularity a real one can
-/// hold: a legacy bare event, CRLF, a blank line, an unparseable line, a line
-/// that is not UTF-8, and a torn last line without its newline.
+/// hold: a legacy bare event, a subagent's own item written into its
+/// parent's log (`ThreadItem.parent_item_id`, crates/agent/src/lib.rs at
+/// v0.1.41; the text is invented), CRLF, a blank line, an unparseable line, a
+/// line that is not UTF-8, and a torn last line without its newline.
 const MIXED_LOG: &[u8] = b"{\"type\":\"turn_started\",\"turn_id\":\"legacy\"}\n\
+{\"ts\":1500,\"event\":{\"type\":\"item_completed\",\"id\":\"spawn:text-1\",\"parent_item_id\":\"spawn\",\"content\":{\"kind\":\"assistant_message\",\"text\":\"child reply\"}}}\n\
 {\"ts\":2000,\"event\":{\"type\":\"turn_completed\",\"turn_id\":\"legacy\",\"status\":\"completed\",\"usage\":null}}\r\n\
 \n\
 {not valid json}\n\
 \xff\xfe{\"type\":\"turn_started\",\"turn_id\":\"not-utf8\"}\n\
 {\"ts\":2500,\"event\":{\"type\":\"turn_started\",\"turn_id\":\"second\"}}\n\
 {\"type\":\"turn_started";
+
+const SUBAGENT_ROW: &str = "{\"ts\":1500,\"event\":{\"type\":\"item_completed\",\"id\":\"spawn:text-1\",\"parent_item_id\":\"spawn\",\"content\":{\"kind\":\"assistant_message\",\"text\":\"child reply\"}}}";
 
 const ORPHAN_LOG: &[u8] =
     b"{\"ts\":1,\"event\":{\"type\":\"turn_started\",\"turn_id\":\"orphan\"}}\n";
@@ -140,12 +145,14 @@ fn assert_fixture_migrated(store: &SessionStore, root: &Path) {
     assert_eq!(store.read_event_log("mixed").unwrap(), MIXED_LOG);
     assert_eq!(store.read_event_log("orphan").unwrap(), ORPHAN_LOG);
     assert!(store.read_event_log("empty").unwrap().is_empty());
-    // A row this build cannot read is read as it is stored, in its place.
+    // A row this build cannot read, or a subagent's item it no longer takes
+    // as the parent's, is read as it is stored, in its place.
     let mixed = store.read_events("mixed").unwrap();
     assert_eq!(
         turn_ids(&mixed),
         [
             (None, "started legacy".to_owned()),
+            (Some(1500), format!("unreadable {SUBAGENT_ROW}")),
             (Some(2000), "completed legacy".to_owned()),
             (None, "unreadable {not valid json}".to_owned()),
             (
@@ -171,6 +178,7 @@ fn assert_fixture_migrated(store: &SessionStore, root: &Path) {
     assert_eq!(
         shown,
         [
+            (0, SUBAGENT_ROW),
             (0, "{not valid json}"),
             (
                 0,

@@ -344,7 +344,9 @@ pub use wire::{
 // Command gains cancel_provider_update, RuntimeToast provider_update_cancelled.
 // ProvidersStatus gains secrets_unreadable.
 // The agent event stream gains unreadable_record {line}: a row of a thread's
-// log the host cannot read is sent as it is stored instead of left out.
+// log the host cannot read is sent as it is stored instead of left out, and so
+// is a subagent's item (with parent_item_id) a build before v0.1.42 wrote
+// into its parent's log.
 // The agent event stream loses plan_resolved, proposed_plan_delta,
 // proposed_plan, model_fallback_detected and turn_blocked, and
 // approval_resolved's decision no longer reads approve, approve_for_session

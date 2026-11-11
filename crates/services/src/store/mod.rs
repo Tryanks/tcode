@@ -1211,11 +1211,25 @@ pub struct EventLog {
 /// The record a row holds for every reader that folds it: what it decodes
 /// to, or else the row as it is stored ([`AgentEvent::UnreadableRecord`]),
 /// timed by its envelope's `ts` when it has one. `None` for a blank row.
+///
+/// A subagent's own item (one with a `parent_item_id`) is read as it is
+/// stored too: builds before v0.1.42 wrote them into the parent thread's log,
+/// and a subagent's items have lived in its own mirror thread since, so no
+/// fold takes them as the parent's.
 pub(crate) fn read_row(line: &[u8]) -> Option<StoredEvent> {
     match decode_row(line) {
+        Ok(Some(record)) if subagent_item(&record.event) => Some(unreadable_row(line)),
         Ok(record) => record,
         Err(_) => Some(unreadable_row(line)),
     }
+}
+
+fn subagent_item(event: &AgentEvent) -> bool {
+    matches!(
+        event,
+        AgentEvent::ItemStarted(item) | AgentEvent::ItemUpdated(item) | AgentEvent::ItemCompleted(item)
+            if item.parent_item_id.is_some()
+    )
 }
 
 fn unreadable_row(line: &[u8]) -> StoredEvent {

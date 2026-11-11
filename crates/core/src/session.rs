@@ -1990,8 +1990,10 @@ impl Timeline {
     }
 
     fn upsert_item(&mut self, ts: Option<u64>, item: &ThreadItem) {
-        // Runtime reroutes native-subagent child items into mirror sessions;
-        // legacy logs still contain them inline — drop, never render.
+        // A subagent's items are its mirror thread's: the runtime reroutes
+        // them, and a row an older build wrote into the parent's log is read
+        // as it is stored (the store's `read_row`). Only a fold of decoded
+        // rows, as compaction makes, still meets one here.
         if item.parent_item_id.is_some() {
             return;
         }
