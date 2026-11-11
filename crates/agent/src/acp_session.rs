@@ -2263,7 +2263,7 @@ impl State {
 fn command_of(tool: &ToolState) -> String {
     tool.raw_input
         .as_ref()
-        .and_then(|input| input.get("command").or_else(|| input.get("cmd")))
+        .and_then(|input| input.get("command"))
         .and_then(|command| match command {
             Value::String(command) => Some(command.clone()),
             Value::Array(parts) => Some(
