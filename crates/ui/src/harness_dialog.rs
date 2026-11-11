@@ -974,7 +974,7 @@ impl HarnessDialog {
     fn confirm_delete(&self, profile_id: String, window: &mut Window, cx: &mut Context<Self>) {
         let store = self.store.clone();
         let endpoint = self.is_endpoint_profile(cx);
-        let (title, body) = delete_confirmation(store.read(cx), &profile_id, endpoint);
+        let (title, body) = delete_confirmation(store.read(cx), &profile_id, self.kind(), endpoint);
         let dialog = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let store = store.clone();
@@ -3038,12 +3038,11 @@ impl Render for HarnessDialog {
 fn delete_confirmation(
     store: &WorkspaceStore,
     profile_id: &str,
+    kind: ProviderKind,
     endpoint: bool,
 ) -> (String, String) {
     let name = store.provider_profile_display_name(profile_id);
-    let default_name = store.provider_profile_display_name(Settings::builtin_profile_id(
-        store.provider_profile_kind(profile_id),
-    ));
+    let default_name = store.provider_profile_display_name(Settings::builtin_profile_id(kind));
     let mut body = if endpoint {
         crate::tr!("providers.harness.delete_endpoint_body").into_owned()
     } else {
@@ -3691,9 +3690,9 @@ mod tests {
         };
         let sessions = vec![thread(Some("work")), thread(Some("work")), thread(None)];
         let host = Host::new(settings, status, sessions, cx);
-        let (title, body) = host
-            .store
-            .read_with(cx, |store, _| delete_confirmation(store, "work", false));
+        let (title, body) = host.store.read_with(cx, |store, _| {
+            delete_confirmation(store, "work", ProviderKind::ClaudeCode, false)
+        });
         assert_eq!(title, "Delete Claude Code (Work)?");
         assert_eq!(
             body,

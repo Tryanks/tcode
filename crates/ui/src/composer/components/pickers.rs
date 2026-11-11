@@ -158,23 +158,25 @@ impl Composer {
             // built-in profiles and other accounts show the official catalog; a
             // third-party profile (e.g. Klaude Kode → Kimi) shows only the models
             // added to its card.
-            PickerRail::Profile(id) => {
-                let kind = store.provider_profile_kind(id);
-                let is_builtin = tcode_core::settings::Settings::is_builtin_profile_id(id);
-                let profile_id = id.clone();
-                store
-                    .picker_models_for_profile(id)
-                    .into_iter()
-                    .map(move |m| ModelRow {
-                        id: m.id,
-                        name: m.name,
-                        provider: kind,
-                        profile_id: (!is_builtin).then(|| profile_id.clone()),
-                        acp: false,
-                        favorite: m.favorite,
-                    })
-                    .collect()
-            }
+            PickerRail::Profile(id) => match store.provider_profile_kind(id) {
+                Some(kind) => {
+                    let is_builtin = tcode_core::settings::Settings::is_builtin_profile_id(id);
+                    let profile_id = id.clone();
+                    store
+                        .picker_models_for_profile(id)
+                        .into_iter()
+                        .map(move |m| ModelRow {
+                            id: m.id,
+                            name: m.name,
+                            provider: kind,
+                            profile_id: (!is_builtin).then(|| profile_id.clone()),
+                            acp: false,
+                            favorite: m.favorite,
+                        })
+                        .collect()
+                }
+                None => Vec::new(),
+            },
             // One row: "use this agent". Its models arrive as ProviderOptions
             // once the session starts and render in the traits picker.
             PickerRail::Acp(id) => store
@@ -819,7 +821,7 @@ fn render_model_pane(
         rail_col = rail_col.item(rail_icon(
             gpui::SharedString::from(format!("rail-acp-{id}")),
             gpui::SharedString::from(name.clone()),
-            Icon::empty().path("icons/box.svg"),
+            crate::provider_card::provider_glyph(ProviderKind::Acp),
             rail == PickerRail::Acp(id.clone()),
             PickerRail::Acp(id.clone()),
         ));

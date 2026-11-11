@@ -2872,14 +2872,15 @@ impl WorkspaceStore {
         self.settings_replica.browser.clone()
     }
 
-    pub fn provider_profile_kind(&self, profile_id: &str) -> agent::ProviderKind {
+    /// The harness of `profile_id`; `None` for a profile the host does not
+    /// list.
+    pub fn provider_profile_kind(&self, profile_id: &str) -> Option<agent::ProviderKind> {
         if let Some(choice) = self.scoped_choice(profile_id) {
-            return choice.provider;
+            return Some(choice.provider);
         }
         self.settings_replica
             .resolved_profile(profile_id)
             .map(|profile| profile.kind)
-            .unwrap_or(agent::ProviderKind::ClaudeCode)
     }
 
     pub fn provider_profile_settings(&self, profile_id: &str) -> ProviderSettings {
@@ -2915,8 +2916,9 @@ impl WorkspaceStore {
     }
 
     fn favorite_ids(&self, profile_id: &str) -> Vec<String> {
-        self.settings_replica
-            .favorite_ids(self.provider_profile_kind(profile_id), profile_id)
+        self.provider_profile_kind(profile_id)
+            .map(|kind| self.settings_replica.favorite_ids(kind, profile_id))
+            .unwrap_or_default()
     }
 
     pub fn provider_profile_display_name(&self, profile_id: &str) -> String {
