@@ -172,9 +172,12 @@ pub(crate) fn composer_state(
                     .iter()
                     .cloned()
                     .map(|mut descriptor| {
-                        let (agent::OptionDescriptor::Select { label, .. }
-                        | agent::OptionDescriptor::Boolean { label, .. }) = &mut descriptor;
-                        *label = crate::i18n::translate_option_name(label);
+                        // A harness's own label is shown as it gave it.
+                        if !status.harness_option_labels {
+                            let (agent::OptionDescriptor::Select { label, .. }
+                            | agent::OptionDescriptor::Boolean { label, .. }) = &mut descriptor;
+                            *label = crate::i18n::translate_option_name(label);
+                        }
                         descriptor
                     })
                     .collect()
@@ -284,6 +287,7 @@ mod tests {
             goal_control: None,
             manual_compaction: false,
             background_control: None,
+            harness_option_labels: false,
             rewind: None,
             fork_at: None,
             queue_held: false,

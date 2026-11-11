@@ -1366,6 +1366,10 @@ impl AppState {
             goal_control: meta.provider.caps().goals,
             manual_compaction: meta.provider.caps().manual_compaction,
             background_control: meta.provider.caps().background,
+            harness_option_labels: matches!(
+                meta.provider.caps().option_descriptors,
+                OptionDescriptors::Wire
+            ),
             stopping: session.interrupt_requested,
             stopping_since: session
                 .interrupt_requested_at

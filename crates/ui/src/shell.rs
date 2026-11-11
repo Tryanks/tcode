@@ -15236,6 +15236,7 @@ pub(crate) mod tests {
             goal_control: None,
             manual_compaction: false,
             background_control: None,
+            harness_option_labels: false,
             rewind: None,
             fork_at: None,
             queue_held: false,

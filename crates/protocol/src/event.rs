@@ -893,6 +893,10 @@ pub struct SessionStatus {
     /// The harness compacts its context when asked.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub manual_compaction: bool,
+    /// The option descriptors' labels are the harness's own words, shown as
+    /// it gave them; otherwise Tcode wrote them, in English.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub harness_option_labels: bool,
     /// What the harness lets a client do with the background work it lists;
     /// none when it lists none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
