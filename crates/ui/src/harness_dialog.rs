@@ -1354,6 +1354,22 @@ impl HarnessDialog {
                     .into_any_element(),
             );
         }
+        if let Some(detail) = snapshot.as_ref().and_then(|snapshot| {
+            crate::provider_status::outdated_detail(&harness_name(store, &self.harness), snapshot)
+        }) {
+            banners.push(
+                crate::material::notice(theme.warning, cx)
+                    .debug_selector(|| "harness-banner-outdated".into())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_secondary(false, cx)
+                            .child(detail),
+                    )
+                    .into_any_element(),
+            );
+        }
         let attention = snapshot.as_ref().is_some_and(|snapshot| {
             snapshot.status == Some(ProviderStatusKind::Warning)
                 && snapshot.diagnostic == Some(ProviderProbeDiagnostic::IndeterminateAuth)
@@ -3553,8 +3569,8 @@ mod tests {
     }
 
     /// What is wrong with a harness is said at the top of its settings: off,
-    /// failing to run, out of date; and a harness whose CLI is missing shows
-    /// only how to install it.
+    /// failing to run, older than Tcode supports, out of date; and a harness
+    /// whose CLI is missing shows only how to install it.
     #[gpui::test]
     fn states_show_as_banners_and_a_missing_cli_as_its_install(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -3582,6 +3598,14 @@ mod tests {
                 ..ProviderSnapshot::default()
             },
         );
+        status.provider_snapshots.insert(
+            "opencode".into(),
+            ProviderSnapshot {
+                version: Some("1.19.5".into()),
+                supported_from: Some("2.0.6".into()),
+                ..ready(None, None)
+            },
+        );
         status.provider_versions.insert(
             ProviderKind::Codex,
             ProviderVersionStatus {
@@ -3607,7 +3631,12 @@ mod tests {
             (
                 ProviderKind::Codex,
                 &["harness-banner-update"][..],
-                &["harness-banner-disabled"][..],
+                &["harness-banner-disabled", "harness-banner-outdated"][..],
+            ),
+            (
+                ProviderKind::OpenCode,
+                &["harness-banner-outdated"][..],
+                &["harness-banner-failed", "harness-install"][..],
             ),
             (
                 ProviderKind::Cursor,

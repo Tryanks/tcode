@@ -986,6 +986,8 @@ providers:
     not_found: "`%{binary}` is not on PATH on this machine."
     not_installed: "Not installed"
     other_env: "Other environment variables"
+    outdated: "Older than supported"
+    outdated_detail: "%{name} %{version} is older than %{supported}, the oldest version Tcode supports. It may not work correctly with Tcode."
     own_override: "This account only, unlike its Harness"
     plugins: "Plugins"
     plugins_help: "Install, turn on and update them in Plugins"

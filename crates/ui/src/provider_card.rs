@@ -34,6 +34,8 @@ pub(crate) enum Trouble {
     Failed,
     SignedOut,
     NeedsAttention,
+    /// Older than the oldest release Tcode supports.
+    Outdated,
 }
 
 /// A harness row's second line and its chip, from the host's description
@@ -78,6 +80,12 @@ pub(crate) fn row_summary(
                     Some(Trouble::NeedsAttention)
                 }
                 _ => None,
+            })
+            .or_else(|| {
+                builtin
+                    .supported_from
+                    .is_some()
+                    .then_some(Trouble::Outdated)
             })
     };
     let line = if !enabled {
@@ -157,6 +165,11 @@ pub(crate) fn harness_row(
             ),
             Trouble::NeedsAttention => (
                 "providers.status.needs_attention",
+                theme.warning,
+                theme.warning_foreground,
+            ),
+            Trouble::Outdated => (
+                "providers.harness.outdated",
                 theme.warning,
                 theme.warning_foreground,
             ),
@@ -281,4 +294,54 @@ pub fn profile_glyph(
     let profile_id =
         profile_id.unwrap_or_else(|| tcode_core::settings::Settings::builtin_profile_id(provider));
     provider_glyph(provider).text_color(rgb(store.provider_profile_color(profile_id)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tcode_core::provider_status::ProviderAuth;
+
+    /// A harness whose CLI is older than Tcode supports says so on its row
+    /// when nothing more pressing is wrong; a signed-out account still is.
+    #[test]
+    fn an_older_cli_marks_its_row_unless_something_else_is_wrong() {
+        let settings = tcode_core::settings::Settings::default();
+        let profile = settings
+            .resolved_profile(tcode_core::settings::Settings::builtin_profile_id(
+                ProviderKind::Codex,
+            ))
+            .unwrap();
+        let probed = |auth: AuthStatus| ProviderSnapshot {
+            checked_at: Some(1),
+            installed: true,
+            version: Some("0.140.2".into()),
+            status: Some(ProviderStatusKind::Ready),
+            auth: Some(ProviderAuth {
+                status: auth,
+                label: None,
+                email: None,
+            }),
+            supported_from: Some("0.148.0".into()),
+            ..ProviderSnapshot::default()
+        };
+        let trouble = |snapshot: ProviderSnapshot| {
+            row_summary(
+                &HarnessDescription::native(ProviderKind::Codex),
+                &[(profile.clone(), Some(snapshot))],
+                true,
+            )
+            .1
+        };
+        assert_eq!(
+            trouble(probed(AuthStatus::Authenticated)),
+            Some(Trouble::Outdated)
+        );
+        assert_eq!(
+            trouble(ProviderSnapshot {
+                diagnostic: Some(ProviderProbeDiagnostic::Unauthenticated),
+                ..probed(AuthStatus::Unauthenticated)
+            }),
+            Some(Trouble::SignedOut)
+        );
+    }
 }

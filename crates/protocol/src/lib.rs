@@ -352,6 +352,8 @@ pub use wire::{
 // and reviewer); Codex's current permissions carry a summary, not a
 // description.
 // SessionStatus gains goal_control and manual_compaction.
+// ProviderSnapshot gains supported_from, the oldest release Tcode supports,
+// present when the probed CLI is older.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

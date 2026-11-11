@@ -979,6 +979,8 @@ providers:
     not_found: "未在此主机的 PATH 中找到 `%{binary}`。"
     not_installed: "未安装"
     other_env: "其他环境变量"
+    outdated: "版本过旧"
+    outdated_detail: "%{name} %{version} 早于 Tcode 支持的最低版本 %{supported}，可能无法与 Tcode 正常配合。"
     own_override: "仅此账号，与 Harness 不同"
     plugins: "插件"
     plugins_help: "在「插件」中安装、启用和更新"

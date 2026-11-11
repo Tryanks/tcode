@@ -32,6 +32,21 @@ pub fn redact_email(email: &str) -> String {
     format!("{head}{local_mask}@{domain_mask}")
 }
 
+/// That the CLI `name` the snapshot probed is older than the oldest release
+/// Tcode supports, when the host found it so.
+pub fn outdated_detail(name: &str, snapshot: &ProviderSnapshot) -> Option<String> {
+    let supported = snapshot.supported_from.as_deref()?;
+    Some(
+        crate::tr!(
+            "providers.harness.outdated_detail",
+            name = name,
+            version = snapshot.version.as_deref().unwrap_or_default(),
+            supported = supported
+        )
+        .into_owned(),
+    )
+}
+
 /// What a probe found, as a harness's settings explain it: the host's own
 /// message when it sent one, else its diagnostic in words the harness's
 /// description fills in.

@@ -986,6 +986,8 @@ providers:
     not_found: "このマシンの PATH に `%{binary}` が見つかりません。"
     not_installed: "未インストール"
     other_env: "その他の環境変数"
+    outdated: "サポート対象より古い"
+    outdated_detail: "%{name} %{version} は Tcode がサポートする最も古いバージョン %{supported} より古いため、Tcode で正しく動作しない可能性があります。"
     own_override: "このアカウントのみ（ハーネスと異なる）"
     plugins: "プラグイン"
     plugins_help: "「プラグイン」でインストール、有効化、更新"
