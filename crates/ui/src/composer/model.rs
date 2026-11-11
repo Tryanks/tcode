@@ -434,7 +434,7 @@ pub(super) fn context_label(usage: Option<TokenUsage>) -> String {
     match usage {
         Some(u) => {
             let window = u.context_window;
-            let used = u.used_tokens.or(u.input_tokens);
+            let used = u.used_tokens;
             match (used, window) {
                 (Some(used), Some(window)) => {
                     format!(

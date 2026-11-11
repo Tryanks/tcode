@@ -144,6 +144,9 @@ impl Dialect for Registry {
         result: Result<acp::PromptResponse, acp::Error>,
     ) -> TurnEnd {
         let (status, message) = prompt_status(&result);
+        // The prompt result counts the session's tokens; how much of the
+        // window is in use is only ever what the last `usage_update` said.
+        let context = state.usage();
         let usage = result
             .ok()
             .and_then(|response| response.usage)
@@ -153,10 +156,12 @@ impl Dialect for Registry {
                 input_tokens: Some(usage.input_tokens),
                 cached_input_tokens: usage.cached_read_tokens,
                 output_tokens: Some(usage.output_tokens),
+                used_tokens: context.and_then(|context| context.used_tokens),
+                context_window: context.and_then(|context| context.context_window),
+                cost_usd: context.and_then(|context| context.cost_usd),
                 ..TokenUsage::default()
             })
-            // Fall back to the live context-window figure from `usage_update`.
-            .or_else(|| state.usage());
+            .or(context);
         TurnEnd {
             status,
             message,
@@ -316,4 +321,46 @@ fn auth_hint(agent: &AcpAgent, init: &acp::InitializeResponse) -> String {
         "`{}` requires authentication.{offered} Sign in with the agent's own CLI, or set its API-key environment variables in Settings → Harnesses → {}.",
         agent.name, agent.name
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ACP's `session/prompt` result counts tokens (`PromptResponse.usage`,
+    /// unstable `end_turn_token_usage`); how much of the window is in use is
+    /// `usage_update`'s `used` and `size` (agent-client-protocol-schema 1.5.0,
+    /// `v1/agent.rs` `Usage`, `v1/client.rs` `UsageUpdate`). The turn's usage
+    /// replaces the session's, so it carries the window on.
+    #[test]
+    fn a_turn_end_keeps_the_window_the_last_usage_update_reported() {
+        let registry = Registry {
+            agent: AcpAgent {
+                id: "agent".into(),
+                name: "Agent".into(),
+                launch: AcpLaunch::Custom {
+                    command: "agent".into(),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                },
+            },
+        };
+        let mut state = State::new(PathBuf::from("/workspace"));
+        state.apply_update(
+            serde_json::from_value(
+                json!({"sessionUpdate": "usage_update", "used": 1200, "size": 200000}),
+            )
+            .unwrap(),
+        );
+        let response = serde_json::from_value(json!({
+            "stopReason": "end_turn",
+            "usage": {"totalTokens": 9000, "inputTokens": 8000, "outputTokens": 1000}
+        }))
+        .unwrap();
+        let usage = registry.turn_end(&mut state, Ok(response)).usage.unwrap();
+        assert_eq!(usage.used_tokens, Some(1200));
+        assert_eq!(usage.context_window, Some(200_000));
+        assert_eq!(usage.input_tokens, Some(8000));
+        assert_eq!(usage.total_processed_tokens, Some(9000));
+    }
 }
