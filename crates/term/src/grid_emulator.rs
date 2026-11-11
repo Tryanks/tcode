@@ -506,7 +506,6 @@ impl GridEmulator {
             visible_rows,
             history_rows,
             row_damage,
-            damage,
             cursor_state,
             cursor,
             cursor_blinking,
@@ -626,14 +625,11 @@ mod tests {
         let snapshot = emulator.snapshot_since(0, 0);
         assert!(snapshot.row_damage[0]);
         assert!(snapshot.row_damage[1..].iter().all(|damaged| !damaged));
-        assert_eq!(snapshot.damage, TerminalDamage::Partial);
         let idle = emulator.snapshot_since(0, 0);
-        assert_eq!(idle.damage, TerminalDamage::Noop);
         assert!(idle.row_damage.iter().all(|damaged| !damaged));
 
         emulator.clear();
         let cleared = emulator.snapshot_since(0, 0);
-        assert_eq!(cleared.damage, TerminalDamage::Full);
         assert!(cleared.row_damage.iter().all(|damaged| *damaged));
         assert_eq!(cleared.history_size, 0);
     }
