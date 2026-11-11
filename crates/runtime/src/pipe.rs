@@ -1039,6 +1039,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::RegenerateSessionTitle { session_id } => {
             app.regenerate_session_title(&session_id, cx)
         }
+        Command::CancelTitleGeneration { session_id } => app.cancel_title_generation(&session_id),
         Command::ForkThread { id, at: None } => match app.fork_thread(&id, cx) {
             Ok(forked) => response = CommandResponse::SessionId(Some(forked)),
             Err(refusal) => {

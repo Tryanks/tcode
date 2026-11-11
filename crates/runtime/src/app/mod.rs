@@ -85,7 +85,6 @@ use tcode_services::worktree::{
 
 const TITLE_MAX_CHARS: usize = 40;
 const TITLE_SOURCE_MAX_CHARS: usize = 8_000;
-const AI_TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 /// Anthropic's prompt cache expires after one hour, so a provider kept longer
 /// cannot preserve a useful cached conversation prefix.
 const RESIDENT_IDLE_GRACE: Duration = Duration::from_secs(60 * 60);
@@ -437,7 +436,8 @@ pub struct AppState {
     /// Kept off in unit tests so dispatching a synthetic turn never launches a
     /// real provider process. Production titles are generated in the background.
     ai_title_generation_enabled: bool,
-    title_generating: Revisioned<HashSet<String>>,
+    /// Titles being generated, by thread.
+    title_generating: Revisioned<HashMap<String, events::TitleGeneration>>,
     provider_launcher: ProviderLauncher,
     /// The ACP agent marketplace: the registry index (from the CDN, cached on
     /// disk with a one-hour TTL), whether a refresh is in flight, and the last

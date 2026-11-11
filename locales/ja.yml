@@ -408,7 +408,7 @@ sidebar:
   reveal_project: "Finder で表示"
   ctx_rename: "スレッドの名前を変更"
   ctx_regenerate_title: "タイトルを再生成"
-  ctx_regenerating_title: "再生成中…"
+  ctx_stop_title: "タイトルの生成を中止"
   ctx_fork: "フォーク"
   ctx_merge_worktree: "プロジェクトディレクトリにマージ"
   ctx_move_thread: "プロジェクトに移動…"

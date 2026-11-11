@@ -461,6 +461,10 @@ impl WorkspaceStore {
     pub fn regenerate_session_title(&mut self, session_id: String) {
         self.dispatch(Command::RegenerateSessionTitle { session_id });
     }
+
+    pub fn cancel_title_generation(&mut self, session_id: String) {
+        self.dispatch(Command::CancelTitleGeneration { session_id });
+    }
     pub fn fork_thread(&mut self, id: String, cx: &mut Context<Self>) {
         self.create_and_show(Command::ForkThread { id, at: None }, true, cx);
     }

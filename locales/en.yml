@@ -408,7 +408,7 @@ sidebar:
   reveal_project: "Reveal in Finder"
   ctx_rename: "Rename thread"
   ctx_regenerate_title: "Regenerate title"
-  ctx_regenerating_title: "Regenerating…"
+  ctx_stop_title: "Stop generating title"
   ctx_fork: "Fork"
   ctx_merge_worktree: "Merge back"
   ctx_move_thread: "Move to project…"

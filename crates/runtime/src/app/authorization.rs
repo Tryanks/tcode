@@ -393,6 +393,7 @@ impl AppState {
                 | Command::MoveToBackground { session_id, .. }
                 | Command::ForceTerminate { session_id }
                 | Command::RenameSession { session_id, .. }
+                | Command::CancelTitleGeneration { session_id }
                 | Command::ArchiveSession { session_id }
                 | Command::UnarchiveSession { session_id }
                 | Command::SettleChildren { session_id }

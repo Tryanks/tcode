@@ -408,7 +408,7 @@ sidebar:
   reveal_project: "在访达中显示"
   ctx_rename: "重命名线程"
   ctx_regenerate_title: "重新生成标题"
-  ctx_regenerating_title: "正在重新生成…"
+  ctx_stop_title: "停止生成标题"
   ctx_fork: "派生线程"
   ctx_merge_worktree: "合并回项目目录"
   ctx_move_thread: "移动到项目…"

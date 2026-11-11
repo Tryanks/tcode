@@ -707,7 +707,7 @@ impl AppState {
     fn build_index_summary(&self) -> IndexSummary {
         let activity = ActivityProjection::new(self);
         let mut summary = IndexSummary {
-            title_generating: self.title_generating.clone(),
+            title_generating: self.title_generating.keys().cloned().collect(),
             archived_revision: self.archived_revision,
             ..IndexSummary::default()
         };
@@ -826,7 +826,7 @@ impl AppState {
                 meta.id.clone(),
                 activity.session_activity(resident.map_or(meta, |s| &s.meta), resident),
             );
-            if self.title_generating.contains(&meta.id) {
+            if self.title_generating.contains_key(&meta.id) {
                 summary.title_generating.insert(meta.id.clone());
             }
             if meta.worktree.is_some()

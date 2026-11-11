@@ -281,6 +281,7 @@ impl AppState {
                 | Command::UnarchiveSession { .. }
                 | Command::RenameSession { .. }
                 | Command::RegenerateSessionTitle { .. }
+                | Command::CancelTitleGeneration { .. }
                 | Command::DeleteSession { .. }
                 | Command::MarkSessionUnread { .. }
                 | Command::MarkSessionRead { .. }

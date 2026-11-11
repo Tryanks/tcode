@@ -528,6 +528,9 @@ struct ThreadRename(ThreadKey);
 struct ThreadRegenerateTitle(ThreadKey);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_thread, no_json)]
+struct ThreadStopTitle(ThreadKey);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
 struct ThreadFork(ThreadKey);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_thread, no_json)]
@@ -1941,6 +1944,14 @@ impl SessionsSidebar {
         if let Some(store) = self.store_of(&action.0.host) {
             store.update(cx, |store, _| {
                 store.regenerate_session_title(action.0.session_id.clone());
+            });
+        }
+    }
+
+    fn on_stop_title(&mut self, action: &ThreadStopTitle, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(store) = self.store_of(&action.0.host) {
+            store.update(cx, |store, _| {
+                store.cancel_title_generation(action.0.session_id.clone());
             });
         }
     }
@@ -4384,15 +4395,18 @@ impl SessionsSidebar {
                     crate::tr!("sidebar.ctx_rename").into_owned(),
                     Box::new(ThreadRename(id.clone())),
                 )
-                .menu_with_enable(
-                    if title_generating {
-                        crate::tr!("sidebar.ctx_regenerating_title").into_owned()
-                    } else {
-                        crate::tr!("sidebar.ctx_regenerate_title").into_owned()
-                    },
-                    Box::new(ThreadRegenerateTitle(id.clone())),
-                    !title_generating,
-                )
+                .when(title_generating, |menu| {
+                    menu.menu(
+                        crate::tr!("sidebar.ctx_stop_title").into_owned(),
+                        Box::new(ThreadStopTitle(id.clone())),
+                    )
+                })
+                .when(!title_generating, |menu| {
+                    menu.menu(
+                        crate::tr!("sidebar.ctx_regenerate_title").into_owned(),
+                        Box::new(ThreadRegenerateTitle(id.clone())),
+                    )
+                })
                 .when(can_fork, |menu| {
                     menu.menu(
                         crate::tr!("sidebar.ctx_fork").into_owned(),
@@ -5791,6 +5805,7 @@ impl SessionsSidebar {
             .on_action(cx.listener(Self::on_link_pull_request))
             .on_action(cx.listener(Self::on_rename))
             .on_action(cx.listener(Self::on_regenerate_title))
+            .on_action(cx.listener(Self::on_stop_title))
             .on_action(cx.listener(Self::on_fork))
             .on_action(cx.listener(Self::on_merge_worktree))
             .on_action(cx.listener(Self::on_move_to_project))
@@ -6823,6 +6838,7 @@ impl Render for SessionsSidebar {
         .on_action(cx.listener(Self::on_link_pull_request))
         .on_action(cx.listener(Self::on_rename))
         .on_action(cx.listener(Self::on_regenerate_title))
+        .on_action(cx.listener(Self::on_stop_title))
         .on_action(cx.listener(Self::on_fork))
         .on_action(cx.listener(Self::on_merge_worktree))
         .on_action(cx.listener(Self::on_move_to_project))

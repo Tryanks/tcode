@@ -478,6 +478,10 @@ pub enum Command {
     RegenerateSessionTitle {
         session_id: String,
     },
+    /// Stop generating the thread's title; the title stays as it is.
+    CancelTitleGeneration {
+        session_id: String,
+    },
     /// Fork the whole thread, or what came before the message `at` names.
     /// With `at`, holding everything through a finished turn.
     ForkThread {
@@ -785,6 +789,7 @@ impl Command {
             | Self::UnarchiveSession { session_id, .. }
             | Self::RenameSession { session_id, .. }
             | Self::RegenerateSessionTitle { session_id }
+            | Self::CancelTitleGeneration { session_id }
             | Self::DeleteSession { session_id, .. }
             | Self::MergeWorktree { session_id, .. }
             | Self::MarkSessionUnread { session_id, .. }
