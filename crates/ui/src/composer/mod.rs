@@ -2340,6 +2340,21 @@ mod replica_tests {
         async_channel::Receiver<String>,
         SessionStatus,
     ) {
+        let (store, incoming, outgoing, status, _) = attach_over(attachment, cx);
+        (store, incoming, outgoing, status)
+    }
+
+    /// [`attach_as`], with the link the transport reports its path on.
+    fn attach_over(
+        attachment: crate::store::WorkspaceAttachment,
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<WorkspaceStore>,
+        async_channel::Sender<String>,
+        async_channel::Receiver<String>,
+        SessionStatus,
+        tcode_client::HostLink,
+    ) {
         cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let root = crate::store::tests::scratch_root("composer-replica");
@@ -2364,12 +2379,13 @@ mod replica_tests {
                 pump.pump().await;
             })
             .detach();
-        let store = cx.new(|cx| WorkspaceStore::new_attached(link, attachment, None, None, cx));
+        let store =
+            cx.new(|cx| WorkspaceStore::new_attached(link.clone(), attachment, None, None, cx));
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
         store.update(cx, |store, cx| {
             store.show_alone(status.session_id.clone(), cx)
         });
-        (store, incoming, outgoing, status)
+        (store, incoming, outgoing, status, link)
     }
 
     /// A composer in a window, seeded with its thread's status, ready to send.
@@ -2656,25 +2672,51 @@ mod replica_tests {
     }
 
     /// A folder has no remote path to carry, and a file over the device's
-    /// ceiling never leaves a link that cannot be trusted with it.
+    /// ceiling never leaves a link that cannot be trusted with it: one whose
+    /// path is not known yet, or a relay. On the machine's own network it
+    /// goes.
     #[gpui::test]
     fn a_remote_client_refuses_folders_and_files_over_the_link_ceiling(cx: &mut TestAppContext) {
-        let (store, incoming, outgoing, status) = attach_as(remote(), cx);
-        let root = crate::store::tests::scratch_root("composer-remote-refused");
-        std::fs::create_dir_all(&root).unwrap();
-        let large = root.join("large.bin");
-        std::fs::File::create(&large)
-            .unwrap()
-            .set_len(tcode_core::attachments::DEFAULT_REMOTE_BYTES + 1)
-            .unwrap();
-        let (_composer, cx) = composer_on(&store, &incoming, status, cx);
-        drop_paths(vec![root.clone(), large], cx);
-        assert!(cx.debug_bounds("attached-file-0").is_none());
-        assert_eq!(
-            answer_upload(&outgoing, &incoming, |_| Err("unexpected".into())),
-            None
-        );
-        let _ = std::fs::remove_dir_all(root);
+        let path = |direct, lan| tcode_protocol::PathInfo {
+            direct,
+            relay: (!direct).then(|| "https://relay.example.invalid".into()),
+            lan,
+            probing_direct: false,
+        };
+        for (path, attached) in [
+            (None, false),
+            (Some(path(false, false)), false),
+            (Some(path(true, true)), true),
+        ] {
+            let (store, incoming, outgoing, status, link) = attach_over(remote(), cx);
+            if let Some(path) = path.clone() {
+                link.set_connection_state(tcode_client::ConnectionState::Connected {
+                    path: Some(path),
+                });
+            }
+            let root = crate::store::tests::scratch_root("composer-remote-refused");
+            std::fs::create_dir_all(&root).unwrap();
+            let large = root.join("large.bin");
+            std::fs::File::create(&large)
+                .unwrap()
+                .set_len(tcode_core::attachments::DEFAULT_REMOTE_BYTES + 1)
+                .unwrap();
+            let (_composer, cx) = composer_on(&store, &incoming, status, cx);
+            drop_paths(vec![root.clone(), large], cx);
+            assert_eq!(
+                cx.debug_bounds("attached-file-0").is_some(),
+                attached,
+                "{path:?}"
+            );
+            assert!(cx.debug_bounds("attached-file-1").is_none(), "{path:?}");
+            if !attached {
+                assert_eq!(
+                    answer_upload(&outgoing, &incoming, |_| Err("unexpected".into())),
+                    None
+                );
+            }
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     fn replace(incoming: &async_channel::Sender<String>, topic: Topic, event: ServerEvent) {
