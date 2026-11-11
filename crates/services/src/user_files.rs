@@ -205,9 +205,13 @@ impl UserDirectories {
         Ok(documents.join("Tcode"))
     }
 
-    pub fn scratch_directory(&self) -> std::io::Result<(PathBuf, PathBuf)> {
+    /// The scratch root and its folder for `today`, the host's local date.
+    pub fn scratch_directory(
+        &self,
+        today: chrono::NaiveDate,
+    ) -> std::io::Result<(PathBuf, PathBuf)> {
         let root = self.scratch_root()?;
-        let daily = root.join(chrono::Local::now().date_naive().to_string());
+        let daily = root.join(today.to_string());
         create_directory(&daily)?;
         Ok((root, daily))
     }
@@ -215,8 +219,13 @@ impl UserDirectories {
     /// Reserve an empty host file for an upload to `session_id`, in today's
     /// scratch directory, which is also where quick threads work. Every
     /// upload has a folder of its own so it keeps the name the user gave it.
-    pub fn reserve_upload(&self, session_id: &str, name: &str) -> io::Result<PathBuf> {
-        let (_, daily) = self.scratch_directory()?;
+    pub fn reserve_upload(
+        &self,
+        session_id: &str,
+        name: &str,
+        today: chrono::NaiveDate,
+    ) -> io::Result<PathBuf> {
+        let (_, daily) = self.scratch_directory(today)?;
         let folder = daily
             .join(UPLOADS_DIR)
             .join(session_id)

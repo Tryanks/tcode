@@ -694,7 +694,8 @@ impl AppState {
 
     pub fn start_scratch_draft(&self, cx: &HostCx) -> HostTask<Result<String, ProtocolError>> {
         let directories = self.user_directories.clone();
-        let task = cx.unblock(move || directories.scratch_directory());
+        let today = cx.clock().today();
+        let task = cx.unblock(move || directories.scratch_directory(today));
         let host = cx.clone();
         cx.spawn_background(async move {
             let (root, cwd) = task.await.map_err(project_directory_error)?;

@@ -1468,7 +1468,8 @@ fn dispatch_query(
                 return cx.spawn_background(async { Err(upload_refused("unknown thread")) });
             }
             let directories = app.user_directories().clone();
-            let task = cx.unblock(move || directories.reserve_upload(&session_id, &name));
+            let today = cx.clock().today();
+            let task = cx.unblock(move || directories.reserve_upload(&session_id, &name, today));
             cx.spawn_background(async move {
                 task.await
                     .map(QueryResponse::UploadBegun)

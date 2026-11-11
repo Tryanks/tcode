@@ -50,6 +50,11 @@ impl HostClock {
         self.unix_millis() / 1000
     }
 
+    /// The date the wall time falls on in the host's time zone.
+    pub fn today(&self) -> chrono::NaiveDate {
+        chrono::DateTime::<chrono::Local>::from(self.wall()).date_naive()
+    }
+
     /// Ready once this clock reaches `at`.
     pub fn timer_at(&self, at: Instant) -> HostTimer {
         match &self.0 {
