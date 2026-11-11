@@ -3715,20 +3715,34 @@ fn a_follow_up_to_an_unloaded_subagent_is_not_answered_by_its_earlier_report() {
 fn send_to_child_whose_cwd_was_removed_reports_the_start_failure() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-send-missing-cwd-test");
+    let cwd = test_store.root().join("child");
+    std::fs::create_dir_all(&cwd).unwrap();
+    run_git(&cwd, &["init", "-b", "main"]).unwrap();
     let fleet = Fleet::new(cx, &test_store, ProviderKind::Codex, &["child"], |meta| {
         meta.project_id = Some("project".into());
     });
+    // Windows refuses to remove a directory a process is working in, and the
+    // host runs git in the child's directory when it starts and when a turn
+    // ends; in use, the idle grace outlasts both. The read at the start sees
+    // a clean tree, the one at the turn's end the child's work.
+    cx.run_until(|state| state.git_status.contains_key("child"));
+    std::fs::write(cwd.join("part.txt"), "done\n").unwrap();
     let child = fleet.child("child");
     child.play([
         report_result_event("rep-1", "old report"),
         completed_turn("turn-1"),
     ]);
     assert!(fleet.lead.next_steer(cx).ends_with("\nold report"));
+    cx.run_until(|state| {
+        matches!(
+            state.git_status.get("child"),
+            Some(Ok(status)) if status.has_working_tree_changes
+        )
+    });
 
     // Its harness has been idle for as long as the host keeps one.
     cx.clock.advance(RESIDENT_IDLE_GRACE);
     assert!(matches!(child.next_command(cx), SessionCommand::Shutdown));
-    let cwd = fleet.root.join("child");
     std::fs::remove_dir_all(&cwd).unwrap();
     // What `agent::start_session` says of a directory that is gone.
     fleet.providers.refuse_in(
