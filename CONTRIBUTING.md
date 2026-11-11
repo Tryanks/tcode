@@ -393,8 +393,9 @@ exercises the behaviour, never a seam only the test uses; assertions exercise
 production logic, not an algorithm recreated in the test. Library and upstream
 behaviour, constant/getter wiring and repeated happy paths need a
 project-specific reason to be tested. When removing or merging tests, say which
-coverage was redundant and where any remaining contract is still covered. For a
-bug fix, show the regression test fails without the fix when practical. Test
+coverage was redundant and where any remaining contract is still covered. A
+bug fix needs no test of its own; one is added only where the fix shows a
+decision Tcode makes had none, and it fails without the fix. Test
 counts and deleted line counts are not quality targets. When a test's value is
 in doubt, or when auditing or pruning tests, follow the
 [`test-audit` skill](.agents/skills/test-audit/SKILL.md); for a test that

@@ -423,6 +423,15 @@ next round, not a reason to keep the timeouts for good.
   codebase as it stands: you carry on its old inertia without telling good
   from bad, and the old bad inertia is exactly what I want gone."
 
+On tests kept because a defect was once fixed, and on a test said to hold the
+motion the maintainer chose out of three prototypes:
+
+> A bug is fixed, not fixed and then given a regression test. As long as the
+> motion is right, and after several rounds it is, there is no need for a
+> test to guard it. I did choose one of three. So what? What has that to do
+> with a test? It cannot be there to make sure the animation is the one I
+> chose and not one of two that do not exist. — the maintainer
+
 ## Defects met on the way
 
 Not defences; fixed or reported as their own entries.

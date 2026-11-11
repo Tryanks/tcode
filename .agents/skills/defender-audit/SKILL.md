@@ -165,8 +165,13 @@ they were, whether a source is shown as it gave itself. A test of how a
 primitive behaves is a test of the dependency (Principle 6): how a scroll
 bounces, which rows a virtual list builds, how a dock divides a width, what
 path an animation takes. So is a test of serde's round trip, of git's own
-status, of a terminal library's parsing. These are deleted; the ones with an
-incident behind them are kept, asserting the incident's visible result.
+status, of a terminal library's parsing. These are deleted, and a defect
+once fixed in that behaviour is no reason to keep one: an incident is a
+ground for a defence in production, not for a test of motion or geometry.
+
+A bug is fixed; a test is not written for having fixed it. A test is written
+when a decision Tcode makes had none. Motion and looks that the maintainer
+has seen and not complained of need no test to say they are still as chosen.
 
 Moving a guess is not removing it. A window that guessed a harness's output
 by tool name was a defence; an adapter that parses the same output's text
