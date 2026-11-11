@@ -3032,6 +3032,8 @@ panes:
   layout_one_beside_two: "左 1・右 2"
   layout_single: "単一ペイン"
   spread_agents: "このスレッドのサブエージェントを横に表示"
+  spread_agents_left_out: "ほかに %{count} 件のサブエージェントは横に収まりません。サイドバーから開けます"
+  spread_agents_left_out_one: "ほかに 1 件のサブエージェントは横に収まりません。サイドバーから開けます"
 tools:
   verb:
     call:

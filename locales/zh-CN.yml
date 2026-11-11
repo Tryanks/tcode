@@ -3025,6 +3025,8 @@ panes:
   layout_one_beside_two: "一左二右"
   layout_single: "单个窗格"
   spread_agents: "在旁边显示此线程委派的线程"
+  spread_agents_left_out: "另有 %{count} 个委派线程放不下，可从侧栏打开"
+  spread_agents_left_out_one: "另有 1 个委派线程放不下，可从侧栏打开"
 tools:
   verb:
     call:

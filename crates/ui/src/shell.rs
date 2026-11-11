@@ -3251,6 +3251,25 @@ impl AppShell {
             <= window.viewport_size().width - sidebar
     }
 
+    /// The current thread's agents not yet settled, newest first: what
+    /// [`PaneLayout::SpreadAgents`] puts beside it.
+    fn spread_agents(&self, cx: &App) -> Option<Vec<String>> {
+        let current_pane = &self.column.as_ref()?.current_pane;
+        let parent = current_pane.read(cx).session_id()?;
+        let store = current_pane.read(cx).store().read(cx);
+        let mut agents: Vec<_> = store
+            .sidebar_sessions()
+            .iter()
+            .filter(|meta| {
+                meta.parent_session_id.as_deref() == Some(parent)
+                    && meta.archived_at.is_none()
+                    && !meta.is_settled()
+            })
+            .collect();
+        agents.sort_by_key(|meta| std::cmp::Reverse(meta.created_at));
+        Some(agents.into_iter().map(|meta| meta.id.clone()).collect())
+    }
+
     /// `layout` as the panes there would fill it: its tree, and what fills
     /// each of the tree's panels. `None` where the column has no room for it,
     /// or it has nothing to show: a single pane alone, a thread without
@@ -3270,20 +3289,9 @@ impl AppShell {
         let first = std::iter::once(Slot::Pane(current_pane.clone()));
         let (fills, fewest): (Vec<_>, _) = match layout {
             PaneLayout::SpreadAgents => {
-                let parent = current_pane.read(cx).session_id()?;
                 let store = current_pane.read(cx).store().read(cx);
-                let mut agents: Vec<_> = store
-                    .sidebar_sessions()
-                    .iter()
-                    .filter(|meta| {
-                        meta.parent_session_id.as_deref() == Some(parent)
-                            && meta.archived_at.is_none()
-                            && !meta.is_settled()
-                    })
-                    .collect();
-                agents.sort_by_key(|meta| std::cmp::Reverse(meta.created_at));
-                let agents = agents.into_iter().map(|meta| {
-                    let thread = store.thread_key(&meta.id);
+                let agents = self.spread_agents(cx)?.into_iter().map(|id| {
+                    let thread = store.thread_key(&id);
                     self.pane_showing(&thread, cx)
                         .map_or(Slot::Thread(thread), Slot::Pane)
                 });
@@ -3350,6 +3358,22 @@ impl AppShell {
         let Some(plan) = self.plan_layout(layout, window, cx) else {
             return;
         };
+        if layout == PaneLayout::SpreadAgents {
+            // The current thread takes one pane.
+            let left_out = self.spread_agents(cx).map_or(0, |agents| {
+                agents.len().saturating_sub(crate::panes::MAX_PANES - 1)
+            });
+            if left_out > 0 {
+                window.push_notification(
+                    Notification::info(if left_out == 1 {
+                        crate::tr!("panes.spread_agents_left_out_one").into_owned()
+                    } else {
+                        crate::tr!("panes.spread_agents_left_out", count = left_out).into_owned()
+                    }),
+                    cx,
+                );
+            }
+        }
         let unchanged = self.layout_unchanged(&plan, cx);
         let Some(column) = self.column.as_mut() else {
             return;

@@ -3032,6 +3032,8 @@ panes:
   layout_one_beside_two: "One beside two"
   layout_single: "Single pane"
   spread_agents: "Show this thread's subagents beside it"
+  spread_agents_left_out: "%{count} more subagents did not fit beside it; open them from the sidebar"
+  spread_agents_left_out_one: "1 more subagent did not fit beside it; open it from the sidebar"
 tools:
   verb:
     call:
