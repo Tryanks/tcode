@@ -318,7 +318,7 @@ mod terminals;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
-pub(crate) use test_support::{next_command, next_command_blocking};
+pub(crate) use test_support::{next_command, next_command_blocking, rpc};
 #[cfg(test)]
 mod tests;
 
@@ -506,6 +506,9 @@ pub struct AppState {
     git_status_generation: HashMap<String, u64>,
     /// Per-session token used to discard superseded timeline loads.
     timeline_load_generations: HashMap<String, u64>,
+    /// Threads whose timeline is being folded from their log, with what waits
+    /// for it: each waiter hears the load settle when its sender goes.
+    timeline_loads: HashMap<String, Vec<smol::channel::Sender<()>>>,
     subscriptions: HashSet<Topic>,
     /// Resident sessions' event logs; see [`SessionLog`] for what is cached
     /// and when it is dropped.
@@ -737,6 +740,7 @@ impl AppState {
             next_operation_id: 1,
             git_status_generation: HashMap::new(),
             timeline_load_generations: HashMap::new(),
+            timeline_loads: HashMap::new(),
             subscriptions: HashSet::new(),
             event_records: HashMap::new(),
             log_hydrations: HashMap::new(),

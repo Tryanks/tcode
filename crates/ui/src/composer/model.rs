@@ -273,37 +273,101 @@ pub(super) fn filter_provider_commands<'a>(
     matched.into_iter().map(|(_, _, command)| command).collect()
 }
 
-pub(super) fn option_selection_str<'a>(
-    selections: &'a [agent::OptionSelection],
-    id: &str,
-) -> Option<&'a str> {
-    selections
-        .iter()
-        .find(|s| s.id == id)
-        .and_then(|s| s.value.as_str())
+/// The options as every control of the composer shows them. Each runs at the
+/// value the host gives, which while a harness runs is the one it reported:
+/// a menu checks that. The thread's choice where it is not that value is
+/// pending: a chip, and a control that holds one position, show it with the
+/// mark. An option the harness does not report runs at what was sent, and says
+/// so; until one it reports has, nothing is known of it.
+#[derive(Clone, Default)]
+pub(crate) struct OptionStates {
+    running: Vec<agent::OptionSelection>,
+    requested: Vec<agent::OptionSelection>,
+    unconfirmed: Vec<String>,
+    harness: &'static str,
 }
 
-pub(super) fn option_selection_bool(
-    selections: &[agent::OptionSelection],
-    id: &str,
-) -> Option<bool> {
-    selections
-        .iter()
-        .find(|s| s.id == id)
-        .and_then(|s| s.value.as_bool())
-}
+impl OptionStates {
+    pub(crate) fn of(state: &crate::store::ComposerState) -> Self {
+        Self {
+            running: state.active_option_selections.clone(),
+            requested: state.requested_option_selections.clone(),
+            unconfirmed: state.unconfirmed_options.clone(),
+            harness: state
+                .provider
+                .map_or("", |provider| provider.display_name()),
+        }
+    }
 
-/// The value a select descriptor runs with: the stored selection as the host
-/// passes it to the harness, even one the current options no longer list,
-/// else the descriptor default.
-pub(super) fn resolved_select_value(
-    id: &str,
-    default_value: &Option<String>,
-    selections: &[agent::OptionSelection],
-) -> Option<String> {
-    option_selection_str(selections, id)
-        .map(str::to_string)
-        .or_else(|| default_value.clone())
+    fn find<'a>(
+        selections: &'a [agent::OptionSelection],
+        id: &str,
+    ) -> Option<&'a serde_json::Value> {
+        selections
+            .iter()
+            .find(|selection| selection.id == id)
+            .map(|selection| &selection.value)
+    }
+
+    /// The value `id` runs at, `None` while nothing is known of it.
+    pub(crate) fn running(&self, id: &str) -> Option<&serde_json::Value> {
+        Self::find(&self.running, id)
+    }
+
+    /// The thread's choice for `id` that it does not run yet.
+    pub(crate) fn pending(&self, id: &str) -> Option<&serde_json::Value> {
+        Self::find(&self.requested, id).filter(|value| Some(*value) != self.running(id))
+    }
+
+    /// `id`'s running value is only what Tcode sent: the harness reports none.
+    pub(crate) fn unconfirmed(&self, id: &str) -> bool {
+        self.unconfirmed.iter().any(|option| option == id)
+    }
+
+    /// What a chip or a one-position control shows of `id`.
+    pub(crate) fn shown(&self, id: &str) -> Option<&serde_json::Value> {
+        self.pending(id).or_else(|| self.running(id))
+    }
+
+    pub(crate) fn shown_str(&self, id: &str) -> Option<&str> {
+        self.shown(id).and_then(serde_json::Value::as_str)
+    }
+
+    /// Each of `descriptors` at what [`Self::shown`] gives it.
+    pub(crate) fn shown_selections(
+        &self,
+        descriptors: &[OptionDescriptor],
+    ) -> Vec<agent::OptionSelection> {
+        descriptors
+            .iter()
+            .filter_map(|descriptor| {
+                let (OptionDescriptor::Select { id, .. } | OptionDescriptor::Boolean { id, .. }) =
+                    descriptor;
+                Some(agent::OptionSelection {
+                    id: id.clone(),
+                    value: self.shown(id)?.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Whether any of `descriptors` has a choice pending.
+    pub(crate) fn any_pending(&self, descriptors: &[OptionDescriptor]) -> bool {
+        descriptors.iter().any(|descriptor| {
+            let (OptionDescriptor::Select { id, .. } | OptionDescriptor::Boolean { id, .. }) =
+                descriptor;
+            self.pending(id).is_some()
+        })
+    }
+
+    /// The note a menu section carries for `id`, when the harness does not
+    /// report it: the value checked is what was sent, or nothing was.
+    pub(crate) fn unconfirmed_note(&self, id: &str) -> Option<std::borrow::Cow<'static, str>> {
+        self.unconfirmed(id).then(|| match self.running(id) {
+            Some(_) => crate::tr!("composer.option_sent", harness = self.harness),
+            None => crate::tr!("composer.option_unknown", harness = self.harness),
+        })
+    }
 }
 
 /// How a select value is named: its option's label, or the value itself when
@@ -315,13 +379,11 @@ pub(super) fn select_value_label(options: &[agent::SelectOption], value: &str) -
         .map_or_else(|| value.to_owned(), |option| option.label.clone())
 }
 
-/// The traits chip label: every resolved descriptor label joined with " · "
-/// (e.g. "High", "High · Fast", "Thinking Off"). `None` when the
-/// model has no descriptors.
-pub(super) fn traits_chip_label(
-    spec: &ModelSpec,
-    selections: &[agent::OptionSelection],
-) -> Option<String> {
+/// The traits chip label: every descriptor's [`OptionStates::shown`] value
+/// joined with " · " (e.g. "High", "High · Fast", "Thinking Off"), its own
+/// label where nothing is known of it. `None` when the model has no
+/// descriptors.
+pub(super) fn traits_chip_label(spec: &ModelSpec, states: &OptionStates) -> Option<String> {
     if spec.options.is_empty() {
         return None;
     }
@@ -329,25 +391,21 @@ pub(super) fn traits_chip_label(
     for descriptor in &spec.options {
         match descriptor {
             OptionDescriptor::Select {
-                id,
-                label,
-                options,
-                default_value,
-                ..
+                id, label, options, ..
             } => {
-                let part = resolved_select_value(id, default_value, selections)
-                    .map(|value| select_value_label(options, &value))
+                let part = states
+                    .shown_str(id)
+                    .map(|value| select_value_label(options, value))
                     .unwrap_or_else(|| label.clone());
                 parts.push(part);
             }
             OptionDescriptor::Boolean {
-                id,
-                label,
-                default_value,
-                role,
-                ..
+                id, label, role, ..
             } => {
-                let on = option_selection_bool(selections, id).unwrap_or(*default_value);
+                let Some(on) = states.shown(id).and_then(serde_json::Value::as_bool) else {
+                    parts.push(label.clone());
+                    continue;
+                };
                 if *role == agent::OptionRole::Speed {
                     parts.push(
                         crate::tr!(if on {

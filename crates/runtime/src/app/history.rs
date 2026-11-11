@@ -264,12 +264,13 @@ struct Window {
 /// while the reply fits [`SESSION_WINDOW_BYTES`], and always at least one. A
 /// record whose reply alone is longer than `line_limit`, the longest line the
 /// receiving connection carries, is sent as [`AgentEvent::RecordWithheld`]
-/// with its size, since a network connection closes on a longer line; it
-/// stays on the host, and an in-process connection, which has no limit, gets
-/// it whole. Consecutive deltas of one item are merged into one, which folds
+/// with its size and its row (`rows[index]`), since a network connection
+/// closes on a longer line; it stays on the host, read whole through an
+/// original, and an in-process connection, which has no limit, gets it whole. Consecutive deltas of one item are merged into one, which folds
 /// the same because nothing between them moves the turn.
 fn wire_window(
     records: &[StoredEvent],
+    rows: &[u64],
     requested: Range<usize>,
     backwards: bool,
     overhead: usize,
@@ -288,7 +289,7 @@ fn wire_window(
         // Separator; also leaves room for an empty array.
         let mut size = wire_len(&wire_record(&records[index])) + 1;
         if line_limit.is_some_and(|line_limit| overhead + size > line_limit) {
-            let placeholder = records[index].withheld(size as u64 - 1);
+            let placeholder = records[index].withheld(size as u64 - 1, Some(rows[index]));
             size = wire_len(&placeholder) + 1;
             withheld.insert(index, placeholder);
         }
@@ -439,6 +440,7 @@ impl LogView<'_> {
         let first = self.index(from);
         let window = wire_window(
             self.records,
+            self.rows,
             first..self.records.len(),
             after.is_none(),
             wire_overhead(&empty),
@@ -480,6 +482,7 @@ impl LogView<'_> {
         };
         let window = wire_window(
             self.records,
+            self.rows,
             requested.clone(),
             true,
             wire_overhead(&empty),
@@ -668,6 +671,15 @@ impl SessionLog {
                 _ => None,
             })
             .ok_or_else(|| ProtocolError::out_of_scope("image is outside this item"))
+    }
+
+    /// The record in `row`, as a client receives it.
+    pub(super) fn record(&self, row: u64) -> Result<StoredEvent, ProtocolError> {
+        let index = self.rows.binary_search(&row).map_err(|_| ProtocolError {
+            code: "not_found".into(),
+            message: format!("the thread's log holds no record in row {row}"),
+        })?;
+        Ok(wire_record(&self.records[index]).into_owned())
     }
 
     pub(super) fn original_image(
@@ -979,6 +991,9 @@ impl AppState {
             Ok(log) => log,
             Err(error) => {
                 log::error!("could not read the log of {session_id}: {error}");
+                if hydration.timeline.is_some() {
+                    self.timeline_loads.remove(&session_id);
+                }
                 let failure = ServerEvent::SessionHistoryError(tcode_protocol::ProtocolError {
                     code: "history_unavailable".into(),
                     message: format!("could not read the history of {session_id}: {error}"),
@@ -1317,6 +1332,17 @@ impl AppState {
             cx,
         );
         task
+    }
+
+    /// The record in `row` of the session's log, as a client receives it.
+    pub(super) fn session_record(
+        &mut self,
+        session_id: &str,
+        row: u64,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<StoredEvent, ProtocolError>> {
+        self.query_session_log(session_id, move |log| log.record(row), cx)
+            .1
     }
 
     pub(super) fn query_item<T: Send + 'static>(

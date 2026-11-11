@@ -373,6 +373,7 @@ impl TurnBoundaries {
             | AgentEvent::PlanUpdated { .. }
             | AgentEvent::GoalUpdated { .. }
             | AgentEvent::UsageLimitReached { .. }
+            | AgentEvent::SessionModel { .. }
             | AgentEvent::ProviderCommands { .. }
             | AgentEvent::ProviderOptions { .. } => false,
         }

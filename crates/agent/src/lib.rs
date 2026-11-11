@@ -157,7 +157,11 @@ pub struct Caps {
     pub goals: Option<GoalControl>,
     pub per_turn_effort: bool,
     pub options_apply_live: bool,
-    pub live_option_push: LiveOptionPush,
+    pub live_option_push: OptionIds,
+    /// The options whose value in effect the harness reports
+    /// ([`AgentEvent::ProviderOptions`]'s selections); of the others a client
+    /// knows only what Tcode sent.
+    pub confirmed_options: OptionIds,
     /// The harness lists its background work ([`AgentEvent::BackgroundTaskList`]),
     /// and what it lets a client do with it.
     pub background: Option<BackgroundControl>,
@@ -285,17 +289,20 @@ pub enum InstructionChannel {
     None,
 }
 
+/// A set of option ids, as a provider fact names them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LiveOptionPush {
+pub enum OptionIds {
     All,
+    AllBut(&'static [&'static str]),
     Only(&'static [&'static str]),
     None,
 }
 
-impl LiveOptionPush {
+impl OptionIds {
     pub fn supports(self, option_id: &str) -> bool {
         match self {
             Self::All => true,
+            Self::AllBut(option_ids) => !option_ids.contains(&option_id),
             Self::Only(option_ids) => option_ids.contains(&option_id),
             Self::None => false,
         }
@@ -358,7 +365,16 @@ impl ProviderKind {
                 }),
                 per_turn_effort: false,
                 options_apply_live: false,
-                live_option_push: LiveOptionPush::None,
+                live_option_push: OptionIds::None,
+                // `system/init` and `system/status` carry `permissionMode`, the
+                // init and each `result` `fast_mode_state`, and `get_settings`
+                // the effort it `applied` (2.1.322). Thinking is in none of
+                // them, and the window only as the model's, not the selection.
+                confirmed_options: OptionIds::Only(&[
+                    "permissionMode",
+                    "fastMode",
+                    EFFORT_OPTION_ID,
+                ]),
                 // `background_tasks_changed` and `stop_task`, shells and
                 // subagents alike (2.1.318); `stop_task` takes one id. The
                 // `background_tasks` control request with a `tool_use_id` is
@@ -416,7 +432,16 @@ impl ProviderKind {
                 }),
                 per_turn_effort: true,
                 options_apply_live: false,
-                live_option_push: LiveOptionPush::None,
+                live_option_push: OptionIds::None,
+                // The `thread/start|resume|fork` answer and
+                // `thread/settings/updated` carry the effort, the service tier
+                // and the permissions (0.167.1). The window comes only as
+                // `modelContextWindow`, the part of it the model may use.
+                confirmed_options: OptionIds::Only(&[
+                    EFFORT_OPTION_ID,
+                    "serviceTier",
+                    "permissions",
+                ]),
                 // `thread/backgroundTerminals/*`: `terminate` and `clean`,
                 // experimental (0.167.0).
                 background: Some(BackgroundControl {
@@ -459,7 +484,9 @@ impl ProviderKind {
                 goals: None,
                 per_turn_effort: false,
                 options_apply_live: true,
-                live_option_push: LiveOptionPush::All,
+                live_option_push: OptionIds::All,
+                // Every option is the agent's own, with its `currentValue`.
+                confirmed_options: OptionIds::All,
                 background: None,
                 live_settings: false,
                 // ACP support is negotiated per agent; capable agents receive
@@ -497,7 +524,10 @@ impl ProviderKind {
                 goals: None,
                 per_turn_effort: false,
                 options_apply_live: false,
-                live_option_push: LiveOptionPush::Only(&[EFFORT_OPTION_ID]),
+                live_option_push: OptionIds::Only(&[EFFORT_OPTION_ID]),
+                // `get_state`'s `thinkingLevel` and `thinking_level_changed`
+                // (1.5.2).
+                confirmed_options: OptionIds::Only(&[EFFORT_OPTION_ID]),
                 background: None,
                 live_settings: true,
                 mcp_servers: false,
@@ -543,7 +573,11 @@ impl ProviderKind {
                 goals: None,
                 per_turn_effort: true,
                 options_apply_live: false,
-                live_option_push: LiveOptionPush::Only(&["agent"]),
+                live_option_push: OptionIds::Only(&["agent"]),
+                // The session's and each step's `model.variant` and `agent`
+                // (2.2.7); the permission mode is the adapter's own answer to
+                // each `permission.asked`.
+                confirmed_options: OptionIds::Only(&[EFFORT_OPTION_ID, "agent", "permission_mode"]),
                 background: None,
                 live_settings: true,
                 mcp_servers: true,
@@ -578,7 +612,10 @@ impl ProviderKind {
                 goals: None,
                 per_turn_effort: false,
                 options_apply_live: true,
-                live_option_push: LiveOptionPush::All,
+                live_option_push: OptionIds::All,
+                // The approval mode is how Tcode launched the agent, which
+                // reports none.
+                confirmed_options: OptionIds::AllBut(&["approvalMode"]),
                 background: None,
                 live_settings: false,
                 mcp_servers: true,
@@ -622,7 +659,10 @@ impl ProviderKind {
                 goals: None,
                 per_turn_effort: false,
                 options_apply_live: true,
-                live_option_push: LiveOptionPush::All,
+                live_option_push: OptionIds::All,
+                // `--permission-mode` is a launch argument the agent does not
+                // report back.
+                confirmed_options: OptionIds::AllBut(&["permissionMode"]),
                 // `background_tasks` lists them; nothing stops one.
                 background: Some(BackgroundControl {
                     stop: BackgroundStop::None,
@@ -2479,16 +2519,31 @@ pub enum AgentEvent {
     /// `configOptions`), pushed at session start and on every change. Reuses
     /// [`OptionDescriptor`] so the composer's existing picker renders them
     /// verbatim; answer with [`SessionCommand::SetOption`].
+    ///
+    /// `selections` are the values in effect as the harness reported them,
+    /// for the options its [`Caps::confirmed_options`] names; a `null` value
+    /// is the harness saying it has none to report for that option now.
+    /// Transient: the runtime keeps them on the session, not in its history.
     ProviderOptions {
         descriptors: Vec<OptionDescriptor>,
         selections: Vec<OptionSelection>,
     },
     /// Emitted once the provider session is ready. `resume` must round-trip
     /// through `SessionOptions::resume` to continue this thread later.
+    /// `model` is the model the session is set to as the harness reports it,
+    /// in the spelling Tcode asked for when that names the same model; `None`
+    /// when it reports none.
     SessionStarted {
         provider_session_id: String,
         resume: ResumeCursor,
         model: Option<String>,
+    },
+    /// The model the running session is set to, as the harness reported it
+    /// after [`SessionStarted`](Self::SessionStarted), spelled as there.
+    /// Transient, like [`Self::TurnAccepted`]. [`Self::ServedModel`] is the
+    /// model that answered one response, which a harness may reroute.
+    SessionModel {
+        model: String,
     },
     /// The model that actually served the response. Providers may reroute away
     /// from the model selected when the session started.
@@ -2755,8 +2810,14 @@ pub enum AgentEvent {
     /// A record of `bytes` bytes, more than one reply to the client it was
     /// for can carry, kept on the host in a history reply. Never emitted by
     /// an adapter nor written; the host sends it in the record's place.
+    /// `row` is the record's log cursor, by which the client reads it whole
+    /// through an original (`OriginalTarget::Record`): a history window
+    /// names it, and a live event, whose cursor the sender does not know, is
+    /// the record at the end of the log the client holds.
     RecordWithheld {
         bytes: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        row: Option<u64>,
     },
     /// Structured plan / task list for the sidebar (Codex `turn/plan/updated`,
     /// Claude `TodoWrite`). Replaces the current turn's plan wholesale.

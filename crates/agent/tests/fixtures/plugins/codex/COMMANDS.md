@@ -59,7 +59,8 @@ The driver and scenario scripts stay outside the repository in
   the CLI outputs, the generated schemas and the authored marketplaces are
   not kept.
 - `config-read.jsonl`: recorded later (2026-10-03, same binary) with the same
-  driver and framing against a fresh `CODEX_HOME=/tmp/tcode-plugins-live/rec-home`,
+  driver and framing against a fresh `CODEX_HOME` (its path in the `origins`
+  entries is written as `/private/tmp/tcode-probe/codex-home-config`),
   process cwd `/tmp`: `marketplace/add {"source":"/tmp/tcode-probe/codex-mkt"}`
   (id 2, not kept), then `config/read {}` (id 3). Its `marketplaces` table is
   the one the main run's `config.toml` snapshot shows after id 2.

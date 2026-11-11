@@ -55,16 +55,46 @@ impl Server {
     }
 
     /// Take the stream: say so, then speak SSH on it until either side ends.
-    pub(crate) async fn serve(&self, mut send: SendStream, reader: LineReader) -> io::Result<()> {
+    ///
+    /// russh runs a session on a task of its own that no caller can end, so
+    /// it is handed a pipe pumped here rather than the stream: the stream
+    /// is gone the moment this future is, and the machine's shutdown waits
+    /// for that before it lets go of the endpoint.
+    pub(crate) async fn serve(
+        &self,
+        mut send: SendStream,
+        mut reader: LineReader,
+    ) -> io::Result<()> {
         wire::write_line(&mut send, &HostLine::Connected).await?;
-        let session = server::run_stream(
-            self.config.clone(),
-            tokio::io::join(reader, send),
-            Connection,
-        )
-        .await
-        .map_err(io::Error::other)?;
-        session.await.map_err(io::Error::other)
+        let (ours, theirs) = tokio::io::duplex(256 * 1024);
+        let (mut from_ssh, mut to_ssh) = tokio::io::split(ours);
+        // The session's end closes its side of the pipe; whatever it wrote
+        // reaches the device before the stream finishes. A pump that fails
+        // drops its half of the pipe, which ends the session.
+        let pump = async move {
+            let mut download = std::pin::pin!(async move {
+                tokio::io::copy(&mut from_ssh, &mut send).await?;
+                send.finish().map_err(io::Error::other)
+            });
+            let upload = async move {
+                tokio::io::copy(&mut reader, &mut to_ssh).await?;
+                to_ssh.shutdown().await
+            };
+            tokio::select! {
+                result = &mut download => result,
+                result = upload => match result {
+                    Ok(()) => download.await,
+                    Err(error) => Err(error),
+                },
+            }
+        };
+        let session = async {
+            server::run_stream(self.config.clone(), theirs, Connection)
+                .await?
+                .await
+        };
+        let (pumped, ended) = tokio::join!(pump, session);
+        pumped.and(ended.map_err(io::Error::other))
     }
 }
 

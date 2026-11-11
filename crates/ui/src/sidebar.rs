@@ -7385,10 +7385,14 @@ mod tests {
         cx.update(|_, cx| {
             assert!(sidebar.read(cx).renaming.is_none());
         });
-        let title =
-            smol::block_on(host.update_state_for_test(|state, _| state.sessions[0].title.clone()))
-                .expect("read host title");
-        assert_eq!(title, "Original title");
+        driver.round_trip(cx);
+        assert_eq!(
+            store.read_with(cx, |store, _| store
+                .thread_meta("rename-thread")
+                .map(|meta| meta.title.clone())),
+            Some("Original title".into()),
+            "the host keeps the title the rename never saved"
+        );
 
         driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
@@ -7602,35 +7606,39 @@ mod tests {
         let device = || tcode_traverse::NativeClientHost::new(root.join("device"), "phone");
         let client: std::rc::Rc<dyn tcode_client::host::ClientHost> = std::rc::Rc::new(device());
         cx.update(|cx| DevicePreferences::install(client, cx));
-        let host = spawn_host(
-            SessionStore::open_at(root.clone()).unwrap(),
-            HostServices::default(),
-        )
-        .expect("spawn sidebar test host");
+        // The host's quick threads work in its documents folder; a project
+        // there is the quick-thread project.
+        let user_directories = tcode_services::user_files::UserDirectories {
+            home: None,
+            documents: Some(root.join("documents")),
+        };
+        let scratch = user_directories.scratch_root().unwrap();
         let seeded: Vec<Project> = (0..projects)
             .map(|index| {
-                let mut project = Project::from_root(root.join(format!("project-{index}")));
-                project.quick_chat = quick_chat && index == 0;
-                project
+                Project::from_root(if quick_chat && index == 0 {
+                    scratch.clone()
+                } else {
+                    root.join(format!("project-{index}"))
+                })
             })
             .collect();
-        let sessions = seeded
-            .iter()
-            .enumerate()
-            .map(|(index, project)| {
-                let mut meta = session(&format!("thread-{index}"), None);
-                meta.project_id = Some(project.id.clone());
-                meta.updated_at = 100 + index as u64;
-                meta.created_at = meta.updated_at;
-                meta
-            })
-            .collect::<Vec<_>>();
-        let projects_seed = seeded.clone();
-        smol::block_on(host.update_state_for_test(move |state, _| {
-            state.projects = projects_seed;
-            state.sessions = sessions.into();
-        }))
-        .expect("seed projects");
+        let disk = SessionStore::open_at(root.clone()).unwrap();
+        for (index, project) in seeded.iter().enumerate() {
+            let mut meta = session(&format!("thread-{index}"), None);
+            meta.project_id = Some(project.id.clone());
+            meta.updated_at = 100 + index as u64;
+            meta.created_at = meta.updated_at;
+            disk.upsert_project(project).unwrap();
+            disk.upsert_meta(&meta).unwrap();
+        }
+        let host = spawn_host(
+            disk,
+            HostServices {
+                user_directories,
+                ..HostServices::default()
+            },
+        )
+        .expect("spawn sidebar test host");
 
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {

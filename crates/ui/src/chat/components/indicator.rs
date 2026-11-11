@@ -249,8 +249,9 @@ pub(crate) fn turn_working_indicator(
 }
 
 /// A finished turn's footer: on the leading edge the actions of the message
-/// it ends on, if any, and on the trailing edge its quiet mono timing, whose
-/// clauses wrap toward that edge as the column narrows.
+/// it ends on, if any, and on the trailing edge its quiet mono timing, kept
+/// to one line: as the column narrows the last clause fades out first, then
+/// the one before it.
 fn turn_time_footer(
     id: SharedString,
     clauses: Vec<TurnTimeClause>,
@@ -259,7 +260,6 @@ fn turn_time_footer(
     cx: &App,
 ) -> Stateful<Div> {
     let warning = cx.theme().warning;
-    let last = clauses.len().saturating_sub(1);
     // A clause the mono face lacks glyphs for, such as a duration in CJK,
     // paints its baseline lower than the others; each is moved back onto the
     // mono face's own, which the separators keep.
@@ -284,40 +284,52 @@ fn turn_time_footer(
             h_flex()
                 .flex_1()
                 .min_w_0()
-                .flex_wrap()
+                .overflow_hidden()
                 .justify_end()
-                .gap_x(px(4.))
-                .gap_y(px(2.))
                 .children(clauses.into_iter().enumerate().map(|(index, clause)| {
                     let selector = clause.selector;
                     let drop = mono_baseline - below_centre(&clause.text);
+                    // Each clause after the first leads with its separator,
+                    // which fades out with it.
+                    let lead = if index > 0 { " · " } else { "" };
+                    let line = format!("{lead}{}", clause.text);
+                    let highlights = clause.warning.then(|| {
+                        let style = gpui::HighlightStyle {
+                            color: Some(warning),
+                            ..Default::default()
+                        };
+                        (lead.len()..line.len(), style)
+                    });
                     // The clause alone triggers its tooltip, which stands
-                    // beside what it explains.
-                    let text = div()
+                    // beside what it explains. Each gives way so much more
+                    // readily than the one before it that the row shrinks it
+                    // to nothing before touching that one.
+                    div()
                         .id(selector)
                         .min_w_0()
+                        .overflow_hidden()
+                        .flex_shrink(SHRINK_STEP.powi(index as i32))
                         .relative()
                         .top(drop)
                         .debug_selector(move || selector.into())
-                        .child(clause.text)
+                        .child(crate::widgets::fade_text(line).with_highlights(highlights))
                         .when_some(clause.tooltip, |text, tooltip| {
                             text.with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
-                        });
-                    h_flex()
-                        .min_w_0()
-                        .gap_x(px(4.))
-                        .when(clause.warning, |element| element.text_color(warning))
-                        .child(text)
-                        .when(index != last, |element| element.child("·"))
+                        })
                 })),
         )
 }
 
-/// [`turn_time_footer`] for `turn`, timed from `timestamp` when it has one.
+/// How much more readily each timing clause gives way than the one before.
+const SHRINK_STEP: f32 = 1000.;
+
+/// [`turn_time_footer`] for `turn`, timed from `timestamp` when it has one;
+/// `served_model` names the model that served it where that is not the one
+/// asked for.
 pub(crate) fn finished_turn_time(
     timestamp: Option<u64>,
     turn: &TurnMeta,
-    requested_model: Option<&str>,
+    served_model: Option<&str>,
     actions: Option<AnyElement>,
     window: &Window,
     cx: &App,
@@ -326,8 +338,7 @@ pub(crate) fn finished_turn_time(
         timestamp.map(format_local_time),
         turn.timing,
         turn.cost_usd,
-        turn.served_model.as_deref(),
-        requested_model,
+        served_model,
     );
     turn_time_footer(
         SharedString::from(format!("turn-time-{}", timestamp.unwrap_or_default())),

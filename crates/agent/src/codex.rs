@@ -892,6 +892,7 @@ async fn run_actor(
         model,
         default_model,
         config_effort,
+        service_tier: reported_tier,
         model_efforts,
         next_id,
         provider_commands,
@@ -975,6 +976,10 @@ async fn run_actor(
         })
         .await;
     actor.emit_permissions(None).await;
+    let (model, effort) = (actor.model.clone(), actor.config_effort.clone());
+    actor
+        .emit_model_settings(&model, effort.as_deref(), reported_tier.as_deref())
+        .await;
     // Replace the composer's cached `/` + `$` menu data even when discovery is
     // empty, so removed prompts/skills do not linger from a prior session.
     actor
@@ -1560,6 +1565,8 @@ struct OpenedThread {
     model: String,
     default_model: String,
     config_effort: Option<String>,
+    /// `serviceTier` as the answer gave it: the tier in effect, `None` for none.
+    service_tier: Option<String>,
     model_efforts: ModelEfforts,
     next_id: i64,
     provider_commands: Vec<ProviderCommand>,
@@ -1625,6 +1632,10 @@ async fn initialize_and_open_thread(
         .get("reasoningEffort")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let service_tier = result
+        .get("serviceTier")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let effective_permission = effective_permission(&result);
     let unrevertable = (result.pointer("/thread/ephemeral") == Some(&json!(true))
         || result.pointer("/thread/historyMode") != Some(&json!("paginated")))
@@ -1672,6 +1683,7 @@ async fn initialize_and_open_thread(
         model,
         default_model,
         config_effort,
+        service_tier,
         model_efforts,
         next_id,
         provider_commands,
@@ -2016,6 +2028,50 @@ impl Actor {
                 }],
             }))
             .await;
+    }
+
+    /// The effort and service tier `model`'s thread is set to, as Codex
+    /// reported them (`reasoningEffort` or `effort`, and `serviceTier`,
+    /// 0.167.1): no effort runs the model's default, as ChatGPT.app takes it,
+    /// and no tier the standard one.
+    async fn emit_model_settings(&mut self, model: &str, effort: Option<&str>, tier: Option<&str>) {
+        let effort = self.model_efforts.resolve(model, effort);
+        self.events
+            .emit(AgentEvent::ProviderOptions {
+                descriptors: Vec::new(),
+                selections: vec![
+                    OptionSelection {
+                        id: crate::EFFORT_OPTION_ID.into(),
+                        value: json!(effort),
+                    },
+                    OptionSelection {
+                        id: "serviceTier".into(),
+                        value: json!(tier.unwrap_or("default")),
+                    },
+                ],
+            })
+            .await;
+    }
+
+    /// A `thread/settings/updated` the thread's settings changed by: its
+    /// model, effort and tier here, its permissions by
+    /// [`Self::emit_permissions`].
+    async fn emit_thread_settings(&mut self, settings: &Value) {
+        let model = settings
+            .get("model")
+            .and_then(Value::as_str)
+            .map_or_else(|| self.model.clone(), str::to_owned);
+        self.events
+            .emit(AgentEvent::SessionModel {
+                model: model.clone(),
+            })
+            .await;
+        self.emit_model_settings(
+            &model,
+            settings.get("effort").and_then(Value::as_str),
+            settings.get("serviceTier").and_then(Value::as_str),
+        )
+        .await;
     }
 
     async fn emit_permissions(&mut self, settings: Option<&Value>) {
@@ -2373,6 +2429,9 @@ impl Actor {
                             .map(effective_permission)
                             .unwrap_or(permission);
                         self.emit_permissions(settings.as_ref()).await;
+                        if let Some(settings) = &settings {
+                            self.emit_thread_settings(settings).await;
+                        }
                     }
                     Some(PendingRequest::Steer { request_id, text }) => {
                         self.pending_steers.push((request_id, text));
@@ -2788,6 +2847,7 @@ impl Actor {
                     } else {
                         self.effective_permission = effective_permission(settings);
                         self.emit_permissions(Some(settings)).await;
+                        self.emit_thread_settings(settings).await;
                     }
                 }
             }
@@ -5066,6 +5126,8 @@ mod tests {
                     })
                 );
                 assert!(selected.unavailable.is_some());
+                // The model, effort and tier the notification also carries.
+                while events.try_recv().is_ok() {}
             }
             let _ = actor.child.kill();
             let _ = actor.child.wait();

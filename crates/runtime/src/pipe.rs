@@ -1228,8 +1228,29 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             model,
             profile_id,
         } => {
-            app.set_active_model(&session_id, provider, model, profile_id, cx);
-            app.release_policy_holds(&session_id, cx);
+            // Whether the switch hands the conversation over is read from the
+            // thread's timeline, which a thread just opened may still be
+            // folding from its log: the switch waits for that.
+            let target = session_id.clone();
+            let switch = move |app: &mut AppState, cx: &mut HostCx| {
+                app.set_active_model(&session_id, provider, model, profile_id, cx);
+                app.release_policy_holds(&session_id, cx);
+                Ok(CommandResponse::Unit)
+            };
+            let Some(settled) = app.timeline_settled(&target) else {
+                return CommandOutcome::Immediate(switch(app, cx));
+            };
+            let host_cx = cx.clone();
+            return CommandOutcome::Pending(cx.spawn_background(async move {
+                let _ = settled.recv().await;
+                host_cx
+                    .enqueue_and_wait(switch)
+                    .await
+                    .map_err(|()| ProtocolError {
+                        code: "host_stopped".into(),
+                        message: "The host stopped before the model could change.".into(),
+                    })?
+            }));
         }
         Command::SetActiveOption {
             session_id,
@@ -1261,12 +1282,36 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             mode,
             client_id,
         } => {
-            let at = crate::app::RewindAt {
-                turn,
-                steer: steer.as_deref(),
-                checkpoint: checkpoint_id.as_deref(),
+            // A thread just opened may still be folding its log, which holds
+            // the turns and restore points the rewind names: it waits for that.
+            let target = session_id.clone();
+            let rewind = move |app: &mut AppState, cx: &mut HostCx| {
+                let at = crate::app::RewindAt {
+                    turn,
+                    steer: steer.as_deref(),
+                    checkpoint: checkpoint_id.as_deref(),
+                };
+                app.rewind_turn(&session_id, at, mode, client_id, cx)
+                    .map(|_| CommandResponse::Unit)
+                    .ok_or_else(|| ProtocolError {
+                        code: "rewind_unavailable".into(),
+                        message: "This turn cannot be restored now.".into(),
+                    })
             };
-            app.rewind_turn(&session_id, at, mode, client_id, cx);
+            let Some(settled) = app.timeline_settled(&target) else {
+                return CommandOutcome::Immediate(rewind(app, cx));
+            };
+            let host_cx = cx.clone();
+            return CommandOutcome::Pending(cx.spawn_background(async move {
+                let _ = settled.recv().await;
+                host_cx
+                    .enqueue_and_wait(rewind)
+                    .await
+                    .map_err(|()| ProtocolError {
+                        code: "host_stopped".into(),
+                        message: "The host stopped before the rewind could start.".into(),
+                    })?
+            }));
         }
         Command::PreviewRewind {
             session_id,
@@ -1849,6 +1894,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_root);
     }
 
+    /// The original of a record of a thread's log, which a window withholds
+    /// from a client whose line it is longer than, is that record as a
+    /// window sends records, read from the row the placeholder names.
+    #[test]
+    fn a_withheld_record_is_read_whole_from_its_row() {
+        use tcode_client::original::OriginalBackend as _;
+        let data_root =
+            std::env::temp_dir().join(format!("tcode-original-record-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(data_root.clone()).expect("open session store");
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::Codex,
+            data_root.join("workspace"),
+            None,
+        );
+        meta.id = "long".into();
+        store.upsert_meta(&meta).expect("write meta");
+        let warning = |message: String| agent::AgentEvent::Warning { message };
+        store
+            .append_event(&meta.id, 1, &warning("short".into()))
+            .expect("append the first record");
+        let long = warning("w".repeat(64 * 1024 * 3 + 5));
+        store
+            .append_event(&meta.id, 2, &long)
+            .expect("append the long record");
+        let host = spawn_host(store, HostServices::default()).expect("spawn host");
+        let source = smol::block_on(host.open(
+            tcode_protocol::Principal::Full,
+            tcode_protocol::OriginalTarget::Record {
+                session_id: meta.id.clone(),
+                row: 1,
+            },
+        ))
+        .expect("open the record");
+        let mut received = Vec::new();
+        loop {
+            let block = source
+                .blocks
+                .recv_blocking()
+                .expect("original stream")
+                .expect("original block");
+            if block.is_empty() {
+                break;
+            }
+            received.extend(block);
+        }
+        assert_eq!(source.metadata.len, received.len() as u64);
+        let record: tcode_core::session::StoredEvent =
+            serde_json::from_slice(&received).expect("a record");
+        assert_eq!(record.event, long);
+
+        drop(source);
+        host.link().shutdown_blocking().expect("stop host");
+        host.stopped.recv_blocking().expect("host thread stopped");
+        drop(host);
+        let _ = std::fs::remove_dir_all(data_root);
+    }
+
     /// Command output is rendered by the host at the width a subscriber asked
     /// for: a finished command is answered once per width, and a running one
     /// is pushed again, coalesced, while its output grows, until the
@@ -1905,7 +2007,15 @@ mod tests {
             .expect("append empty command output");
         store.upsert_meta(&meta).expect("write meta");
 
-        let host = spawn_host(store, HostServices::default()).expect("spawn host");
+        let provider = crate::app::scripted_provider(agent::ProviderKind::ClaudeCode);
+        let host = spawn_host(
+            store,
+            HostServices {
+                provider_launcher: provider.launcher.clone(),
+                ..HostServices::default()
+            },
+        )
+        .expect("spawn host");
         let link = host.link();
         let events = super::p4b_tests::observed_events(&link);
         let session_topic = Topic::SessionEvents {
@@ -1982,16 +2092,34 @@ mod tests {
         }
         assert_eq!(reply(&topic("empty-output", 40)).rows, 0);
 
-        let session_id = meta.id.clone();
-        let record = |events: Vec<agent::AgentEvent>| {
-            let session_id = session_id.clone();
-            smol::block_on(host.update_state_for_test(move |state, cx| {
-                for (ts, event) in events.iter().enumerate() {
-                    state.record_event_for_replica_test(&session_id, 10 + ts as u64, event, cx);
-                }
-            }))
-            .expect("record provider events");
+        // The thread's harness runs a turn, and what it says is recorded:
+        // the client holding the thread is sent each record.
+        link.command_blocking(Command::SendTurn {
+            session_id: meta.id.clone(),
+            text: "build it".into(),
+            attachment_paths: Vec::new(),
+        })
+        .expect("send");
+        assert!(matches!(
+            crate::app::next_command_blocking(&provider.commands),
+            Ok(agent::SessionCommand::SendTurn { .. })
+        ));
+        let play = |played: Vec<agent::AgentEvent>| {
+            for event in played {
+                provider.events.try_send(event).expect("play the provider");
+            }
         };
+        let record = |played: Vec<agent::AgentEvent>| {
+            let count = played.len();
+            play(played);
+            for _ in 0..count {
+                next_event(&events, |event| {
+                    event.topic == session_topic
+                        && matches!(event.event, ServerEvent::SessionEvent(_))
+                });
+            }
+        };
+
         let delta = |text: &str| agent::AgentEvent::Delta {
             item_id: "run-1".into(),
             kind: agent::DeltaKind::CommandOutput,
@@ -2018,7 +2146,7 @@ mod tests {
             .collect::<Vec<_>>();
         growth.push(delta("100%\n\u{1b}[32mok\u{1b}[0m\n"));
         let deltas = growth.len();
-        record(growth);
+        play(growth);
         // The subscriber holds the answer, so each push is what changed.
         let mut pushes = 0;
         let latest = loop {

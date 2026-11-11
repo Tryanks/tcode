@@ -207,18 +207,81 @@ pub(crate) fn settings_kept_divider(id: &str, cx: &App) -> AnyElement {
     )
 }
 
-/// A record too large to send to this client, which the host keeps.
-pub(crate) fn record_withheld_divider(id: &str, bytes: u64, cx: &App) -> AnyElement {
-    divider(
-        SharedString::from(format!("withheld-{id}")),
-        crate::tr!(
-            "chat.record_withheld",
-            size = crate::thread_export::format_size(bytes)
+/// Where reading a withheld record whole stands, with what its control does.
+pub(crate) enum WithheldRead {
+    /// Not asked for; the control loads it.
+    Offered(super::changed_files::ClickHandler),
+    /// On its way; the control stops it.
+    Loading(super::changed_files::ClickHandler),
+    /// The read failed with this; the control tries again.
+    Failed(String, super::changed_files::ClickHandler),
+}
+
+/// A record too large to send to this client, which the host keeps, and the
+/// control that reads it whole (`read`, absent where its row is unknown).
+pub(crate) fn record_withheld_divider(
+    id: &str,
+    bytes: u64,
+    read: Option<WithheldRead>,
+    cx: &App,
+) -> AnyElement {
+    let size = crate::thread_export::format_size(bytes);
+    let control_id = SharedString::from(format!("withheld-{id}-read"));
+    let (label, control) = match read {
+        None => (crate::tr!("chat.record_withheld", size = size), None),
+        Some(WithheldRead::Offered(load)) => (
+            crate::tr!("chat.record_withheld", size = size),
+            Some((crate::tr!("chat.load_record"), load)),
+        ),
+        Some(WithheldRead::Loading(cancel)) => (
+            crate::tr!("chat.record_loading", size = size),
+            Some((crate::tr!("chat.cancel_record_load"), cancel)),
+        ),
+        Some(WithheldRead::Failed(error, load)) => (
+            crate::tr!("chat.record_load_failed", size = size, error = error),
+            Some((crate::tr!("chat.load_record"), load)),
+        ),
+    };
+    let label = label.into_owned();
+    let Some((action, on_click)) = control else {
+        return divider(
+            SharedString::from(format!("withheld-{id}")),
+            label,
+            cx.theme().muted_foreground,
+            cx,
+        );
+    };
+    h_flex()
+        .id(SharedString::from(format!("withheld-{id}")))
+        .w_full()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .child(divider_stub(cx))
+        .child(
+            div()
+                .min_w_0()
+                .flex_shrink_1()
+                .text_center()
+                .text_token(&cx.theme().tokens.typography.xs)
+                .text_color(cx.theme().muted_foreground)
+                .child(label),
         )
-        .into_owned(),
-        cx.theme().muted_foreground,
-        cx,
-    )
+        .child(
+            div()
+                .debug_selector({
+                    let selector = control_id.to_string();
+                    move || selector.clone()
+                })
+                .child(super::changed_files::quiet_control(
+                    control_id,
+                    action.into_owned().into(),
+                    on_click,
+                    cx,
+                )),
+        )
+        .child(divider_stub(cx))
+        .into_any_element()
 }
 
 pub(crate) fn session_moved_divider(

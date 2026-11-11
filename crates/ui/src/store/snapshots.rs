@@ -53,6 +53,12 @@ pub struct ComposerState {
     pub active_option_descriptors: Vec<agent::OptionDescriptor>,
     pub active_option_selections: Vec<agent::OptionSelection>,
     pub requested_option_selections: Vec<agent::OptionSelection>,
+    /// The options whose running value is only what Tcode sent.
+    pub unconfirmed_options: Vec<String>,
+    /// The model the session runs, as the host gives it; `active_model`'s
+    /// is the thread's choice.
+    pub running_model: Option<String>,
+    pub model_unconfirmed: bool,
     pub options_pending_restart: bool,
 
     pub token_usage: Option<agent::TokenUsage>,
@@ -189,6 +195,11 @@ pub(crate) fn composer_state(
         requested_option_selections: status
             .map(|status| status.provider_option_requested_selections.clone())
             .unwrap_or_default(),
+        unconfirmed_options: status
+            .map(|status| status.provider_option_unconfirmed.clone())
+            .unwrap_or_default(),
+        running_model: status.and_then(|status| status.running_model.clone()),
+        model_unconfirmed: status.is_some_and(|status| status.model_unconfirmed),
         options_pending_restart: status.is_some_and(|status| status.options_pending_restart),
         token_usage,
         goal: status.and_then(|status| status.goal.clone()),
@@ -303,7 +314,10 @@ mod tests {
             steering_supported: true,
             provider_option_descriptors: Vec::new(),
             provider_option_selections: Vec::new(),
+            provider_option_unconfirmed: Vec::new(),
             provider_option_requested_selections: Vec::new(),
+            running_model: None,
+            model_unconfirmed: false,
             provider_commands: Vec::new(),
             git_branch: Some("main".into()),
             branches: vec!["main".into()],

@@ -956,6 +956,8 @@ impl DiffPanel {
                 shown.fold_across(
                     material::chip_surface(cx.theme().secondary, cx.theme().foreground, cx)
                         .debug_selector(|| "diff-subject".into())
+                        .flex_shrink(1.)
+                        .min_w_0()
                         .max_w(px(SUBJECT_WIDEST))
                         .child(
                             div()

@@ -1920,7 +1920,7 @@ impl WorkspaceStore {
         &mut self,
         session_id: &str,
         topic: &Topic,
-        record: StoredEvent,
+        mut record: StoredEvent,
     ) -> Option<bool> {
         let baseline = self.baseline_topics.contains(topic);
         let thread = self.open_thread_mut(session_id)?;
@@ -1931,6 +1931,14 @@ impl WorkspaceStore {
             return None;
         }
         let held = thread.history.as_ref()?;
+        // A record withheld live does not say its row: it is the one that
+        // takes the held log's end.
+        if let agent::AgentEvent::RecordWithheld {
+            row: row @ None, ..
+        } = &mut record.event
+        {
+            *row = Some(held.end);
+        }
         let after = held.end + 1;
         self.host.remember_after(topic, after);
         self.apply_conversation_event(session_id, &record.event);
@@ -4561,7 +4569,6 @@ pub(crate) mod tests {
         settings::Settings,
     };
     use tcode_protocol::{Command, EventEnvelope, ServerEvent, Subscription, Topic};
-    use tcode_runtime::host::HostEvent;
     use tcode_runtime::pipe::{HostServices, SpawnedHost, spawn_host};
     use tcode_services::store::SessionStore;
 
@@ -6043,7 +6050,9 @@ pub(crate) mod tests {
         disk.upsert_meta(&thread(&root, "deleted", "p", None))
             .unwrap();
         let host = test_host(disk);
-        let mut driver = LocalHostDriver::new(&host);
+        let mux =
+            tcode_traverse::mux::HostMux::new(host.attachments.clone(), host.from_host.clone());
+        let (mut driver, mut elsewhere) = (attach(&mux), attach(&mux));
         let link = driver.link.clone();
         let workspace = driver.workspace(cx);
         workspace.update(cx, |store, cx| store.show_alone("deleted".into(), cx));
@@ -6061,21 +6070,16 @@ pub(crate) mod tests {
                 Vec::new(),
             )
         });
-        smol::block_on(host.update_state_for_test(|state, cx| {
-            state.delete_session("deleted", false, cx).detach()
-        }))
-        .unwrap();
-        workspace.update(cx, |store, cx| {
-            store.receive(
-                EventEnvelope {
-                    request_id: None,
-                    topic: Topic::Index,
-                    event: ServerEvent::IndexRemoveSession {
-                        session_id: "deleted".into(),
-                    },
-                },
-                cx,
-            )
+        // Another device deletes the thread while this one is away.
+        elsewhere.command(
+            cx,
+            Command::DeleteSession {
+                session_id: "deleted".into(),
+                remove_worktree: false,
+            },
+        );
+        driver.wait_until(cx, "the thread's removal", |cx| {
+            workspace.read_with(cx, |store, _| store.thread_meta("deleted").is_none())
         });
         assert_eq!(
             workspace.read_with(cx, |store, _| store.sole_thread()),
@@ -6101,7 +6105,7 @@ pub(crate) mod tests {
         let key = link.failed_commands()[0].0.key.clone();
         workspace.update(cx, |store, _| store.discard_delivery(&key));
         assert!(link.pending_commands().is_empty() && link.failed_commands().is_empty());
-        driver.shutdown(cx, &host);
+        shutdown_attached(cx, &host, vec![driver, elsewhere]);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -6970,12 +6974,6 @@ pub(crate) mod tests {
         .expect("spawn test host")
     }
 
-    macro_rules! update_host {
-        ($host:expr, $update:expr) => {
-            smol::block_on($host.update_state_for_test($update)).expect("update test host")
-        };
-    }
-
     /// What a test with no shell does in place of its one pane.
     impl WorkspaceStore {
         /// The thread the pane shows, the one open.
@@ -7181,12 +7179,55 @@ pub(crate) mod tests {
                 .expect("typed host command");
         }
 
+        /// Everything sent so far has reached the host, and what the host
+        /// sent for it has reached the client: the host answers in order,
+        /// and sends what an input changed before it reads the next.
+        pub(crate) fn round_trip(&mut self, cx: &mut TestAppContext) {
+            let link = self.link.clone();
+            self.await_with_events(cx, link.query(tcode_protocol::Query::Ping))
+                .expect("the host answers a ping");
+            self.step(cx);
+        }
+
         pub(crate) fn shutdown(&mut self, cx: &mut TestAppContext, host: &SpawnedHost) {
             let link = self.link.clone();
             self.await_with_events(cx, link.shutdown())
                 .expect("stop host");
             host.stopped.recv_blocking().expect("host stopped");
         }
+    }
+
+    /// A client of `mux`'s host, attached as another device's app is.
+    pub(crate) fn attach(mux: &tcode_traverse::mux::HostMux) -> LocalHostDriver {
+        let connection = mux.attach(
+            tcode_protocol::Principal::Full,
+            tcode_client::attachment::AttachmentPolicy::LOCAL,
+        );
+        LocalHostDriver::from_link(tcode_client::HostLink::new(
+            connection.to_host,
+            connection.from_host,
+        ))
+    }
+
+    /// Stop a host whose clients attached through a mux: the first flushes
+    /// it, every client lets go, and the host's own channels close.
+    pub(crate) fn shutdown_attached(
+        cx: &mut TestAppContext,
+        host: &SpawnedHost,
+        drivers: Vec<LocalHostDriver>,
+    ) {
+        let mut drivers = drivers;
+        let link = drivers[0].link.clone();
+        drivers[0]
+            .await_with_events(cx, link.command(Command::ShutdownAllAndFlush))
+            .expect("flush the host");
+        for driver in &drivers {
+            driver.link.close();
+        }
+        drop(drivers);
+        host.to_host.close();
+        host.from_host.close();
+        host.stopped.recv_blocking().expect("host stopped");
     }
 
     #[gpui::test]
@@ -7664,13 +7705,7 @@ pub(crate) mod tests {
         });
 
         workspace.update(cx, |store, _| store.set_auto_settle_after_days(Some(0.5)));
-        // The host answers in order: once a later ping is answered, the
-        // refusal has arrived too.
-        let link = driver.link.clone();
-        driver
-            .await_with_events(cx, link.query(tcode_protocol::Query::Ping))
-            .expect("ping");
-        cx.run_until_parked();
+        driver.round_trip(cx);
         let refusal = Settings::default()
             .apply(tcode_core::settings::SettingsPatch::AutoSettleAfterDays(
                 Some(0.5),
@@ -8255,7 +8290,9 @@ pub(crate) mod tests {
             .upsert_meta(&seed_session)
             .expect("persist seed session");
         let host = test_host(session_store);
-        let mut driver = LocalHostDriver::new(&host);
+        let mux =
+            tcode_traverse::mux::HostMux::new(host.attachments.clone(), host.from_host.clone());
+        let mut driver = attach(&mux);
         let workspace = driver.workspace(cx);
         driver.wait_until(cx, "initial session index", |cx| {
             workspace.read_with(cx, |store, _| {
@@ -8349,27 +8386,31 @@ pub(crate) mod tests {
             );
         });
 
-        // Credential discovery can update settings after the command reply.
-        // Let the UI consume those events before comparing the live replicas.
-        driver.wait_until(cx, "index and settings equal to live state", |cx| {
-            let (live_index, live_settings) = update_host!(&host, |state, _| {
-                let index = state.index_snapshot();
+        // A client that attaches now is given the host's index and settings
+        // as they are, and the one that followed every change holds the
+        // same. Credential discovery can change settings after a command's
+        // reply, which both hear.
+        let mut fresh_driver = attach(&mux);
+        let fresh = fresh_driver.workspace(cx);
+        let replicas = |store: &gpui::Entity<WorkspaceStore>, cx: &TestAppContext| {
+            store.read_with(cx, |store, _| {
                 (
-                    (
-                        serde_json::to_value(&index.sessions).unwrap(),
-                        serde_json::to_value(&index.projects).unwrap(),
-                    ),
-                    serde_json::to_value(&state.settings).unwrap(),
+                    serde_json::to_value(&store.index_replica.0).unwrap(),
+                    serde_json::to_value(&store.index_replica.1).unwrap(),
+                    serde_json::to_value(&store.settings_replica).unwrap(),
                 )
-            });
-            workspace.read_with(cx, |store, _| {
-                serde_json::to_value(&store.index_replica.0).unwrap() == live_index.0
-                    && serde_json::to_value(&store.index_replica.1).unwrap() == live_index.1
-                    && serde_json::to_value(&store.settings_replica).unwrap() == live_settings
             })
-        });
+        };
+        loop {
+            driver.step(cx);
+            fresh_driver.step(cx);
+            if replicas(&workspace, cx) == replicas(&fresh, cx) {
+                break;
+            }
+            driver.wait_for_host("index and settings equal to a fresh client's");
+        }
 
-        driver.shutdown(cx, &host);
+        shutdown_attached(cx, &host, vec![driver, fresh_driver]);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -8385,7 +8426,9 @@ pub(crate) mod tests {
             session_store,
             tcode_runtime::app::scripted_provider(ProviderKind::Codex).launcher,
         );
-        let mut driver = LocalHostDriver::new(&host);
+        let mux =
+            tcode_traverse::mux::HostMux::new(host.attachments.clone(), host.from_host.clone());
+        let mut driver = attach(&mux);
         let workspace = driver.workspace(cx);
         workspace.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, "selected session status", |cx| {
@@ -8421,24 +8464,27 @@ pub(crate) mod tests {
                 ),
             },
         );
-        // The scripted provider keeps moving the host (delivery, steering
-        // support) after the queue change, so the replica is compared with the
-        // live status of the same moment rather than a later snapshot.
-        driver.wait_until(cx, "replica equal to the live status", |cx| {
-            let live_id = session_id.clone();
-            let live = update_host!(&host, move |state, _| {
-                state
-                    .session_status_snapshot(&live_id)
-                    .expect("live session status")
-            });
-            workspace.read_with(cx, |store, cx| {
-                store.sole_status(cx).is_some_and(|status| {
-                    status.queued_messages.len() == 1
-                        && status.review_comment_drafts.len() == 1
-                        && *status == live
-                })
-            })
-        });
+        // A client that opens the thread now is given its status as the host
+        // holds it. The scripted provider keeps moving the host (delivery,
+        // steering support) after the queue change, which both clients hear,
+        // so the two are compared once they agree.
+        let mut fresh_driver = attach(&mux);
+        let fresh = fresh_driver.workspace(cx);
+        fresh.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
+        loop {
+            driver.step(cx);
+            fresh_driver.step(cx);
+            let replica = workspace.read_with(cx, |store, cx| store.sole_status(cx).cloned());
+            let given = fresh.read_with(cx, |store, cx| store.sole_status(cx).cloned());
+            if replica.as_ref().is_some_and(|status| {
+                status.queued_messages.len() == 1
+                    && status.review_comment_drafts.len() == 1
+                    && given.as_ref() == Some(status)
+            }) {
+                break;
+            }
+            driver.wait_for_host("the status a client opening the thread now is given");
+        }
         let replica = workspace.read_with(cx, |store, cx| {
             store
                 .sole_status(cx)
@@ -8455,7 +8501,7 @@ pub(crate) mod tests {
             replica.review_comment_drafts
         );
 
-        driver.shutdown(cx, &host);
+        shutdown_attached(cx, &host, vec![driver, fresh_driver]);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -8463,98 +8509,174 @@ pub(crate) mod tests {
     fn rewind_prefills_reach_only_their_client_and_stay_keyed_to_parked_sessions(
         cx: &mut TestAppContext,
     ) {
+        use crate::chat::tests::{record_thread, thread_meta};
         let root = scratch_root("tcode-native-rewind-replica-test");
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
-        let first = SessionMeta::new(ProviderKind::ClaudeCode, root.join("first"), None);
-        let second = SessionMeta::new(ProviderKind::ClaudeCode, root.join("second"), None);
-        session_store
-            .upsert_meta(&first)
-            .expect("persist first session");
-        session_store
-            .upsert_meta(&second)
-            .expect("persist second session");
-
-        let host = test_host(session_store);
+        // Two threads of a harness that rewinds, each with two turns it
+        // checkpointed.
+        let (first, second) = (
+            thread_meta(Some(ProviderKind::ClaudeCode)),
+            thread_meta(Some(ProviderKind::ClaudeCode)),
+        );
+        for meta in [&first, &second] {
+            record_thread(
+                &session_store,
+                meta,
+                (0..2).flat_map(|turn| {
+                    [
+                        AgentEvent::TurnStarted {
+                            turn_id: turn.to_string(),
+                        },
+                        AgentEvent::TurnCheckpoint {
+                            turn_id: turn.to_string(),
+                            checkpoint_id: format!("checkpoint-{turn}"),
+                        },
+                        AgentEvent::TurnCompleted {
+                            turn_id: turn.to_string(),
+                            status: TurnStatus::Completed,
+                            usage: Some(agent::TokenUsage {
+                                used_tokens: Some(1_000),
+                                ..Default::default()
+                            }),
+                        },
+                    ]
+                }),
+            );
+        }
+        let scripts = tcode_runtime::app::Scripts::default();
+        let host = launching_host(session_store, scripts.launcher());
         let mut driver = LocalHostDriver::new(&host);
         let workspace = driver.workspace(cx);
-        workspace.update(cx, |store, cx| store.show_alone(first.id.clone(), cx));
-        driver.wait_until(cx, "first selected session", |cx| {
+        // The two threads are shown side by side, so both statuses reach
+        // this client. A rewind is made from the host's own fold of a
+        // thread's log; a status carries the context its turns used once
+        // the host has folded them.
+        workspace.update(cx, |store, cx| {
+            store.show_alone(first.id.clone(), cx);
+            store.open_thread(&second.id, cx);
+        });
+        driver.wait_until(cx, "both threads folded on the host", |cx| {
+            workspace.read_with(cx, |store, cx| {
+                [&first.id, &second.id].into_iter().all(|id| {
+                    store
+                        .session_status_for(Some(id), cx)
+                        .is_some_and(|status| status.session_id == *id && status.usage.is_some())
+                })
+            })
+        });
+        let rewound_to = |session_id: &str, checkpoint: &str, cx: &TestAppContext| {
             workspace.read_with(cx, |store, cx| {
                 store
-                    .sole_status(cx)
-                    .is_some_and(|status| status.session_id == first.id)
+                    .with_timeline_for(
+                        Some(session_id),
+                        |timeline| {
+                            timeline.entries.iter().any(|entry| {
+                                matches!(&entry.content, EntryContent::Rewound(rewound)
+                                    if rewound.checkpoint_id == checkpoint)
+                            })
+                        },
+                        cx,
+                    )
+                    .unwrap_or_default()
+            })
+        };
+        // The harness rewinds what the host asks it to and gives the prompt
+        // back.
+        let answer = |driver: &mut LocalHostDriver,
+                      cx: &mut TestAppContext,
+                      provider: &tcode_runtime::app::ScriptedProvider,
+                      prefill: &str| {
+            let (checkpoint_id, mode) = loop {
+                if let agent::SessionCommand::Rewind {
+                    checkpoint_id,
+                    mode,
+                } = driver.recv(cx, &provider.commands)
+                {
+                    break (checkpoint_id, mode);
+                }
+            };
+            provider
+                .events
+                .try_send(AgentEvent::RewindCompleted {
+                    checkpoint_id,
+                    mode,
+                    prefill: Some(prefill.into()),
+                    prefill_attachments: Vec::new(),
+                    later_history: agent::LaterHistory::Truncated,
+                    files: None,
+                    incomplete: None,
+                    undo_token: None,
+                })
+                .unwrap();
+        };
+
+        // This client rewinds the first thread's second message.
+        let provider = scripts.script(ProviderKind::ClaudeCode);
+        workspace.update(cx, |store, _| {
+            store.rewind_turn_for(
+                first.id.clone(),
+                1,
+                None,
+                None,
+                agent::RewindMode::Conversation,
+            )
+        });
+        answer(&mut driver, cx, &provider, "first parked prefill");
+        driver.wait_until(cx, "the first thread's prompt back", |cx| {
+            workspace.read_with(cx, |store, cx| {
+                store.composer_text_waiting_for(Some(&first.id), cx)
+            })
+        });
+        // Another client rewinds it further: that prompt is the other
+        // client's to put back.
+        driver.command(
+            cx,
+            Command::RewindTurn {
+                session_id: first.id.clone(),
+                turn: 0,
+                steer: None,
+                checkpoint_id: None,
+                mode: agent::RewindMode::Conversation,
+                client_id: Some("another-client".into()),
+            },
+        );
+        answer(&mut driver, cx, &provider, "asked elsewhere");
+        driver.wait_until(cx, "the other client's rewind", |cx| {
+            rewound_to(&first.id, "checkpoint-0", cx)
+        });
+        driver.round_trip(cx);
+        // This client rewinds the second thread, shown beside the first.
+        let provider = scripts.script(ProviderKind::ClaudeCode);
+        workspace.update(cx, |store, _| {
+            store.rewind_turn_for(
+                second.id.clone(),
+                1,
+                None,
+                None,
+                agent::RewindMode::Conversation,
+            )
+        });
+        answer(&mut driver, cx, &provider, "second parked prefill");
+        driver.wait_until(cx, "the second thread's prompt back", |cx| {
+            workspace.read_with(cx, |store, cx| {
+                store.composer_text_waiting_for(Some(&second.id), cx)
             })
         });
 
-        // This replica test deliberately owns both status subscriptions. Ordinary
-        // navigation owns only its selected session; mux isolation is tested separately.
-        driver
-            .link
-            .subscribe(tcode_protocol::Subscription {
-                known_index: None,
-                topic: Topic::SessionStatus {
-                    session_id: second.id.clone(),
-                },
-                after: None,
-            })
-            .unwrap();
-        let own = workspace.read_with(cx, |store, _| store.preview.client_id().to_owned());
-        for (session_id, client_id, text) in [
-            (
-                first.id.clone(),
-                own.clone(),
-                "first parked prefill".to_string(),
-            ),
-            (second.id.clone(), own, "second parked prefill".to_string()),
-            (
-                first.id.clone(),
-                "another-client".to_string(),
-                "asked elsewhere".to_string(),
-            ),
+        for (session_id, text) in [
+            (&first.id, "first parked prefill"),
+            (&second.id, "second parked prefill"),
         ] {
-            update_host!(&host, move |_state, cx| {
-                cx.emit(HostEvent::Domain(EventEnvelope {
-                    request_id: None,
-                    topic: Topic::SessionStatus {
-                        session_id: session_id.clone(),
-                    },
-                    event: ServerEvent::RewindPrefill {
-                        session_id,
-                        client_id,
-                        text,
-                        attachments: Vec::new(),
-                    },
-                }));
-            });
+            assert_eq!(
+                workspace.update(cx, |store, cx| store
+                    .take_native_rewind_prefill_for(Some(session_id), cx)),
+                Some(crate::store::RewindPrefill {
+                    text: text.into(),
+                    attachments: Vec::new(),
+                }),
+                "each thread's composer gets the prompt this client asked for there"
+            );
         }
-        driver.wait_until(cx, "both rewind prefill events", |cx| {
-            workspace.read_with(cx, |store, _| store.native_rewind_prefills.len() == 2)
-        });
-
-        assert_eq!(
-            workspace.update(cx, |store, cx| store
-                .take_native_rewind_prefill_for(store.sole_thread().as_deref(), cx)),
-            Some(crate::store::RewindPrefill {
-                text: "first parked prefill".into(),
-                attachments: Vec::new(),
-            })
-        );
-        workspace.update(cx, |store, cx| store.show_alone(second.id.clone(), cx));
-        driver.wait_until(cx, "second selected session", |cx| {
-            workspace.read_with(cx, |store, cx| {
-                store
-                    .sole_status(cx)
-                    .is_some_and(|status| status.session_id == second.id)
-            })
-        });
-        assert_eq!(
-            workspace.update(cx, |store, cx| store
-                .take_native_rewind_prefill_for(store.sole_thread().as_deref(), cx)),
-            Some(crate::store::RewindPrefill {
-                text: "second parked prefill".into(),
-                attachments: Vec::new(),
-            })
-        );
 
         driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);

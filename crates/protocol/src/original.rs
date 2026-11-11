@@ -15,6 +15,13 @@ pub enum OriginalTarget {
         item_id: String,
         image_index: usize,
     },
+    /// The record in `row` of a thread's log, as JSON, as a history window
+    /// sends records: one withheld from a window for its size
+    /// (`AgentEvent::RecordWithheld`).
+    Record {
+        session_id: String,
+        row: u64,
+    },
 }
 
 impl OriginalTarget {
@@ -33,6 +40,12 @@ impl OriginalTarget {
                 item_id,
                 image_index,
                 max_bytes: None,
+            },
+            // Read by whoever may read the thread's history.
+            Self::Record { session_id, row } => Query::SessionHistoryPage {
+                session_id,
+                before: row.saturating_add(1),
+                limit: 1,
             },
         }
     }

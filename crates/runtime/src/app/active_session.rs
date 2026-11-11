@@ -175,7 +175,12 @@ pub struct ActiveSession {
     /// another account restarts it before the next turn.
     pub(super) live_profile_id: Option<String>,
     pub(super) live_option_selections: Vec<OptionSelection>,
+    /// What the live process reported of the option values in effect, by
+    /// [`AgentEvent::ProviderOptions`].
     pub(super) confirmed_option_selections: Vec<OptionSelection>,
+    /// The model the live process is set to as its harness reported it: `None`
+    /// until it reports, `Some(None)` when it reports none.
+    pub(super) confirmed_model: Option<Option<String>>,
     /// Sent to the live process, which has yet to answer. Dispatch waits: the
     /// message after a change is the one that asked for it.
     pub(super) settings_apply_in_flight: Option<LiveSettings>,
@@ -301,6 +306,7 @@ impl ActiveSession {
             live_profile_id,
             live_option_selections: Vec::new(),
             confirmed_option_selections: Vec::new(),
+            confirmed_model: None,
             settings_apply_in_flight: None,
             settings_refused: None,
             draft_workspace: WorkspaceMode::LocalCheckout,

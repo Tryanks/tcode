@@ -583,14 +583,13 @@ pub(crate) struct TurnTimeClause {
 }
 
 /// A finished turn's timing row: when it finished, how long it took, what it
-/// cost, and the model that served it where that is not the one asked for;
-/// each where the turn has it.
+/// cost, and the model that served it where that is not the one asked for
+/// (`served_model`, by its shown name); each where the turn has it.
 pub(crate) fn turn_time_clauses(
     clock: Option<String>,
     timing: Option<TurnTiming>,
     cost_usd: Option<f64>,
     served_model: Option<&str>,
-    requested_model: Option<&str>,
 ) -> Vec<TurnTimeClause> {
     let mut clauses = Vec::new();
     if let Some(clock) = clock {
@@ -617,7 +616,7 @@ pub(crate) fn turn_time_clauses(
             tooltip: None,
         });
     }
-    if let Some(served) = divergent_served_model(served_model, requested_model) {
+    if let Some(served) = served_model {
         #[cfg(target_arch = "wasm32")]
         let warning_mark = "!";
         #[cfg(not(target_arch = "wasm32"))]
@@ -1438,7 +1437,7 @@ pub(in crate::chat) mod tests {
     }
 
     #[test]
-    fn finished_time_clauses_format_cost_and_only_show_a_divergent_served_model() {
+    fn finished_time_clauses_format_cost_and_name_the_served_model() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::set_locale(crate::LANGUAGE_ENGLISH);
 
@@ -1447,7 +1446,6 @@ pub(in crate::chat) mod tests {
             Some(TurnTiming::new(80_000, 35_000)),
             Some(0.12),
             Some("claude-opus-5"),
-            Some("claude-fable-5"),
         );
         assert_eq!(
             clauses
@@ -1462,13 +1460,7 @@ pub(in crate::chat) mod tests {
             ]
         );
 
-        let sub_cent = turn_time_clauses(
-            Some("3:04 PM".into()),
-            None,
-            Some(0.004),
-            Some("claude-fable-5"),
-            Some("claude-fable-5"),
-        );
+        let sub_cent = turn_time_clauses(Some("3:04 PM".into()), None, Some(0.004), None);
         assert_eq!(
             sub_cent
                 .iter()
@@ -1477,19 +1469,9 @@ pub(in crate::chat) mod tests {
             vec![("turn-time-clock", "3:04 PM"), ("turn-time-cost", "$0.004"),]
         );
 
-        let missing_requested =
-            turn_time_clauses(Some("3:04 PM".into()), None, None, Some("served"), None);
-        assert_eq!(missing_requested.len(), 1);
-
         // A turn with no finish time still says what it cost and which model
         // served it.
-        let unclocked = turn_time_clauses(
-            None,
-            None,
-            Some(0.12),
-            Some("claude-opus-5"),
-            Some("claude-fable-5"),
-        );
+        let unclocked = turn_time_clauses(None, None, Some(0.12), Some("claude-opus-5"));
         assert_eq!(
             unclocked
                 .iter()
@@ -1529,7 +1511,7 @@ pub(in crate::chat) mod tests {
             .into_iter()
             .zip(totals)
             {
-                let clauses = turn_time_clauses(None, Some(timing), None, None, None);
+                let clauses = turn_time_clauses(None, Some(timing), None, None);
                 assert_eq!(
                     clauses
                         .iter()

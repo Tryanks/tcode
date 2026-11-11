@@ -419,6 +419,15 @@ pub use wire::{
 // BackgroundCommandsOnSteer patch.
 // SessionContentHits gains truncated: more messages matched than the limit
 // asked for. SearchSessionContent's limit is no longer capped at 50.
+// record_withheld gains row, the withheld record's log cursor, which a
+// history window names and a live session_event leaves out; OriginalTarget
+// gains record {session_id, row}, that record as JSON, read whole on the
+// original stream by whoever may read the thread's history.
+// SessionStatus's provider_option_selections are, while a harness runs, the
+// values it reported (only the permission's were); it gains
+// provider_option_unconfirmed, the options it does not report, running_model
+// and model_unconfirmed. The agent event stream gains session_model {model},
+// and a provider_options selection may be null: the harness reports no value.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

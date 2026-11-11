@@ -681,6 +681,10 @@ fn mcp_args(registrations: &[crate::McpRegistration]) -> Vec<String> {
 /// Model-scoped launch flags resolved from the session's option selections.
 #[derive(Clone, Debug, Default)]
 struct ClaudeLaunchOptions {
+    /// The model as Tcode named it, which `model_id` launches.
+    model: Option<String>,
+    /// The effort selection it resolved to, in Tcode's values.
+    effort_value: Option<String>,
     /// Model id with the manifest's context-window suffix (e.g. `[1m]`) only
     /// when the selected window exceeds what the bare slug already opens.
     model_id: Option<String>,
@@ -772,6 +776,8 @@ impl ClaudeLaunchOptions {
             launch_settings_json(thinking, fast_mode, ultracode, auto_compact_window);
 
         ClaudeLaunchOptions {
+            model: model.map(str::to_owned),
+            effort_value: resolved_effort.clone(),
             model_id,
             effort,
             settings_json,
@@ -919,6 +925,10 @@ async fn actor_loop(
     let initialize = mapper.initialize_request();
     if let Err(error) = write_line(&mut stdin, &initialize).await {
         log::warn!("claude: could not register the worktree hooks: {error}");
+    }
+    let settings_read = mapper.settings_read_request();
+    if let Err(error) = write_line(&mut stdin, &settings_read).await {
+        log::warn!("claude: could not ask for the settings in effect: {error}");
     }
     let mut tailers = HashMap::new();
     let (tail_tx, tail_rx) = smol::channel::unbounded::<SubagentTailNotice>();
@@ -2100,6 +2110,12 @@ pub(crate) struct Mapper {
     /// What the process runs now.
     applied_settings: ClaudeLaunchOptions,
     pending_settings: Option<PendingSettings>,
+    /// The `get_settings` read awaiting its answer.
+    pending_settings_read: Option<String>,
+    /// The model the session is set to as Claude last reported it.
+    reported_model: Option<String>,
+    /// Fast mode as Claude last reported it.
+    reported_fast_mode: Option<bool>,
     /// Native rewind control requests awaiting Claude's correlated response.
     pending_rewinds: HashMap<String, PendingRewind>,
     /// What the latest dry run of each restore point found: Claude answers a
@@ -2165,6 +2181,9 @@ impl Mapper {
             background_drain_withheld: false,
             applied_settings: ClaudeLaunchOptions::default(),
             pending_settings: None,
+            pending_settings_read: None,
+            reported_model: None,
+            reported_fast_mode: None,
             pending_rewinds: HashMap::new(),
             rewind_previews: HashMap::new(),
             steer_uuids: HashMap::new(),
@@ -2413,7 +2432,135 @@ impl Mapper {
             return Vec::new();
         }
         self.applied_settings = pending.target;
+        let read = self.settings_read_request();
+        self.outgoing.push(read);
         vec![AgentEvent::SettingsApplied { applied: true }]
+    }
+
+    /// `get_settings`, whose `applied` is what the next message runs with
+    /// (2.1.322): the model, and the effort it resolved, `null` for a model
+    /// without one. The stream reports neither until a turn, and the effort
+    /// never.
+    fn settings_read_request(&mut self) -> Value {
+        let message = self.control_request(json!({ "subtype": "get_settings" }));
+        self.pending_settings_read = message["request_id"].as_str().map(str::to_owned);
+        message
+    }
+
+    fn on_settings_read(&mut self, response: &Value) -> Vec<AgentEvent> {
+        let applied = response
+            .pointer("/response/applied")
+            .filter(|_| response.get("subtype").and_then(Value::as_str) == Some("success"));
+        if applied.is_none() {
+            log::warn!("claude: get_settings was not answered: {response}");
+        }
+        let mut events = Vec::new();
+        if let Some(model) = applied
+            .and_then(|applied| applied.get("model"))
+            .and_then(Value::as_str)
+        {
+            events.extend(self.observe_model(model));
+        }
+        let effort = applied.map_or(Value::Null, |applied| self.tcode_effort(applied));
+        events.push(AgentEvent::ProviderOptions {
+            descriptors: Vec::new(),
+            selections: vec![OptionSelection {
+                id: crate::EFFORT_OPTION_ID.into(),
+                value: effort,
+            }],
+        });
+        events
+    }
+
+    /// The effort Claude applied, in Tcode's values: the one sent when it
+    /// names that level, else the first of the model's that does, else
+    /// Claude's own word. `null` when Claude has none, or when the value sent
+    /// is one the manifest's `effortMap` launches with no level, so that what
+    /// Claude applied is not it.
+    fn tcode_effort(&self, applied: &Value) -> Value {
+        let Some(effort) = applied.get("effort").and_then(Value::as_str) else {
+            return Value::Null;
+        };
+        let ultracode = applied.get("ultracode").and_then(Value::as_bool) == Some(true);
+        let catalog = crate::claude_manifest::current();
+        let Some(entry) = self
+            .applied_settings
+            .model
+            .as_deref()
+            .or(self.reported_model.as_deref())
+            .and_then(|model| catalog.model(model))
+        else {
+            return json!(effort);
+        };
+        let sent = self.applied_settings.effort_value.as_deref();
+        if sent.is_some_and(|sent| entry.cli_effort(sent).is_none()) {
+            return Value::Null;
+        }
+        let names = |value: &str| {
+            entry.cli_effort(value).as_deref() == Some(effort)
+                && (value == "ultracode") == ultracode
+        };
+        if let Some(sent) = sent.filter(|sent| names(sent)) {
+            return json!(sent);
+        }
+        entry
+            .spec
+            .options
+            .iter()
+            .find_map(|option| match option {
+                OptionDescriptor::Select { id, options, .. } if id == crate::EFFORT_OPTION_ID => {
+                    options.iter().find(|option| names(&option.value))
+                }
+                _ => None,
+            })
+            .map_or_else(|| json!(effort), |option| json!(option.value))
+    }
+
+    /// The model Claude names, spelled as Tcode launched it when it is that
+    /// one: the CLI resolves an alias and adds the window's suffix.
+    fn tcode_model(&self, reported: &str) -> String {
+        let catalog = crate::claude_manifest::current();
+        let canonical = |model: &str| {
+            catalog.model(model).map_or_else(
+                || strip_context_window_suffix(model).to_owned(),
+                |entry| entry.spec.id.clone(),
+            )
+        };
+        match self.applied_settings.model.as_deref() {
+            Some(launched) if canonical(launched) == canonical(reported) => launched.to_owned(),
+            _ => canonical(reported),
+        }
+    }
+
+    /// A model Claude reports the session set to, when it is news.
+    fn observe_model(&mut self, reported: &str) -> Option<AgentEvent> {
+        let model = self.tcode_model(reported);
+        if self.reported_model.as_deref() == Some(model.as_str()) {
+            return None;
+        }
+        self.reported_model = Some(model.clone());
+        Some(AgentEvent::SessionModel { model })
+    }
+
+    /// Fast mode as `fast_mode_state` reports it, when it is news: on in a
+    /// cooldown too, which only waits out a rate limit (2.1.322).
+    fn observe_fast_mode(&mut self, state: Option<&Value>) -> Option<AgentEvent> {
+        let on = match state?.as_str()? {
+            "off" => false,
+            "on" | "cooldown" => true,
+            _ => return None,
+        };
+        if self.reported_fast_mode == Some(on) {
+            return None;
+        }
+        self.reported_fast_mode = Some(on);
+        Some(AgentEvent::ProviderOptions {
+            descriptors: Vec::new(),
+            selections: vec![OptionSelection {
+                id: "fastMode".into(),
+                value: json!(on),
+            }],
+        })
     }
 
     /// Build the `control_response` answering a pending `can_use_tool` prompt.
@@ -2786,6 +2933,19 @@ impl Mapper {
                 self.background_drain_withheld = false;
                 return vec![AgentEvent::BackgroundTasksChanged { count: 0 }];
             }
+            // `{status: null, permissionMode}` on every change of the mode,
+            // the model's own included (2.1.322).
+            Some("status") => {
+                let Some(mode) = msg.get("permissionMode").and_then(Value::as_str) else {
+                    log::debug!("claude: ignoring system/status {:?}", msg.get("status"));
+                    return Vec::new();
+                };
+                if mode == "auto" {
+                    self.auto_unavailable = None;
+                }
+                self.applied_permission_mode = mode.to_owned();
+                return vec![self.permission_options()];
+            }
             Some("model_refusal_fallback") => return self.on_model_refusal_fallback(msg),
             Some("api_retry") => return vec![api_retry_notice(msg)],
             other => {
@@ -2816,17 +2976,29 @@ impl Mapper {
                     .any(|worktree| same_directory(worktree, Path::new(cwd)))
             })
             .and_then(|cwd| self.move_session(PathBuf::from(cwd)));
+        // Each turn's init names the model the turn runs and fast mode's state.
+        let fast_mode = self.observe_fast_mode(msg.get("fast_mode_state"));
         if self.session_id.is_some() {
             let mut events = vec![self.permission_options()];
+            events.extend(
+                msg.get("model")
+                    .and_then(Value::as_str)
+                    .and_then(|model| self.observe_model(model)),
+            );
+            events.extend(fast_mode);
             events.extend(moved);
             return events;
         }
         let session_id = match msg.get("session_id").and_then(Value::as_str) {
             Some(id) => id.to_string(),
-            None => return Vec::new(),
+            None => return fast_mode.into_iter().collect(),
         };
         self.session_id = Some(session_id.clone());
-        let model = msg.get("model").and_then(Value::as_str).map(str::to_string);
+        let model = msg
+            .get("model")
+            .and_then(Value::as_str)
+            .map(|model| self.tcode_model(model));
+        self.reported_model.clone_from(&model);
         let mut events = vec![
             AgentEvent::SessionStarted {
                 provider_session_id: session_id.clone(),
@@ -2838,6 +3010,7 @@ impl Mapper {
             // controls; this session has them.
             AgentEvent::RewindAvailability { unavailable: None },
         ];
+        events.extend(fast_mode);
         // The `slash_commands` (Command) and `skills` (Skill) arrays feed the
         // composer's `/` and `$` menus. Both are arrays of names (no descriptions).
         let commands = parse_provider_commands(msg);
@@ -3823,7 +3996,14 @@ impl Mapper {
             if response.get("subtype").and_then(Value::as_str) != Some("success") {
                 log::warn!("claude: the worktree hooks were not registered: {response}");
             }
-            return Vec::new();
+            return self
+                .observe_fast_mode(response.pointer("/response/fast_mode_state"))
+                .into_iter()
+                .collect();
+        }
+        if self.pending_settings_read.as_deref() == Some(request_id) {
+            self.pending_settings_read = None;
+            return self.on_settings_read(response);
         }
         if self.pending_background_moves.remove(request_id) {
             let moved = response.get("subtype").and_then(Value::as_str) == Some("success")
@@ -4289,6 +4469,7 @@ impl Mapper {
         }
         self.awaiting_turn_checkpoint = false;
         let mut events = self.observe_stop_reason(msg.get("stop_reason").and_then(Value::as_str));
+        events.extend(self.observe_fast_mode(msg.get("fast_mode_state")));
         let turn_id = self
             .current_turn_id
             .take()
@@ -5239,6 +5420,45 @@ mod tests {
             account_file_in(None, Some("/home".into())),
             Some(PathBuf::from("/home/.claude.json"))
         );
+    }
+
+    #[test]
+    fn the_settings_claude_applied_are_read_back_in_tcodes_terms() {
+        // `get_settings`' `applied` {model, effort, ultracode}: the control
+        // schema of Claude Code 2.1.322; the values are made up.
+        let answer = |sent: &str, applied: Value| {
+            let mut mapper = Mapper::new();
+            mapper.applied_settings = ClaudeLaunchOptions::resolve(
+                Some("opus"),
+                &[select(crate::EFFORT_OPTION_ID, json!(sent))],
+            );
+            let read = mapper.settings_read_request();
+            assert_eq!(read["request"], json!({"subtype": "get_settings"}));
+            mapper.on_message(json!({"type":"control_response", "response": {
+                "subtype":"success", "request_id":read["request_id"],
+                "response":{"applied":applied}
+            }}))
+        };
+        let effort = |events: &[AgentEvent]| match events.last() {
+            Some(AgentEvent::ProviderOptions { selections, .. }) => selections[0].value.clone(),
+            _ => panic!("no effort in {events:?}"),
+        };
+        let events = answer(
+            "ultracode",
+            json!({"model":"claude-opus-5-5[1m]", "effort":"xhigh", "ultracode":true}),
+        );
+        assert!(
+            matches!(events.first(), Some(AgentEvent::SessionModel { model }) if model == "opus")
+        );
+        assert_eq!(effort(&events), json!("ultracode"));
+        assert_eq!(
+            effort(&answer(
+                "ultracode",
+                json!({"effort":"xhigh", "ultracode":false})
+            )),
+            json!("xhigh")
+        );
+        assert_eq!(effort(&answer("low", json!({"effort":null}))), Value::Null);
     }
 
     #[test]

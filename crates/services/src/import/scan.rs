@@ -154,7 +154,14 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Ext
                 continue;
             };
             let originator = payload.get("originator").and_then(Value::as_str);
-            if originator == Some("tcode") {
+            // A thread attached to another, a side chat, is not in Codex's
+            // thread list: it is listed only under its parent
+            // (`build_thread_item`, `rollout/src/list.rs`, and the state
+            // database's lists, `state/src/runtime/threads.rs`, at
+            // `rust-v0.167.0`).
+            if originator == Some("tcode")
+                || payload.get("attached_thread").and_then(Value::as_bool) == Some(true)
+            {
                 continue;
             }
             let newest = super::codex::rollout_name(&path)

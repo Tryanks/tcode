@@ -72,9 +72,11 @@ fn free_port() -> u16 {
 /// A platform browse delivers what it finds while the resolve is polled, and
 /// is told to stop the moment the resolve is dropped: iroh drops a resolve
 /// as soon as it has a path, which aborts the task behind it, so the stop
-/// must not wait for the task's deadline.
-#[test]
-fn a_dropped_resolve_stops_the_platform_browse_at_once() {
+/// must not wait for the task's deadline. The resolve runs on this test's
+/// runtime, whose paused clock reaches the deadline only once nothing else
+/// is left to run.
+#[tokio::test(start_paused = true)]
+async fn a_dropped_resolve_stops_the_platform_browse_at_once() {
     let id = iroh::SecretKey::from_bytes(&[5; 32]).public();
     let (started_tx, started) = async_channel::unbounded();
     let (stopped_tx, stopped) = async_channel::unbounded();
@@ -90,27 +92,25 @@ fn a_dropped_resolve_stops_the_platform_browse_at_once() {
         },
     );
     let found: SocketAddr = "10.0.0.12:47420".parse().unwrap();
-    tcode_traverse::block_on(async {
-        let mut stream = lookup.resolve(id).unwrap();
-        let request = started.recv().await.unwrap();
-        browser.found(request, &id.to_string(), [found]);
-        let item = stream.next().await.unwrap().unwrap();
-        assert_eq!(item.provenance(), "lan-dns-sd");
-        assert_eq!(
-            item.endpoint_info().ip_addrs().copied().collect::<Vec<_>>(),
-            [found]
-        );
-        assert!(stopped.is_empty(), "the browse runs on");
-        let dropped_at = Instant::now();
-        drop(stream);
-        let stop = stopped.recv().await.unwrap();
-        assert_eq!(stop, request);
-        assert!(
-            dropped_at.elapsed() < lan::BROWSE_TIME,
-            "the platform browse was stopped before its deadline"
-        );
-        assert!(started.is_empty(), "one browse was started");
-    });
+    let mut stream = lookup.resolve(id).unwrap();
+    let request = started.recv().await.unwrap();
+    browser.found(request, &id.to_string(), [found]);
+    let item = stream.next().await.unwrap().unwrap();
+    assert_eq!(item.provenance(), "lan-dns-sd");
+    assert_eq!(
+        item.endpoint_info().ip_addrs().copied().collect::<Vec<_>>(),
+        [found]
+    );
+    assert!(stopped.is_empty(), "the browse runs on");
+    let dropped_at = tokio::time::Instant::now();
+    drop(stream);
+    let stop = stopped.recv().await.unwrap();
+    assert_eq!(stop, request);
+    assert!(
+        dropped_at.elapsed() < lan::BROWSE_TIME,
+        "the platform browse was stopped before its deadline"
+    );
+    assert!(started.is_empty(), "one browse was started");
 }
 
 /// Real multicast on this host's interfaces: the machine's DNS-SD record is

@@ -648,7 +648,12 @@ impl Composer {
                             .aria_label(crate::tr!("composer.loading"))
                             .into_any_element(),
                         };
-                        div().pr_1().pt_1().child(thumb).into_any_element()
+                        div()
+                            .min_w_0()
+                            .pr_1()
+                            .pt_1()
+                            .child(thumb)
+                            .into_any_element()
                     },
                 )
                 .render(h_flex().w_full().flex_wrap().pt_0p5())

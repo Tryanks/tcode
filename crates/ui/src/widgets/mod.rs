@@ -22,6 +22,7 @@ pub mod spinner;
 pub mod switch;
 pub mod tabs;
 pub mod tooltip;
+pub(crate) mod whole;
 
 pub use breathing::BreathingDot;
 pub use button::{Button, ButtonVariant, ButtonVariants};

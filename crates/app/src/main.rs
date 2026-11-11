@@ -250,8 +250,6 @@ fn window_options(cx: &App, throttle_inactive: bool) -> WindowOptions {
             size(px(tcode_ui::DEFAULT_WINDOW_WIDTH), px(800.)),
             cx,
         )),
-        // Low enough that the window can actually be dragged into the
-        // compact layout; the launch geometry above is unchanged.
         window_min_size: Some(size(px(360.), px(480.))),
         // macOS: seamless titlebar — transparent, with the traffic lights
         // nudged down to sit vertically centered in the 52px top strip.

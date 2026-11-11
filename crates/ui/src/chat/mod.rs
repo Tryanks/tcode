@@ -181,6 +181,9 @@ pub struct ChatView {
     /// panes' layout changes (see `panes::ThreadPanes`), which would scroll
     /// an element-keyed header back to its start.
     header_scroll: gpui::ScrollHandle,
+    /// How much wider the header's git and Open buttons are with their labels
+    /// than without, as the header last laid them out.
+    header_label_width: Rc<Cell<Option<f32>>>,
     /// The scene of the thread the view shows: everything the view, its
     /// composer and its terminal drawer draw keeps its motion under it, so
     /// another thread shown starts all of it at rest, while the same thread
@@ -474,6 +477,7 @@ impl ChatView {
             pane_close: None,
             pane_controls: None,
             header_scroll: gpui::ScrollHandle::default(),
+            header_label_width: Rc::default(),
             motion: crate::motion::owned::Owned::in_scene(&scene),
             scene_shown: false,
             held: false,
@@ -1234,6 +1238,7 @@ impl ChatView {
                 main.child(
                     div()
                         .id("timeline")
+                        .debug_selector(|| "chat-timeline".into())
                         .flex()
                         .flex_col()
                         .flex_1()

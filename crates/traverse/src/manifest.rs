@@ -467,11 +467,25 @@ impl ManifestLoader {
         }
     }
 
+    /// [`Self::refresh_loop`] on the runtime, aborted through the returned
+    /// handle by its owner.
+    pub fn spawn_refresh<F, Fut>(&self, apply: F) -> tokio::task::AbortHandle
+    where
+        F: Fn(Option<Arc<Manifest>>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        crate::runtime::runtime()
+            .spawn(self.refresh_loop(apply))
+            .abort_handle()
+    }
+
     /// Fetch once the copy in effect is [`REFRESH_INTERVAL`] old (at once
     /// for the bundle or nothing), then every interval; `apply` runs after
-    /// each fetch, with the manifest when it changed. Aborted when the
-    /// returned handle is dropped by its owner.
-    pub fn spawn_refresh<F, Fut>(&self, apply: F) -> tokio::task::AbortHandle
+    /// each fetch, with the manifest when it changed.
+    pub(crate) fn refresh_loop<F, Fut>(
+        &self,
+        apply: F,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static
     where
         F: Fn(Option<Arc<Manifest>>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
@@ -480,16 +494,14 @@ impl ManifestLoader {
         let mut wait = loader.state().fetched_at_ms.map_or(Duration::ZERO, |at| {
             REFRESH_INTERVAL.saturating_sub(Duration::from_millis(now_ms().saturating_sub(at)))
         });
-        crate::runtime::runtime()
-            .spawn(async move {
-                loop {
-                    tokio::time::sleep(wait).await;
-                    let manifest = loader.refresh().await;
-                    apply(manifest).await;
-                    wait = REFRESH_INTERVAL;
-                }
-            })
-            .abort_handle()
+        async move {
+            loop {
+                tokio::time::sleep(wait).await;
+                let manifest = loader.refresh().await;
+                apply(manifest).await;
+                wait = REFRESH_INTERVAL;
+            }
+        }
     }
 }
 

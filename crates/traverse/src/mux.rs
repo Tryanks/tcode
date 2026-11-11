@@ -507,8 +507,9 @@ async fn pump(
 
 /// What a connection whose line `line` exceeds is sent for a thread's record:
 /// the record's size in its place, as a history window sends it, so the
-/// connection stays open and the records after it arrive as they are.
-/// `None` for any other event.
+/// connection stays open and the records after it arrive as they are. A live
+/// event does not say its cursor; the client knows it as the end of the log
+/// it holds. `None` for any other event.
 fn withhold(line: &str) -> Option<String> {
     let Ok(tcode_protocol::HostMessage::Event(mut envelope)) =
         tcode_protocol::decode_host_line(line)
@@ -519,7 +520,7 @@ fn withhold(line: &str) -> Option<String> {
         return None;
     };
     let bytes = serde_json::to_vec(record).ok()?.len() as u64;
-    envelope.event = tcode_protocol::ServerEvent::SessionEvent(record.withheld(bytes));
+    envelope.event = tcode_protocol::ServerEvent::SessionEvent(record.withheld(bytes, None));
     encode_line(&tcode_protocol::HostMessage::Event(envelope)).ok()
 }
 

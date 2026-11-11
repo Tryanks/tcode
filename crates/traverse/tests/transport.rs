@@ -790,6 +790,81 @@ fn revocation_closes_the_live_connection_and_rejects_reconnects() {
     real_host::stop(runtime, &mux);
 }
 
+/// A machine that stops tells its devices so, and started again it is the
+/// same machine: its key, so the device that paired with it is admitted
+/// wherever it is bound now; its devices as they described themselves; its
+/// pairing switch; and the name it was started under. The key is kept in a
+/// file only its user can read.
+#[test]
+fn a_restarted_machine_keeps_its_key_devices_and_pairing_switch() {
+    let host_dir = TestDir::new("restart-host");
+    let silent = silent_host();
+    let host = start_host(silent.mux.clone(), &host_dir, None);
+    let dir = TestDir::new("restart-phone");
+    let phone = device(&dir, "phone");
+    phone.set_details("phone".into(), Some("Android 15".into()));
+    let paired = pair(&host.new_invitation().invite, &phone).unwrap();
+    let client = tcode_traverse::connect(&paired, &phone);
+    wait_state(&client, syncing_directly);
+    host.hosting(HostingAction::SetEnabled(false)).unwrap();
+    host.shutdown();
+    wait_state(&client, |state| {
+        matches!(
+            state,
+            ConnectionState::Reconnecting {
+                reason: Some(ConnectionFailure::HostClosed),
+                ..
+            }
+        )
+    });
+    client.to_host.close();
+
+    let restarted = TraverseHost::start(
+        silent.mux.clone(),
+        HostConfig {
+            host_name: "Renamed".into(),
+            data_dir: host_dir.0.clone(),
+            traverse: Vec::new(),
+            pairing_enabled: true,
+            bind_port: None,
+        },
+    )
+    .unwrap();
+    let state = restarted.hosting(HostingAction::State).unwrap();
+    assert_eq!(state.host_id, paired.host_id);
+    assert_eq!(state.host_name, "Renamed");
+    assert!(!state.enabled, "pairing stays off");
+    let devices: Vec<_> = state
+        .devices
+        .iter()
+        .map(|device| (device.id.clone(), device.platform.clone()))
+        .collect();
+    assert_eq!(
+        devices,
+        [(phone.endpoint_id().to_string(), Some("Android 15".into()))]
+    );
+    let moved = PairedHost {
+        addrs: vec![
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, restarted.addr().port))
+                .to_string(),
+        ],
+        ..paired
+    };
+    let client = tcode_traverse::connect(&moved, &phone);
+    wait_state(&client, syncing_directly);
+    client.to_host.close();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(host_dir.0.join("traverse.json"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    restarted.shutdown();
+}
+
 fn space_invite(host: &TraverseHost, id: &str) -> PairInvite {
     tcode_client::pairing::parse_pair_url(&host.space_link_url(id).unwrap()).unwrap()
 }
@@ -1341,8 +1416,9 @@ fn originals_preserve_control_progress_bytes_and_cancelled_admission() {
 }
 
 /// Opens `target` once the host admits it. A read gives its slot back when the
-/// host sees the client stop the stream, which can trail the client reading
-/// the end or cancelling.
+/// host sees the client stop the stream or acknowledge its end, which no
+/// stream orders before the next request: until then the host answers that
+/// request busy, and the device asks again.
 async fn admitted_original(
     link: &tcode_client::HostLink,
     target: &tcode_protocol::OriginalTarget,
@@ -1351,7 +1427,7 @@ async fn admitted_original(
         let mut next = link.read_original(target.clone());
         match next.metadata().await {
             Ok(_) => break next,
-            Err(error) if error.code == "busy" => tokio::task::yield_now().await,
+            Err(error) if error.code == "busy" => {}
             Err(error) => panic!("original: {error:?}"),
         }
     }

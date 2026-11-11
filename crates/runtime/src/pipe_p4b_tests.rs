@@ -36,10 +36,6 @@ pub(crate) fn observed_events(link: &HostLink) -> async_channel::Receiver<EventE
     received
 }
 
-pub(super) fn fixture() -> (SpawnedHost, HostMux, HostLink, String) {
-    fixture_on(crate::clock::HostClock::default())
-}
-
 /// [`fixture`], on a host that keeps `clock`.
 pub(super) fn fixture_on(
     clock: crate::clock::HostClock,
@@ -118,26 +114,172 @@ fn preview_client(link: &HostLink, name: &str) -> tcode_protocol::PreviewClient 
     client
 }
 
-/// An agent's preview call, as the preview MCP broker hands it to the host.
-fn agent_call(
-    host: &SpawnedHost,
-    session_id: &str,
-    op: preview_mcp::PreviewOp,
-) -> async_channel::Receiver<Result<preview_mcp::PreviewReply, String>> {
-    let (reply, answer) = async_channel::bounded(1);
-    let session_id = session_id.to_owned();
-    smol::block_on(host.update_state_for_test(move |state, cx| {
-        state.route_preview(
-            preview_mcp::BrokerRequest {
-                session_id,
-                op,
-                reply,
-            },
-            cx,
-        )
-    }))
+/// [`fixture`], whose thread's turn runs on a provider the test plays, which
+/// the host gave its preview tools: the registration the provider calls them
+/// with.
+fn preview_fixture() -> (
+    SpawnedHost,
+    HostMux,
+    HostLink,
+    String,
+    agent::McpRegistration,
+) {
+    let root = std::env::temp_dir().join(format!("tcode-p4b-{}", uuid::Uuid::new_v4()));
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let mut mcp = mcp_host::Host::bind().unwrap();
+    let preview = preview_mcp::start(&mut mcp);
+    mcp.start().unwrap();
+    let provider = crate::app::scripted_provider(agent::ProviderKind::ClaudeCode);
+    let host = spawn_host(
+        SessionStore::open_at(root).unwrap(),
+        HostServices {
+            preview: Some(preview),
+            provider_launcher: provider.launcher.clone(),
+            ..HostServices::default()
+        },
+    )
     .unwrap();
-    answer
+    let mux = HostMux::new(host.attachments.clone(), host.from_host.clone());
+    let link = linked(&mux);
+    let CommandResponse::ProjectId(Some(project_id)) = link
+        .command_blocking(Command::CreateProject {
+            root: project.clone(),
+        })
+        .unwrap()
+    else {
+        panic!("no project");
+    };
+    let CommandResponse::SessionId(Some(session_id)) = link
+        .command_blocking(Command::StartDraft {
+            project_id,
+            cwd: project,
+        })
+        .unwrap()
+    else {
+        panic!("no session");
+    };
+    link.subscribe(Subscription {
+        known_index: None,
+        topic: Topic::SessionStatus {
+            session_id: session_id.clone(),
+        },
+        after: None,
+    })
+    .unwrap();
+    link.command_blocking(Command::SendTurn {
+        session_id: session_id.clone(),
+        text: "check the page".into(),
+        attachment_paths: Vec::new(),
+    })
+    .unwrap();
+    let options = provider.launches.recv_blocking().unwrap();
+    let Ok(agent::SessionCommand::SendTurn { delivery_id, .. }) =
+        crate::app::next_command_blocking(&provider.commands)
+    else {
+        panic!("the provider takes the turn");
+    };
+    for event in [
+        agent::AgentEvent::TurnAccepted { delivery_id },
+        agent::AgentEvent::TurnStarted {
+            turn_id: "turn".into(),
+        },
+    ] {
+        provider.events.try_send(event).unwrap();
+    }
+    let registration = options
+        .mcp_servers
+        .into_iter()
+        .find(|server| server.name == agent::McpRegistration::SERVER_NAME_PREVIEW)
+        .expect("the provider is given the preview tools");
+    // The provider's handle keeps its channels open for the test's life.
+    std::mem::forget(provider);
+    (host, mux, link, session_id, registration)
+}
+
+/// A preview tool call the agent made through its harness, over the
+/// session's MCP connection: what it answers, and the harness giving up on
+/// it.
+struct AgentCall {
+    answer: async_channel::Receiver<Result<preview_mcp::PreviewReply, String>>,
+    registration: agent::McpRegistration,
+    session: Option<String>,
+}
+
+impl AgentCall {
+    /// The harness stops waiting for the call, as MCP says it does.
+    fn give_up(&self) {
+        crate::app::rpc(
+            &self.registration.url,
+            &self.registration.bearer_token,
+            self.session.as_deref(),
+            serde_json::json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2}}),
+        );
+    }
+
+    fn recv_blocking(
+        &self,
+    ) -> Result<Result<preview_mcp::PreviewReply, String>, async_channel::RecvError> {
+        self.answer.recv_blocking()
+    }
+}
+
+/// The agent calls the preview tool for `op`.
+fn agent_call(registration: &agent::McpRegistration, op: preview_mcp::PreviewOp) -> AgentCall {
+    let tool = match op {
+        preview_mcp::PreviewOp::Status => "preview_status",
+        preview_mcp::PreviewOp::Snapshot => "preview_snapshot",
+        preview_mcp::PreviewOp::Navigate { .. } => "preview_navigate",
+        other => panic!("no call made for {other:?}"),
+    };
+    let arguments = match op {
+        preview_mcp::PreviewOp::Navigate { url } => serde_json::json!({ "url": url }),
+        _ => serde_json::json!({}),
+    };
+    let (url, token) = (&registration.url, &registration.bearer_token);
+    let (_, session) = crate::app::rpc(
+        url,
+        token,
+        None,
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"played-provider","version":"1"}}}),
+    );
+    crate::app::rpc(
+        url,
+        token,
+        session.as_deref(),
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    );
+    let (reply, answer) = async_channel::bounded(1);
+    let call = (url.clone(), token.clone(), session.clone());
+    std::thread::spawn(move || {
+        let (url, token, session) = call;
+        let (response, _) = crate::app::rpc(
+            &url,
+            &token,
+            session.as_deref(),
+            serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":tool,"arguments":arguments}}),
+        );
+        if response.is_null() {
+            // Answered by the cancellation, which ends the call unanswered.
+            return;
+        }
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let _ = reply.send_blocking(if response["result"]["isError"] == true {
+            Err(text)
+        } else {
+            Ok(preview_mcp::PreviewReply::Json(
+                serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text)),
+            ))
+        });
+    });
+    AgentCall {
+        answer,
+        registration: registration.clone(),
+        session,
+    }
 }
 
 fn show_here(
@@ -201,8 +343,8 @@ fn request_id(event: ServerEvent) -> u64 {
 
 #[test]
 fn an_agent_preview_request_reaches_only_the_client_rendering_its_thread() {
-    let (host, mux, desk, session_id) = fixture();
-    let refused = agent_call(&host, &session_id, preview_mcp::PreviewOp::Status);
+    let (_host, mux, desk, session_id, preview) = preview_fixture();
+    let refused = agent_call(&preview, preview_mcp::PreviewOp::Status);
     assert!(
         refused
             .recv_blocking()
@@ -218,8 +360,7 @@ fn an_agent_preview_request_reaches_only_the_client_rendering_its_thread() {
     show_here(&desk, &session_id, &desk_client, false);
 
     let answered = agent_call(
-        &host,
-        &session_id,
+        &preview,
         preview_mcp::PreviewOp::Navigate {
             url: "http://localhost:5173".into(),
         },
@@ -269,16 +410,16 @@ fn an_agent_preview_request_reaches_only_the_client_rendering_its_thread() {
 /// more.
 #[test]
 fn a_preview_call_given_up_is_cancelled_on_the_rendering_client() {
-    let (host, _mux, desk, session_id) = fixture();
+    let (_host, _mux, desk, session_id, preview) = preview_fixture();
     let desk_events = observed_events(&desk);
     let desk_client = preview_client(&desk, "Desk");
     show_here(&desk, &session_id, &desk_client, false);
 
-    let answer = agent_call(&host, &session_id, preview_mcp::PreviewOp::Status);
+    let answer = agent_call(&preview, preview_mcp::PreviewOp::Status);
     let asked = request_id(next(&desk_events, |event| {
         matches!(event, ServerEvent::PreviewRequest { .. })
     }));
-    drop(answer);
+    answer.give_up();
     assert_eq!(
         next(&desk_events, |event| {
             matches!(event, ServerEvent::PreviewRequestCancelled { .. })
@@ -286,16 +427,18 @@ fn a_preview_call_given_up_is_cancelled_on_the_rendering_client() {
         ServerEvent::PreviewRequestCancelled { request_id: asked }
     );
 
-    let answer = agent_call(&host, &session_id, preview_mcp::PreviewOp::Status);
+    let answer = agent_call(&preview, preview_mcp::PreviewOp::Status);
     let asked = request_id(next(&desk_events, |event| {
         matches!(event, ServerEvent::PreviewRequest { .. })
     }));
-    let interrupted = session_id.clone();
-    smol::block_on(
-        host.update_state_for_test(move |state, _| state.cancel_previews_of(&interrupted)),
-    )
+    desk.command_blocking(Command::Interrupt {
+        session_id: session_id.clone(),
+    })
     .unwrap();
-    assert!(answer.recv_blocking().is_err(), "the harness's call ends");
+    assert!(
+        answer.recv_blocking().unwrap().is_err(),
+        "the harness's call ends"
+    );
     assert_eq!(
         next(&desk_events, |event| {
             matches!(event, ServerEvent::PreviewRequestCancelled { .. })
@@ -308,7 +451,7 @@ fn a_preview_call_given_up_is_cancelled_on_the_rendering_client() {
 
 #[test]
 fn show_here_moves_rendering_and_the_page_with_it() {
-    let (host, mux, desk, session_id) = fixture();
+    let (_host, mux, desk, session_id, preview) = preview_fixture();
     let laptop = linked(&mux);
     let desk_events = observed_events(&desk);
     let laptop_events = observed_events(&laptop);
@@ -371,7 +514,7 @@ fn show_here_moves_rendering_and_the_page_with_it() {
         rendering(event).is_some_and(|sessions| sessions.is_empty())
     });
 
-    let answered = agent_call(&host, &session_id, preview_mcp::PreviewOp::Status);
+    let answered = agent_call(&preview, preview_mcp::PreviewOp::Status);
     let request_id = request_id(next(&laptop_events, |event| {
         matches!(event, ServerEvent::PreviewRequest { .. })
     }));
@@ -397,7 +540,7 @@ fn show_here_moves_rendering_and_the_page_with_it() {
 
 #[test]
 fn a_rendering_client_that_goes_away_releases_its_threads() {
-    let (host, mux, desk, session_id) = fixture();
+    let (_host, mux, desk, session_id, preview) = preview_fixture();
     let desk_events = observed_events(&desk);
     let desk_client = preview_client(&desk, "Desk");
     // The phone is a raw attachment so the test can close its link, as a
@@ -426,7 +569,7 @@ fn a_rendering_client_that_goes_away_releases_its_threads() {
         .unwrap();
     watch_session(&desk, &session_id);
 
-    let orphaned = agent_call(&host, &session_id, preview_mcp::PreviewOp::Status);
+    let orphaned = agent_call(&preview, preview_mcp::PreviewOp::Status);
     next(&phone_events, |event| {
         matches!(event, ServerEvent::PreviewRequest { .. })
     });
@@ -441,7 +584,7 @@ fn a_rendering_client_that_goes_away_releases_its_threads() {
     });
 
     // The next call opens the page on a client still here.
-    let answered = agent_call(&host, &session_id, preview_mcp::PreviewOp::Status);
+    let answered = agent_call(&preview, preview_mcp::PreviewOp::Status);
     let ServerEvent::PreviewRenderingReplaced(taken) = next(&desk_events, |event| {
         rendering(event).is_some_and(|sessions| !sessions.is_empty())
     }) else {
@@ -459,7 +602,7 @@ fn a_rendering_client_that_goes_away_releases_its_threads() {
 
 #[test]
 fn user_input_on_the_rendering_page_reaches_the_agent_until_it_snapshots() {
-    let (host, mux, desk, session_id) = fixture();
+    let (_host, mux, desk, session_id, preview) = preview_fixture();
     let laptop = linked(&mux);
     let desk_events = observed_events(&desk);
     let laptop_events = observed_events(&laptop);
@@ -468,7 +611,7 @@ fn user_input_on_the_rendering_page_reaches_the_agent_until_it_snapshots() {
     show_here(&desk, &session_id, &desk_client, false);
     watch_session(&laptop, &session_id);
     let status = |expected: bool| {
-        let answered = agent_call(&host, &session_id, preview_mcp::PreviewOp::Status);
+        let answered = agent_call(&preview, preview_mcp::PreviewOp::Status);
         let request_id = request_id(next(&desk_events, |event| {
             matches!(event, ServerEvent::PreviewRequest { .. })
         }));
@@ -501,7 +644,7 @@ fn user_input_on_the_rendering_page_reaches_the_agent_until_it_snapshots() {
     });
     status(true);
 
-    let snapshot = agent_call(&host, &session_id, preview_mcp::PreviewOp::Snapshot);
+    let snapshot = agent_call(&preview, preview_mcp::PreviewOp::Snapshot);
     let request_id = request_id(next(&desk_events, |event| {
         matches!(event, ServerEvent::PreviewRequest { .. })
     }));
@@ -562,14 +705,20 @@ fn runtime_read_budget_comes_from_the_attachment() {
 /// The root is deliberately distinct per test so a sentinel found by search
 /// can only have come from this host's own store.
 fn project_fixture() -> (SpawnedHost, HostMux, HostLink, PathBuf, String) {
+    project_fixture_over(|_, _| {})
+}
+
+/// [`project_fixture`], over a store `seed` writes into first, as an earlier
+/// host left it; `seed` is given the store and its root.
+fn project_fixture_over(
+    seed: impl FnOnce(&SessionStore, &Path),
+) -> (SpawnedHost, HostMux, HostLink, PathBuf, String) {
     let root = std::env::temp_dir().join(format!("tcode-p4b-{}", uuid::Uuid::new_v4()));
     let project = root.join("project");
     std::fs::create_dir_all(&project).unwrap();
-    let host = spawn_host(
-        SessionStore::open_at(root.clone()).unwrap(),
-        HostServices::default(),
-    )
-    .unwrap();
+    let store = SessionStore::open_at(root.clone()).unwrap();
+    seed(&store, &root);
+    let host = spawn_host(store, HostServices::default()).unwrap();
     let mux = HostMux::new(host.attachments.clone(), host.from_host.clone());
     let link = linked(&mux);
     let CommandResponse::ProjectId(Some(project_id)) = link
@@ -627,9 +776,70 @@ fn import_status(event: &ServerEvent) -> Option<&ExternalImportStatus> {
     }
 }
 
+/// An import that runs refuses another for its project; one that finished
+/// does not (import_status_survives_clients_and_gates_new_runs_by_lifecycle).
+/// The import runs while it reads a transcript that is still being written:
+/// a FIFO, which its reader waits on until the writer is done.
+#[cfg(unix)]
+#[test]
+fn a_running_import_refuses_another_for_its_project() {
+    let (_host, _mux, link, root, project_id) = project_fixture();
+    let events = observed_events(&link);
+    link.subscribe(Subscription {
+        known_index: None,
+        after: None,
+        topic: Topic::ExternalImport {
+            project_id: project_id.clone(),
+        },
+    })
+    .unwrap();
+    let history = root.join("history");
+    let written = claude_thread(
+        &history,
+        "being-written",
+        "a conversation still being written",
+    );
+    let contents = std::fs::read(&written.file).unwrap();
+    std::fs::remove_file(&written.file).unwrap();
+    let fifo = std::ffi::CString::new(written.file.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: `fifo` is a NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    let start = |threads| {
+        link.command_blocking(Command::StartExternalImport {
+            project_id: project_id.clone(),
+            threads,
+        })
+    };
+    assert_eq!(
+        start(vec![written.clone()]).unwrap(),
+        CommandResponse::ExternalImportStarted(true)
+    );
+    assert_eq!(start(Vec::new()).unwrap_err().code, "import_in_progress");
+    std::fs::write(&written.file, contents).unwrap();
+    let finished = next(&events, |event| {
+        matches!(
+            import_status(event).map(|status| &status.state),
+            Some(ExternalImportState::Finished { .. })
+        )
+    });
+    assert_eq!(
+        import_status(&finished).unwrap().state,
+        ExternalImportState::Finished {
+            imported: 1,
+            skipped: 0,
+            failed: Vec::new(),
+        }
+    );
+    assert_eq!(
+        start(Vec::new()).unwrap(),
+        CommandResponse::ExternalImportStarted(true)
+    );
+    link.command_blocking(Command::ShutdownAllAndFlush).unwrap();
+}
+
 #[test]
 fn import_status_survives_clients_and_gates_new_runs_by_lifecycle() {
-    let (host, mux, link, _root, project_id) = project_fixture();
+    let (_host, mux, link, _root, project_id) = project_fixture();
     let events = observed_events(&link);
     link.subscribe(Subscription {
         known_index: None,
@@ -647,37 +857,6 @@ fn import_status_survives_clients_and_gates_new_runs_by_lifecycle() {
         )))
         .is_none()
     );
-
-    let live = project_id.clone();
-    smol::block_on(host.update_state_for_test(move |state, cx| {
-        state.replace_external_import_status(
-            &live,
-            Some(ExternalImportStatus {
-                run_id: 7,
-                state: ExternalImportState::Progress {
-                    done: 1,
-                    total: 9,
-                    tool: "Claude Code".into(),
-                },
-            }),
-            cx,
-        );
-    }))
-    .unwrap();
-    assert_eq!(
-        link.command_blocking(Command::StartExternalImport {
-            project_id: project_id.clone(),
-            threads: Vec::new(),
-        })
-        .unwrap_err()
-        .code,
-        "import_in_progress"
-    );
-    let reset = project_id.clone();
-    smol::block_on(host.update_state_for_test(move |state, cx| {
-        state.replace_external_import_status(&reset, None, cx);
-    }))
-    .unwrap();
 
     assert_eq!(
         link.command_blocking(Command::StartExternalImport {
@@ -750,27 +929,21 @@ fn import_status_survives_clients_and_gates_new_runs_by_lifecycle() {
 
 #[test]
 fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnects() {
-    let (host, mux, watcher, root, project_id) = project_fixture();
-    let mut owner = tcode_core::project::SessionMeta::new(
-        agent::ProviderKind::ClaudeCode,
-        root.join("project"),
-        None,
-    );
-    owner.id = "archived-owner".into();
-    owner.archived_at = Some(1);
-    owner.worktree = Some(tcode_core::project::WorktreeInfo {
-        root_project_path: root.join("repo"),
-        base: "main".into(),
-        branch: "tcode/owner".into(),
+    let (_host, mux, watcher, root, project_id) = project_fixture_over(|store, root| {
+        let mut owner = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::ClaudeCode,
+            root.join("project"),
+            None,
+        );
+        owner.id = "archived-owner".into();
+        owner.archived_at = Some(1);
+        owner.worktree = Some(tcode_core::project::WorktreeInfo {
+            root_project_path: root.join("repo"),
+            base: "main".into(),
+            branch: "tcode/owner".into(),
+        });
+        store.upsert_meta(&owner).unwrap();
     });
-    SessionStore::open_at(root.clone())
-        .unwrap()
-        .upsert_meta(&owner)
-        .unwrap();
-    smol::block_on(host.update_state_for_test(move |state, _cx| {
-        state.sessions.push(owner);
-    }))
-    .unwrap();
     let QueryResponse::ArchivedSessions(before) =
         smol::block_on(watcher.query(Query::ArchivedSessions)).unwrap()
     else {

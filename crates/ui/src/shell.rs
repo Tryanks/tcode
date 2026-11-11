@@ -8267,6 +8267,89 @@ pub(crate) mod tests {
         );
     }
 
+    /// Stopping a plugin change from its toast ends the command the change
+    /// started, whatever that command was doing. The profile's harness is
+    /// set to a program that runs no harness: `/bin/sh`, which pi's install
+    /// arguments (`install <source>`) have run the script `install` in the
+    /// profile's home. The script opens the source, a FIFO this test reads,
+    /// and sleeps holding it, so the read ends only when that process ends.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn stopping_a_plugin_change_from_its_toast_ends_the_command_it_started(
+        cx: &mut TestAppContext,
+    ) {
+        use std::io::Read as _;
+        use tcode_core::settings::ProfileSettingsPatch;
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
+        // The change's toast spins while it runs, which rests only with
+        // motion reduced.
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let root = crate::store::tests::scratch_root("plugin-change-stop");
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("install"), "exec 3>\"$1\"\nexec sleep 86400\n").unwrap();
+        let source = root.join("source");
+        assert!(
+            tcode_services::process::command("mkfifo")
+                .arg(&source)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let disk = tcode_services::store::SessionStore::open_at(root.join("data")).unwrap();
+        let (_shell, store, host, mut driver, cx) = mount_on_host(cx, disk, None);
+        for patch in [
+            ProfileSettingsPatch::SetBinaryPath(Some("/bin/sh".into())),
+            ProfileSettingsPatch::SetHomePath(Some(home.clone())),
+        ] {
+            driver.command(
+                cx,
+                Command::UpdateProfileSettings {
+                    profile_id: "pi".into(),
+                    patch,
+                },
+            );
+        }
+        // A change is made to a listing; this one fails (`sh list`), as a
+        // listing may.
+        driver.command(
+            cx,
+            Command::RefreshProviderPlugins {
+                profile_id: "pi".into(),
+                cwd: None,
+            },
+        );
+        driver.wait_until(cx, "pi's listing", |cx| {
+            store.read_with(cx, |store, _| {
+                store
+                    .provider_plugin_catalog("pi", None)
+                    .is_some_and(|catalog| !catalog.loading)
+            })
+        });
+        driver.command(
+            cx,
+            Command::InstallProviderPlugin {
+                profile_id: "pi".into(),
+                entry_id: source.to_string_lossy().into_owned(),
+                scope: agent::PluginScope::User,
+                cwd: None,
+            },
+        );
+        // Opening the FIFO returns once the command has opened it too.
+        let mut held = std::fs::File::open(&source).unwrap();
+        driver.settle_until(cx, "the change's toast", |cx| {
+            cx.debug_bounds("toast-action").is_some()
+        });
+        click("toast-action", cx);
+        let mut rest = Vec::new();
+        held.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty());
+
+        driver.shutdown(cx, &host);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// A failed git action's toast carries git's own words, which Copy
     /// error gives back as they came, and its Retry sends the host the
     /// action that failed, as it was asked.
@@ -14328,6 +14411,13 @@ pub(crate) mod tests {
             shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
             // Let the compact push animation settle so the picker is in place.
             crate::test_frames::draw_settled(cx);
+            if !mobile && width < 900. {
+                // At a phone's width the sidebar leaves the thread's row no
+                // room for the picker; it is folded away to reach it.
+                let toggle = cx.debug_bounds("toggle-sidebar").expect("sidebar toggle");
+                cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+                crate::test_frames::draw_settled(cx);
+            }
             let picker = cx.debug_bounds("model-picker").expect("model picker");
             cx.simulate_click(picker.center(), gpui::Modifiers::default());
             draw(cx);
@@ -15193,7 +15283,10 @@ pub(crate) mod tests {
                 .into_iter()
                 .collect(),
             provider_option_selections: Vec::new(),
+            provider_option_unconfirmed: Vec::new(),
             provider_option_requested_selections: Vec::new(),
+            running_model: None,
+            model_unconfirmed: false,
             provider_commands: Vec::new(),
             git_branch: None,
             branches: Vec::new(),
@@ -15505,6 +15598,115 @@ pub(crate) mod tests {
         }
         seed_wide_diff_with(&shell, &host, cx, events);
         (shell, host, cx)
+    }
+
+    /// A reader halfway up a long conversation keeps their place as the
+    /// right panel opens beside it and the conversation narrows: the
+    /// message the timeline starts at is the one it started at before.
+    #[gpui::test]
+    fn opening_the_right_panel_keeps_the_reader_at_the_message_they_were_at(
+        cx: &mut TestAppContext,
+    ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(crate::markdown::init);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let root = crate::store::tests::scratch_root("panel-reader");
+        let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::ClaudeCode,
+            root.clone(),
+            None,
+        );
+        meta.id = "thread-1".into();
+        disk.upsert_meta(&meta).unwrap();
+        // Answers long enough to wrap again when the conversation narrows.
+        let answer =
+            "Each step of the migration checks what the one before it left behind. ".repeat(12);
+        let message = |id: String, content: agent::ItemContent| {
+            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id,
+                parent_item_id: None,
+                content,
+            })
+        };
+        let log = (0..40).flat_map(|turn| {
+            [
+                agent::AgentEvent::TurnStarted {
+                    turn_id: turn.to_string(),
+                },
+                message(
+                    format!("user-{turn}"),
+                    agent::ItemContent::UserMessage {
+                        text: format!("Question {turn}"),
+                        attachments: Vec::new(),
+                    },
+                ),
+                message(
+                    format!("answer-{turn}"),
+                    agent::ItemContent::AssistantMessage {
+                        text: answer.clone(),
+                        summarized: false,
+                    },
+                ),
+                agent::AgentEvent::TurnCompleted {
+                    turn_id: turn.to_string(),
+                    status: agent::TurnStatus::Completed,
+                    usage: None,
+                },
+            ]
+        });
+        for (ts, event) in log.enumerate() {
+            disk.append_event(&meta.id, ts as u64, &event).unwrap();
+        }
+        let (_shell, store, host, mut driver, cx) = mount_on_host(cx, disk, None);
+        resize(cx, 1100.);
+        // The reader goes to a turn halfway up, as the palette takes them.
+        store.update(cx, |store, cx| {
+            store.show_thread_at_turn("thread-1".into(), 20, cx)
+        });
+        driver.settle_until(cx, "the turn the reader went to", |cx| {
+            cx.update(|_, cx| store.read(cx).pending_chat_turn("thread-1").is_none())
+                && top_row(cx).is_some_and(|row| row > 0)
+        });
+        // And scrolls up a little, into the middle of a message.
+        let timeline = cx.debug_bounds("chat-timeline").unwrap();
+        for (delta, phase) in [
+            (0., gpui::TouchPhase::Started),
+            (90., gpui::TouchPhase::Moved),
+            (0., gpui::TouchPhase::Ended),
+        ] {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: timeline.center(),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(delta))),
+                touch_phase: phase,
+                ..Default::default()
+            });
+            crate::test_frames::draw_settled(cx);
+        }
+        let reading = top_row(cx).expect("the timeline shows the thread");
+
+        store.update(cx, |store, cx| {
+            store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Plan, cx)
+        });
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            cx.debug_bounds("right-panel").is_some(),
+            "the panel is open"
+        );
+        assert_eq!(top_row(cx), Some(reading), "the reader is where they were");
+
+        driver.shutdown(cx, &host);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The row of the conversation at the top of the timeline: the first
+    /// one drawn that reaches into it.
+    fn top_row(cx: &mut VisualTestContext) -> Option<usize> {
+        let top = cx.debug_bounds("chat-timeline")?.top();
+        (0..1_000).find(|row| {
+            cx.debug_bounds(format!("timeline-row-{row}").leak())
+                .is_some_and(|bounds| bounds.bottom() > top)
+        })
     }
 
     /// The right panel comes back to the width the user chose by dragging

@@ -43,6 +43,9 @@ use crate::{
     wire::{self, ClientLine, DeviceClaim, HelloRejection, HostLine, LineReader, PairRejection},
 };
 
+mod tasks;
+use tasks::Tasks;
+
 /// The device sharing this data directory, if it has one; a `device.json`
 /// that cannot be read is an error naming it.
 fn local_device(data_dir: &std::path::Path) -> io::Result<Option<(EndpointId, DeviceClaim)>> {
@@ -170,19 +173,13 @@ struct Shared {
     /// finds it can be.
     #[cfg(feature = "ssh")]
     ssh: Mutex<Option<crate::ssh::Server>>,
+    /// Everything this machine runs on the runtime, ended with it.
+    tasks: Tasks,
 }
 
 pub struct TraverseHost {
     shared: Arc<Shared>,
     router: Router,
-    /// The loop that keeps the group in step with the other members.
-    group_sync: tokio::task::AbortHandle,
-    /// The manifest refresh loops, one per source, ended with the host.
-    refresh: Vec<tokio::task::AbortHandle>,
-    /// The loop behind [`TraverseHost::traverse_events`].
-    status: tokio::task::AbortHandle,
-    /// The loop behind [`TraverseHost::hosting_events`].
-    hosting: tokio::task::AbortHandle,
     /// This machine's DNS-SD record, withdrawn with the host.
     advertisement: Option<lan::Advertisement>,
 }
@@ -295,51 +292,42 @@ impl TraverseHost {
                 hosting_listeners: Mutex::new(Vec::new()),
                 #[cfg(feature = "ssh")]
                 ssh: Mutex::new(None),
+                tasks: Tasks::new(),
             });
             shared.observe_spaces(&shared.state.lock().unwrap());
             // A fetched manifest is applied to the running endpoint, whether
             // it refreshes the one in hand or is the first to arrive. The
             // loop holds no reference that would keep a stopped host alive.
-            let refresh = shared
-                .loaders
-                .iter()
-                .enumerate()
-                .map(|(index, loader)| {
-                    let shared = Arc::downgrade(&shared);
-                    loader.spawn_refresh(move |manifest| {
-                        let shared = shared.upgrade();
-                        async move {
-                            let Some(shared) = shared else {
-                                return;
-                            };
-                            if let Some(manifest) = manifest {
-                                shared.apply_manifest(index, manifest).await;
-                            }
-                            shared.status_changed.notify_one();
+            for (index, loader) in shared.loaders.iter().enumerate() {
+                let weak = Arc::downgrade(&shared);
+                shared.tasks.spawn(loader.refresh_loop(move |manifest| {
+                    let shared = weak.upgrade();
+                    async move {
+                        let Some(shared) = shared else {
+                            return;
+                        };
+                        if let Some(manifest) = manifest {
+                            shared.apply_manifest(index, manifest).await;
                         }
-                    })
-                })
-                .collect();
-            let status = tokio::spawn(watch_status(Arc::downgrade(&shared))).abort_handle();
-            let hosting = tokio::spawn(watch_hosting(Arc::downgrade(&shared))).abort_handle();
+                        shared.status_changed.notify_one();
+                    }
+                }));
+            }
+            shared.tasks.spawn(watch_status(Arc::downgrade(&shared)));
+            shared.tasks.spawn(watch_hosting(Arc::downgrade(&shared)));
             let router = Router::builder(endpoint)
                 .accept(wire::ALPN_PAIR, PairHandler(shared.clone()))
                 .accept(wire::ALPN_MAIN, MainHandler(shared.clone()))
                 .accept(ALPN_GROUP, GroupHandler(shared.clone()))
                 .spawn();
             shared.group_wake.notify_one();
-            let group_sync = tokio::spawn(group_sync_loop(
+            shared.tasks.spawn(group_sync_loop(
                 Arc::downgrade(&shared),
                 shared.group_wake.clone(),
-            ))
-            .abort_handle();
+            ));
             Ok(TraverseHost {
                 shared,
                 router,
-                group_sync,
-                refresh,
-                status,
-                hosting,
                 advertisement,
             })
         })
@@ -518,23 +506,23 @@ impl TraverseHost {
         HostingHandle(self.shared.clone())
     }
 
+    /// Close the endpoint and end everything the machine runs. Called off
+    /// the runtime with no [`HostingHandle`] still held, it returns with the
+    /// machine's UDP port free, so the machine can start on it again at
+    /// once (see the `tasks` module for why that needs waiting for).
     pub fn shutdown(self) {
-        self.group_sync.abort();
         drop(self.advertisement);
-        for refresh in self.refresh {
-            refresh.abort();
-        }
-        self.status.abort();
-        self.hosting.abort();
         // Ends every listener's stream, whatever still holds the host.
         self.shared.hosting_listeners.lock().unwrap().clear();
-        if let Some(expiry) = self.shared.expiry.lock().unwrap().take() {
-            expiry.abort();
-        }
         let router = self.router;
+        let tasks = self.shared.tasks.clone();
         block_on(async move {
             let _ = router.shutdown().await;
+            tasks.end().await;
         });
+        // The last handle on the endpoint and its connections, dropped off
+        // the runtime.
+        drop(self.shared);
     }
 }
 
@@ -819,13 +807,13 @@ impl Shared {
         let shared = Arc::downgrade(self);
         let secret = invitation.invite.secret.clone();
         let expires_at = invitation.expires_at + Duration::from_millis(10);
-        let expiry = crate::runtime::runtime().spawn(async move {
+        let expiry = self.tasks.spawn(async move {
             tokio::time::sleep_until(expires_at.into()).await;
             if let Some(shared) = shared.upgrade() {
                 shared.expire(&secret);
             }
         });
-        if let Some(previous) = self.expiry.lock().unwrap().replace(expiry.abort_handle()) {
+        if let Some(previous) = std::mem::replace(&mut *self.expiry.lock().unwrap(), expiry) {
             previous.abort();
         }
         self.notify(Some(invitation.clone()));
@@ -1806,7 +1794,7 @@ impl Shared {
         // The members no longer sync with it, so it is told once now; if it
         // is unreachable it learns from the next member it syncs with.
         if let Some(machine) = removed {
-            crate::runtime::runtime().spawn(self.clone().sync_with(machine));
+            self.tasks.spawn(self.clone().sync_with(machine));
         }
         Ok(())
     }
@@ -2268,15 +2256,18 @@ async fn group_sync_loop(shared: std::sync::Weak<Shared>, wake: Arc<tokio::sync:
             return;
         };
         shared.refresh_this_machine();
-        let rounds: Vec<_> = shared
-            .peers()
-            .into_iter()
-            .map(|peer| tokio::spawn(shared.clone().sync_with(peer)))
-            .collect();
-        drop(shared);
-        for round in rounds {
-            let _ = round.await;
+        // Each round holds a clone of `done`: the next wait starts once all
+        // of them have ended.
+        let (done, rounds) = async_channel::bounded::<()>(1);
+        for peer in shared.peers() {
+            let (round, done) = (shared.clone().sync_with(peer), done.clone());
+            shared.tasks.spawn(async move {
+                round.await;
+                drop(done);
+            });
         }
+        drop((shared, done));
+        let _ = rounds.recv().await;
     }
 }
 
@@ -2556,7 +2547,7 @@ impl ProtocolHandler for MainHandler {
                 principal: principal.clone(),
                 tunnels: tunnels.clone(),
             };
-            tokio::spawn(async move {
+            shared.tasks.spawn(async move {
                 if let Err(error) = stream.run(send, wire::reader(recv)).await {
                     log::debug!("main stream ended: {error}");
                 }

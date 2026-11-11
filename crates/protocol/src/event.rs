@@ -961,8 +961,24 @@ pub struct SessionStatus {
     #[serde(rename = "supports_steering")]
     pub steering_supported: bool,
     pub provider_option_descriptors: Vec<OptionDescriptor>,
+    /// The value each option runs at: while a harness runs, what it reported,
+    /// or for an option of `provider_option_unconfirmed` what Tcode sent it;
+    /// an option it reports has none until it has. With none running, what a
+    /// launch sends: the thread's choice, else the option's default.
     pub provider_option_selections: Vec<OptionSelection>,
+    /// The options whose running value the harness does not report, so that
+    /// only what Tcode sent is known of it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_option_unconfirmed: Vec<String>,
+    /// The thread's own choices, which a running harness may not have taken.
     pub provider_option_requested_selections: Vec<OptionSelection>,
+    /// The model the session runs, as `provider_option_selections` has each
+    /// option's value; `requested_model` is the thread's choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_model: Option<String>,
+    /// `running_model` is what Tcode sent: the harness reports no model.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub model_unconfirmed: bool,
     pub provider_commands: Vec<ProviderCommand>,
     pub git_branch: Option<String>,
     pub branches: Vec<String>,

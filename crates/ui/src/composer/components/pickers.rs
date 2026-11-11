@@ -44,6 +44,16 @@ struct SelectedModel {
     profile_id: Option<String>,
 }
 
+/// The rows the picker marks, by [`OptionStates`]' rule: the model the thread
+/// runs is checked, its choice where that is another is pending.
+#[derive(Clone)]
+struct ModelMarks {
+    running: Option<SelectedModel>,
+    pending: Option<SelectedModel>,
+    /// Why the model checked may not be the one in effect.
+    note: Option<gpui::SharedString>,
+}
+
 impl ModelRow {
     fn is_selected(&self, selected: &Option<SelectedModel>) -> bool {
         selected.as_ref().is_some_and(|selected| {
@@ -213,18 +223,33 @@ impl Composer {
         let store_entity = self.workspace_store.clone();
         let model_search = self.model_search.clone();
         let pending_restart = composer_state.model_pending_restart;
-        // On an ACP rail the "selected" row is the agent itself.
-        let selected = match provider {
-            ProviderKind::Acp => acp_agent_id.clone(),
-            _ => current_model.clone(),
-        }
-        .map(|id| SelectedModel {
+        let mark = |id| SelectedModel {
             id,
             provider,
             profile_id: active_profile
                 .clone()
                 .filter(|id| !tcode_core::settings::Settings::is_builtin_profile_id(id)),
-        });
+        };
+        // On an ACP rail the "selected" row is the agent itself.
+        let running_model = composer_state.running_model.clone();
+        let selected = match provider {
+            ProviderKind::Acp => ModelMarks {
+                running: acp_agent_id.clone().map(mark),
+                pending: None,
+                note: None,
+            },
+            _ => ModelMarks {
+                running: running_model.clone().map(mark),
+                pending: current_model
+                    .clone()
+                    .filter(|model| Some(model) != running_model.as_ref())
+                    .map(mark),
+                note: composer_state.model_unconfirmed.then(|| {
+                    crate::tr!("composer.option_sent", harness = provider.display_name()).into()
+                }),
+            },
+        };
+        let pending = selected.pending.is_some();
         let acp_rail_agents: Vec<(String, String)> = store
             .settings_installed_acp_agents()
             .into_iter()
@@ -298,6 +323,18 @@ impl Composer {
                                 )
                             }))
                     })
+                    .child(folding_suffix(
+                        "model-chip-pending",
+                        pending,
+                        px(6.),
+                        |cx| {
+                            div()
+                                .flex_none()
+                                .text_secondary(false, cx)
+                                .child(crate::tr!("permission.pending"))
+                                .into_any_element()
+                        },
+                    ))
                     .child(
                         Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground),
                     ),
@@ -367,15 +404,12 @@ impl Composer {
             })
             .cloned()
             .collect::<Vec<_>>();
+        let states = OptionStates::of(&composer);
         if composer.conversation_read_only {
             let label = match effort_descriptor(&descriptors) {
-                Some(OptionDescriptor::Select {
-                    id,
-                    options,
-                    default_value,
-                    ..
-                }) => resolved_select_value(id, default_value, &composer.active_option_selections)
-                    .map(|value| select_value_label(options, &value)),
+                Some(OptionDescriptor::Select { id, options, .. }) => states
+                    .shown_str(id)
+                    .map(|value| select_value_label(options, value)),
                 _ => None,
             }?;
             let label = gpui::SharedString::from(label);
@@ -404,7 +438,6 @@ impl Composer {
                 options: Vec::new(),
             })
         };
-        let selections = composer.active_option_selections.clone();
         // Keep the effort value readable on phones; the sheet still exposes
         // every parameter, including context capacity and service tier.
         let mut chip_spec = spec.clone();
@@ -413,7 +446,8 @@ impl Composer {
         {
             chip_spec.options = vec![effort.clone()];
         }
-        let label = gpui::SharedString::from(traits_chip_label(&chip_spec, &selections)?);
+        let label = gpui::SharedString::from(traits_chip_label(&chip_spec, &states)?);
+        let pending = states.any_pending(&chip_spec.options);
         let muted = cx.theme().muted_foreground;
         let pending_restart = composer.options_pending_restart;
 
@@ -434,6 +468,18 @@ impl Composer {
                         self.motion.scope(self.motion_key("traits-label")),
                         label.clone(),
                     ))
+                    .child(folding_suffix(
+                        "traits-chip-pending",
+                        pending,
+                        px(6.),
+                        |cx| {
+                            div()
+                                .flex_none()
+                                .text_secondary(false, cx)
+                                .child(crate::tr!("permission.pending"))
+                                .into_any_element()
+                        },
+                    ))
                     .child(Icon::new(IconName::ChevronDown)),
             );
 
@@ -450,7 +496,7 @@ impl Composer {
                 let popover = cx.entity();
                 render_traits_pane(
                     &spec,
-                    &selections,
+                    &states,
                     composer_entity.read(cx).compact,
                     pending_restart,
                     &store_entity,
@@ -741,7 +787,7 @@ fn render_model_pane(
     // The rail's rows before the search filtered them, which a row the
     // search takes away is drawn from as it folds.
     all_rows: Rc<[ModelRow]>,
-    selected: &Option<SelectedModel>,
+    selected: &ModelMarks,
     rail: PickerRail,
     // (id, name) of every installed+enabled ACP agent — one rail entry each.
     acp_agents: &[(String, String)],
@@ -841,7 +887,10 @@ fn render_model_pane(
         .read(cx)
         .value()
         .is_empty()
-        .then(|| rows.iter().position(|row| row.is_selected(selected)))
+        .then(|| {
+            rows.iter()
+                .position(|row| row.is_selected(&selected.running))
+        })
         .flatten();
     let build_list = {
         let selected = selected.clone();
@@ -980,6 +1029,17 @@ fn render_model_pane(
                 ),
         )
         .child(list);
+    if let Some(note) = selected.note.clone() {
+        pane = pane.child(
+            div()
+                .px_3()
+                .py_1p5()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .text_secondary(compact, cx)
+                .child(note),
+        );
+    }
     pane = pane.child(folding_note(
         "model-restart-note",
         pending_restart,
@@ -1056,20 +1116,21 @@ fn render_compact_model_footer(
     let composer_state = store_entity
         .read(cx)
         .composer_state_for(session_id.as_deref(), cx);
-    let selections = composer_state.active_option_selections.clone();
+    let states = OptionStates::of(&composer_state);
     let effort = match effort_descriptor(&composer_state.active_option_descriptors) {
-        Some(OptionDescriptor::Select {
-            id,
-            options,
-            default_value,
-            ..
-        }) => Some((
-            id.clone(),
+        Some(OptionDescriptor::Select { id, options, .. }) => {
             // Use the localized shared label instead of provider-specific copy.
-            crate::tr!("composer.effort").into_owned(),
-            options.clone(),
-            resolved_select_value(id, default_value, &selections),
-        )),
+            let mut label = crate::tr!("composer.effort").into_owned();
+            if states.pending(id).is_some() {
+                label = format!("{label} · {}", crate::tr!("permission.pending"));
+            }
+            Some((
+                id.clone(),
+                label,
+                options.clone(),
+                states.shown_str(id).map(str::to_owned),
+            ))
+        }
         _ => None,
     };
 
@@ -1117,6 +1178,9 @@ fn render_compact_model_footer(
             .aria_label(label.clone())
             .choices(segments);
         footer = footer.child(group(label.into(), track, cx));
+        if let Some(note) = states.unconfirmed_note(&effort_id) {
+            footer = footer.child(div().text_secondary(true, cx).child(note));
+        }
     }
 
     if let Some(control) = PermissionControl::from_composer(&composer_state) {
@@ -1163,6 +1227,9 @@ fn render_compact_model_footer(
             (false, _) => control.label.clone(),
         };
         footer = footer.child(group(label.into(), track, cx));
+        if let Some(note) = control.note.clone() {
+            footer = footer.child(div().text_secondary(true, cx).child(note));
+        }
     } else {
         footer = footer.child(permission_notice(&composer_state, cx));
     }
@@ -1181,7 +1248,7 @@ fn render_compact_model_footer(
 fn render_model_row(
     row: &ModelRow,
     index: usize,
-    selected: &Option<SelectedModel>,
+    selected: &ModelMarks,
     show_source: bool,
     compact: bool,
     store_entity: &Entity<WorkspaceStore>,
@@ -1190,7 +1257,8 @@ fn render_model_row(
     cx: &App,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
-    let is_current = row.is_selected(selected);
+    let is_current = row.is_selected(&selected.running);
+    let is_pending = row.is_selected(&selected.pending);
     let is_acp = row.acp;
     let is_fav = !is_acp && row.favorite;
     let name = row.name.clone();
@@ -1254,6 +1322,13 @@ fn render_model_row(
                         )
                         .when(is_current, |this| {
                             this.child(Icon::new(IconName::Check).text_color(cx.theme().primary))
+                        })
+                        .when(is_pending, |this| {
+                            this.child(
+                                div()
+                                    .text_secondary(compact, cx)
+                                    .child(crate::tr!("permission.pending")),
+                            )
                         }),
                 )
                 .when(show_source, |this| {
@@ -1338,10 +1413,12 @@ struct PermissionControl {
     id: String,
     label: String,
     rows: Vec<PermissionRow>,
-    /// The value the provider confirmed.
+    /// The value it runs at ([`OptionStates::running`]).
     current: Option<serde_json::Value>,
-    /// A value the user chose that the provider has not confirmed yet.
+    /// The thread's choice it does not run yet ([`OptionStates::pending`]).
     requested: Option<serde_json::Value>,
+    /// Why the value checked may not be the one in effect.
+    note: Option<gpui::SharedString>,
     apply: agent::ApplyTiming,
 }
 
@@ -1360,12 +1437,11 @@ impl PermissionControl {
                 )
             })
             .cloned()?;
-        let (id, label, rows, default, apply) = match descriptor {
+        let (id, label, rows, apply) = match descriptor {
             OptionDescriptor::Select {
                 id,
                 label,
                 options,
-                default_value,
                 apply,
                 recommended,
                 ..
@@ -1402,38 +1478,19 @@ impl PermissionControl {
                         }
                     })
                     .collect();
-                (
-                    id,
-                    label,
-                    rows,
-                    default_value.map(serde_json::Value::String),
-                    apply,
-                )
+                (id, label, rows, apply)
             }
             OptionDescriptor::Boolean { .. } => return None,
         };
-        let stored = composer
-            .requested_option_selections
-            .iter()
-            .find(|selection| selection.id == id)
-            .map(|selection| selection.value.clone());
-        // While the harness runs, the host gives only what it confirmed; a
-        // stored value it has not confirmed leaves the running one unknown,
-        // never the default. With nothing stored, the default is what runs.
-        let current = composer
-            .active_option_selections
-            .iter()
-            .find(|selection| selection.id == id)
-            .map(|selection| selection.value.clone())
-            .or_else(|| stored.is_none().then_some(default).flatten());
-        let requested = stored.filter(|value| Some(value) != current.as_ref());
+        let states = OptionStates::of(composer);
         Some(Self {
             label: crate::i18n::translate_english(&format!("permission.controls.{id}"), &label)
                 .into_owned(),
+            current: states.running(&id).cloned(),
+            requested: states.pending(&id).cloned(),
+            note: states.unconfirmed_note(&id).map(Into::into),
             id,
             rows,
-            current,
-            requested,
             apply,
         })
     }
@@ -1599,6 +1656,16 @@ fn render_permission_pane(
         .w_full()
         .when(!compact, |pane| pane.w(px(280.)))
         .child(list);
+    if let Some(note) = control.note.clone() {
+        pane = pane.child(
+            div()
+                .px_3()
+                .py_1p5()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .child(caption(note)),
+        );
+    }
     if let Some(hint) = control.apply_hint() {
         pane = pane.child(
             div()
@@ -1626,25 +1693,21 @@ fn render_effort_slider(
     let composer_state = store_entity
         .read(cx)
         .composer_state_for(session_id.as_deref(), cx);
-    let (effort_id, levels, current) =
-        match effort_descriptor(&composer_state.active_option_descriptors)? {
-            OptionDescriptor::Select {
-                id,
-                options,
-                default_value,
-                ..
-            } => (
-                id.clone(),
-                options.clone(),
-                resolved_select_value(id, default_value, &composer_state.active_option_selections),
-            ),
-            OptionDescriptor::Boolean { .. } => return None,
-        };
+    let states = OptionStates::of(&composer_state);
+    let (effort_id, levels) = match effort_descriptor(&composer_state.active_option_descriptors)? {
+        OptionDescriptor::Select { id, options, .. } => (id.clone(), options.clone()),
+        OptionDescriptor::Boolean { .. } => return None,
+    };
     if levels.len() < 2 {
         return None;
     }
-    // No level known to run: the rows show the levels with none checked.
-    let current = current.and_then(|value| levels.iter().position(|level| level.value == value))?;
+    // The slider holds the level chosen; with none known, the rows show the
+    // levels with none checked.
+    let current = states
+        .shown_str(&effort_id)
+        .and_then(|value| levels.iter().position(|level| level.value == value))?;
+    let pending = states.pending(&effort_id).is_some();
+    let note = states.unconfirmed_note(&effort_id);
     let key = levels
         .iter()
         .map(|level| level.value.as_str())
@@ -1729,7 +1792,19 @@ fn render_effort_slider(
                             .text_color(cx.theme().muted_foreground)
                             .child(crate::widgets::fade_text(crate::tr!("composer.effort"))),
                     )
-                    .child(level_label),
+                    .child(level_label)
+                    .child(folding_suffix(
+                        "effort-slider-pending",
+                        pending,
+                        px(4.),
+                        |cx| {
+                            div()
+                                .flex_none()
+                                .text_secondary(false, cx)
+                                .child(crate::tr!("permission.pending"))
+                                .into_any_element()
+                        },
+                    )),
             )
             .child(
                 div()
@@ -1744,6 +1819,16 @@ fn render_effort_slider(
                             .fill(accent),
                     ),
             )
+            .when_some(note, |slider, note| {
+                slider.child(
+                    div()
+                        .px_2()
+                        .pb_1()
+                        .text_center()
+                        .text_secondary(false, cx)
+                        .child(note),
+                )
+            })
             .into_any_element(),
     )
 }
@@ -1751,7 +1836,7 @@ fn render_effort_slider(
 #[allow(clippy::too_many_arguments)]
 fn render_traits_pane(
     spec: &ModelSpec,
-    selections: &[agent::OptionSelection],
+    states: &OptionStates,
     compact: bool,
     pending_restart: bool,
     store_entity: &Entity<WorkspaceStore>,
@@ -1762,6 +1847,28 @@ fn render_traits_pane(
 ) -> AnyElement {
     let primary = cx.theme().primary;
     let default_suffix = crate::tr!("composer.option_default").into_owned();
+    // A section's note that its value is only what was sent, and a row's
+    // mark that its value is chosen and not yet in effect.
+    let section_note = |id: &str, cx: &mut Context<PopoverState>| {
+        states.unconfirmed_note(id).map(|note| {
+            div()
+                .flex_none()
+                .px_2()
+                .pb_1()
+                .text_secondary(compact, cx)
+                .child(note)
+                .into_any_element()
+        })
+    };
+    let pending_mark = |key: String, pending: bool| {
+        folding_suffix(gpui::SharedString::from(key), pending, px(6.), move |cx| {
+            div()
+                .flex_none()
+                .text_secondary(compact, cx)
+                .child(crate::tr!("permission.pending"))
+                .into_any_element()
+        })
+    };
 
     let section_header = |label: &str, cx: &mut Context<PopoverState>| -> AnyElement {
         div()
@@ -1817,10 +1924,15 @@ fn render_traits_pane(
                     continue;
                 }
                 pane = pane.child(section_header(label, cx));
-                let resolved = resolved_select_value(id, default_value, selections);
+                if let Some(note) = section_note(id, cx) {
+                    pane = pane.child(note);
+                }
+                let running = states.running(id).and_then(serde_json::Value::as_str);
+                let pending = states.pending(id).and_then(serde_json::Value::as_str);
                 for (index, opt) in options.iter().enumerate() {
                     let is_default = default_value.as_deref() == Some(opt.value.as_str());
-                    let is_selected = resolved.as_deref() == Some(opt.value.as_str());
+                    let is_selected = running == Some(opt.value.as_str());
+                    let is_pending = pending == Some(opt.value.as_str());
                     let mut text = opt.label.clone();
                     if is_default {
                         text.push_str(&default_suffix);
@@ -1849,6 +1961,10 @@ fn render_traits_pane(
                                 .overflow_hidden()
                                 .child(crate::widgets::fade_text(text)),
                         )
+                        .child(pending_mark(
+                            format!("trait-opt-pending-{id}-{index}"),
+                            is_pending,
+                        ))
                         .when(is_selected, |this| {
                             this.child(Icon::new(IconName::Check).text_color(primary))
                         })
@@ -1867,17 +1983,16 @@ fn render_traits_pane(
                     );
                 }
             }
-            OptionDescriptor::Boolean {
-                id,
-                label,
-                default_value,
-                ..
-            } => {
+            OptionDescriptor::Boolean { id, label, .. } => {
                 if fast_owned {
                     continue;
                 }
                 pane = pane.child(section_header(label, cx));
-                let on = option_selection_bool(selections, id).unwrap_or(*default_value);
+                if let Some(note) = section_note(id, cx) {
+                    pane = pane.child(note);
+                }
+                let running = states.running(id).and_then(serde_json::Value::as_bool);
+                let pending = states.pending(id).and_then(serde_json::Value::as_bool);
                 for (index, (value, text)) in [
                     (true, crate::tr!("composer.on").into_owned()),
                     (false, crate::tr!("composer.off").into_owned()),
@@ -1885,7 +2000,8 @@ fn render_traits_pane(
                 .into_iter()
                 .enumerate()
                 {
-                    let is_selected = on == value;
+                    let is_selected = running == Some(value);
+                    let is_pending = pending == Some(value);
                     let store = store_entity.clone();
                     let session_id = session_id.clone();
                     let pop = popover.clone();
@@ -1909,6 +2025,10 @@ fn render_traits_pane(
                                 .overflow_hidden()
                                 .child(crate::widgets::fade_text(text)),
                         )
+                        .child(pending_mark(
+                            format!("trait-opt-pending-{id}-{index}"),
+                            is_pending,
+                        ))
                         .when(is_selected, |this| {
                             this.child(Icon::new(IconName::Check).text_color(primary))
                         })
@@ -1957,7 +2077,7 @@ fn render_traits_pane(
         )
         .child(render_fast_mode_bolt(
             fast.as_ref(),
-            selections,
+            &states.shown_selections(&spec.options),
             compact,
             store_entity,
             session_id,

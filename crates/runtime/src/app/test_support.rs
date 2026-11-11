@@ -4,7 +4,175 @@ use std::ops::Deref;
 use std::rc::{Rc, Weak};
 
 use crate::host::HostFn;
-use tcode_protocol::{ClientMessage, ClientPayload, Command, HostMessage, decode_host_line};
+use tcode_protocol::{
+    ClientMessage, ClientPayload, Command, CommandResponse, HostMessage, Principal, Query,
+    Subscription, decode_host_line,
+};
+
+/// What a client attached to the test host has been sent on the topics it
+/// holds, kept as a client keeps it: the latest status of each thread, the
+/// records of each thread's log, the index, and the answers to its requests.
+#[derive(Default)]
+pub(super) struct ClientView {
+    statuses: HashMap<String, SessionStatus>,
+    records: HashMap<String, Vec<StoredEvent>>,
+    sessions: HashMap<String, SessionMeta>,
+    activity: HashMap<String, SessionActivity>,
+    title_generating: HashSet<String>,
+    worktree_shared: HashSet<String>,
+    acks: HashMap<u64, Result<CommandResponse, ProtocolError>>,
+    answers: HashMap<u64, Result<QueryResponse, ProtocolError>>,
+    notifications: Vec<RuntimeEvent>,
+    providers: Option<ProvidersStatus>,
+}
+
+impl ClientView {
+    fn apply(&mut self, message: HostMessage) {
+        let envelope = match message {
+            HostMessage::Ack { id, result } => {
+                self.acks.insert(id, result);
+                return;
+            }
+            HostMessage::QueryResult { id, result } => {
+                self.answers.insert(id, result);
+                return;
+            }
+            HostMessage::Event(envelope) => envelope,
+        };
+        match (envelope.topic, envelope.event) {
+            (Topic::SessionStatus { session_id }, ServerEvent::SessionStatusReplaced(status)) => {
+                self.statuses.insert(session_id, *status);
+            }
+            (
+                Topic::SessionStatus { session_id },
+                ServerEvent::SessionUsageChanged {
+                    usage,
+                    context_window,
+                },
+            ) => {
+                if let Some(status) = self.statuses.get_mut(&session_id) {
+                    status.usage = usage;
+                    status.context_window = context_window;
+                }
+            }
+            (Topic::SessionEvents { session_id }, ServerEvent::SessionSnapshot { records, .. }) => {
+                self.records.insert(session_id, records);
+            }
+            (Topic::SessionEvents { session_id }, ServerEvent::SessionEvent(record)) => {
+                self.records.entry(session_id).or_default().push(record);
+            }
+            (Topic::Index, ServerEvent::IndexSnapshot(snapshot)) => {
+                self.sessions = snapshot
+                    .sessions
+                    .into_iter()
+                    .map(|meta| (meta.id.clone(), meta))
+                    .collect();
+                self.activity = snapshot.summary.activity;
+                self.title_generating = snapshot.summary.title_generating;
+                self.worktree_shared = snapshot.summary.worktree_shared;
+            }
+            (Topic::Index, ServerEvent::IndexUpsertSession(meta)) => {
+                self.sessions.insert(meta.id.clone(), *meta);
+            }
+            (Topic::Index, ServerEvent::IndexRemoveSession { session_id }) => {
+                self.sessions.remove(&session_id);
+            }
+            (Topic::Index, ServerEvent::IndexSummaryReplaced(summary)) => {
+                self.activity = summary.activity;
+                self.title_generating = summary.title_generating;
+                self.worktree_shared = summary.worktree_shared;
+            }
+            (Topic::Index, ServerEvent::IndexActivitiesChanged { upserts, removed }) => {
+                self.activity.extend(upserts);
+                for id in removed {
+                    self.activity.remove(&id);
+                }
+            }
+            (Topic::Providers, ServerEvent::ProvidersReplaced(providers)) => {
+                self.providers = Some(providers);
+            }
+            (
+                Topic::Providers,
+                ServerEvent::ProviderUsageChanged {
+                    provider_usage,
+                    usage_checking,
+                },
+            ) => {
+                if let Some(providers) = &mut self.providers {
+                    providers.provider_usage = provider_usage;
+                    providers.usage_checking = usage_checking;
+                }
+            }
+            (_, ServerEvent::Runtime(notification)) => self.notifications.push(notification),
+            _ => {}
+        }
+    }
+
+    /// The thread's status as its status topic last gave it.
+    pub(super) fn status(&self, session_id: &str) -> &SessionStatus {
+        self.statuses
+            .get(session_id)
+            .unwrap_or_else(|| panic!("no status of {session_id} reached the client"))
+    }
+
+    pub(super) fn has_status(&self, session_id: &str) -> bool {
+        self.statuses.contains_key(session_id)
+    }
+
+    /// The thread's log as its events topic gave it.
+    pub(super) fn records(&self, session_id: &str) -> &[StoredEvent] {
+        self.records.get(session_id).map_or(&[], Vec::as_slice)
+    }
+
+    /// The thread's records as a client folds them.
+    pub(super) fn timeline(&self, session_id: &str) -> Timeline {
+        Timeline::fold_stored(self.records(session_id))
+    }
+
+    /// A thread of the index.
+    pub(super) fn session(&self, session_id: &str) -> Option<&SessionMeta> {
+        self.sessions.get(session_id)
+    }
+
+    /// The index's threads.
+    pub(super) fn sessions(&self) -> impl Iterator<Item = &SessionMeta> {
+        self.sessions.values()
+    }
+
+    /// The index's activity of a thread.
+    pub(super) fn activity(&self, session_id: &str) -> Option<&SessionActivity> {
+        self.activity.get(session_id)
+    }
+
+    /// Whether the index says a title is being made for the thread.
+    pub(super) fn title_generating(&self, session_id: &str) -> bool {
+        self.title_generating.contains(session_id)
+    }
+
+    /// Whether the index says another thread works in the thread's worktree.
+    pub(super) fn worktree_shared(&self, session_id: &str) -> bool {
+        self.worktree_shared.contains(session_id)
+    }
+
+    /// The thread of the index that mirrors the harness's own subagent `native`.
+    pub(super) fn mirror(&self, native: &str) -> Option<&SessionMeta> {
+        self.sessions
+            .values()
+            .find(|meta| meta.native_subagent.as_deref() == Some(native))
+    }
+
+    /// The providers topic as it last stood.
+    pub(super) fn providers(&self) -> &ProvidersStatus {
+        self.providers
+            .as_ref()
+            .expect("the client holds the providers topic")
+    }
+
+    /// Every runtime notification the client was sent.
+    pub(super) fn notifications(&self) -> &[RuntimeEvent] {
+        &self.notifications
+    }
+}
 
 /// What reaches the host from work running off it.
 enum Arrival<T> {
@@ -65,6 +233,10 @@ pub(super) struct TestAppContext {
     outgoing_tx: smol::channel::Sender<String>,
     pub(super) outgoing_rx: smol::channel::Receiver<String>,
     outgoing: Vec<String>,
+    /// Everything the host sent, as the client attached to it keeps it.
+    view: ClientView,
+    /// The id of the client's next request.
+    next_request: u64,
     domain_diff: Option<DomainDiff>,
     state: Option<Weak<RefCell<TestClientState>>>,
     /// The host's time, which moves only when the test advances it.
@@ -81,6 +253,9 @@ impl Default for TestAppContext {
             outgoing_tx,
             outgoing_rx,
             outgoing: Vec::new(),
+            view: ClientView::default(),
+            // Clear of the ids tests number by hand.
+            next_request: 1 << 32,
             domain_diff: None,
             state: None,
             clock: test_clock(),
@@ -139,7 +314,7 @@ impl TestAppContext {
                 self.after_input(&mut state);
             }
             while let Ok(line) = self.outgoing_rx.try_recv() {
-                self.outgoing.push(line);
+                self.take(line);
                 had_work = true;
             }
             if had_work {
@@ -263,7 +438,7 @@ impl TestAppContext {
         message(&mut state.borrow_mut(), &mut host_cx);
         self.after_input(&mut state.borrow_mut());
         while let Ok(line) = self.outgoing_rx.try_recv() {
-            self.outgoing.push(line);
+            self.take(line);
         }
     }
 
@@ -291,7 +466,7 @@ impl TestAppContext {
                 None
             }
             Arrival::Line(line) => {
-                self.outgoing.push(line);
+                self.take(line);
                 None
             }
             Arrival::Other(value) => Some(value),
@@ -302,12 +477,42 @@ impl TestAppContext {
     /// on the same serialized traffic consumed by production clients.
     pub(super) fn drain_outgoing(&mut self) -> Vec<HostMessage> {
         while let Ok(line) = self.outgoing_rx.try_recv() {
-            self.outgoing.push(line);
+            self.take(line);
         }
         self.outgoing
             .drain(..)
             .map(|line| decode_host_line(&line).expect("decode outgoing host NDJSON"))
             .collect()
+    }
+
+    /// Take in a line the host sent: the client attached to it keeps what it
+    /// says, and the test can still drain it.
+    fn take(&mut self, line: String) {
+        self.view
+            .apply(decode_host_line(&line).expect("decode outgoing host NDJSON"));
+        self.outgoing.push(line);
+    }
+
+    /// What the client attached to the host has been sent so far.
+    pub(super) fn seen(&self) -> &ClientView {
+        &self.view
+    }
+
+    /// Run the host until what the client has been sent satisfies `done`,
+    /// waiting between parks for work off the host to hand something back.
+    pub(super) fn run_until_seen(&mut self, mut done: impl FnMut(&ClientView) -> bool) {
+        loop {
+            self.run_until_parked();
+            if done(&self.view) {
+                return;
+            }
+            self.wait_for_host(std::future::pending::<()>());
+        }
+    }
+
+    fn request_id(&mut self) -> u64 {
+        self.next_request += 1;
+        self.next_request
     }
 
     /// Push a `StoreWrite::Flush` barrier through the store-writer task and
@@ -341,20 +546,85 @@ impl TestEntity {
     }
 
     pub(super) fn deliver(&self, cx: &mut TestAppContext, id: u64, payload: ClientPayload) {
+        self.deliver_as(cx, id, None, None, payload);
+    }
+
+    /// [`Self::deliver`] from a client whose device is admitted as
+    /// `principal`, as the mux stamps its messages.
+    fn deliver_as(
+        &self,
+        cx: &mut TestAppContext,
+        id: u64,
+        principal: Option<Principal>,
+        key: Option<String>,
+        payload: ClientPayload,
+    ) {
         let mut host_cx = cx.host_cx();
         let mut state = self.0.borrow_mut();
         crate::pipe::handle_client_message(
             &mut state,
             &mut host_cx,
             ClientMessage {
-                principal: None,
-                key: None,
+                principal,
+                key,
                 id,
                 payload,
             },
             tcode_client::attachment::AttachmentPolicy::LOCAL,
         );
         cx.after_input(&mut state);
+    }
+
+    /// [`Self::command`] under the idempotency `key` a client gives a request
+    /// it may send again.
+    pub(super) fn command_keyed(
+        &self,
+        cx: &mut TestAppContext,
+        key: &str,
+        command: Command,
+    ) -> Result<CommandResponse, ProtocolError> {
+        let id = cx.request_id();
+        self.deliver_as(
+            cx,
+            id,
+            None,
+            Some(key.into()),
+            ClientPayload::Command(command),
+        );
+        cx.run_until_seen(|view| view.acks.contains_key(&id));
+        cx.view.acks.remove(&id).unwrap()
+    }
+
+    /// [`Self::command`] from a member device admitted as `principal`.
+    pub(super) fn command_as(
+        &self,
+        cx: &mut TestAppContext,
+        principal: Principal,
+        command: Command,
+    ) -> Result<CommandResponse, ProtocolError> {
+        let id = cx.request_id();
+        self.deliver_as(
+            cx,
+            id,
+            Some(principal),
+            None,
+            ClientPayload::Command(command),
+        );
+        cx.run_until_seen(|view| view.acks.contains_key(&id));
+        cx.view.acks.remove(&id).unwrap()
+    }
+
+    /// [`Self::query`] from a member device admitted as `principal`.
+    pub(super) fn query_as(
+        &self,
+        cx: &mut TestAppContext,
+        principal: Principal,
+        query: Query,
+    ) -> Result<QueryResponse, ProtocolError> {
+        let id = cx.request_id();
+        self.deliver_as(cx, id, Some(principal), None, ClientPayload::Query(query));
+        cx.run_until_seen(|view| view.answers.contains_key(&id));
+        cx.view.answers.remove(&id).unwrap()
     }
 
     pub(super) fn update<R>(
@@ -368,6 +638,105 @@ impl TestEntity {
 
     pub(super) fn read<R>(&self, read: impl FnOnce(&TestClientState) -> R) -> R {
         read(&self.0.borrow())
+    }
+
+    /// Send `command` as the client does, and run the host until it answers.
+    pub(super) fn command(
+        &self,
+        cx: &mut TestAppContext,
+        command: Command,
+    ) -> Result<CommandResponse, ProtocolError> {
+        let id = cx.request_id();
+        self.deliver(cx, id, ClientPayload::Command(command));
+        cx.run_until_seen(|view| view.acks.contains_key(&id));
+        cx.view.acks.remove(&id).unwrap()
+    }
+
+    /// Ask `query` as the client does, and run the host until it answers.
+    pub(super) fn query(
+        &self,
+        cx: &mut TestAppContext,
+        query: Query,
+    ) -> Result<QueryResponse, ProtocolError> {
+        let id = cx.request_id();
+        self.deliver(cx, id, ClientPayload::Query(query));
+        cx.run_until_seen(|view| view.answers.contains_key(&id));
+        cx.view.answers.remove(&id).unwrap()
+    }
+
+    /// Hold `topic`, as a client showing what it carries does.
+    pub(super) fn subscribe(&self, cx: &mut TestAppContext, topic: Topic) {
+        let id = cx.request_id();
+        self.deliver(
+            cx,
+            id,
+            ClientPayload::Subscribe(Subscription {
+                known_index: None,
+                topic,
+                after: None,
+            }),
+        );
+        cx.run_until_parked();
+    }
+
+    /// Let `topic` go.
+    pub(super) fn unsubscribe(&self, cx: &mut TestAppContext, topic: Topic) {
+        let id = cx.request_id();
+        self.deliver(
+            cx,
+            id,
+            ClientPayload::Unsubscribe(Subscription {
+                known_index: None,
+                topic,
+                after: None,
+            }),
+        );
+        cx.run_until_parked();
+    }
+
+    /// Open thread `id` as a client showing it does, holding its status and
+    /// its log, and run until both have reached the client.
+    pub(super) fn open(&self, cx: &mut TestAppContext, id: &str) {
+        self.subscribe(
+            cx,
+            Topic::SessionStatus {
+                session_id: id.into(),
+            },
+        );
+        self.subscribe(
+            cx,
+            Topic::SessionEvents {
+                session_id: id.into(),
+            },
+        );
+        cx.run_until_seen(|view| view.has_status(id) && view.records.contains_key(id));
+    }
+
+    /// Leave thread `id`, as a client that shows another does.
+    pub(super) fn leave(&self, cx: &mut TestAppContext, id: &str) {
+        for topic in [
+            Topic::SessionStatus {
+                session_id: id.into(),
+            },
+            Topic::SessionEvents {
+                session_id: id.into(),
+            },
+        ] {
+            self.unsubscribe(cx, topic);
+        }
+    }
+
+    /// The user sends `text` to thread `id`.
+    pub(super) fn send(&self, cx: &mut TestAppContext, id: &str, text: &str) {
+        self.command(
+            cx,
+            Command::SendTurn {
+                session_id: id.into(),
+                text: text.into(),
+                attachment_paths: Vec::new(),
+            },
+        )
+        .expect("the host takes the message");
     }
 
     /// Open the parked thread `id` again, as a client selecting it does, and
@@ -422,9 +791,6 @@ impl TestClientState {
     pub(super) fn selected_session(&self) -> Option<&ActiveSession> {
         self.host.residents.live.get(self.selected.as_deref()?)
     }
-    pub(super) fn selected_session_mut(&mut self) -> Option<&mut ActiveSession> {
-        self.host.residents.live.get_mut(self.selected.as_deref()?)
-    }
     pub(super) fn active_session_id(&self) -> Option<&str> {
         self.selected.as_deref()
     }
@@ -466,9 +832,346 @@ impl TestClientState {
     }
 }
 
+/// What holds a start back until it goes.
+type Gate = smol::channel::Sender<()>;
+
+/// Every provider the host starts, each played by the test on channels of
+/// its own, in the order the host started them.
+#[derive(Clone)]
+pub(super) struct Providers {
+    started: Arc<std::sync::Mutex<Vec<Played>>>,
+    /// Starts in these directories fail with what the adapter says.
+    refused: Arc<std::sync::Mutex<Vec<(PathBuf, String)>>>,
+    /// While held, each start goes on until it is let go: the gate of every
+    /// start, by its number, open once its sender is gone.
+    held: Arc<std::sync::Mutex<Option<Vec<Option<Gate>>>>>,
+    /// Told of each start, which happens off the host.
+    starts: smol::channel::Receiver<()>,
+    start: smol::channel::Sender<()>,
+}
+
+impl Default for Providers {
+    fn default() -> Self {
+        let (start, starts) = smol::channel::unbounded();
+        Self {
+            started: Default::default(),
+            refused: Default::default(),
+            held: Default::default(),
+            starts,
+            start,
+        }
+    }
+}
+
+/// One provider the host started: the test plays its adapter's half of the
+/// canonical stream.
+#[derive(Clone)]
+pub(super) struct Played {
+    pub(super) provider: ProviderKind,
+    pub(super) options: SessionOptions,
+    pub(super) commands: smol::channel::Receiver<SessionCommand>,
+    pub(super) events: smol::channel::Sender<AgentEvent>,
+}
+
+impl Providers {
+    pub(super) fn launcher(&self) -> ProviderLauncher {
+        let (started, start) = (self.started.clone(), self.start.clone());
+        let (refused, held) = (self.refused.clone(), self.held.clone());
+        ProviderLauncher(Arc::new(move |provider, options: SessionOptions| {
+            let hold = held.lock().unwrap().as_mut().map(|gates| {
+                let (gate, hold) = smol::channel::bounded::<()>(1);
+                gates.resize(started.lock().unwrap().len(), None);
+                gates.push(Some(gate));
+                hold
+            });
+            let refusal = refused
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(cwd, _)| *cwd == options.cwd)
+                .map(|(_, error)| error.clone());
+            if let Some(error) = refusal {
+                return Box::pin(async move { Err(AgentError::Spawn(error)) });
+            }
+            let (commands, command_rx) = smol::channel::unbounded();
+            let (event_tx, events) = smol::channel::unbounded();
+            started.lock().unwrap().push(Played {
+                provider,
+                options,
+                commands: command_rx,
+                events: event_tx,
+            });
+            let _ = start.try_send(());
+            Box::pin(async move {
+                if let Some(hold) = hold {
+                    let _ = hold.recv().await;
+                }
+                Ok(SessionHandle {
+                    provider,
+                    commands,
+                    events,
+                })
+            })
+        }))
+    }
+
+    /// The providers the host starts from now on are still starting, as a
+    /// harness is for the seconds it takes, until [`Self::let_go`].
+    pub(super) fn hold(&self) {
+        *self.held.lock().unwrap() = Some(Vec::new());
+    }
+
+    /// The starts held go on, and the ones after them are not held.
+    pub(super) fn let_go(&self) {
+        self.held.lock().unwrap().take();
+    }
+
+    /// The start the host made `n`th, held, goes on.
+    pub(super) fn let_go_of(&self, n: usize) {
+        if let Some(gate) = self
+            .held
+            .lock()
+            .unwrap()
+            .as_mut()
+            .and_then(|gates| gates.get_mut(n))
+        {
+            gate.take();
+        }
+    }
+
+    /// A provider started in `cwd` from now on fails to start, its adapter
+    /// saying `error`.
+    pub(super) fn refuse_in(&self, cwd: &Path, error: String) {
+        self.refused
+            .lock()
+            .unwrap()
+            .push((cwd.to_path_buf(), error));
+    }
+
+    /// How many providers the host has started.
+    pub(super) fn count(&self) -> usize {
+        self.started.lock().unwrap().len()
+    }
+
+    /// The provider the host started `n`th, from 0, once it has.
+    pub(super) fn started(&self, cx: &mut TestAppContext, n: usize) -> Played {
+        while self.count() <= n {
+            cx.run_until_recv(&self.starts);
+        }
+        self.started.lock().unwrap()[n].clone()
+    }
+
+    /// The provider the host started in `cwd`, once it has: the one a thread
+    /// working there runs.
+    pub(super) fn started_in(&self, cx: &mut TestAppContext, cwd: &Path) -> Played {
+        loop {
+            if let Some(played) = self
+                .started
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|played| played.options.cwd == cwd)
+            {
+                return played.clone();
+            }
+            cx.run_until_recv(&self.starts);
+        }
+    }
+}
+
+impl Played {
+    /// The next command the host sends the provider, with the usage reads a
+    /// harness answers on its own answered on the way.
+    pub(super) fn next_command(&self, cx: &mut TestAppContext) -> SessionCommand {
+        cx.run_until_command(&self.commands)
+    }
+
+    /// The next message the host steers into the running turn.
+    pub(super) fn next_steer(&self, cx: &mut TestAppContext) -> String {
+        match self.next_command(cx) {
+            SessionCommand::Steer { text, .. } => text,
+            other => panic!("expected a steer, got {other:?}"),
+        }
+    }
+
+    /// The next turn the host sends: its delivery id and text.
+    pub(super) fn next_turn(&self, cx: &mut TestAppContext) -> (u64, String) {
+        match self.next_command(cx) {
+            SessionCommand::SendTurn {
+                delivery_id, text, ..
+            } => (delivery_id, text),
+            other => panic!("expected a turn, got {other:?}"),
+        }
+    }
+
+    /// The provider says `events` happened, in order. They reach the host off
+    /// it; a test waits for what the last of them changes.
+    pub(super) fn play(&self, events: impl IntoIterator<Item = AgentEvent>) {
+        for event in events {
+            self.events
+                .try_send(event)
+                .expect("the host holds the provider's events");
+        }
+    }
+
+    /// The provider's event stream ends, as an adapter's does when its
+    /// process is gone.
+    pub(super) fn end_stream(&self) {
+        self.events.close();
+    }
+
+    /// Run until the host has taken every event played so far: the provider
+    /// lists its commands after them, which nothing else of the thread
+    /// reads, and the client showing thread `id`, the thread this provider
+    /// runs, is sent that list last.
+    pub(super) fn fence(&self, cx: &mut TestAppContext, id: &str) {
+        static FENCES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let mark = format!(
+            "fence-{}",
+            FENCES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        self.play([AgentEvent::ProviderCommands {
+            commands: vec![agent::ProviderCommand {
+                name: mark.clone(),
+                description: None,
+                kind: agent::ProviderCommandKind::Command,
+            }],
+        }]);
+        cx.run_until_seen(|view| {
+            view.status(id)
+                .provider_commands
+                .iter()
+                .any(|command| command.name == mark)
+        });
+    }
+
+    /// The provider takes the next turn the host sends and starts it as
+    /// `turn_id`, as an adapter does once the message is written; returns
+    /// the turn's delivery id.
+    pub(super) fn start_turn(&self, cx: &mut TestAppContext, turn_id: &str) -> u64 {
+        let (delivery_id, _) = self.next_turn(cx);
+        self.play([
+            AgentEvent::TurnAccepted { delivery_id },
+            AgentEvent::TurnStarted {
+                turn_id: turn_id.into(),
+            },
+        ]);
+        delivery_id
+    }
+}
+
+impl Played {
+    /// The model calls `tcode_control`'s `tool` with `arguments`, as its
+    /// harness does over the MCP server the host gave it at launch: the
+    /// tool's answer, or the error it gave.
+    pub(super) fn control(
+        &self,
+        cx: &mut TestAppContext,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let registration = self
+            .options
+            .mcp_servers
+            .iter()
+            .find(|server| server.name == "tcode_control")
+            .expect("the provider was given tcode_control")
+            .clone();
+        let (answer, answered) = smol::channel::bounded(1);
+        let tool = tool.to_owned();
+        std::thread::spawn(move || {
+            let (url, token) = (&registration.url, &registration.bearer_token);
+            let (_, session) = rpc(
+                url,
+                token,
+                None,
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"played-provider","version":"1"}}}),
+            );
+            rpc(
+                url,
+                token,
+                session.as_deref(),
+                serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            );
+            let (reply, _) = rpc(
+                url,
+                token,
+                session.as_deref(),
+                serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":tool,"arguments":arguments}}),
+            );
+            let _ = answer.send_blocking(reply);
+        });
+        let reply = cx.run_until_recv(&answered);
+        if let Some(error) = reply.get("error") {
+            return Err(error["message"].as_str().unwrap_or_default().to_owned());
+        }
+        let text = reply["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        if reply["result"]["isError"] == true {
+            Err(text)
+        } else {
+            Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text)))
+        }
+    }
+}
+
+/// [`played_host`], offering its providers `tcode_control` on loopback as a
+/// composition root does.
+pub(super) fn controlled_host(
+    cx: &mut TestAppContext,
+    store: &SessionStore,
+) -> (TestEntity, Providers) {
+    let mut server = mcp_host::Host::bind().unwrap();
+    let control = control_mcp::start(&mut server);
+    server.start().unwrap();
+    let providers = Providers::default();
+    let mut state = TestClientState::new(store.clone());
+    state.set_provider_launcher(providers.launcher());
+    state.attach_control_mcp(control);
+    let state = cx.new_entity(state);
+    state.update(cx, |state, cx| {
+        state.pump_control_requests(cx);
+        state.resume_undelivered_reports(cx);
+    });
+    (state, providers)
+}
+
+/// A host over `store` whose providers the test plays.
+pub(super) fn played_host(
+    cx: &mut TestAppContext,
+    store: &SessionStore,
+) -> (TestEntity, Providers) {
+    let providers = Providers::default();
+    let mut state = TestClientState::new(store.clone());
+    state.set_provider_launcher(providers.launcher());
+    let state = cx.new_entity(state);
+    // What a host does as it starts over a store an earlier one left.
+    state.update(cx, |state, cx| state.resume_undelivered_reports(cx));
+    (state, providers)
+}
+
+/// A thread of `provider` working in `cwd`, as a host that ran it before left
+/// it on disk.
+pub(super) fn stored_thread(
+    store: &SessionStore,
+    id: &str,
+    provider: ProviderKind,
+    cwd: &Path,
+    edit: impl FnOnce(&mut SessionMeta),
+) -> SessionMeta {
+    std::fs::create_dir_all(cwd).unwrap();
+    let mut meta = SessionMeta::new(provider, cwd.to_path_buf(), None);
+    meta.id = id.into();
+    edit(&mut meta);
+    store.upsert_meta(&meta).unwrap();
+    meta
+}
+
 /// One JSON-RPC exchange with an in-process MCP server, as a provider makes it: the reply
 /// and the session id the server assigned.
-pub(super) fn rpc(
+pub(crate) fn rpc(
     url: &str,
     token: &str,
     session: Option<&str>,

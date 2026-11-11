@@ -186,15 +186,7 @@ impl<T> Shown<T> {
 
     /// In a column: grows to its height and fades in, shrinks and fades out.
     pub(crate) fn fold(&self, content: impl IntoElement) -> AnyElement {
-        Reveal {
-            id: child_id(&self.id, "fold"),
-            progress: self.progress,
-            measure: self.measure.clone(),
-            axis: Axis::Vertical,
-            gap: px(0.),
-            child: self.frame(content).w_full().into_any_element(),
-        }
-        .into_any_element()
+        self.reveal("fold", Axis::Vertical, px(0.), content)
     }
 
     /// Beside other content in a row: grows to its width and fades in,
@@ -205,32 +197,28 @@ impl<T> Shown<T> {
 
     /// [`Self::fold_across`] in a row with a `gap` between its children: the
     /// gap before it comes and goes with it, so nothing beside it jumps by
-    /// the gap as it starts or finishes. At rest it shrinks with the row as
-    /// its content would.
+    /// the gap as it starts or finishes. At rest it is its content in the
+    /// row: it shrinks as far as its content does and no further.
     pub(crate) fn fold_across_gap(&self, gap: Pixels, content: impl IntoElement) -> AnyElement {
-        Reveal {
-            id: child_id(&self.id, "fold-across"),
-            progress: self.progress,
-            measure: self.measure.clone(),
-            axis: Axis::Horizontal,
-            gap,
-            child: self.frame(content).min_w_0().into_any_element(),
-        }
-        .into_any_element()
+        self.reveal("fold-across", Axis::Horizontal, gap, content)
     }
 
-    /// [`Self::fold_across`] for content that must keep `min` of its width
-    /// at rest however narrow its row gets (a picker that must stay
-    /// pressable): the row shrinks it to `min` and no further, so what is
-    /// beside it never comes to lie over it.
-    pub(crate) fn fold_across_min(&self, min: Pixels, content: impl IntoElement) -> AnyElement {
+    fn reveal(
+        &self,
+        channel: &'static str,
+        axis: Axis,
+        gap: Pixels,
+        content: impl IntoElement,
+    ) -> AnyElement {
         Reveal {
-            id: child_id(&self.id, "fold-across"),
+            id: child_id(&self.id, channel),
             progress: self.progress,
+            leaving: self.leaving,
             measure: self.measure.clone(),
-            axis: Axis::Horizontal,
-            gap: px(0.),
-            child: self.frame(content).min_w(min).into_any_element(),
+            axis,
+            gap,
+            content: Some(content.into_any_element()),
+            child: None,
         }
         .into_any_element()
     }
@@ -261,16 +249,20 @@ impl<T> Shown<T> {
             .into_any_element()
     }
 
-    /// What is leaving takes no clicks.
     fn frame(&self, content: impl IntoElement) -> Div {
-        div()
-            .relative()
-            .opacity(self.progress)
-            .child(faded::faded(self.progress, content))
-            .when(self.leaving, |frame| {
-                frame.child(div().absolute().inset_0().occlude())
-            })
+        frame(self.progress, self.leaving, content)
     }
+}
+
+/// `content` drawn `progress` in. What is leaving takes no clicks.
+fn frame(progress: f32, leaving: bool, content: impl IntoElement) -> Div {
+    div()
+        .relative()
+        .opacity(progress)
+        .child(faded::faded(progress, content))
+        .when(leaving, |frame| {
+            frame.child(div().absolute().inset_0().occlude())
+        })
 }
 
 /// A fold in a column at `progress` its owner drives (a list's row under
@@ -299,18 +291,27 @@ pub(crate) fn fold(
 /// message's actions, an open disclosure) comes in a frame late and moves
 /// what is below; and it folds only heights. This one lays its child out as
 /// itself while it is at rest or unmeasured, and clips it to its measurement
-/// scaled by the progress only while it folds. Its child keeps its place in
-/// the tree in both.
+/// scaled by the progress only while it folds. Its content keeps its place
+/// in the tree in both.
+///
+/// In a row at rest it lays out its content alone, as if it were not there:
+/// a box of its own around the content would let the row shrink the box
+/// below what the content can shrink to, and the content would be drawn at
+/// its own width over what is beside it.
 struct Reveal {
     id: ElementId,
     progress: f32,
+    leaving: bool,
     /// Its measurement, when an owner keeps it.
     measure: Option<Measure>,
     /// The extent it folds: height in a column, width in a row.
     axis: Axis,
     /// In a row, the gap before it that it brings and takes away.
     gap: Pixels,
-    child: AnyElement,
+    /// What it draws, until it is laid out as [`Self::child`].
+    content: Option<AnyElement>,
+    /// The content as this frame lays it out: framed with its fade, or alone.
+    child: Option<AnyElement>,
 }
 
 /// How a fold lays its content out this frame.
@@ -393,6 +394,16 @@ impl gpui::Element for Reveal {
             }
             style
         };
+        let content = self.content.take().expect("a Reveal is laid out once");
+        let child = self.child.insert(match self.axis {
+            Axis::Horizontal if self.progress >= 1. && !self.leaving => content,
+            Axis::Horizontal => frame(self.progress, self.leaving, content)
+                .min_w_0()
+                .into_any_element(),
+            Axis::Vertical => frame(self.progress, self.leaving, content)
+                .w_full()
+                .into_any_element(),
+        });
         match measured {
             Some(size) if self.progress < 1. => (
                 window.request_layout(folded(size, self.progress), None, cx),
@@ -402,7 +413,7 @@ impl gpui::Element for Reveal {
                 window.request_layout(folded(Size::default(), 0.), None, cx),
                 RevealLayout::Clipped,
             ),
-            _ => (self.child.request_layout(window, cx), RevealLayout::Plain),
+            _ => (child.request_layout(window, cx), RevealLayout::Plain),
         }
     }
 
@@ -416,9 +427,10 @@ impl gpui::Element for Reveal {
         cx: &mut App,
     ) {
         let global_id = global_id.expect("Reveal has an id");
+        let child = self.child.as_mut().expect("laid out");
         let size = match layout {
             RevealLayout::Plain => {
-                self.child.prepaint(window, cx);
+                child.prepaint(window, cx);
                 bounds.size
             }
             RevealLayout::Clipped => {
@@ -432,9 +444,9 @@ impl gpui::Element for Reveal {
                         gpui::AvailableSpace::MinContent,
                     ),
                 };
-                let size = self.child.layout_as_root(space, window, cx);
+                let size = child.layout_as_root(space, window, cx);
                 window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-                    self.child.prepaint_at(bounds.origin, window, cx);
+                    child.prepaint_at(bounds.origin, window, cx);
                 });
                 size
             }
@@ -461,11 +473,12 @@ impl gpui::Element for Reveal {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let child = self.child.as_mut().expect("laid out");
         match layout {
-            RevealLayout::Plain => self.child.paint(window, cx),
+            RevealLayout::Plain => child.paint(window, cx),
             RevealLayout::Clipped => {
                 window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-                    self.child.paint(window, cx);
+                    child.paint(window, cx);
                 });
             }
         }

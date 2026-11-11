@@ -7,47 +7,57 @@ use tcode_core::project::ChildExpectation;
 use tcode_core::settings::{SettingsPatch, ThemeMode};
 use tcode_protocol::{BackgroundTaskStatus, Command, CommandResponse, HostMessage, Subscription};
 
-/// What crosses the wire for `thread`'s index entry while `events` run, one
-/// host turn each, as the provider delivers them to `via`.
+/// What crosses the wire for `thread`'s index entry from now on, in order.
 fn published_activity(
-    state: &TestEntity,
     cx: &mut TestAppContext,
-    via: &str,
     thread: &str,
-    events: Vec<AgentEvent>,
-) -> Vec<tcode_protocol::SessionActivity> {
-    let mut published = Vec::new();
-    for event in events {
-        state.update(cx, |state, cx| {
-            state.provider_event_for_test(via, event, cx);
-        });
-        cx.run_until_parked();
-        for message in cx.drain_outgoing() {
-            if let HostMessage::Event(envelope) = message
-                && let ServerEvent::IndexActivitiesChanged { upserts, .. } = envelope.event
-                && let Some(activity) = upserts.get(thread)
-            {
-                published.push(activity.clone());
-            }
-        }
-    }
-    published
+) -> Vec<Option<tcode_core::session::LatestActivity>> {
+    cx.drain_outgoing()
+        .into_iter()
+        .filter_map(|message| match message {
+            HostMessage::Event(envelope) => match envelope.event {
+                ServerEvent::IndexActivitiesChanged { mut upserts, .. } => upserts
+                    .remove(thread)
+                    .map(|activity| activity.latest_activity),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
 }
 
-fn subscribed_to_index(cx: &mut TestAppContext, state: TestClientState) -> TestEntity {
-    let state = cx.new_entity(state);
-    state.deliver(
-        cx,
-        1,
-        tcode_protocol::ClientPayload::Subscribe(Subscription {
-            topic: Topic::Index,
-            after: None,
-            known_index: None,
-        }),
-    );
-    cx.run_until_parked();
-    cx.drain_outgoing();
-    state
+/// The user sends thread `id`, shown on the client, its first message, and
+/// the provider the host starts `n`th takes it and starts a turn.
+fn first_turn(
+    state: &TestEntity,
+    cx: &mut TestAppContext,
+    providers: &Providers,
+    id: &str,
+    n: usize,
+) -> Played {
+    state.open(cx, id);
+    state.send(cx, id, "Go");
+    let provider = providers.started(cx, n);
+    provider.start_turn(cx, "turn");
+    cx.run_until_seen(|view| view.status(id).running_turn.is_some());
+    provider
+}
+
+/// Whether the client holds a record of `id`'s log that `matches`.
+fn has_record(view: &ClientView, id: &str, matches: impl Fn(&AgentEvent) -> bool) -> bool {
+    view.records(id).iter().any(|record| matches(&record.event))
+}
+
+fn turn_completed(turn_id: &str, status: TurnStatus) -> AgentEvent {
+    AgentEvent::TurnCompleted {
+        turn_id: turn_id.into(),
+        status,
+        usage: None,
+    }
+}
+
+fn is_turn_end(event: &AgentEvent) -> bool {
+    matches!(event, AgentEvent::TurnCompleted { .. })
 }
 
 /// A client learns what a thread it does not hold is doing from the index
@@ -59,12 +69,21 @@ fn only_a_new_item_publishes_a_threads_latest_activity() {
     use tcode_core::session::LatestActivity;
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-latest-activity");
-    let mut host = TestClientState::new((*test_store).clone());
-    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/child"), None);
-    meta.id = "child".into();
-    host.sessions.push(meta.clone());
-    host.install_selected(ActiveSession::new(meta, false, Vec::new()));
-    let state = subscribed_to_index(cx, host);
+    stored_thread(
+        &test_store,
+        "child",
+        ProviderKind::Codex,
+        &test_store.root().join("child"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    let provider = first_turn(&state, cx, &providers, "child", 0);
+    cx.run_until_seen(|view| {
+        view.activity("child")
+            .is_some_and(|activity| activity.turn_running)
+    });
+    cx.drain_outgoing();
 
     let item = |id: &str, content| {
         AgentEvent::ItemStarted(ThreadItem {
@@ -90,76 +109,35 @@ fn only_a_new_item_publishes_a_threads_latest_activity() {
         kind,
         text: text.into(),
     };
-    published_activity(
-        &state,
-        cx,
-        "child",
-        "child",
-        vec![AgentEvent::TurnStarted {
-            turn_id: "turn".into(),
-        }],
-    );
-
-    let activities = |published: Vec<tcode_protocol::SessionActivity>| {
-        published
-            .into_iter()
-            .map(|activity| activity.latest_activity)
-            .collect::<Vec<_>>()
-    };
-    let thought = item(
+    provider.play(std::iter::once(item(
         "thought",
         ItemContent::Reasoning {
             text: String::new(),
         },
-    );
+    )));
+    provider.play((0..50).map(|_| delta("thought", agent::DeltaKind::ReasoningText, "more")));
+    provider.play([
+        command("first"),
+        delta("first", agent::DeltaKind::CommandOutput, "ok\n"),
+        command("second"),
+        turn_completed("turn", TurnStatus::Completed),
+    ]);
+    cx.run_until_seen(|view| has_record(view, "child", is_turn_end));
+
+    let published = published_activity(cx, "child");
+    let (during, after) = published.split_at(2);
     assert_eq!(
-        activities(published_activity(
-            &state,
-            cx,
-            "child",
-            "child",
-            vec![thought]
-        )),
-        [Some(LatestActivity::Thinking)]
+        during,
+        [
+            Some(LatestActivity::Thinking),
+            Some(LatestActivity::Command {
+                text: "cargo test".into()
+            })
+        ]
     );
-    let stream = (0..50)
-        .map(|_| delta("thought", agent::DeltaKind::ReasoningText, "more"))
-        .collect();
-    assert_eq!(
-        activities(published_activity(&state, cx, "child", "child", stream)),
-        []
-    );
-    let running = LatestActivity::Command {
-        text: "cargo test".into(),
-    };
-    assert_eq!(
-        activities(published_activity(
-            &state,
-            cx,
-            "child",
-            "child",
-            vec![
-                command("first"),
-                delta("first", agent::DeltaKind::CommandOutput, "ok\n"),
-                command("second"),
-            ]
-        )),
-        [Some(running)]
-    );
-    assert_eq!(
-        activities(published_activity(
-            &state,
-            cx,
-            "child",
-            "child",
-            vec![AgentEvent::TurnCompleted {
-                turn_id: "turn".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            }]
-        ))
-        .last(),
-        Some(&None)
+    assert!(
+        !after.is_empty() && after.iter().all(Option::is_none),
+        "{after:?}"
     );
 }
 
@@ -171,12 +149,16 @@ fn a_native_subagents_activity_is_published_on_its_mirror() {
     use tcode_core::session::LatestActivity;
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-mirror-activity");
-    let mut host = TestClientState::new((*test_store).clone());
-    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/tmp/lead"), None);
-    meta.id = "lead".into();
-    host.sessions.push(meta.clone());
-    host.install_selected(ActiveSession::new(meta, false, Vec::new()));
-    let state = subscribed_to_index(cx, host);
+    stored_thread(
+        &test_store,
+        "lead",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("lead"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    let provider = first_turn(&state, cx, &providers, "lead", 0);
 
     let spawn = |status| ThreadItem {
         id: "spawn".into(),
@@ -190,65 +172,38 @@ fn a_native_subagents_activity_is_published_on_its_mirror() {
             effort: None,
         },
     };
-    published_activity(
-        &state,
-        cx,
-        "lead",
-        "lead",
-        vec![
-            AgentEvent::TurnStarted {
-                turn_id: "turn".into(),
-            },
-            AgentEvent::ItemStarted(spawn(ItemStatus::InProgress)),
-        ],
-    );
-    let mirror = state.read(|state| {
-        state
-            .sessions
-            .iter()
-            .find(|meta| meta.native_subagent.is_some())
-            .expect("the spawn made a mirror")
-            .id
-            .clone()
-    });
-    let published = published_activity(
-        &state,
-        cx,
-        "lead",
-        &mirror,
-        vec![AgentEvent::ItemStarted(ThreadItem {
-            id: "child".into(),
-            parent_item_id: Some("spawn".into()),
-            content: ItemContent::CommandExecution {
-                command: "ls".into(),
-                input: Vec::new(),
-                output: String::new(),
-                exit_code: None,
-                status: ItemStatus::InProgress,
-            },
-        })],
-    );
+    provider.play([AgentEvent::ItemStarted(spawn(ItemStatus::InProgress))]);
+    cx.run_until_seen(|view| view.mirror("spawn").is_some());
+    let mirror = cx.seen().mirror("spawn").unwrap().id.clone();
+    provider.play([AgentEvent::ItemStarted(ThreadItem {
+        id: "child".into(),
+        parent_item_id: Some("spawn".into()),
+        content: ItemContent::CommandExecution {
+            command: "ls".into(),
+            input: Vec::new(),
+            output: String::new(),
+            exit_code: None,
+            status: ItemStatus::InProgress,
+        },
+    })]);
+    let ls = Some(LatestActivity::Command { text: "ls".into() });
+    cx.run_until_seen(|view| view.activity(&mirror).unwrap().latest_activity == ls);
     assert_eq!(
-        published.last().unwrap().latest_activity,
-        Some(LatestActivity::Command { text: "ls".into() })
+        cx.seen().activity("lead").unwrap().latest_activity,
+        Some(LatestActivity::Subagent {
+            description: "Audit".into()
+        })
     );
-    state.read(|state| {
-        assert_eq!(
-            state.resident("lead").unwrap().timeline.latest_activity(),
-            Some(LatestActivity::Subagent {
-                description: "Audit".into()
-            })
-        );
-    });
 
-    let published = published_activity(
-        &state,
-        cx,
-        "lead",
-        &mirror,
-        vec![AgentEvent::ItemCompleted(spawn(ItemStatus::Completed))],
-    );
-    assert_eq!(published.last().unwrap().latest_activity, None);
+    provider.play([AgentEvent::ItemCompleted(spawn(ItemStatus::Completed))]);
+    cx.run_until_seen(|view| {
+        has_record(
+            view,
+            "lead",
+            |event| matches!(event, AgentEvent::ItemCompleted(item) if item.id == "spawn"),
+        )
+    });
+    assert_eq!(cx.seen().activity(&mirror).unwrap().latest_activity, None);
 }
 
 /// A log whose turn a dead host left open still folds to a running timeline,
@@ -257,204 +212,185 @@ fn a_native_subagents_activity_is_published_on_its_mirror() {
 fn a_turn_left_open_in_the_log_reports_no_activity() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-stale-activity");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    state.update(cx, |state, _| {
-        let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/stale"), None);
-        meta.id = "stale".into();
-        let mut session = ActiveSession::new(meta.clone(), false, Vec::new());
-        for event in [
-            AgentEvent::TurnStarted {
-                turn_id: "turn".into(),
+    stored_thread(
+        &test_store,
+        "stale",
+        ProviderKind::Codex,
+        &test_store.root().join("stale"),
+        |_| {},
+    );
+    for (ts, event) in [
+        AgentEvent::TurnStarted {
+            turn_id: "turn".into(),
+        },
+        AgentEvent::ItemStarted(ThreadItem {
+            id: "thought".into(),
+            parent_item_id: None,
+            content: ItemContent::Reasoning {
+                text: String::new(),
             },
-            AgentEvent::ItemStarted(ThreadItem {
-                id: "thought".into(),
-                parent_item_id: None,
-                content: ItemContent::Reasoning {
-                    text: String::new(),
-                },
-            }),
-        ] {
-            session.timeline.apply_at(None, &event);
-        }
-        state.sessions.push(meta);
-        state.install_selected(session);
-    });
-    let summary = state.read(|state| state.index_snapshot().summary);
-    assert_eq!(summary.activity["stale"].latest_activity, None);
+        }),
+    ]
+    .iter()
+    .enumerate()
+    {
+        test_store.append_event("stale", ts as u64, event).unwrap();
+    }
+    let (state, _providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    state.open(cx, "stale");
+    assert_eq!(cx.seen().activity("stale").unwrap().latest_activity, None);
 }
 
+/// A harness's own subagent becomes a read-only thread under the lead,
+/// titled by its description's first line and running the lead's model and
+/// options until it names its own; its transcript goes there and not to the
+/// lead, and its one turn is the spawn's. A host started again finds the
+/// mirror as it last was.
 #[test]
 fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-native-subagent-mirror-test");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-
-    state.update(cx, |state, cx| {
-        let mut parent_meta = SessionMeta::new(
-            ProviderKind::Codex,
-            PathBuf::from("/tmp/native-subagent-parent"),
-            Some("gpt-test".into()),
-        );
-        parent_meta.id = "parent".into();
-        parent_meta.project_id = Some("project".into());
-        parent_meta.option_selections = vec![OptionSelection {
+    let cwd = test_store.root().join("parent");
+    stored_thread(&test_store, "parent", ProviderKind::Codex, &cwd, |meta| {
+        meta.model = Some("gpt-test".into());
+        meta.option_selections = vec![OptionSelection {
             id: "reasoningEffort".into(),
             value: serde_json::json!("high"),
         }];
-        state.sessions.push(parent_meta.clone());
-        state.install_selected(ActiveSession::new(parent_meta, false, Vec::new()));
+    });
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    let provider = first_turn(&state, cx, &providers, "parent", 0);
+    let spawn = |description: &str, status, summary: Option<&str>, model: Option<&str>| {
+        let item = ThreadItem {
+            id: "spawn-1".into(),
+            parent_item_id: None,
+            content: ItemContent::Subagent {
+                agent_type: "explorer".into(),
+                description: description.into(),
+                status,
+                summary: summary.map(Into::into),
+                model: model.map(Into::into),
+                effort: model.map(|_| "low".into()),
+            },
+        };
+        match (status, model) {
+            (ItemStatus::InProgress, None) => AgentEvent::ItemStarted(item),
+            (ItemStatus::InProgress, Some(_)) => AgentEvent::ItemUpdated(item),
+            _ => AgentEvent::ItemCompleted(item),
+        }
+    };
+    let is_spawn = |event: &AgentEvent| {
+        matches!(
+            event,
+            AgentEvent::ItemUpdated(item) | AgentEvent::ItemCompleted(item) if item.id == "spawn-1"
+        )
+    };
 
-        state.on_event(
-            "parent",
-            AgentEvent::ItemStarted(ThreadItem {
-                id: "spawn-1".into(),
-                parent_item_id: None,
-                content: ItemContent::Subagent {
-                    agent_type: "explorer".into(),
-                    description: "Inspect event routing\nand report".into(),
-                    status: ItemStatus::InProgress,
-                    summary: None,
-                    model: None,
-                    effort: None,
-                },
-            }),
-            cx,
-        );
+    provider.play([spawn(
+        "Inspect event routing\nand report",
+        ItemStatus::InProgress,
+        None,
+        None,
+    )]);
+    cx.run_until_seen(|view| view.mirror("spawn-1").is_some());
+    let mirror = cx.seen().mirror("spawn-1").unwrap().clone();
+    assert_eq!(mirror.parent_session_id.as_deref(), Some("parent"));
+    assert_eq!(mirror.title, "explorer: Inspect event routing");
+    assert_eq!(mirror.option_selections[0].value, serde_json::json!("high"));
+    assert_eq!(mirror.model.as_deref(), Some("gpt-test"));
+    state.open(cx, &mirror.id);
 
-        let mirror = state
-            .sessions
-            .iter()
-            .find(|meta| meta.native_subagent.as_deref() == Some("spawn-1"))
-            .cloned()
-            .expect("native subagent mirror metadata");
-        assert_eq!(mirror.parent_session_id.as_deref(), Some("parent"));
-        assert_eq!(mirror.title, "explorer: Inspect event routing");
-        assert_eq!(mirror.option_selections[0].value, serde_json::json!("high"));
-        assert_eq!(mirror.model.as_deref(), Some("gpt-test"));
+    provider.play([spawn(
+        "Inspect event routing",
+        ItemStatus::InProgress,
+        None,
+        Some("child-model"),
+    )]);
+    cx.run_until_seen(|view| has_record(view, "parent", is_spawn));
+    let status = cx.seen().status(&mirror.id);
+    assert_eq!(status.requested_model.as_deref(), Some("child-model"));
+    assert_eq!(
+        status.provider_option_selections[0].value,
+        serde_json::json!("low")
+    );
+    assert!(status.activity.turn_running);
+    assert_eq!(
+        cx.seen().status("parent").requested_model.as_deref(),
+        Some("gpt-test")
+    );
 
-        state.on_event(
-            "parent",
-            AgentEvent::ItemUpdated(ThreadItem {
-                id: "spawn-1".into(),
-                parent_item_id: None,
-                content: ItemContent::Subagent {
-                    agent_type: "explorer".into(),
-                    description: "Inspect event routing".into(),
-                    status: ItemStatus::InProgress,
-                    summary: None,
-                    model: Some("child-model".into()),
-                    effort: Some("low".into()),
-                },
-            }),
-            cx,
-        );
-        let status = state.session_status_snapshot(&mirror.id).unwrap();
-        assert_eq!(status.requested_model.as_deref(), Some("child-model"));
-        assert_eq!(
-            status.provider_option_selections[0].value,
-            serde_json::json!("low")
-        );
-        assert_eq!(
-            state.resident("parent").unwrap().meta.model.as_deref(),
-            Some("gpt-test")
-        );
-        assert!(state.resident(&mirror.id).unwrap().timeline.turn_running);
-
-        state.on_event(
-            "parent",
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "child-answer".into(),
-                parent_item_id: Some("spawn-1".into()),
-                content: ItemContent::AssistantMessage {
-                    text: "routed transcript".into(),
-                    summarized: false,
-                },
-            }),
-            cx,
-        );
-        let mirror_timeline = &state.resident(&mirror.id).unwrap().timeline;
-        assert!(mirror_timeline.entries.iter().any(|entry| {
+    provider.play([AgentEvent::ItemCompleted(ThreadItem {
+        id: "child-answer".into(),
+        parent_item_id: Some("spawn-1".into()),
+        content: ItemContent::AssistantMessage {
+            text: "routed transcript".into(),
+            summarized: false,
+        },
+    })]);
+    provider.play([spawn(
+        "Inspect event routing\nand report",
+        ItemStatus::Completed,
+        Some("routing verified"),
+        None,
+    )]);
+    cx.run_until_seen(|view| {
+        has_record(view, "parent", |event| {
+            is_spawn(event) && matches!(event, AgentEvent::ItemCompleted(_))
+        })
+    });
+    let answer = |timeline: &Timeline| {
+        timeline.entries.iter().any(|entry| {
             matches!(
                 &entry.content,
                 EntryContent::Item(ItemContent::AssistantMessage { text, .. })
                     if entry.id == "child-answer" && text == "routed transcript"
             )
-        }));
-        assert_eq!(state.resident("parent").unwrap().timeline.entries.len(), 1);
+        })
+    };
+    assert!(answer(&cx.seen().timeline(&mirror.id)));
+    assert!(!cx.seen().status(&mirror.id).activity.turn_running);
+    let parent = cx.seen().timeline("parent");
+    assert!(!answer(&parent));
+    assert!(parent.entries.iter().any(|entry| matches!(
+        &entry.content,
+        EntryContent::Item(ItemContent::Subagent {
+            status: ItemStatus::Completed,
+            summary: Some(summary),
+            ..
+        }) if summary == "routing verified"
+    )));
 
-        state.on_event(
-            "parent",
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "spawn-1".into(),
-                parent_item_id: None,
-                content: ItemContent::Subagent {
-                    agent_type: "explorer".into(),
-                    description: "Inspect event routing\nand report".into(),
-                    status: ItemStatus::Completed,
-                    summary: Some("routing verified".into()),
-                    model: None,
-                    effort: None,
-                },
-            }),
-            cx,
-        );
-        assert!(!state.resident(&mirror.id).unwrap().timeline.turn_running);
-        assert!(matches!(
-            &state.resident("parent").unwrap().timeline.entries[0].content,
-            EntryContent::Item(ItemContent::Subagent {
-                status: ItemStatus::Completed,
-                summary: Some(summary),
-                ..
-            }) if summary == "routing verified"
-        ));
-    });
-    cx.run_until_parked();
-
-    state.update(cx, |state, _| {
-        let mirror = state
-            .sessions
+    // The completion named no model or effort; the mirror keeps the ones it
+    // last named, and its transcript is its own.
+    let cx = &mut TestAppContext::default();
+    let (state, _providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    state.open(cx, &mirror.id);
+    state.open(cx, "parent");
+    let reopened = cx.seen().session(&mirror.id).unwrap();
+    assert_eq!(reopened.model.as_deref(), Some("child-model"));
+    assert_eq!(
+        reopened.option_selections[0].value,
+        serde_json::json!("low")
+    );
+    assert!(has_record(cx.seen(), &mirror.id, |event| matches!(
+        event,
+        AgentEvent::ItemCompleted(ThreadItem { id, parent_item_id: None, .. })
+            if id == "child-answer"
+    )));
+    assert!(
+        cx.seen()
+            .records("parent")
             .iter()
-            .find(|meta| meta.native_subagent.as_deref() == Some("spawn-1"))
-            .unwrap();
-        // A completion without model/effort must not erase the last observation,
-        // and reopening the persisted mirror must retain it.
-        let persisted = state
-            .store
-            .load_index()
-            .unwrap()
-            .into_iter()
-            .find(|meta| meta.id == mirror.id)
-            .unwrap();
-        assert_eq!(persisted.model.as_deref(), Some("child-model"));
-        assert_eq!(
-            persisted.option_selections[0].value,
-            serde_json::json!("low")
-        );
-        let mirror_events = state.store.read_events(&mirror.id).unwrap();
-        assert!(mirror_events.iter().any(|stored| matches!(
-            &stored.event,
-            AgentEvent::ItemCompleted(ThreadItem {
-                id,
-                parent_item_id: None,
-                ..
-            }) if id == "child-answer"
-        )));
-        let parent_events = state.store.read_events("parent").unwrap();
-        assert!(parent_events.iter().any(|stored| matches!(
-            &stored.event,
-            AgentEvent::ItemCompleted(ThreadItem {
-                id,
-                parent_item_id: None,
-                content: ItemContent::Subagent { .. },
-            }) if id == "spawn-1"
-        )));
-        assert!(parent_events.iter().all(|stored| match &stored.event {
-            AgentEvent::ItemStarted(item)
-            | AgentEvent::ItemUpdated(item)
-            | AgentEvent::ItemCompleted(item) => item.parent_item_id.is_none(),
-            _ => true,
-        }));
-    });
+            .all(|stored| match &stored.event {
+                AgentEvent::ItemStarted(item)
+                | AgentEvent::ItemUpdated(item)
+                | AgentEvent::ItemCompleted(item) => item.parent_item_id.is_none(),
+                _ => true,
+            })
+    );
 }
 
 /// The canonical events OpenCode's recorded `subagent_turn.jsonl` maps to
@@ -466,7 +402,15 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
 fn a_subagents_streamed_text_stays_out_of_the_parent_thread() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-opencode-subagent-deltas");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    stored_thread(
+        &test_store,
+        "parent",
+        ProviderKind::OpenCode,
+        &test_store.root().join("parent"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
     let spawn = "msg_198acc1db0013V4MEKRcfmYvtt:chatcmpl-tool-b5f7774ecdb70d58";
     let child = "msg_198accaf2001JTZdDPBbxetEk2:text:0";
     let reply = "msg_198accd89001hG3ffj4MheRnb9:text:0";
@@ -495,69 +439,53 @@ fn a_subagents_streamed_text_stays_out_of_the_parent_thread() {
         kind: agent::DeltaKind::AssistantText,
         text: text.into(),
     };
-    state.update(cx, |state, cx| {
-        let mut meta = SessionMeta::new(ProviderKind::OpenCode, PathBuf::from("/tmp"), None);
-        meta.id = "parent".into();
-        state.sessions.push(meta.clone());
-        state.install_selected(ActiveSession::new(meta, false, Vec::new()));
-        for event in [
-            AgentEvent::TurnStarted {
-                turn_id: "opencode-turn-1".into(),
-            },
-            AgentEvent::ItemStarted(subagent(ItemStatus::InProgress, None)),
-            AgentEvent::ItemStarted(text(child, Some(spawn), "")),
-            delta(child, "KIWI"),
-            AgentEvent::ItemCompleted(text(child, Some(spawn), "KIWI")),
-            AgentEvent::ItemCompleted(subagent(ItemStatus::Completed, Some("KIWI"))),
-            AgentEvent::ItemStarted(text(reply, None, "")),
-            delta(reply, "The subagent said: KIWI"),
-            AgentEvent::ItemCompleted(text(reply, None, "The subagent said: KIWI")),
-            AgentEvent::TurnCompleted {
-                turn_id: "opencode-turn-1".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-        ] {
-            state.on_event("parent", event, cx);
-        }
-    });
-    cx.run_until_parked();
+    let provider = first_turn(&state, cx, &providers, "parent", 0);
+    provider.play([
+        AgentEvent::ItemStarted(subagent(ItemStatus::InProgress, None)),
+        AgentEvent::ItemStarted(text(child, Some(spawn), "")),
+        delta(child, "KIWI"),
+        AgentEvent::ItemCompleted(text(child, Some(spawn), "KIWI")),
+        AgentEvent::ItemCompleted(subagent(ItemStatus::Completed, Some("KIWI"))),
+        AgentEvent::ItemStarted(text(reply, None, "")),
+        delta(reply, "The subagent said: KIWI"),
+        AgentEvent::ItemCompleted(text(reply, None, "The subagent said: KIWI")),
+        turn_completed("turn", TurnStatus::Completed),
+    ]);
+    cx.run_until_seen(|view| has_record(view, "parent", is_turn_end));
+    let mirror = cx.seen().mirror(spawn).unwrap().id.clone();
     let ids = |timeline: &Timeline| -> Vec<String> {
         timeline
             .entries
             .iter()
-            .filter(|entry| matches!(entry.content, EntryContent::Item(_)))
+            .filter(|entry| {
+                matches!(
+                    entry.content,
+                    EntryContent::Item(ItemContent::AssistantMessage { .. })
+                        | EntryContent::Item(ItemContent::Subagent { .. })
+                )
+            })
             .map(|entry| entry.id.clone())
             .collect()
     };
-    state.update(cx, |state, _| {
-        let mirror = state
-            .sessions
-            .iter()
-            .find(|meta| meta.native_subagent.as_deref() == Some(spawn))
-            .unwrap()
-            .id
-            .clone();
-        assert_eq!(
-            ids(&Timeline::fold_events(
-                state.store.read_events(&mirror).unwrap()
-            )),
-            [child],
-            "the mirror holds the child's reply"
-        );
-        assert_eq!(
-            ids(&state.resident("parent").unwrap().timeline),
-            [spawn, reply],
-            "the live parent thread"
-        );
-        assert_eq!(
-            ids(&Timeline::fold_events(
-                state.store.read_events("parent").unwrap()
-            )),
-            [spawn, reply],
-            "the parent thread reopened from its log"
-        );
-    });
+    assert_eq!(
+        ids(&cx.seen().timeline("parent")),
+        [spawn, reply],
+        "the parent thread as its client folds it"
+    );
+    state.open(cx, &mirror);
+    assert_eq!(
+        ids(&cx.seen().timeline(&mirror)),
+        [child],
+        "the mirror holds the child's reply"
+    );
+    let cx = &mut TestAppContext::default();
+    let (state, _providers) = played_host(cx, &test_store);
+    state.open(cx, "parent");
+    assert_eq!(
+        ids(&cx.seen().timeline("parent")),
+        [spawn, reply],
+        "the parent thread reopened from its log"
+    );
 }
 
 /// How the mirror's single turn ends: the Subagent item reaching a terminal
@@ -572,75 +500,81 @@ enum MirrorEnd {
     SessionClosed,
 }
 
-// Exercise provider routing and disk replay, including residency changes
-// between events. Each case is a parent thread of its own on one host.
+/// A lead's provider runs a subagent of its own: its mirror holds one turn,
+/// from the spawn to its end, however the mirror leaves and comes back into
+/// the host's memory, whatever arrives after the end, and whether the lead's
+/// own turn ends first.
 fn assert_native_mirror_turn_lifecycle(
     cx: &mut TestAppContext,
     state: &TestEntity,
+    providers: &Providers,
+    launch: usize,
     evict: bool,
     late: bool,
     end: MirrorEnd,
 ) {
-    let parent = format!("parent-{evict}-{late}-{end:?}");
+    let parent = native_mirror_parent(evict, late, end);
     let parent = parent.as_str();
-    let mirror_id = state.update(cx, |state, cx| {
-        let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp"), None);
-        meta.id = parent.into();
-        state.sessions.push(meta.clone());
-        state.install_selected(ActiveSession::new(meta, false, Vec::new()));
-        state.on_event(
-            parent,
-            AgentEvent::TurnStarted {
-                turn_id: "parent-turn".into(),
-            },
-            cx,
-        );
-        state.on_event(
-            parent,
-            native_mirror_parent_item(ItemStatus::InProgress),
-            cx,
-        );
-        let id = state
-            .sessions
-            .iter()
-            .find(|m| m.native_subagent.is_some() && m.parent_session_id.as_deref() == Some(parent))
-            .unwrap()
-            .id
-            .clone();
-        for i in 0..3 {
-            if evict && i == 1 {
-                assert!(state.residents.evict(&id).is_some());
-            }
-            state.on_event(parent, native_mirror_child_item(i), cx);
-        }
-        match end {
-            MirrorEnd::SubagentCompleted => {
-                state.on_event(parent, native_mirror_parent_item(ItemStatus::Completed), cx);
-            }
-            MirrorEnd::ParentTurnThenSubagentCompleted => {
-                state.on_event(
-                    parent,
-                    AgentEvent::TurnCompleted {
-                        turn_id: "parent-turn".into(),
-                        status: TurnStatus::Completed,
-                        usage: None,
-                    },
-                    cx,
-                );
-                assert!(evict || state.turn_running_for(&id));
-                state.on_event(parent, native_mirror_child_item(3), cx);
-                state.on_event(parent, native_mirror_parent_item(ItemStatus::Completed), cx);
-            }
-            MirrorEnd::SessionClosed => {
-                state.on_event(parent, AgentEvent::SessionClosed { reason: None }, cx);
+    let provider = first_turn(state, cx, providers, parent, launch);
+    provider.play([native_mirror_parent_item(ItemStatus::InProgress)]);
+    let mirror_of = |view: &ClientView| {
+        view.sessions()
+            .find(|meta| {
+                meta.native_subagent.is_some() && meta.parent_session_id.as_deref() == Some(parent)
+            })
+            .map(|meta| meta.id.clone())
+    };
+    cx.run_until_seen(|view| mirror_of(view).is_some());
+    let mirror_id = mirror_of(cx.seen()).unwrap();
+    for i in 0..3 {
+        if evict && i == 1 {
+            // The user looked at the subagent's thread and went on to
+            // others; the host lets it go from memory once more recent ones
+            // are left too.
+            state.open(cx, &mirror_id);
+            cx.run_until_seen(|view| view.timeline(&mirror_id).entries.len() == 1);
+            cx.clock.advance(Duration::from_secs(1));
+            state.leave(cx, &mirror_id);
+            for filler in NATIVE_MIRROR_FILLERS {
+                cx.clock.advance(Duration::from_secs(1));
+                state.open(cx, filler);
+                state.leave(cx, filler);
             }
         }
-        if late {
-            state.on_event(parent, native_mirror_child_item(4), cx);
+        provider.play([native_mirror_child_item(i)]);
+    }
+    match end {
+        MirrorEnd::SubagentCompleted => {
+            provider.play([native_mirror_parent_item(ItemStatus::Completed)]);
         }
-        id
-    });
-    cx.run_until_parked();
+        MirrorEnd::ParentTurnThenSubagentCompleted => {
+            provider.play([turn_completed("turn", TurnStatus::Completed)]);
+            cx.run_until_seen(|view| has_record(view, parent, is_turn_end));
+            if !evict {
+                assert!(cx.seen().activity(&mirror_id).unwrap().turn_running);
+            }
+            provider.play([
+                native_mirror_child_item(3),
+                native_mirror_parent_item(ItemStatus::Completed),
+            ]);
+        }
+        MirrorEnd::SessionClosed => {
+            provider.play([AgentEvent::SessionClosed { reason: None }]);
+        }
+    }
+    if late {
+        provider.play([native_mirror_child_item(4)]);
+    }
+    if end == MirrorEnd::SessionClosed {
+        cx.run_until_seen(|view| {
+            has_record(view, parent, |event| {
+                matches!(event, AgentEvent::SessionClosed { .. })
+            })
+        });
+    } else {
+        provider.fence(cx, parent);
+    }
+
     let expected_items =
         3 + usize::from(end == MirrorEnd::ParentTurnThenSubagentCompleted) + usize::from(late);
     let expected_status = if end == MirrorEnd::SessionClosed {
@@ -648,78 +582,45 @@ fn assert_native_mirror_turn_lifecycle(
     } else {
         TurnStatus::Completed
     };
-    state.update(cx, |state, cx| {
-        let events = state.store.read_events(&mirror_id).unwrap();
-        let mut open = false;
-        let mut boundaries = 0;
-        let mut items = 0;
-        for stored in &events {
-            match &stored.event {
-                AgentEvent::TurnStarted { .. } => {
-                    assert!(!open);
-                    open = true;
-                    boundaries += 1;
-                }
-                AgentEvent::TurnCompleted { status, .. } => {
-                    assert!(open);
-                    assert_eq!(*status, expected_status);
-                    open = false;
-                    boundaries += 1;
-                }
-                AgentEvent::ItemCompleted(_) => {
-                    items += 1;
-                }
-                _ => {}
+    state.open(cx, &mirror_id);
+    let (mut open, mut boundaries, mut items) = (false, 0, 0);
+    for stored in cx.seen().records(&mirror_id) {
+        match &stored.event {
+            AgentEvent::TurnStarted { .. } => {
+                assert!(!open);
+                open = true;
+                boundaries += 1;
             }
+            AgentEvent::TurnCompleted { status, .. } => {
+                assert!(open);
+                assert_eq!(*status, expected_status);
+                open = false;
+                boundaries += 1;
+            }
+            AgentEvent::ItemCompleted(_) => items += 1,
+            _ => {}
         }
-        assert!(!open, "persisted mirror boundaries must balance");
-        assert_eq!(boundaries, 2, "exactly one turn, never a zero-length one");
-        assert_eq!(items, expected_items);
-        assert!(!state.turn_running_for(&mirror_id));
-        if state.resident(&mirror_id).is_none() {
-            let meta = state.find_meta(&mirror_id).unwrap().clone();
-            state.load_background_session(meta, cx);
-        }
-    });
-    // The turn's end can show before its last reply is folded in.
-    let replies = |mirror: &ActiveSession| {
-        mirror
-            .timeline
-            .entries
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry.content,
-                    EntryContent::Item(ItemContent::AssistantMessage { .. })
-                )
-            })
-            .count()
-    };
-    cx.run_until(|state| {
-        state.resident(&mirror_id).is_some_and(|mirror| {
-            replies(mirror) == expected_items
-                && mirror
-                    .timeline
-                    .turns
-                    .first()
-                    .is_some_and(|turn| turn.end_ts.is_some())
-        })
-    });
-    state.update(cx, |state, _| {
-        let mirror = state.resident(&mirror_id).unwrap();
-        assert!(!mirror.timeline.turn_running);
-        assert_eq!(mirror.timeline.turns.len(), 1);
-        let turn = &mirror.timeline.turns[0];
-        assert!(!turn.running && turn.start_ts.is_some() && turn.end_ts.is_some());
-        assert_eq!(turn.status, Some(expected_status));
-        assert!(
-            !state
-                .session_status_snapshot(&mirror_id)
-                .unwrap()
-                .activity
-                .working
-        );
-    });
+    }
+    assert!(!open, "persisted mirror boundaries must balance");
+    assert_eq!(boundaries, 2, "exactly one turn, never a zero-length one");
+    assert_eq!(items, expected_items);
+    let timeline = cx.seen().timeline(&mirror_id);
+    assert!(!timeline.turn_running);
+    assert_eq!(timeline.turns.len(), 1);
+    let turn = &timeline.turns[0];
+    assert!(!turn.running && turn.start_ts.is_some() && turn.end_ts.is_some());
+    assert_eq!(turn.status, Some(expected_status));
+    assert!(!cx.seen().status(&mirror_id).activity.working);
+    state.leave(cx, &mirror_id);
+}
+
+/// Threads only the user visits, enough of them that leaving them all lets
+/// a thread left before them go from the host's memory.
+const NATIVE_MIRROR_FILLERS: [&str; MAX_IDLE_REPLAY_RESIDENTS] =
+    ["visited-1", "visited-2", "visited-3", "visited-4"];
+
+fn native_mirror_parent(evict: bool, late: bool, end: MirrorEnd) -> String {
+    format!("parent-{evict}-{late}-{end:?}")
 }
 
 fn native_mirror_parent_item(status: ItemStatus) -> AgentEvent {
@@ -753,11 +654,13 @@ fn native_mirror_child_item(i: usize) -> AgentEvent {
     })
 }
 
+/// An item a provider sends after closing never reaches the host, so a late
+/// one follows only an ending the provider goes on from.
 #[test]
 fn native_mirror_keeps_one_turn_across_residency_late_items_and_parent_completion() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-native-mirror-turn-lifecycle");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let mut cases = Vec::new();
     for evict in [false, true] {
         for late in [false, true] {
             for end in [
@@ -765,9 +668,48 @@ fn native_mirror_keeps_one_turn_across_residency_late_items_and_parent_completio
                 MirrorEnd::ParentTurnThenSubagentCompleted,
                 MirrorEnd::SessionClosed,
             ] {
-                assert_native_mirror_turn_lifecycle(cx, &state, evict, late, end);
+                if late && end == MirrorEnd::SessionClosed {
+                    continue;
+                }
+                let parent = native_mirror_parent(evict, late, end);
+                stored_thread(
+                    &test_store,
+                    &parent,
+                    ProviderKind::Codex,
+                    &test_store.root().join(&parent),
+                    |_| {},
+                );
+                cases.push((evict, late, end));
             }
         }
+    }
+    for filler in NATIVE_MIRROR_FILLERS {
+        stored_thread(
+            &test_store,
+            filler,
+            ProviderKind::Codex,
+            &test_store.root().join(filler),
+            |_| {},
+        );
+        test_store
+            .append_event(
+                filler,
+                1,
+                &AgentEvent::ItemCompleted(ThreadItem {
+                    id: format!("{filler}-message"),
+                    parent_item_id: None,
+                    content: ItemContent::UserMessage {
+                        text: "Hello".into(),
+                        attachments: Vec::new(),
+                    },
+                }),
+            )
+            .unwrap();
+    }
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    for (launch, (evict, late, end)) in cases.into_iter().enumerate() {
+        assert_native_mirror_turn_lifecycle(cx, &state, &providers, launch, evict, late, end);
     }
 }
 
@@ -802,213 +744,201 @@ fn subagent_item(
 fn nested_subagent_items_open_a_titled_mirror_under_the_child_mirror_and_close_it() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-nested-native-mirror");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let (child_id, grandchild_id, second_id) = state.update(cx, |state, cx| {
-        let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/tmp"), None);
-        meta.id = "parent".into();
-        state.sessions.push(meta.clone());
-        state.install_selected(ActiveSession::new(meta, false, Vec::new()));
-        state.on_event(
-            "parent",
-            AgentEvent::ItemStarted(subagent_item(
-                "toolu_child",
-                None,
-                "general-purpose",
-                "Research hosting",
-                ItemStatus::InProgress,
-            )),
-            cx,
-        );
-        state.on_event(
-            "parent",
-            AgentEvent::ItemStarted(subagent_item(
-                "toolu_grandchild",
-                Some("toolu_child"),
-                "Explore",
-                "Research Workers limits\nwith sources",
-                ItemStatus::InProgress,
-            )),
-            cx,
-        );
-        let child_id = state
-            .sessions
-            .iter()
-            .find(|meta| meta.native_subagent.as_deref() == Some("toolu_child"))
-            .unwrap()
-            .id
-            .clone();
-        let grandchild = state
-            .sessions
-            .iter()
-            .find(|meta| meta.native_subagent.as_deref() == Some("toolu_grandchild"))
-            .cloned()
-            .expect("the spawn alone opens the grandchild's mirror");
-        assert_eq!(
-            grandchild.parent_session_id.as_deref(),
-            Some(child_id.as_str())
-        );
-        assert_eq!(grandchild.title, "Explore: Research Workers limits");
-        assert!(
-            state
-                .resident(&child_id)
-                .unwrap()
-                .timeline
-                .entries
-                .iter()
-                .any(|entry| {
-                    entry.id == "toolu_grandchild"
-                        && matches!(
-                            entry.content,
-                            EntryContent::Item(ItemContent::Subagent { .. })
-                        )
-                })
-        );
-        // Launched in the background, it is the child's background work.
-        state.on_event(
-            "parent",
-            AgentEvent::ItemBackgrounded {
-                item_id: "toolu_grandchild".into(),
-                parent_item_id: Some("toolu_child".into()),
-            },
-            cx,
-        );
-        assert!(matches!(
-            state.session_status_snapshot(&child_id).unwrap().background_tasks.as_slice(),
-            [listed] if listed.task.item_id.as_deref() == Some("toolu_grandchild")
-                && listed.task.kind == agent::BackgroundKind::Agent
-        ));
-        assert!(
-            state
-                .session_status_snapshot("parent")
-                .unwrap()
-                .background_tasks
-                .is_empty()
-        );
+    stored_thread(
+        &test_store,
+        "parent",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("parent"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    let provider = first_turn(&state, cx, &providers, "parent", 0);
+    provider.play([
+        AgentEvent::ItemStarted(subagent_item(
+            "toolu_child",
+            None,
+            "general-purpose",
+            "Research hosting",
+            ItemStatus::InProgress,
+        )),
+        AgentEvent::ItemStarted(subagent_item(
+            "toolu_grandchild",
+            Some("toolu_child"),
+            "Explore",
+            "Research Workers limits\nwith sources",
+            ItemStatus::InProgress,
+        )),
+    ]);
+    cx.run_until_seen(|view| view.mirror("toolu_grandchild").is_some());
+    let child_id = cx.seen().mirror("toolu_child").unwrap().id.clone();
+    let grandchild = cx
+        .seen()
+        .mirror("toolu_grandchild")
+        .cloned()
+        .expect("the spawn alone opens the grandchild's mirror");
+    assert_eq!(
+        grandchild.parent_session_id.as_deref(),
+        Some(child_id.as_str())
+    );
+    assert_eq!(grandchild.title, "Explore: Research Workers limits");
+    state.open(cx, &child_id);
+    assert!(cx.seen().timeline(&child_id).entries.iter().any(|entry| {
+        entry.id == "toolu_grandchild"
+            && matches!(
+                entry.content,
+                EntryContent::Item(ItemContent::Subagent { .. })
+            )
+    }));
 
-        state.on_event(
-            "parent",
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "toolu_grandchild:user-1".into(),
-                parent_item_id: Some("toolu_grandchild".into()),
-                content: ItemContent::UserMessage {
-                    text: "Fetch the limits page.".into(),
-                    attachments: Vec::new(),
-                },
-            }),
-            cx,
-        );
-        assert!(
-            state
-                .resident(&grandchild.id)
-                .unwrap()
-                .timeline
-                .entries
-                .iter()
-                .any(|entry| entry.id == "toolu_grandchild:user-1"),
-            "the grandchild's transcript goes to the mirror its spawn opened"
-        );
-        assert_eq!(
-            state
-                .sessions
-                .iter()
-                .filter(|meta| meta.native_subagent.as_deref() == Some("toolu_grandchild"))
-                .count(),
-            1
-        );
-        assert_eq!(
-            state
-                .sessions
-                .iter()
-                .filter(|meta| meta.parent_session_id.as_deref() == Some("parent"))
-                .count(),
-            1,
-            "the root session owns only the child it spawned"
-        );
-
-        // The grandchild's terminal snapshot travels as child content too.
-        state.on_event(
-            "parent",
-            AgentEvent::ItemUpdated(subagent_item(
-                "toolu_grandchild",
-                Some("toolu_child"),
-                "Explore",
-                "Research Workers limits",
-                ItemStatus::Completed,
-            )),
-            cx,
-        );
-        state.on_event(
-            "parent",
-            AgentEvent::ItemCompleted(subagent_item(
-                "toolu_child",
-                None,
-                "general-purpose",
-                "Research hosting",
-                ItemStatus::Completed,
-            )),
-            cx,
-        );
-        assert_eq!(state.resident("parent").unwrap().timeline.entries.len(), 1);
-
-        // A second nested spawn is still running when the root process closes:
-        // it belongs to that process, so it ends with it.
-        for event in [
-            AgentEvent::ItemStarted(subagent_item(
-                "toolu_grandchild_2",
-                Some("toolu_child"),
-                "Explore",
-                "Check pricing",
-                ItemStatus::InProgress,
-            )),
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "toolu_grandchild_2:msg:0".into(),
-                parent_item_id: Some("toolu_grandchild_2".into()),
-                content: ItemContent::AssistantMessage {
-                    text: "Fetching pricing.".into(),
-                    summarized: false,
-                },
-            }),
-        ] {
-            state.on_event("parent", event, cx);
-        }
-        let second = state
-            .sessions
-            .iter()
-            .find(|meta| meta.native_subagent.as_deref() == Some("toolu_grandchild_2"))
-            .cloned()
-            .expect("second grandchild mirror");
-        assert_eq!(second.parent_session_id.as_deref(), Some(child_id.as_str()));
-        state.on_event("parent", AgentEvent::SessionClosed { reason: None }, cx);
-        (child_id, grandchild.id, second.id)
+    // Launched in the background, it is the child's background work.
+    provider.play([AgentEvent::ItemBackgrounded {
+        item_id: "toolu_grandchild".into(),
+        parent_item_id: Some("toolu_child".into()),
+    }]);
+    cx.run_until_seen(|view| {
+        has_record(view, &child_id, |event| {
+            matches!(event, AgentEvent::ItemBackgrounded { .. })
+        })
     });
-    cx.run_until_parked();
-    state.update(cx, |state, _| {
-        let events = state.store.read_events(&grandchild_id).unwrap();
-        assert!(matches!(
-            &events.first().unwrap().event,
-            AgentEvent::TurnStarted { turn_id } if turn_id == "toolu_grandchild"
-        ));
-        assert!(matches!(
-            &events.last().unwrap().event,
-            AgentEvent::TurnCompleted {
-                status: TurnStatus::Completed,
-                ..
-            }
-        ));
-        assert!(matches!(
-            &state.store.read_events(&second_id).unwrap().last().unwrap().event,
-            AgentEvent::TurnCompleted { turn_id, status: TurnStatus::Interrupted, .. }
-                if turn_id == "toolu_grandchild_2"
-        ));
-        assert!(state.store.read_events(&child_id).unwrap().iter().all(
-            |stored| match &stored.event {
+    assert!(matches!(
+        cx.seen().status(&child_id).background_tasks.as_slice(),
+        [listed] if listed.task.item_id.as_deref() == Some("toolu_grandchild")
+            && listed.task.kind == agent::BackgroundKind::Agent
+    ));
+    assert!(cx.seen().status("parent").background_tasks.is_empty());
+
+    state.open(cx, &grandchild.id);
+    provider.play([AgentEvent::ItemCompleted(ThreadItem {
+        id: "toolu_grandchild:user-1".into(),
+        parent_item_id: Some("toolu_grandchild".into()),
+        content: ItemContent::UserMessage {
+            text: "Fetch the limits page.".into(),
+            attachments: Vec::new(),
+        },
+    })]);
+    cx.run_until_seen(|view| {
+        view.timeline(&grandchild.id)
+            .entries
+            .iter()
+            .any(|entry| entry.id == "toolu_grandchild:user-1")
+    });
+    assert_eq!(
+        cx.seen()
+            .sessions()
+            .filter(|meta| meta.native_subagent.as_deref() == Some("toolu_grandchild"))
+            .count(),
+        1,
+        "the grandchild's transcript goes to the mirror its spawn opened"
+    );
+    assert_eq!(
+        cx.seen()
+            .sessions()
+            .filter(|meta| meta.parent_session_id.as_deref() == Some("parent"))
+            .count(),
+        1,
+        "the root session owns only the child it spawned"
+    );
+
+    // The grandchild's terminal snapshot travels as child content too.
+    provider.play([
+        AgentEvent::ItemUpdated(subagent_item(
+            "toolu_grandchild",
+            Some("toolu_child"),
+            "Explore",
+            "Research Workers limits",
+            ItemStatus::Completed,
+        )),
+        AgentEvent::ItemCompleted(subagent_item(
+            "toolu_child",
+            None,
+            "general-purpose",
+            "Research hosting",
+            ItemStatus::Completed,
+        )),
+    ]);
+    cx.run_until_seen(|view| {
+        has_record(
+            view,
+            "parent",
+            |event| matches!(event, AgentEvent::ItemCompleted(item) if item.id == "toolu_child"),
+        )
+    });
+    let parent_items = cx
+        .seen()
+        .timeline("parent")
+        .entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.content,
+                EntryContent::Item(ref item) if !matches!(item, ItemContent::UserMessage { .. })
+            )
+        })
+        .map(|entry| entry.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(parent_items, ["toolu_child"]);
+
+    // A second nested spawn is still running when the root process closes:
+    // it belongs to that process, so it ends with it.
+    provider.play([
+        AgentEvent::ItemStarted(subagent_item(
+            "toolu_grandchild_2",
+            Some("toolu_child"),
+            "Explore",
+            "Check pricing",
+            ItemStatus::InProgress,
+        )),
+        AgentEvent::ItemCompleted(ThreadItem {
+            id: "toolu_grandchild_2:msg:0".into(),
+            parent_item_id: Some("toolu_grandchild_2".into()),
+            content: ItemContent::AssistantMessage {
+                text: "Fetching pricing.".into(),
+                summarized: false,
+            },
+        }),
+        AgentEvent::SessionClosed { reason: None },
+    ]);
+    cx.run_until_seen(|view| {
+        has_record(view, "parent", |event| {
+            matches!(event, AgentEvent::SessionClosed { .. })
+        })
+    });
+    let second = cx
+        .seen()
+        .mirror("toolu_grandchild_2")
+        .cloned()
+        .expect("second grandchild mirror");
+    assert_eq!(second.parent_session_id.as_deref(), Some(child_id.as_str()));
+    state.open(cx, &second.id);
+    let records = cx.seen().records(&grandchild.id);
+    assert!(matches!(
+        &records.first().unwrap().event,
+        AgentEvent::TurnStarted { turn_id } if turn_id == "toolu_grandchild"
+    ));
+    assert!(matches!(
+        &records.last().unwrap().event,
+        AgentEvent::TurnCompleted {
+            status: TurnStatus::Completed,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &cx.seen().records(&second.id).last().unwrap().event,
+        AgentEvent::TurnCompleted { turn_id, status: TurnStatus::Interrupted, .. }
+            if turn_id == "toolu_grandchild_2"
+    ));
+    assert!(
+        cx.seen()
+            .records(&child_id)
+            .iter()
+            .all(|stored| match &stored.event {
                 AgentEvent::ItemStarted(item)
                 | AgentEvent::ItemUpdated(item)
                 | AgentEvent::ItemCompleted(item) => item.parent_item_id.is_none(),
                 _ => true,
-            }
-        ));
-    });
+            })
+    );
 }
 
 /// A child item whose spawn this session never announced still gets a mirror,
@@ -1017,43 +947,39 @@ fn nested_subagent_items_open_a_titled_mirror_under_the_child_mirror_and_close_i
 fn unknown_parent_mirror_closes_when_the_parent_session_closes() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-unknown-parent-native-mirror");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let mirror_id = state.update(cx, |state, cx| {
-        let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/tmp"), None);
-        meta.id = "parent".into();
-        state.sessions.push(meta.clone());
-        state.install_selected(ActiveSession::new(meta, false, Vec::new()));
-        state.on_event(
-            "parent",
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "toolu_orphan:msg:0".into(),
-                parent_item_id: Some("toolu_orphan".into()),
-                content: ItemContent::AssistantMessage {
-                    text: "working".into(),
-                    summarized: false,
-                },
-            }),
-            cx,
-        );
-        let mirror = state
-            .sessions
-            .iter()
-            .find(|meta| meta.native_subagent.as_deref() == Some("toolu_orphan"))
-            .cloned()
-            .expect("placeholder mirror");
-        assert_eq!(mirror.title, "subagent");
-        state.on_event("parent", AgentEvent::SessionClosed { reason: None }, cx);
-        mirror.id
+    stored_thread(
+        &test_store,
+        "parent",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("parent"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    let provider = first_turn(&state, cx, &providers, "parent", 0);
+    provider.play([AgentEvent::ItemCompleted(ThreadItem {
+        id: "toolu_orphan:msg:0".into(),
+        parent_item_id: Some("toolu_orphan".into()),
+        content: ItemContent::AssistantMessage {
+            text: "working".into(),
+            summarized: false,
+        },
+    })]);
+    cx.run_until_seen(|view| view.mirror("toolu_orphan").is_some());
+    let mirror = cx.seen().mirror("toolu_orphan").unwrap().clone();
+    assert_eq!(mirror.title, "subagent");
+    provider.play([AgentEvent::SessionClosed { reason: None }]);
+    cx.run_until_seen(|view| {
+        has_record(view, "parent", |event| {
+            matches!(event, AgentEvent::SessionClosed { .. })
+        })
     });
-    cx.run_until_parked();
-    state.update(cx, |state, _| {
-        let events = state.store.read_events(&mirror_id).unwrap();
-        assert!(matches!(
-            &events.last().unwrap().event,
-            AgentEvent::TurnCompleted { turn_id, status: TurnStatus::Interrupted, .. }
-                if turn_id == "toolu_orphan"
-        ));
-    });
+    state.open(cx, &mirror.id);
+    assert!(matches!(
+        &cx.seen().records(&mirror.id).last().unwrap().event,
+        AgentEvent::TurnCompleted { turn_id, status: TurnStatus::Interrupted, .. }
+            if turn_id == "toolu_orphan"
+    ));
 }
 
 /// A mirror persisted with an open turn by a host that stopped before the
@@ -1091,50 +1017,20 @@ fn loading_a_mirror_with_an_open_turn_and_no_live_parent_ends_it() {
             .unwrap();
     }
 
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    state.update(cx, |state, cx| {
-        state.select_session("mirror", cx);
-    });
-    cx.run_until(|state| {
-        state
-            .resident("mirror")
-            .is_some_and(|mirror| mirror.timeline.turns.len() == 1)
-    });
-    cx.run_until_parked();
-    state.update(cx, |state, _| {
-        let mirror = state.resident("mirror").unwrap();
-        assert!(!mirror.timeline.turn_running);
-        assert_eq!(
-            mirror.timeline.turns[0].status,
-            Some(TurnStatus::Interrupted)
-        );
-        assert_eq!(
-            mirror.timeline.last_turn_status,
-            Some(TurnStatus::Interrupted)
-        );
-        let events = state.store.read_events("mirror").unwrap();
-        assert_eq!(events.len(), 3);
-        assert!(matches!(
-            &events[2].event,
-            AgentEvent::TurnCompleted { turn_id, status: TurnStatus::Interrupted, .. }
-                if turn_id == "toolu_zombie"
-        ));
-    });
-
-    // Reloading the repaired mirror leaves the closed turn alone, in a host
-    // started again, which nothing the first one left running reaches.
-    let cx = &mut TestAppContext::default();
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    state.update(cx, |state, cx| state.select_session("mirror", cx));
-    cx.run_until(|state| {
-        state
-            .resident("mirror")
-            .is_some_and(|mirror| mirror.timeline.turns.len() == 1)
-    });
-    cx.run_until_parked();
-    state.update(cx, |state, _| {
-        assert_eq!(state.store.read_events("mirror").unwrap().len(), 3);
-    });
+    let (state, _providers) = played_host(cx, &test_store);
+    state.open(cx, "mirror");
+    cx.run_until_seen(|view| has_record(view, "mirror", is_turn_end));
+    let records = cx.seen().records("mirror");
+    assert_eq!(records.len(), 3);
+    assert!(matches!(
+        &records[2].event,
+        AgentEvent::TurnCompleted { turn_id, status: TurnStatus::Interrupted, .. }
+            if turn_id == "toolu_zombie"
+    ));
+    let timeline = cx.seen().timeline("mirror");
+    assert!(!timeline.turn_running);
+    assert_eq!(timeline.turns[0].status, Some(TurnStatus::Interrupted));
+    assert!(!cx.seen().status("mirror").activity.turn_running);
 }
 
 #[test]
@@ -1368,45 +1264,39 @@ fn unreadable_secrets_are_reported_and_never_written_over() {
 fn a_turn_refreshes_only_its_profiles_usage_from_its_running_harness() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-turn-usage");
-    let account = std::env::temp_dir().join(format!("tcode-turn-usage-{}", uuid::Uuid::new_v4()));
+    let account = test_store.root().join("account");
     std::fs::create_dir_all(&account).unwrap();
     std::fs::write(
         account.join(".claude.json"),
         r#"{"oauthAccount":{"organizationType":"claude_max","planDisplayName":"Ultra"}}"#,
     )
     .unwrap();
-    let mut client = TestClientState::new((*test_store).clone());
-    client
-        .settings
-        .provider_mut(ProviderKind::ClaudeCode)
-        .home_path = Some(account.clone());
-    let state = cx.new_entity(client);
-    let (commands, received) = smol::channel::unbounded();
-    let session = live_session(ProviderKind::ClaudeCode, commands);
-    let id = session.meta.id.clone();
-    state.update(cx, |state, cx| {
-        state.sessions.push(session.meta.clone());
-        state.residents.live.insert(id.clone(), session);
-        state.provider_event_for_test(
-            &id,
-            AgentEvent::TurnCompleted {
-                turn_id: "turn".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            cx,
-        );
-    });
+    let mut settings = Settings::default();
+    settings.provider_mut(ProviderKind::ClaudeCode).home_path = Some(account);
+    SettingsStore::new(test_store.root().clone())
+        .save(&settings)
+        .unwrap();
+    stored_thread(
+        &test_store,
+        "thread",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("project"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Providers);
+    let provider = first_turn(&state, cx, &providers, "thread", 0);
+    provider.play([turn_completed("turn", TurnStatus::Completed)]);
+    let reply = loop {
+        if let SessionCommand::ReadAccountUsage { reply } = cx.run_until_recv(&provider.commands) {
+            break reply;
+        }
+    };
+    cx.run_until_parked();
     assert_eq!(
-        state.read(|state| state.providers.usage_checking.clone()),
+        cx.seen().providers().usage_checking,
         HashSet::from(["claude".to_string()])
     );
-    let reply = std::iter::from_fn(|| received.try_recv().ok())
-        .find_map(|command| match command {
-            SessionCommand::ReadAccountUsage { reply } => Some(reply),
-            _ => None,
-        })
-        .expect("the running session is asked for its usage");
     reply
         .try_send(Ok(serde_json::json!({
             "subscription_type": "max",
@@ -1414,12 +1304,12 @@ fn a_turn_refreshes_only_its_profiles_usage_from_its_running_harness() {
             "rate_limits": {"five_hour": {"utilization": 94, "resets_at": "2026-09-04T21:20:00+00:00"}}
         })))
         .unwrap();
-    cx.run_until(|state| state.providers.usage_checking.is_empty());
-    let usage = state.read(|state| state.providers.provider_usage.clone());
+    cx.run_until_seen(|view| view.providers().usage_checking.is_empty());
+    let usage = &cx.seen().providers().provider_usage;
     assert_eq!(usage.keys().collect::<Vec<_>>(), ["claude"]);
     assert_eq!(usage["claude"].plan.as_deref(), Some("Ultra"));
     assert_eq!(usage["claude"].windows.len(), 1);
-    let _ = std::fs::remove_dir_all(account);
+    assert_eq!(providers.count(), 1, "no other harness is started for it");
 }
 
 /// Another Claude account starts from a copy of the user's own configuration,
@@ -1804,68 +1694,79 @@ fn archive_and_unarchive_apply_exact_timestamp_cascades() {
     );
 }
 
+/// Deleting a thread deletes every thread under it, archived or running, in
+/// the one command: a descendant's harness is stopped, and a host started
+/// again has none of them or their logs.
 #[test]
 fn deleting_a_thread_deletes_every_descendant_in_one_command() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-delete-cascade-test");
     let root = test_store.root().clone();
-    let store = (*test_store).clone();
     for (id, parent) in [
         ("parent", None),
         ("child", Some("parent")),
         ("grandchild", Some("child")),
         ("other", None),
     ] {
-        let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
-        meta.id = id.into();
-        meta.parent_session_id = parent.map(str::to_string);
-        if id == "child" {
-            meta.archived_at = Some(1);
-        }
-        store.upsert_meta(&meta).unwrap();
-        store
+        stored_thread(
+            &test_store,
+            id,
+            ProviderKind::Codex,
+            &root.join("project"),
+            |meta| {
+                meta.parent_session_id = parent.map(str::to_string);
+                if id == "child" {
+                    meta.archived_at = Some(1);
+                }
+            },
+        );
+        test_store
             .append_event(id, 1, &AgentEvent::Warning { message: id.into() })
             .unwrap();
     }
-    let state = cx.new_entity(TestClientState::new(store.clone()));
-    let (commands, background) = smol::channel::unbounded();
-    state.update(cx, |state, _| {
-        let mut grandchild = live_session(ProviderKind::Codex, commands);
-        grandchild.meta = state.find_meta("grandchild").unwrap();
-        state
-            .residents
-            .parked
-            .insert("grandchild".into(), grandchild);
-    });
+    let (state, providers) = played_host(cx, &test_store);
+    // The grandchild's harness runs on in the background.
+    let grandchild = first_turn(&state, cx, &providers, "grandchild", 0);
+    grandchild.play([turn_completed("turn", TurnStatus::Completed)]);
+    cx.run_until_seen(|view| has_record(view, "grandchild", is_turn_end));
+    state.leave(cx, "grandchild");
 
-    state.dispatch_command(
-        cx,
-        1,
-        Command::DeleteSession {
-            session_id: "parent".into(),
-            remove_worktree: false,
-        },
-    );
-    cx.run_until_parked();
-
+    state
+        .command(
+            cx,
+            Command::DeleteSession {
+                session_id: "parent".into(),
+                remove_worktree: false,
+            },
+        )
+        .unwrap();
     assert!(matches!(
-        background.try_recv(),
-        Ok(SessionCommand::Shutdown)
+        grandchild.next_command(cx),
+        SessionCommand::Shutdown
     ));
     state.update(cx, |state, _| state.close_store().unwrap());
+
+    let cx = &mut TestAppContext::default();
     let reopened = SessionStore::open_at(root).unwrap();
-    let remaining: Vec<_> = reopened
-        .load_index()
-        .unwrap()
-        .into_iter()
-        .map(|meta| meta.id)
-        .collect();
-    assert_eq!(remaining, ["other"]);
+    let (state, _providers) = played_host(cx, &reopened);
+    state.subscribe(cx, Topic::Index);
+    assert_eq!(
+        cx.seen()
+            .sessions()
+            .map(|meta| meta.id.as_str())
+            .collect::<Vec<_>>(),
+        ["other"]
+    );
+    let Ok(QueryResponse::ArchivedSessions(archived)) =
+        state.query(cx, tcode_protocol::Query::ArchivedSessions)
+    else {
+        panic!("the host lists its archived threads")
+    };
+    assert!(archived.sessions.is_empty());
     for id in ["parent", "child", "grandchild"] {
         assert!(reopened.read_event_log(id).unwrap().is_empty(), "{id}");
     }
     assert!(!reopened.read_event_log("other").unwrap().is_empty());
-    reopened.close().unwrap();
 }
 
 #[test]
@@ -1985,7 +1886,8 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
         ),
     ];
     // Every case is a thread of its own, stored before the host starts so
-    // none is resident when its title is asked for.
+    // none but the one whose latest message was just sent is resident when
+    // its title is asked for.
     let store = TestStore::new("tcode-regenerate-title");
     let image = store.root().join("qr.png");
     fs::write(&image, [1, 2, 3]).unwrap();
@@ -2025,43 +1927,28 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
         meta.id
     });
     let cx = &mut TestAppContext::default();
-    let scripted = scripted_provider(ProviderKind::Codex);
+    let providers = Providers::default();
     let state = cx.new_entity({
         let mut state = TestClientState::new((*store).clone());
         state.ai_title_generation_enabled = true;
-        state.set_provider_launcher(scripted.launcher);
+        state.set_provider_launcher(providers.launcher());
         state
     });
-    state.deliver(
-        cx,
-        1000,
-        tcode_protocol::ClientPayload::Subscribe(Subscription {
-            topic: Topic::Index,
-            after: None,
-            known_index: None,
-        }),
-    );
-    cx.run_until_parked();
+    state.subscribe(cx, Topic::Index);
     cx.drain_outgoing();
+    let mut launches = 0;
     for ((outcome, raw_title, status, output_tokens, expected), id) in cases.into_iter().zip(ids) {
         if outcome == "cached" {
-            state.update(cx, |state, cx| {
-                state.record_event(
-                    &id,
-                    &AgentEvent::ItemCompleted(ThreadItem {
-                        id: "latest".into(),
-                        parent_item_id: None,
-                        content: ItemContent::UserMessage {
-                            text: "Include link expiration".into(),
-                            attachments: Vec::new(),
-                        },
-                    }),
-                    cx,
-                );
-            });
+            // The thread's latest message was taken the moment before, and
+            // its provider runs it.
+            state.open(cx, &id);
+            state.send(cx, &id, "Include link expiration");
+            providers.started(cx, launches).start_turn(cx, "turn");
+            launches += 1;
+            cx.run_until_seen(|view| view.status(&id).running_turn.is_some());
+            cx.drain_outgoing();
         }
-        // No selected or resident session. The cached case also covers an accepted
-        // message captured before its queued disk write has completed.
+        let updated_at = cx.seen().session(&id).unwrap().updated_at;
         for request_id in [1, 2] {
             state.dispatch_command(
                 cx,
@@ -2071,6 +1958,8 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
                 },
             );
         }
+        let scripted = providers.started(cx, launches);
+        launches += 1;
         let prompt = match cx.run_until_recv(&scripted.commands) {
             SessionCommand::SendTurn {
                 text, attachments, ..
@@ -2081,8 +1970,9 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
             }
             other => panic!("expected a title request, got {other:?}"),
         };
+        cx.run_until_parked();
         assert!(
-            scripted.commands.try_recv().is_err(),
+            scripted.commands.try_recv().is_err() && providers.count() == launches,
             "duplicate requests must coalesce"
         );
         assert!(prompt.contains("Old title"));
@@ -2156,31 +2046,19 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
             .unwrap();
         // Completion arrives after the scratch-cwd cleanup on the thread pool;
         // wait on the pending flag rather than a fixed idle window.
-        cx.run_until(|state| {
-            !state
-                .index_snapshot()
-                .summary
-                .title_generating
-                .contains(&id)
-        });
-        state.read(|state| {
-            let title = state
-                .sessions
-                .iter()
-                .find(|meta| meta.id == id)
-                .map(|meta| meta.title.as_str());
-            assert_eq!(title, expected, "{outcome}");
-            let persisted = store
-                .load_index()
-                .unwrap()
-                .into_iter()
-                .find(|meta| meta.id == id);
-            assert_eq!(persisted.as_ref().map(|meta| meta.title.as_str()), expected);
-            if !matches!(outcome, "renamed" | "deleted") {
-                assert_eq!(state.find_meta(&id).unwrap().updated_at, 123, "{outcome}");
-                assert_eq!(persisted.unwrap().updated_at, 123, "{outcome}");
-            }
-        });
+        cx.run_until_seen(|view| !view.title_generating(&id));
+        let shown = cx.seen().session(&id);
+        assert_eq!(shown.map(|meta| meta.title.as_str()), expected, "{outcome}");
+        let persisted = store
+            .load_index()
+            .unwrap()
+            .into_iter()
+            .find(|meta| meta.id == id);
+        assert_eq!(persisted.as_ref().map(|meta| meta.title.as_str()), expected);
+        if !matches!(outcome, "renamed" | "deleted") {
+            assert_eq!(shown.unwrap().updated_at, updated_at, "{outcome}");
+            assert_eq!(persisted.unwrap().updated_at, updated_at, "{outcome}");
+        }
         let sent = cx.drain_outgoing();
         if outcome == "failed" {
             assert!(sent.iter().any(|message| matches!(
@@ -2598,90 +2476,121 @@ fn deleting_a_profile_takes_its_stars_with_it() {
     });
 }
 
+/// A message goes to the provider with what the user attached to it: the
+/// terminal lines they picked and their review comments, in that order after
+/// the text, and the images it names; once sent, none of them waits for the
+/// next message.
 #[test]
 fn send_turn_assembles_draft_context_and_attachment_paths() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-send-assembly-test");
     let root = test_store.root().clone();
-    std::fs::create_dir_all(&root).unwrap();
     let attachment_path = root.join("sample.png");
     std::fs::write(&attachment_path, [1, 2, 3]).unwrap();
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (commands, receiver) = smol::channel::unbounded();
-
-    state.update(cx, |state, cx| {
-        let mut active = live_session(ProviderKind::Codex, commands);
-        active.meta.id = "assembled".into();
-        active.terminal_workspace.contexts.push(TerminalContext {
-            id: 1,
-            terminal_label: "zsh".into(),
-            line_start: 12,
-            line_end: 13,
-            text: "cargo test\nok".into(),
-        });
-        state.install_selected(active);
-        state.add_review_comment("assembled",
-            ReviewComment::new(
-                "src/lib.rs".into(),
-                7,
-                7,
-                tcode_core::session::ReviewSide::New,
-                "Please fix".into(),
-                "let bad = true;".into(),
-                "section".into(),
-                "Changes".into(),
-                3,
-                4,
-            ),
+    stored_thread(
+        &test_store,
+        "assembled",
+        ProviderKind::Codex,
+        &root.join("project"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state.open(cx, "assembled");
+    state
+        .command(
             cx,
-        );
-
-        state.add_review_comment(
-            "assembled",
-            ReviewComment::new(
-                "src/lib.rs".into(),
-                7,
-                8,
-                tcode_core::session::ReviewSide::New,
-                "  Please avoid the unwrap.  ".into(),
-                "@@ -7,1 +7,2 @@\n old\n+new".into(),
-                "turn:3".into(),
-                "Turn 4".into(),
-                12,
-                13,
-            ),
+            Command::ToggleTerminalPanel {
+                session_id: "assembled".into(),
+            },
+        )
+        .unwrap();
+    cx.run_until_seen(|view| !view.status("assembled").terminals.is_empty());
+    let terminal = cx.seen().status("assembled").terminals[0].clone();
+    state
+        .command(
             cx,
-        );
-        state.send_turn("assembled", "Explain this".into(), vec![attachment_path.clone()], cx);
+            Command::CaptureTerminalSelection {
+                session_id: "assembled".into(),
+                terminal_id: terminal.id,
+                selection: Some(tcode_protocol::TerminalSelection {
+                    line_start: 12,
+                    line_end: 13,
+                    text: "cargo test\nok".into(),
+                }),
+            },
+        )
+        .unwrap();
+    for comment in [
+        ReviewComment::new(
+            "src/lib.rs".into(),
+            7,
+            7,
+            tcode_core::session::ReviewSide::New,
+            "Please fix".into(),
+            "let bad = true;".into(),
+            "section".into(),
+            "Changes".into(),
+            3,
+            4,
+        ),
+        ReviewComment::new(
+            "src/lib.rs".into(),
+            7,
+            8,
+            tcode_core::session::ReviewSide::New,
+            "  Please avoid the unwrap.  ".into(),
+            "@@ -7,1 +7,2 @@\n old\n+new".into(),
+            "turn:3".into(),
+            "Turn 4".into(),
+            12,
+            13,
+        ),
+    ] {
+        state
+            .command(
+                cx,
+                Command::AddReviewComment {
+                    session_id: "assembled".into(),
+                    comment,
+                },
+            )
+            .unwrap();
+    }
+    state
+        .command(
+            cx,
+            Command::SendTurn {
+                session_id: "assembled".into(),
+                text: "Explain this".into(),
+                attachment_paths: vec![attachment_path.clone()],
+            },
+        )
+        .unwrap();
 
-        let SessionCommand::SendTurn {
-            text, attachments, ..
-        } = receiver.try_recv().expect("assembled send command")
-        else {
-            panic!("expected SendTurn")
-        };
-        assert_eq!(
-            text,
-            "Explain this\n\n<terminal_context>\n- zsh lines 12-13:\n  12 | cargo test\n  13 | ok\n</terminal_context>\n\n<review_comment sectionId=\"section\" sectionTitle=\"Changes\" filePath=\"src/lib.rs\" startIndex=\"3\" endIndex=\"4\" rangeLabel=\"+7\">\nPlease fix\n```diff\nlet bad = true;\n```\n</review_comment>\n\n<review_comment sectionId=\"turn:3\" sectionTitle=\"Turn 4\" filePath=\"src/lib.rs\" startIndex=\"12\" endIndex=\"13\" rangeLabel=\"+7 to +8\">\nPlease avoid the unwrap.\n```diff\n@@ -7,1 +7,2 @@\n old\n+new\n```\n</review_comment>"
-        );
-        assert_eq!(
-            attachments,
-            vec![Attachment {
-                media_type: "image/png".into(),
-                data_base64: "AQID".into(),
-                source_path: Some(attachment_path.to_string_lossy().into_owned()),
-            }]
-        );
-        assert!(
-            state.selected_session()
-                .unwrap()
-                .terminal_workspace
-                .contexts
-                .is_empty()
-        );
-        assert!(state.review_comments("assembled").is_empty());
-    });
+    let SessionCommand::SendTurn {
+        text, attachments, ..
+    } = providers.started(cx, 0).next_command(cx)
+    else {
+        panic!("expected the message")
+    };
+    assert_eq!(
+        text,
+        format!(
+            "Explain this\n\n<terminal_context>\n- {} lines 12-13:\n  12 | cargo test\n  13 | ok\n</terminal_context>\n\n<review_comment sectionId=\"section\" sectionTitle=\"Changes\" filePath=\"src/lib.rs\" startIndex=\"3\" endIndex=\"4\" rangeLabel=\"+7\">\nPlease fix\n```diff\nlet bad = true;\n```\n</review_comment>\n\n<review_comment sectionId=\"turn:3\" sectionTitle=\"Turn 4\" filePath=\"src/lib.rs\" startIndex=\"12\" endIndex=\"13\" rangeLabel=\"+7 to +8\">\nPlease avoid the unwrap.\n```diff\n@@ -7,1 +7,2 @@\n old\n+new\n```\n</review_comment>",
+            terminal.title
+        )
+    );
+    assert_eq!(
+        attachments,
+        vec![Attachment {
+            media_type: "image/png".into(),
+            data_base64: "AQID".into(),
+            source_path: Some(attachment_path.to_string_lossy().into_owned()),
+        }]
+    );
+    let status = cx.seen().status("assembled");
+    assert!(status.terminal_contexts.is_empty());
+    assert!(status.review_comment_drafts.is_empty());
 }
 
 /// A remote client on a bad network can queue a thread's subscription and its
@@ -3442,6 +3351,11 @@ fn report_callbacks_carry_the_report_verbatim_and_label_fallbacks() {
     );
 }
 
+/// A subagent's report reaches its lead, and only the report: what else it
+/// said stays in its thread, waking itself later tells the lead nothing, and
+/// one that ends its turn silent is reminded once, visibly, and then its last
+/// words go to the lead marked as a fallback. A report made after that still
+/// reaches the lead, once. A thread no other thread started cannot report.
 #[test]
 fn only_report_result_reaches_the_lead_and_a_silent_child_is_reminded_then_fallen_back() {
     use tcode_core::notice::{ORCHESTRATE_FALLBACK_LABEL, ORCHESTRATE_REPORT_LABEL};
@@ -3449,70 +3363,44 @@ fn only_report_result_reaches_the_lead_and_a_silent_child_is_reminded_then_falle
 
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-report-result-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (parent_commands, parent_receiver) = smol::channel::unbounded();
-    let (silent_commands, silent_receiver) = smol::channel::unbounded();
-    let callbacks = || {
-        std::iter::from_fn(|| parent_receiver.try_recv().ok())
-            .filter_map(|command| match command {
-                SessionCommand::Steer { text, .. } => Some(text),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-    };
+    let fleet = Fleet::new(
+        cx,
+        &test_store,
+        ProviderKind::Codex,
+        &["reporter", "silent"],
+        |_| {},
+    );
+    let report = |text: &str| serde_json::json!({ "text": text });
+    assert!(
+        fleet
+            .lead
+            .control(cx, "report_result", report("nope"))
+            .is_err()
+    );
+    let reporter = fleet.child("reporter");
+    assert_eq!(
+        reporter
+            .control(cx, "report_result", report("the full reported RESULT"))
+            .unwrap()["delivered_when"],
+        "turn_ends"
+    );
 
-    state.update(cx, |state, cx| {
-        let mut parent = live_session(ProviderKind::Codex, parent_commands);
-        parent.meta.id = "parent".into();
-        parent.turn_in_flight = true;
-        state.sessions.push(parent.meta.clone());
-        state
-            .residents
-            .parked
-            .insert(parent.meta.id.clone(), parent);
-
-        for (id, commands) in [
-            ("reporter", smol::channel::unbounded().0),
-            ("silent", silent_commands),
-        ] {
-            let mut child = live_session(ProviderKind::Codex, commands);
-            child.meta.id = id.into();
-            child.meta.parent_session_id = Some("parent".into());
-            child.meta.expectation = Some(ChildExpectation::opened(1));
-            child.turn_in_flight = true;
-            state.sessions.push(child.meta.clone());
-            state.residents.parked.insert(child.meta.id.clone(), child);
-        }
-
-        // A report from a thread no other thread started as its subagent is refused.
-        let report = |text: &str| {
-            control_mcp::ControlOp::ReportResult(control_mcp::ReportResultParams {
-                text: text.into(),
-            })
-        };
-        assert!(control_call(state, cx, "parent", report("nope")).is_err());
-        assert_eq!(
-            control_call(state, cx, "reporter", report("the full reported RESULT")).unwrap()
-                ["delivered_when"],
-            "turn_ends"
-        );
-
-        // The report rides in the child's own transcript as the tool call.
-        state.on_event("reporter", persisted_assistant_event("working"), cx);
-        state.on_event(
-            "reporter",
-            report_result_event("rep-1", "the full reported RESULT"),
-            cx,
-        );
-        state.on_event("reporter", persisted_assistant_event("done"), cx);
-        state.on_event("reporter", completed_turn("turn-1"), cx);
-        state.on_event("silent", persisted_assistant_event("last message"), cx);
-        state.on_event("silent", completed_turn("turn-1"), cx);
-    });
-    cx.run_until_parked();
-
-    let delivered = callbacks();
+    // The report rides in the child's own transcript as the tool call.
+    reporter.play([
+        persisted_assistant_event("working"),
+        report_result_event("rep-1", "the full reported RESULT"),
+        persisted_assistant_event("done"),
+        completed_turn("turn-1"),
+    ]);
+    let silent = fleet.child("silent");
+    silent.play([
+        persisted_assistant_event("last message"),
+        completed_turn("turn-1"),
+    ]);
+    // The silent child is reminded once, visibly, instead of being reported on.
+    let (reminder, text) = silent.next_turn(cx);
+    assert_eq!(text, CHILD_REPORT_REMINDER);
+    let delivered = fleet.callbacks(cx, &["reporter", "silent"]);
     assert_eq!(
         delivered.len(),
         1,
@@ -3523,112 +3411,159 @@ fn only_report_result_reaches_the_lead_and_a_silent_child_is_reminded_then_falle
         "reported.\n{ORCHESTRATE_REPORT_LABEL}the full reported RESULT"
     )));
     assert!(!delivered[0].contains("done"));
-    state.read(|state| {
-        assert_eq!(
-            state.find_meta("reporter").unwrap().report(),
-            AgentReport::Reported
-        );
-        let silent = state.find_meta("silent").unwrap();
-        assert_eq!(silent.report(), AgentReport::Expected);
-    });
-    // The silent child is reminded once, visibly, instead of being reported on.
-    let reminder = match silent_receiver.try_recv() {
-        Ok(SessionCommand::SendTurn {
-            delivery_id, text, ..
-        }) => {
-            assert_eq!(text, CHILD_REPORT_REMINDER);
-            delivery_id
-        }
-        other => panic!("expected the reminder as the silent child's next turn, got {other:?}"),
-    };
+    assert_eq!(fleet.report(cx, "reporter"), AgentReport::Reported);
+    assert_eq!(fleet.report(cx, "silent"), AgentReport::Expected);
 
-    state.update(cx, |state, cx| {
-        // The reporter wakes itself (a monitor, a scheduled wake-up): nothing
-        // new for the lead.
-        state.on_event(
-            "reporter",
-            AgentEvent::TurnStarted {
-                turn_id: "turn-2".into(),
-            },
-            cx,
-        );
-        state.on_event(
-            "reporter",
-            persisted_assistant_event("Four of 10 done."),
-            cx,
-        );
-        state.on_event("reporter", completed_turn("turn-2"), cx);
-
-        // The silent child runs the reminder turn and still does not report.
-        state.on_event(
-            "silent",
-            AgentEvent::TurnAccepted {
-                delivery_id: reminder,
-            },
-            cx,
-        );
-        state.on_event(
-            "silent",
-            AgentEvent::TurnStarted {
-                turn_id: "turn-2".into(),
-            },
-            cx,
-        );
-        state.on_event("silent", persisted_assistant_event("still nothing"), cx);
-        state.on_event("silent", completed_turn("turn-2"), cx);
-    });
-    cx.run_until_parked();
-
-    let delivered = callbacks();
+    // The reporter wakes itself (a monitor, a scheduled wake-up): nothing
+    // new for the lead.
+    reporter.play([
+        AgentEvent::TurnStarted {
+            turn_id: "turn-2".into(),
+        },
+        persisted_assistant_event("Four of 10 done."),
+        completed_turn("turn-2"),
+    ]);
+    // The silent child runs the reminder turn and still does not report.
+    silent.play([
+        AgentEvent::TurnAccepted {
+            delivery_id: reminder,
+        },
+        AgentEvent::TurnStarted {
+            turn_id: "turn-2".into(),
+        },
+        persisted_assistant_event("still nothing"),
+        completed_turn("turn-2"),
+    ]);
+    let delivered = fleet.callbacks(cx, &["reporter", "silent"]);
     assert_eq!(delivered.len(), 1, "{delivered:?}");
     assert!(delivered[0].starts_with("[orchestrate] thread silent (\""));
     assert!(delivered[0].contains(&format!(
         "unreported.\n{ORCHESTRATE_FALLBACK_LABEL}still nothing"
     )));
-    state.read(|state| {
-        assert_eq!(
-            state.find_meta("silent").unwrap().report(),
-            AgentReport::Unreported
-        );
-    });
-    assert!(silent_receiver.try_recv().is_err(), "no second reminder");
+    assert_eq!(fleet.report(cx, "silent"), AgentReport::Unreported);
+    assert!(
+        next_command(&silent.commands).is_err(),
+        "no second reminder"
+    );
 
     // A late report still reaches the lead, once.
-    state.update(cx, |state, cx| {
-        state.on_event(
-            "silent",
-            AgentEvent::TurnStarted {
-                turn_id: "turn-3".into(),
-            },
-            cx,
-        );
-        state.on_event("silent", report_result_event("rep-2", "late report"), cx);
-        state.on_event("silent", completed_turn("turn-3"), cx);
-        state.on_event(
-            "silent",
-            AgentEvent::TurnStarted {
-                turn_id: "turn-4".into(),
-            },
-            cx,
-        );
-        state.on_event("silent", completed_turn("turn-4"), cx);
-    });
-    cx.run_until_parked();
-    let delivered = callbacks();
+    silent.play([AgentEvent::TurnStarted {
+        turn_id: "turn-3".into(),
+    }]);
+    silent
+        .control(cx, "report_result", report("late report"))
+        .unwrap();
+    silent.play([
+        report_result_event("rep-2", "late report"),
+        completed_turn("turn-3"),
+        AgentEvent::TurnStarted {
+            turn_id: "turn-4".into(),
+        },
+        completed_turn("turn-4"),
+    ]);
+    let delivered = fleet.callbacks(cx, &["silent"]);
     assert_eq!(delivered.len(), 1, "{delivered:?}");
     assert!(delivered[0].contains(&format!("reported.\n{ORCHESTRATE_REPORT_LABEL}late report")));
 }
 
-/// One `tcode_control` call by `caller`, answered on the host thread.
-fn control_call(
-    state: &mut AppState,
-    cx: &mut HostCx,
-    caller: &str,
-    op: control_mcp::ControlOp,
-) -> Result<serde_json::Value, String> {
-    let (reply, response) = smol::channel::bounded(1);
-    state.handle_control_op(caller.into(), op, reply, cx);
-    response.try_recv().unwrap()
+/// A lead whose turn runs, and the subagents it sent their brief to through
+/// `tcode_control`, each running the turn that brief opened and shown on the
+/// client. Every thread was stored before the host started, the subagents
+/// under the lead, each working in a directory of its own.
+struct Fleet {
+    state: TestEntity,
+    providers: Providers,
+    lead: Played,
+    children: HashMap<String, Played>,
+    root: PathBuf,
+}
+
+impl Fleet {
+    fn new(
+        cx: &mut TestAppContext,
+        store: &SessionStore,
+        provider: ProviderKind,
+        children: &[&str],
+        edit: impl Fn(&mut SessionMeta),
+    ) -> Self {
+        let root = store.root().clone();
+        stored_thread(store, "parent", provider, &root.join("parent"), &edit);
+        for child in children {
+            stored_thread(store, child, provider, &root.join(child), |meta| {
+                meta.parent_session_id = Some("parent".into());
+                edit(meta);
+            });
+        }
+        let (state, providers) = controlled_host(cx, store);
+        state.subscribe(cx, Topic::Index);
+        let lead = first_turn(&state, cx, &providers, "parent", 0);
+        let mut fleet = Self {
+            state,
+            providers,
+            lead,
+            children: HashMap::new(),
+            root,
+        };
+        if !children.is_empty() {
+            let sent = fleet.dispatch(cx, children, "Do your part");
+            for child in children {
+                fleet.state.open(cx, child);
+                let played = fleet.providers.started_in(cx, &fleet.root.join(child));
+                played.start_turn(cx, "turn-1");
+                cx.run_until_seen(|view| view.status(child).running_turn.is_some());
+                fleet.children.insert(child.to_string(), played);
+            }
+            assert!(
+                sent["results"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|result| result["outcome"] == "applied"),
+                "{sent}"
+            );
+        }
+        fleet
+    }
+
+    fn child(&self, id: &str) -> &Played {
+        &self.children[id]
+    }
+
+    /// The lead sends `children` `text` after their running turn.
+    fn dispatch(
+        &self,
+        cx: &mut TestAppContext,
+        children: &[&str],
+        text: &str,
+    ) -> serde_json::Value {
+        self.lead
+            .control(
+                cx,
+                "send_message",
+                serde_json::json!({"thread_ids": children, "text": text, "mode": "queue"}),
+            )
+            .unwrap()
+    }
+
+    /// What the lead is told of its subagents, steered into its running
+    /// turn, until the host has taken everything `children` said so far.
+    fn callbacks(&self, cx: &mut TestAppContext, children: &[&str]) -> Vec<String> {
+        for child in children {
+            self.child(child).fence(cx, child);
+        }
+        cx.run_until_parked();
+        std::iter::from_fn(|| next_command(&self.lead.commands).ok())
+            .map(|command| match command {
+                SessionCommand::Steer { text, .. } => text,
+                other => panic!("the lead was sent {other:?}"),
+            })
+            .collect()
+    }
+
+    /// The subagent's report as the index gives it.
+    fn report(&self, cx: &TestAppContext, child: &str) -> tcode_core::settlement::AgentReport {
+        cx.seen().activity(child).unwrap().agent.unwrap().report
+    }
 }
 
 /// The child's `report_result` call as its transcript records it.
@@ -3661,8 +3596,10 @@ fn completed_turn(turn_id: &str) -> AgentEvent {
 /// progress messages (turns 2–10), and it reported once, in turn 12. Its lead
 /// received twelve "completed" callbacks. The contract is
 /// one: the report. `BackgroundTasksChanged` is not persisted, so the Monitor's
-/// liveness is replayed the way the CLI publishes it — set when the monitor
-/// starts, cleared with the result of the turn in which it ended.
+/// liveness is played the way the CLI publishes it — set when the monitor
+/// starts, cleared with the result of the turn in which it ended. The brief
+/// and its turn's start are the host's own records, so the provider plays
+/// what follows them.
 #[test]
 fn a_child_waking_itself_reports_to_its_lead_once() {
     use tcode_core::session::StoredEvent;
@@ -3672,68 +3609,53 @@ fn a_child_waking_itself_reports_to_its_lead_once() {
 
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-monitor-wakeups");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let (parent_commands, parent_receiver) = smol::channel::unbounded();
-    let (child_commands, child_receiver) = smol::channel::unbounded();
-
-    state.update(cx, |state, cx| {
-        let mut parent = live_session(ProviderKind::ClaudeCode, parent_commands);
-        parent.meta.id = "parent".into();
-        parent.turn_in_flight = true;
-        state.sessions.push(parent.meta.clone());
-        state
-            .residents
-            .parked
-            .insert(parent.meta.id.clone(), parent);
-        let mut child = live_session(ProviderKind::ClaudeCode, child_commands);
-        child.meta.id = "child".into();
-        child.meta.title = "改写样例说明（10 条）".into();
-        child.meta.parent_session_id = Some("parent".into());
-        child.meta.expectation = Some(ChildExpectation::opened(1));
-        state.sessions.push(child.meta.clone());
-        state.residents.parked.insert(child.meta.id.clone(), child);
-
-        let records: Vec<StoredEvent> = RECORDING
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        let last_turn = records
-            .iter()
-            .rev()
-            .find_map(|record| match &record.event {
-                AgentEvent::TurnCompleted { turn_id, .. } => Some(turn_id.clone()),
-                _ => None,
-            })
-            .unwrap();
-        for record in records {
-            let monitor_started = matches!(
-                &record.event,
-                AgentEvent::ItemCompleted(ThreadItem {
-                    content: ItemContent::ToolCall { name, .. },
-                    ..
-                }) if name == "Monitor"
-            );
-            if matches!(&record.event, AgentEvent::TurnCompleted { turn_id, .. } if *turn_id == last_turn)
-            {
-                state.on_event("child", AgentEvent::BackgroundTasksChanged { count: 0 }, cx);
+    let fleet = Fleet::new(
+        cx,
+        &test_store,
+        ProviderKind::ClaudeCode,
+        &["child"],
+        |meta| {
+            if meta.id == "child" {
+                meta.title = "改写样例说明（10 条）".into();
             }
-            if let AgentEvent::TurnStarted { .. } = &record.event {
-                state.resident_mut("child").unwrap().turn_in_flight = true;
-            }
-            state.on_event("child", record.event, cx);
-            if monitor_started {
-                state.on_event("child", AgentEvent::BackgroundTasksChanged { count: 1 }, cx);
-            }
-        }
-    });
-    cx.run_until_parked();
-
-    let callbacks: Vec<_> = std::iter::from_fn(|| parent_receiver.try_recv().ok())
-        .filter_map(|command| match command {
-            SessionCommand::Steer { text, .. } => Some(text),
+        },
+    );
+    let records: Vec<StoredEvent> = RECORDING
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let last_turn = records
+        .iter()
+        .rev()
+        .find_map(|record| match &record.event {
+            AgentEvent::TurnCompleted { turn_id, .. } => Some(turn_id.clone()),
             _ => None,
         })
-        .collect();
+        .unwrap();
+    let child = fleet.child("child");
+    for record in records
+        .into_iter()
+        .skip_while(|record| !matches!(&record.event, AgentEvent::TurnStarted { .. }))
+        .skip(1)
+    {
+        let monitor_started = matches!(
+            &record.event,
+            AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::ToolCall { name, .. },
+                ..
+            }) if name == "Monitor"
+        );
+        if matches!(&record.event, AgentEvent::TurnCompleted { turn_id, .. } if *turn_id == last_turn)
+        {
+            child.play([AgentEvent::BackgroundTasksChanged { count: 0 }]);
+        }
+        child.play([record.event]);
+        if monitor_started {
+            child.play([AgentEvent::BackgroundTasksChanged { count: 1 }]);
+        }
+    }
+
+    let callbacks = fleet.callbacks(cx, &["child"]);
     assert_eq!(
         callbacks.len(),
         1,
@@ -3749,35 +3671,31 @@ fn a_child_waking_itself_reports_to_its_lead_once() {
         "progress lines stay in the child"
     );
     assert!(
-        std::iter::from_fn(|| child_receiver.try_recv().ok())
+        std::iter::from_fn(|| next_command(&child.commands).ok())
             .all(|command| !matches!(command, SessionCommand::SendTurn { .. })),
         "a child waiting on its monitor is not reminded"
     );
-    state.read(|state| {
-        assert_eq!(
-            state.find_meta("child").unwrap().report(),
-            AgentReport::Reported
-        );
-    });
+    assert_eq!(fleet.report(cx, "child"), AgentReport::Reported);
 }
 
 /// A follow-up to a subagent whose log is not loaded yet is owed a new report: the report
-/// the subagent made for the previous message is not delivered again as its answer.
+/// the subagent made for the previous message is not delivered again as its answer, and
+/// the subagent is reminded to make one.
 #[test]
 fn a_follow_up_to_an_unloaded_subagent_is_not_answered_by_its_earlier_report() {
     use tcode_core::settlement::AgentReport;
 
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-subagent-follow-up-unloaded");
-    let mut child = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
-    child.id = "child".into();
-    child.parent_session_id = Some("parent".into());
-    child.expectation = Some(ChildExpectation {
-        state: AgentReport::Reported,
-        delivered_item: Some("rep-old".into()),
-        ..ChildExpectation::opened(1)
+    let cwd = store.root().join("child");
+    stored_thread(&store, "child", ProviderKind::Codex, &cwd, |child| {
+        child.parent_session_id = Some("parent".into());
+        child.expectation = Some(ChildExpectation {
+            state: AgentReport::Reported,
+            delivered_item: Some("rep-old".into()),
+            ..ChildExpectation::opened(1)
+        });
     });
-    store.upsert_meta(&child).unwrap();
     let earlier = cx.now_millis();
     cx.clock.advance(Duration::from_secs(60));
     for event in [
@@ -3789,61 +3707,22 @@ fn a_follow_up_to_an_unloaded_subagent_is_not_answered_by_its_earlier_report() {
     ] {
         store.append_event("child", earlier, &event).unwrap();
     }
-    let scripted = scripted_provider(ProviderKind::Codex);
-    let state = cx.new_entity({
-        let mut state = TestClientState::new((*store).clone());
-        state.set_provider_launcher(scripted.launcher);
-        state
-    });
-    let (parent_commands, parent_receiver) = smol::channel::unbounded();
-
-    state.update(cx, |state, cx| {
-        let mut parent = live_session(ProviderKind::Codex, parent_commands);
-        parent.meta.id = "parent".into();
-        parent.turn_in_flight = true;
-        state.sessions.push(parent.meta.clone());
-        state.residents.parked.insert("parent".into(), parent);
-        assert!(state.resident("child").is_none());
-        let sent = control_call(
-            state,
-            cx,
-            "parent",
-            control_mcp::ControlOp::SendMessage(control_mcp::SendMessageParams {
-                thread_ids: vec!["child".into()],
-                text: "One more check".into(),
-                mode: control_mcp::SendMode::Queue,
-                attachments: None,
-                request_id: None,
-            }),
-        )
-        .unwrap();
-        assert_eq!(sent["results"][0]["outcome"], "applied", "{sent}");
-    });
+    let fleet = Fleet::new(cx, &store, ProviderKind::Codex, &[], |_| {});
+    let sent = fleet.dispatch(cx, &["child"], "One more check");
+    assert_eq!(sent["results"][0]["outcome"], "applied", "{sent}");
+    let child = fleet.providers.started_in(cx, &cwd);
+    child.start_turn(cx, "turn-2");
+    child.play([
+        persisted_assistant_event("checked, no report"),
+        completed_turn("turn-2"),
+    ]);
+    assert_eq!(child.next_turn(cx).1, CHILD_REPORT_REMINDER);
     cx.run_until_parked();
-    state.update(cx, |state, cx| {
-        state.on_event(
-            "child",
-            AgentEvent::TurnStarted {
-                turn_id: "turn-2".into(),
-            },
-            cx,
-        );
-        state.on_event("child", persisted_assistant_event("checked, no report"), cx);
-        state.on_event("child", completed_turn("turn-2"), cx);
-    });
-    cx.run_until_parked();
-
-    let callbacks: Vec<_> = std::iter::from_fn(|| parent_receiver.try_recv().ok())
-        .filter_map(|command| match command {
-            SessionCommand::Steer { text, .. } => Some(text),
-            _ => None,
-        })
-        .collect();
-    assert!(callbacks.is_empty(), "{callbacks:?}");
-    state.read(|state| {
-        let child = state.find_meta("child").unwrap();
-        assert_eq!(child.report(), AgentReport::Expected);
-    });
+    assert!(
+        next_command(&fleet.lead.commands).is_err(),
+        "the lead is told nothing"
+    );
+    assert_eq!(fleet.report(cx, "child"), AgentReport::Expected);
 }
 
 /// An orchestrator returning to a long-idle child whose worktree has since been
@@ -3853,203 +3732,299 @@ fn a_follow_up_to_an_unloaded_subagent_is_not_answered_by_its_earlier_report() {
 fn send_to_child_whose_cwd_was_removed_reports_the_start_failure() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-send-missing-cwd-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (parent_commands, parent_receiver) = smol::channel::unbounded();
-    let (child_commands, _child_receiver) = smol::channel::unbounded();
-    let cwd = std::env::temp_dir().join(format!("tcode-removed-{}", uuid::Uuid::new_v4()));
-
-    state.update(cx, |state, cx| {
-        let mut parent = live_session(ProviderKind::Codex, parent_commands);
-        parent.meta.id = "parent".into();
-        parent.meta.project_id = Some("project".into());
-        parent.turn_in_flight = true;
-        state.sessions.push(parent.meta.clone());
-        state
-            .residents
-            .parked
-            .insert(parent.meta.id.clone(), parent);
-
-        let mut child = live_session(ProviderKind::Codex, child_commands);
-        child.meta.id = "child".into();
-        child.meta.parent_session_id = Some("parent".into());
-        child.meta.cwd = cwd.clone();
-        child.meta.project_id = Some("project".into());
-        child.meta.expectation = Some(ChildExpectation::opened(1));
-        child.turn_in_flight = true;
-        state.sessions.push(child.meta.clone());
-        state.residents.parked.insert(child.meta.id.clone(), child);
-
-        state.on_event("child", report_result_event("rep-1", "old report"), cx);
-        state.on_event("child", completed_turn("turn-1"), cx);
+    let fleet = Fleet::new(cx, &test_store, ProviderKind::Codex, &["child"], |meta| {
+        meta.project_id = Some("project".into());
     });
-    assert!(matches!(
-        cx.run_until_recv(&parent_receiver),
-        SessionCommand::Steer { text, .. } if text.ends_with("\nold report")
-    ));
+    let child = fleet.child("child");
+    child.play([
+        report_result_event("rep-1", "old report"),
+        completed_turn("turn-1"),
+    ]);
+    assert!(fleet.lead.next_steer(cx).ends_with("\nold report"));
 
-    state.update(cx, |state, cx| {
-        state.resident_mut("child").unwrap().shutdown_to_idle();
-        let sent = control_call(
-            state,
-            cx,
-            "parent",
-            control_mcp::ControlOp::SendMessage(control_mcp::SendMessageParams {
-                thread_ids: vec!["child".into()],
-                text: "continue".into(),
-                mode: control_mcp::SendMode::Queue,
-                attachments: None,
-                request_id: None,
-            }),
-        )
-        .unwrap();
-        assert_eq!(sent["results"][0]["outcome"], "applied", "{sent}");
-    });
-    cx.run_until(|_| !parent_receiver.is_empty());
-    assert!(
-        cx.drain_outgoing().iter().any(|message| matches!(
-            message,
-            HostMessage::Event(EventEnvelope {
-                event: ServerEvent::Runtime(RuntimeEvent::Error(
-                    RuntimeError::WorkingDirectoryMissing { session_id, project_id: Some(project_id), cwd: missing }
-                )),
-                ..
-            }) if session_id == "child" && project_id == "project" && missing == &cwd
-        )),
-        "a missing working directory is reported with its project so a client can offer to re-point it"
+    // Its harness has been idle for as long as the host keeps one.
+    cx.clock.advance(RESIDENT_IDLE_GRACE);
+    assert!(matches!(child.next_command(cx), SessionCommand::Shutdown));
+    let cwd = fleet.root.join("child");
+    std::fs::remove_dir_all(&cwd).unwrap();
+    // What `agent::start_session` says of a directory that is gone.
+    fleet.providers.refuse_in(
+        &cwd,
+        format!("working directory `{}` no longer exists", cwd.display()),
     );
-
-    let Ok(SessionCommand::Steer { text, .. }) = parent_receiver.try_recv() else {
-        panic!("the parent must be told the child failed to start");
-    };
+    cx.drain_outgoing();
+    let sent = fleet.dispatch(cx, &["child"], "continue");
+    assert_eq!(sent["results"][0]["outcome"], "applied", "{sent}");
+    let failed = fleet.lead.next_steer(cx);
     assert_eq!(
-        text,
+        failed,
         format!(
             "[orchestrate] thread child (\"{}\") failed.\nfailed to spawn provider process: working directory `{}` no longer exists",
-            state.read(|state| state.find_meta("child").unwrap().title.clone()),
+            cx.seen().session("child").unwrap().title,
             cwd.display()
         )
     );
-
-    state.update(cx, |state, cx| {
-        let thread = control_call(
-            state,
+    assert!(
+        cx.seen()
+            .notifications()
+            .iter()
+            .any(|notification| matches!(
+                notification,
+                RuntimeEvent::Error(RuntimeError::WorkingDirectoryMissing {
+                    session_id,
+                    project_id: Some(project_id),
+                    cwd: missing,
+                }) if session_id == "child" && project_id == "project" && missing == &cwd
+            )),
+        "a missing working directory is reported with its project so a client can offer to re-point it"
+    );
+    let thread = fleet
+        .lead
+        .control(
             cx,
-            "parent",
-            control_mcp::ControlOp::GetThread(control_mcp::GetThreadParams {
-                thread_id: "child".into(),
-            }),
+            "get_thread",
+            serde_json::json!({ "thread_id": "child" }),
         )
         .unwrap();
-        assert_eq!(thread["report"], "failed", "{thread}");
-    });
+    assert_eq!(thread["report"], "failed", "{thread}");
 }
 
+/// A subagent's approval request reaches its lead with the harness's own
+/// options, and the lead answers with one of those ids, or cancels, unless
+/// the user keeps subagent approvals to themselves; only the lead may answer,
+/// one request at a time, with what the request offered. With approvals left
+/// to the agents, the harness's own "allow" answers on the spot, the most
+/// lasting one first.
 #[test]
 fn child_native_approval_callback_and_respond_approval_preserve_options_and_scope() {
     use agent::ApprovalOptionKind::{AllowAlways, AllowOnce, RejectOnce};
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-native-child-approvals");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let (parent_commands, parent_receiver) = smol::channel::unbounded();
-    let (child_commands, child_receiver) = smol::channel::unbounded();
-    state.update(cx, |state, cx| {
-        let mut parent = live_session(ProviderKind::Codex, parent_commands);
-        parent.meta.id = "parent".into();
-        parent.turn_in_flight = true;
-        let mut child = live_session(ProviderKind::Codex, child_commands);
-        child.meta.id = "child".into();
-        child.meta.parent_session_id = Some("parent".into());
-        let mut other = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp"), None);
-        other.id = "other-parent".into();
-        state.sessions.extend([parent.meta.clone(), child.meta.clone(), other]);
-        state.residents.parked.insert("parent".into(), parent);
-        state.residents.parked.insert("child".into(), child);
-        let respond = |state: &mut AppState, cx: &mut HostCx, caller: &str, approval: Option<&str>, option: Option<&str>, cancel: bool| {
-            control_call(state, cx, caller, control_mcp::ControlOp::RespondApproval(control_mcp::RespondApprovalParams {
-                thread_id: "child".into(),
-                approval_id: approval.map(str::to_string),
-                option: option.map(str::to_string),
-                cancel,
-            }))
+    stored_thread(
+        &store,
+        "other-parent",
+        ProviderKind::Codex,
+        &store.root().join("other"),
+        |_| {},
+    );
+    let fleet = Fleet::new(cx, &store, ProviderKind::Codex, &["child"], |_| {});
+    let other = first_turn(&fleet.state, cx, &fleet.providers, "other-parent", 2);
+    let (state, child) = (&fleet.state, fleet.child("child"));
+    let set_mode = |cx: &mut TestAppContext, mode| {
+        state
+            .command(
+                cx,
+                Command::PatchSettings {
+                    patch: SettingsPatch::OrchestrateChildApproval(mode),
+                },
+            )
+            .unwrap();
+    };
+    let respond = |cx: &mut TestAppContext,
+                   caller: &Played,
+                   approval: Option<&str>,
+                   option: Option<&str>,
+                   cancel: bool| {
+        caller.control(
+            cx,
+            "respond_approval",
+            serde_json::json!({
+                "thread_id": "child",
+                "approval_id": approval,
+                "option": option,
+                "cancel": cancel,
+            }),
+        )
+    };
+    let pending = |cx: &TestAppContext| cx.seen().status("child").pending_approvals.len();
+    for (n, mode) in [
+        ChildApprovalMode::Orchestrator,
+        ChildApprovalMode::Auto,
+        ChildApprovalMode::Manual,
+        ChildApprovalMode::AlwaysAllow,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        set_mode(cx, mode);
+        let request_id = format!("request-{n}");
+        let options = if mode == ChildApprovalMode::AlwaysAllow {
+            vec![agent::ApprovalOption {
+                id: "Reject:Native".into(),
+                label: "Reject".into(),
+                kind: RejectOnce,
+            }]
+        } else {
+            vec![
+                agent::ApprovalOption {
+                    id: "Allow:Native".into(),
+                    label: "Native allowance".into(),
+                    kind: AllowOnce,
+                },
+                agent::ApprovalOption {
+                    id: "Reject:Native".into(),
+                    label: "Reject".into(),
+                    kind: RejectOnce,
+                },
+            ]
         };
-        for (n, mode) in [ChildApprovalMode::Orchestrator, ChildApprovalMode::Auto, ChildApprovalMode::Manual, ChildApprovalMode::AlwaysAllow].into_iter().enumerate() {
-            state.settings.subagents.child_approval = mode;
-            let request_id = format!("request-{n}");
-            let options = if mode == ChildApprovalMode::AlwaysAllow {
-                vec![agent::ApprovalOption { id: "Reject:Native".into(), label: "Reject".into(), kind: RejectOnce }]
-            } else {
-                vec![
-                    agent::ApprovalOption { id: "Allow:Native".into(), label: "Native allowance".into(), kind: AllowOnce },
-                    agent::ApprovalOption { id: "Reject:Native".into(), label: "Reject".into(), kind: RejectOnce },
-                ]
-            };
-            state.on_event("child", AgentEvent::ApprovalRequested(agent::ApprovalRequest {
-                parent_item_id: None,
-                id: request_id.clone(), turn_id: None,
-                kind: agent::ApprovalKind::ToolUse { name: "mcp__tcode_control__report_result".into(), input: serde_json::json!({}), detail: "Native MCP consent".into() },
-                reason: None,
-                blocked_path: None,
-                options: options.clone(),
-            }), cx);
-            assert!(child_receiver.try_recv().is_err(), "requests without automatic allow must remain pending");
-            let SessionCommand::Steer { text, .. } = parent_receiver.try_recv().unwrap() else { panic!("approval must reach lead") };
-            assert!(text.contains(&request_id));
-            let native = text.split_once("Native options: ").unwrap().1.split_once(". ").unwrap().0;
-            let offered: Vec<agent::ApprovalOption> = serde_json::from_str(native).unwrap();
-            assert_eq!(offered, options);
-            let manual = mode == ChildApprovalMode::Manual;
-            if manual {
-                assert!(text.contains("The user answers in the child thread."));
-            } else {
-                assert!(text.contains("respond_approval"));
-                assert!(text.contains("option: <exact id> or cancel: true"));
-            }
-            let refusals = [
-                ("other-parent", None, Some("Reject:Native"), false, "not your subagent"),
-                ("parent", Some("missing"), Some("Reject:Native"), false, "is not pending"),
-                ("parent", None, Some("invented-id"), false, "valid option ids"),
-                ("parent", None, Some("Reject:Native"), true, "never both"),
-                ("parent", None, None, false, "never both"),
-            ];
-            // In manual mode the approval is the user's, whatever the lead asks.
-            let manual_refusal = [("parent", None, Some("Reject:Native"), false, "subagent approvals is manual")];
-            for (caller, approval, option, cancel, error) in if manual { &manual_refusal[..] } else { &refusals[..] } {
-                let refused = respond(state, cx, caller, *approval, *option, *cancel).unwrap_err();
-                assert!(refused.contains(error), "{refused}");
-                assert!(child_receiver.try_recv().is_err());
-                assert_eq!(state.approval_requests("child").len(), 1);
-            }
-            let chosen = offered.first().unwrap().id.clone();
-            if manual {
-                state.respond_session_approval("child", request_id.clone(), ApprovalDecision::Cancel).unwrap();
-            } else {
-                assert_eq!(respond(state, cx, "parent", None, Some(&chosen), false).unwrap()["approval_id"], request_id);
-            }
-            let SessionCommand::RespondApproval { request_id: delivered, decision } = child_receiver.try_recv().unwrap() else { panic!("missing native approval response") };
-            assert_eq!(delivered, request_id);
-            assert_eq!(decision, if manual { ApprovalDecision::Cancel } else { ApprovalDecision::Option(chosen) });
-            assert!(state.approval_requests("child").is_empty());
+        child.play([AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+            parent_item_id: None,
+            id: request_id.clone(),
+            turn_id: None,
+            kind: agent::ApprovalKind::ToolUse {
+                name: "mcp__tcode_control__report_result".into(),
+                input: serde_json::json!({}),
+                detail: "Native MCP consent".into(),
+            },
+            reason: None,
+            blocked_path: None,
+            options: options.clone(),
+        })]);
+        let text = fleet.lead.next_steer(cx);
+        assert!(
+            next_command(&child.commands).is_err(),
+            "requests without automatic allow must remain pending"
+        );
+        assert!(text.contains(&request_id));
+        let native = text
+            .split_once("Native options: ")
+            .unwrap()
+            .1
+            .split_once(". ")
+            .unwrap()
+            .0;
+        let offered: Vec<agent::ApprovalOption> = serde_json::from_str(native).unwrap();
+        assert_eq!(offered, options);
+        let manual = mode == ChildApprovalMode::Manual;
+        if manual {
+            assert!(text.contains("The user answers in the child thread."));
+        } else {
+            assert!(text.contains("respond_approval"));
+            assert!(text.contains("option: <exact id> or cancel: true"));
         }
-        state.settings.subagents.child_approval = ChildApprovalMode::AlwaysAllow;
-        for (n, kinds, expected) in [
-            (0, vec![RejectOnce, AllowOnce, AllowAlways, AllowOnce], "native-2"),
-            (1, vec![RejectOnce, AllowOnce], "native-1"),
-        ] {
-            let request_id = format!("automatic-{n}");
-            state.on_event("child", AgentEvent::ApprovalRequested(agent::ApprovalRequest {
-                parent_item_id: None,
-                id: request_id.clone(), turn_id: None,
-                kind: agent::ApprovalKind::ExecCommand { command: "cargo check".into(), cwd: None, description: None },
-                reason: None,
-                blocked_path: None,
-                options: kinds.into_iter().enumerate().map(|(i, kind)| agent::ApprovalOption { id: format!("native-{i}"), label: "Native choice".into(), kind }).collect(),
-            }), cx);
-            assert!(matches!(child_receiver.try_recv(), Ok(SessionCommand::RespondApproval { request_id: delivered, decision: ApprovalDecision::Option(option) }) if delivered == request_id && option == expected));
-            assert!(parent_receiver.try_recv().is_err());
-            assert!(state.approval_requests("child").is_empty());
+        let refusals = [
+            (
+                &other,
+                None,
+                Some("Reject:Native"),
+                false,
+                "not your subagent",
+            ),
+            (
+                &fleet.lead,
+                Some("missing"),
+                Some("Reject:Native"),
+                false,
+                "is not pending",
+            ),
+            (
+                &fleet.lead,
+                None,
+                Some("invented-id"),
+                false,
+                "valid option ids",
+            ),
+            (&fleet.lead, None, Some("Reject:Native"), true, "never both"),
+            (&fleet.lead, None, None, false, "never both"),
+        ];
+        // In manual mode the approval is the user's, whatever the lead asks.
+        let manual_refusal = [(
+            &fleet.lead,
+            None,
+            Some("Reject:Native"),
+            false,
+            "subagent approvals is manual",
+        )];
+        for (caller, approval, option, cancel, error) in if manual {
+            &manual_refusal[..]
+        } else {
+            &refusals[..]
+        } {
+            let refused = respond(cx, caller, *approval, *option, *cancel).unwrap_err();
+            assert!(refused.contains(error), "{refused}");
+            assert!(next_command(&child.commands).is_err());
+            assert_eq!(pending(cx), 1);
         }
-    });
+        let chosen = offered.first().unwrap().id.clone();
+        if manual {
+            state
+                .command(
+                    cx,
+                    Command::RespondApproval {
+                        session_id: "child".into(),
+                        request_id: request_id.clone(),
+                        decision: ApprovalDecision::Cancel,
+                    },
+                )
+                .unwrap();
+        } else {
+            assert_eq!(
+                respond(cx, &fleet.lead, None, Some(&chosen), false).unwrap()["approval_id"],
+                request_id
+            );
+        }
+        let SessionCommand::RespondApproval {
+            request_id: delivered,
+            decision,
+        } = child.next_command(cx)
+        else {
+            panic!("missing native approval response")
+        };
+        assert_eq!(delivered, request_id);
+        assert_eq!(
+            decision,
+            if manual {
+                ApprovalDecision::Cancel
+            } else {
+                ApprovalDecision::Option(chosen)
+            }
+        );
+        cx.run_until_parked();
+        assert_eq!(pending(cx), 0);
+    }
+    set_mode(cx, ChildApprovalMode::AlwaysAllow);
+    for (n, kinds, expected) in [
+        (
+            0,
+            vec![RejectOnce, AllowOnce, AllowAlways, AllowOnce],
+            "native-2",
+        ),
+        (1, vec![RejectOnce, AllowOnce], "native-1"),
+    ] {
+        let request_id = format!("automatic-{n}");
+        child.play([AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+            parent_item_id: None,
+            id: request_id.clone(),
+            turn_id: None,
+            kind: agent::ApprovalKind::ExecCommand {
+                command: "cargo check".into(),
+                cwd: None,
+                description: None,
+            },
+            reason: None,
+            blocked_path: None,
+            options: kinds
+                .into_iter()
+                .enumerate()
+                .map(|(i, kind)| agent::ApprovalOption {
+                    id: format!("native-{i}"),
+                    label: "Native choice".into(),
+                    kind,
+                })
+                .collect(),
+        })]);
+        assert!(matches!(
+            child.next_command(cx),
+            SessionCommand::RespondApproval {
+                request_id: delivered,
+                decision: ApprovalDecision::Option(option),
+            } if delivered == request_id && option == expected
+        ));
+        child.fence(cx, "child");
+        assert!(next_command(&fleet.lead.commands).is_err());
+        assert_eq!(pending(cx), 0);
+    }
 }
 
 /// A `tcode_control` call made during a member's turn stays inside the member's space and
@@ -4059,418 +4034,354 @@ fn control_calls_in_a_members_turn_stay_inside_the_space() {
     use tcode_core::control::{ControlCategory, ControlGrant, ControlScope, ControlTier};
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-control-space");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let (commands, receiver) = smol::channel::unbounded();
-    state.update(cx, |state, cx| {
-        let thread = |id: &str, project: &str| {
-            let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp"), None);
-            meta.id = id.into();
-            meta.project_id = Some(project.into());
-            meta
-        };
-        let root = store.root().join("project-a");
-        std::fs::create_dir_all(&root).unwrap();
-        let mut project = tcode_core::project::Project::from_root(root.clone());
-        project.id = "a".into();
-        state.projects.push(project);
-        let mut caller = live_session(ProviderKind::Codex, commands);
-        caller.meta.id = "caller".into();
-        caller.meta.cwd = root.clone();
-        caller.live_cwd = root;
-        caller.meta.project_id = Some("a".into());
-        caller.meta.control_grant = Some(ControlGrant {
+    let root = store.root().join("project-a");
+    let mut project = tcode_core::project::Project::from_root(root.clone());
+    project.id = "a".into();
+    store.upsert_project(&project).unwrap();
+    stored_thread(&store, "caller", ProviderKind::Codex, &root, |meta| {
+        meta.project_id = Some("a".into());
+        meta.control_grant = Some(ControlGrant {
             scope: ControlScope::Host,
             tiers: ControlTier::ALL.into_iter().collect(),
             categories: ControlCategory::ALL.into_iter().collect(),
         });
-        state.sessions.extend([
-            caller.meta.clone(),
-            thread("same", "a"),
-            thread("other", "b"),
-        ]);
-        state.residents.live.insert("caller".into(), caller);
-        state.observe_principal(&tcode_protocol::Principal::Space {
-            policy_revision: 1,
-            space_id: "s".into(),
-            space_name: "Shared".into(),
-            project_ids: vec!["a".into()],
-            device_id: "phone".into(),
-            device_name: "Phone".into(),
-            policy: tcode_protocol::SpacePolicy {
-                git_remote: false,
-                ..tcode_protocol::SpacePolicy::unrestricted()
-            },
-        });
-        let get = |id: &str| {
-            control_mcp::ControlOp::GetThread(control_mcp::GetThreadParams {
-                thread_id: id.into(),
-            })
-        };
-        let push = control_mcp::ControlOp::Git(control_mcp::GitParams {
-            thread_id: "same".into(),
-            op: control_mcp::GitOp::Push,
-        });
-        let settings =
-            || control_mcp::ControlOp::GetSettings(control_mcp::GetSettingsParams { keys: None });
-        assert!(control_call(state, cx, "caller", get("other")).is_ok());
-        assert!(control_call(state, cx, "caller", settings()).is_ok());
-
-        // A member sends the turn the agent works in, as the pipe admits it.
-        cx.space = Some("s".into());
-        state.send_turn("caller", "go".into(), Vec::new(), cx);
-        cx.space = None;
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(SessionCommand::SendTurn { .. })
-        ));
-
-        assert!(control_call(state, cx, "caller", get("same")).is_ok());
-        let refused = control_call(state, cx, "caller", get("other")).unwrap_err();
-        assert!(refused.contains("outside"), "{refused}");
-        let refused = control_call(state, cx, "caller", push).unwrap_err();
-        assert!(refused.contains("pushing and pulling"), "{refused}");
-        let refused = control_call(state, cx, "caller", settings()).unwrap_err();
-        assert!(refused.contains("in this space"), "{refused}");
-
-        // What the member's turn sets going works for the member too: a
-        // subagent it starts and a message it queues in another thread wait
-        // once the space allows nothing.
-        let started = control_call(
-            state,
-            cx,
-            "caller",
-            control_mcp::ControlOp::StartThread(control_mcp::StartThreadParams {
-                project_id: None,
-                cwd: None,
-                workspace: None,
-                subagent: Some(true),
-                provider: "codex".into(),
-                model: None,
-                profile: None,
-                options: None,
-                title: None,
-                message: "work".into(),
-                attachments: None,
-                request_id: "child".into(),
-            }),
-        )
-        .unwrap();
-        let child = started["thread_id"].as_str().unwrap().to_owned();
-        control_call(
-            state,
-            cx,
-            "caller",
-            control_mcp::ControlOp::SendMessage(control_mcp::SendMessageParams {
-                thread_ids: vec!["same".into()],
-                text: "more".into(),
-                mode: control_mcp::SendMode::Queue,
-                attachments: None,
-                request_id: None,
-            }),
-        )
-        .unwrap();
-        state.observe_principal(&tcode_protocol::Principal::Space {
-            policy_revision: 2,
-            space_id: "s".into(),
-            space_name: "Shared".into(),
-            project_ids: vec!["a".into()],
-            device_id: "phone".into(),
-            device_name: "Phone".into(),
-            policy: tcode_protocol::SpacePolicy::new_space(),
-        });
-        for id in [child.as_str(), "same"] {
-            let status = state.session_status_snapshot(id).unwrap();
-            assert!(
-                status
-                    .queued_messages
-                    .iter()
-                    .any(|message| message.space_held),
-                "{id}: {:?}",
-                status.queued_messages
-            );
-        }
     });
+    for (id, project) in [("same", "a"), ("other", "b")] {
+        stored_thread(&store, id, ProviderKind::Codex, &root, |meta| {
+            meta.project_id = Some(project.into());
+        });
+    }
+    let (state, providers) = controlled_host(cx, &store);
+    let member = |policy_revision, policy| tcode_protocol::Principal::Space {
+        policy_revision,
+        space_id: "s".into(),
+        space_name: "Shared".into(),
+        project_ids: vec!["a".into()],
+        device_id: "phone".into(),
+        device_name: "Phone".into(),
+        policy,
+    };
+    let shared = || tcode_protocol::SpacePolicy {
+        git_remote: false,
+        ..tcode_protocol::SpacePolicy::unrestricted()
+    };
+    state
+        .query_as(cx, member(1, shared()), tcode_protocol::Query::Ping)
+        .unwrap();
+    let get = |id: &str| serde_json::json!({ "thread_id": id });
+    let push = serde_json::json!({ "thread_id": "same", "op": "push" });
+    let settings = || serde_json::json!({});
+
+    // The owner's own turn.
+    let caller = first_turn(&state, cx, &providers, "caller", 0);
+    assert!(caller.control(cx, "get_thread", get("other")).is_ok());
+    assert!(caller.control(cx, "get_settings", settings()).is_ok());
+    caller.play([completed_turn("turn")]);
+    cx.run_until_seen(|view| view.status("caller").running_turn.is_none());
+
+    // A member sends the turn the agent works in, as the pipe admits it.
+    state
+        .command_as(
+            cx,
+            member(1, shared()),
+            Command::SendTurn {
+                session_id: "caller".into(),
+                text: "go".into(),
+                attachment_paths: Vec::new(),
+            },
+        )
+        .unwrap();
+    caller.start_turn(cx, "member-turn");
+    cx.run_until_seen(|view| view.status("caller").running_turn.is_some());
+    assert!(caller.control(cx, "get_thread", get("same")).is_ok());
+    let refused = caller.control(cx, "get_thread", get("other")).unwrap_err();
+    assert!(refused.contains("outside"), "{refused}");
+    let refused = caller.control(cx, "git", push).unwrap_err();
+    assert!(refused.contains("pushing and pulling"), "{refused}");
+    let refused = caller.control(cx, "get_settings", settings()).unwrap_err();
+    assert!(refused.contains("in this space"), "{refused}");
+
+    // What the member's turn sets going works for the member too: a
+    // subagent it starts and a message it queues in another thread wait
+    // once the space allows nothing. Their providers are still starting.
+    providers.hold();
+    let started = caller
+        .control(
+            cx,
+            "start_thread",
+            serde_json::json!({
+                "subagent": true,
+                "provider": "codex",
+                "message": "work",
+                "request_id": "child",
+            }),
+        )
+        .unwrap();
+    let child = started["thread_id"].as_str().unwrap().to_owned();
+    caller
+        .control(
+            cx,
+            "send_message",
+            serde_json::json!({ "thread_ids": ["same"], "text": "more", "mode": "queue" }),
+        )
+        .unwrap();
+    state
+        .query_as(
+            cx,
+            member(2, tcode_protocol::SpacePolicy::new_space()),
+            tcode_protocol::Query::Ping,
+        )
+        .unwrap();
+    for id in [child.as_str(), "same"] {
+        state.open(cx, id);
+        let status = cx.seen().status(id);
+        assert!(
+            status
+                .queued_messages
+                .iter()
+                .any(|message| message.space_held),
+            "{id}: {:?}",
+            status.queued_messages
+        );
+    }
+    providers.let_go();
 }
 
+/// A subagent's question reaches its lead with the harness's own questions
+/// and says whether the subagent waits; the lead answers each question, or
+/// the user does when they keep subagent answers to themselves. Only the lead
+/// answers its own subagent unasked, a pending request, every question and
+/// no other; a question is never answered automatically.
 #[test]
 fn child_questions_reach_the_lead_and_respond_input_answers_them() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-child-questions");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let (parent_commands, parent_receiver) = smol::channel::unbounded();
-    let (child_commands, child_receiver) = smol::channel::unbounded();
-    state.update(cx, |state, cx| {
-        let mut parent = live_session(ProviderKind::Codex, parent_commands);
-        parent.meta.id = "parent".into();
-        parent.turn_in_flight = true;
-        let mut child = live_session(ProviderKind::Codex, child_commands);
-        child.meta.id = "child".into();
-        child.meta.parent_session_id = Some("parent".into());
-        let mut other = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp"), None);
-        other.id = "other-parent".into();
+    stored_thread(
+        &store,
+        "other-parent",
+        ProviderKind::Codex,
+        &store.root().join("other"),
+        |_| {},
+    );
+    let fleet = Fleet::new(cx, &store, ProviderKind::Codex, &["child"], |_| {});
+    let other = first_turn(&fleet.state, cx, &fleet.providers, "other-parent", 2);
+    let (state, child) = (&fleet.state, fleet.child("child"));
+    let respond = |cx: &mut TestAppContext,
+                   caller: &Played,
+                   question: Option<&str>,
+                   answers: serde_json::Value| {
+        caller.control(
+            cx,
+            "respond_input",
+            serde_json::json!({
+                "thread_id": "child",
+                "question_id": question,
+                "answers": answers,
+            }),
+        )
+    };
+    let questions = vec![
+        agent::UserInputQuestion {
+            id: "lang".into(),
+            header: "Language".into(),
+            question: "Which language?".into(),
+            options: vec![agent::UserInputOption {
+                label: "Rust".into(),
+                description: "Native".into(),
+            }],
+            multi_select: false,
+            prefill: None,
+        },
+        agent::UserInputQuestion {
+            id: "targets".into(),
+            header: "Targets".into(),
+            question: "Which targets?".into(),
+            options: vec![
+                agent::UserInputOption {
+                    label: "ios".into(),
+                    description: String::new(),
+                },
+                agent::UserInputOption {
+                    label: "android".into(),
+                    description: String::new(),
+                },
+            ],
+            multi_select: true,
+            prefill: None,
+        },
+    ];
+    for (n, mode, delivery) in [
+        (
+            0,
+            ChildApprovalMode::Auto,
+            agent::UserInputDelivery::Blocking,
+        ),
+        (
+            1,
+            ChildApprovalMode::Manual,
+            agent::UserInputDelivery::Async,
+        ),
+    ] {
         state
-            .sessions
-            .extend([parent.meta.clone(), child.meta.clone(), other]);
-        let respond = |state: &mut AppState,
-                       cx: &mut HostCx,
-                       caller: &str,
-                       question: Option<&str>,
-                       answers: serde_json::Map<String, serde_json::Value>| {
-            control_call(
-                state,
+            .command(
                 cx,
-                caller,
-                control_mcp::ControlOp::RespondInput(control_mcp::RespondInputParams {
-                    thread_id: "child".into(),
-                    question_id: question.map(str::to_string),
-                    answers,
-                }),
+                Command::PatchSettings {
+                    patch: SettingsPatch::OrchestrateChildApproval(mode),
+                },
             )
-        };
-        state.residents.parked.insert("parent".into(), parent);
-        state.residents.parked.insert("child".into(), child);
-        let questions = vec![
-            agent::UserInputQuestion {
-                id: "lang".into(),
-                header: "Language".into(),
-                question: "Which language?".into(),
-                options: vec![agent::UserInputOption {
-                    label: "Rust".into(),
-                    description: "Native".into(),
-                }],
-                multi_select: false,
-                prefill: None,
-            },
-            agent::UserInputQuestion {
-                id: "targets".into(),
-                header: "Targets".into(),
-                question: "Which targets?".into(),
-                options: vec![
-                    agent::UserInputOption {
-                        label: "ios".into(),
-                        description: String::new(),
-                    },
-                    agent::UserInputOption {
-                        label: "android".into(),
-                        description: String::new(),
-                    },
-                ],
-                multi_select: true,
-                prefill: None,
-            },
-        ];
-        for (n, mode, delivery) in [
+            .unwrap();
+        let request_id = format!("question-{n}");
+        child.play([AgentEvent::UserInputRequested {
+            request_id: request_id.clone(),
+            questions: questions.clone(),
+            delivery,
+        }]);
+        let text = fleet.lead.next_steer(cx);
+        assert!(
+            next_command(&child.commands).is_err(),
+            "a question is never answered automatically"
+        );
+        assert!(text.contains(&request_id), "{text}");
+        let asked = text
+            .split_once("Questions: ")
+            .unwrap()
+            .1
+            .split_once(". ")
+            .unwrap()
+            .0;
+        let asked: Vec<agent::UserInputQuestion> = serde_json::from_str(asked).unwrap();
+        assert_eq!(asked, questions);
+        assert!(
+            text.contains(if delivery.is_blocking() {
+                "blocked until"
+            } else {
+                "keeps working"
+            }),
+            "{text}"
+        );
+        assert!(
+            text.contains(if mode == ChildApprovalMode::Manual {
+                "The user answers in the child thread."
+            } else {
+                "respond_input"
+            }),
+            "{text}"
+        );
+        for (caller, request, answers, error) in [
             (
-                0,
-                ChildApprovalMode::Auto,
-                agent::UserInputDelivery::Blocking,
+                &other,
+                None,
+                serde_json::json!({"lang": "Rust", "targets": []}),
+                "needs category answer_input",
             ),
             (
-                1,
-                ChildApprovalMode::Manual,
-                agent::UserInputDelivery::Async,
+                &fleet.lead,
+                Some("missing"),
+                serde_json::json!({"lang": "Rust", "targets": []}),
+                "request missing is not pending",
+            ),
+            (
+                &fleet.lead,
+                None,
+                serde_json::json!({"lang": "Rust", "colour": "red"}),
+                "unknown question id",
+            ),
+            (
+                &fleet.lead,
+                None,
+                serde_json::json!({"lang": "Rust"}),
+                "missing answers for question ids [\"targets\"]",
             ),
         ] {
-            state.settings.subagents.child_approval = mode;
-            let request_id = format!("question-{n}");
-            state.on_event(
-                "child",
-                AgentEvent::UserInputRequested {
-                    request_id: request_id.clone(),
-                    questions: questions.clone(),
-                    delivery,
-                },
-                cx,
-            );
-            assert!(
-                child_receiver.try_recv().is_err(),
-                "a question is never answered automatically"
-            );
-            let SessionCommand::Steer { text, .. } = parent_receiver.try_recv().unwrap() else {
-                panic!("question must reach lead")
-            };
-            assert!(text.contains(&request_id), "{text}");
-            let asked = text
-                .split_once("Questions: ")
-                .unwrap()
-                .1
-                .split_once(". ")
-                .unwrap()
-                .0;
-            let asked: Vec<agent::UserInputQuestion> = serde_json::from_str(asked).unwrap();
-            assert_eq!(asked, questions);
-            assert!(
-                text.contains(if delivery.is_blocking() {
-                    "blocked until"
-                } else {
-                    "keeps working"
-                }),
-                "{text}"
-            );
-            assert!(
-                text.contains(if mode == ChildApprovalMode::Manual {
-                    "The user answers in the child thread."
-                } else {
-                    "respond_input"
-                }),
-                "{text}"
-            );
-            let answers = |value: serde_json::Value| value.as_object().cloned().unwrap();
-            for (parent, request, answers, error) in [
-                (
-                    "other-parent",
-                    None,
-                    answers(serde_json::json!({"lang": "Rust", "targets": []})),
-                    "needs category answer_input",
-                ),
-                (
-                    "parent",
-                    Some("missing"),
-                    answers(serde_json::json!({"lang": "Rust", "targets": []})),
-                    "request missing is not pending",
-                ),
-                (
-                    "parent",
-                    None,
-                    answers(serde_json::json!({"lang": "Rust", "colour": "red"})),
-                    "unknown question id",
-                ),
-                (
-                    "parent",
-                    None,
-                    answers(serde_json::json!({"lang": "Rust"})),
-                    "missing answers for question ids [\"targets\"]",
-                ),
-            ] {
-                let refused = respond(state, cx, parent, request, answers).unwrap_err();
-                assert!(refused.contains(error), "{refused}");
-                assert!(child_receiver.try_recv().is_err());
-            }
-            let answers =
-                answers(serde_json::json!({"lang": "Rust", "targets": ["ios", "android"]}));
-            assert_eq!(
-                respond(state, cx, "parent", Some(&request_id), answers.clone()).unwrap()
-                    ["request_id"],
-                request_id
-            );
-            let SessionCommand::RespondUserInput {
-                request_id: delivered,
-                answers: sent,
-            } = child_receiver.try_recv().unwrap()
-            else {
-                panic!("missing answer")
-            };
-            assert_eq!(delivered, request_id);
-            assert_eq!(sent, answers);
-            state.on_event(
-                "child",
-                AgentEvent::UserInputResolved {
-                    request_id,
-                    answers,
-                },
-                cx,
-            );
-            assert!(
-                state
-                    .resident("child")
-                    .unwrap()
-                    .timeline
-                    .pending_user_input
-                    .is_none()
-            );
-            assert!(
-                respond(state, cx, "parent", None, serde_json::Map::new())
-                    .unwrap_err()
-                    .contains("has no pending user-input request")
-            );
+            let refused = respond(cx, caller, request, answers).unwrap_err();
+            assert!(refused.contains(error), "{refused}");
+            assert!(next_command(&child.commands).is_err());
         }
-    });
+        let answers = serde_json::json!({"lang": "Rust", "targets": ["ios", "android"]});
+        assert_eq!(
+            respond(cx, &fleet.lead, Some(&request_id), answers.clone()).unwrap()["request_id"],
+            request_id
+        );
+        let SessionCommand::RespondUserInput {
+            request_id: delivered,
+            answers: sent,
+        } = child.next_command(cx)
+        else {
+            panic!("missing answer")
+        };
+        assert_eq!(delivered, request_id);
+        assert_eq!(serde_json::Value::Object(sent.clone()), answers);
+        child.play([AgentEvent::UserInputResolved {
+            request_id,
+            answers: sent,
+        }]);
+        cx.run_until_seen(|view| view.status("child").pending_user_input.is_none());
+        assert!(
+            respond(cx, &fleet.lead, None, serde_json::json!({}))
+                .unwrap_err()
+                .contains("has no pending user-input request")
+        );
+    }
 }
 
+/// A subagent that ends silent after its reminder has its last turn's final
+/// message, whole, go to the lead as the fallback: the adjacent blocks of it,
+/// without the earlier preamble or the reasoning.
 #[test]
 fn an_unreported_fallback_is_the_final_message_of_the_last_turn() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-fallback-final-message-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
+    let fleet = Fleet::new(cx, &test_store, ProviderKind::Codex, &["child"], |_| {});
+    let child = fleet.child("child");
+    child.play([completed_turn("turn-1")]);
+    let (reminder, text) = child.next_turn(cx);
+    assert_eq!(text, CHILD_REPORT_REMINDER);
+    child.play([
+        AgentEvent::TurnAccepted {
+            delivery_id: reminder,
+        },
+        AgentEvent::TurnStarted {
+            turn_id: "turn-2".into(),
+        },
+    ]);
     let report = format!("Complete answer.\n{}", "full detail ".repeat(80));
-    let (parent_commands, parent_receiver) = smol::channel::unbounded();
-
-    state.update(cx, |state, cx| {
-        let mut parent = live_session(ProviderKind::Codex, parent_commands);
-        parent.meta.id = "parent".into();
-        parent.turn_in_flight = true;
-        state.sessions.push(parent.meta.clone());
-        state.residents.parked.insert("parent".into(), parent);
-
-        let (commands, _receiver) = smol::channel::unbounded();
-        let mut child = live_session(ProviderKind::Codex, commands);
-        child.meta.id = "child".into();
-        child.meta.parent_session_id = Some("parent".into());
-        // Already reminded once, so going quiet again delivers the fallback.
-        child.meta.expectation = Some(ChildExpectation {
-            reminded: true,
-            ..ChildExpectation::opened(1)
-        });
-        child.turn_in_flight = true;
-
-        state.sessions.push(child.meta.clone());
-        state.residents.parked.insert(child.meta.id.clone(), child);
-
-        for (id, content) in [
-            (
-                "preamble",
-                ItemContent::AssistantMessage {
-                    text: "Earlier tool preamble.".into(),
-                    summarized: false,
-                },
-            ),
-            (
-                "reasoning",
-                ItemContent::Reasoning {
-                    text: "private reasoning".into(),
-                },
-            ),
-            (
-                "final-1",
-                ItemContent::AssistantMessage {
-                    text: "Complete ".into(),
-                    summarized: false,
-                },
-            ),
-            (
-                "final-2",
-                ItemContent::AssistantMessage {
-                    text: format!("answer.\n{}", "full detail ".repeat(80)),
-                    summarized: false,
-                },
-            ),
-        ] {
-            state.on_event(
-                "child",
-                AgentEvent::ItemCompleted(ThreadItem {
-                    id: id.into(),
-                    parent_item_id: None,
-                    content,
-                }),
-                cx,
-            );
-        }
-        state.on_event(
-            "child",
-            AgentEvent::TurnCompleted {
-                turn_id: "turn-1".into(),
-                status: TurnStatus::Completed,
-                usage: None,
+    for (id, content) in [
+        (
+            "preamble",
+            ItemContent::AssistantMessage {
+                text: "Earlier tool preamble.".into(),
+                summarized: false,
             },
-            cx,
-        );
-    });
-    cx.run_until_parked();
-    let Ok(SessionCommand::Steer { text, .. }) = parent_receiver.try_recv() else {
-        panic!("the lead must receive the fallback");
-    };
-    // The adjacent blocks of the final message, without the earlier preamble or reasoning.
+        ),
+        (
+            "reasoning",
+            ItemContent::Reasoning {
+                text: "private reasoning".into(),
+            },
+        ),
+        (
+            "final-1",
+            ItemContent::AssistantMessage {
+                text: "Complete ".into(),
+                summarized: false,
+            },
+        ),
+        (
+            "final-2",
+            ItemContent::AssistantMessage {
+                text: format!("answer.\n{}", "full detail ".repeat(80)),
+                summarized: false,
+            },
+        ),
+    ] {
+        child.play([AgentEvent::ItemCompleted(ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content,
+        })]);
+    }
+    child.play([completed_turn("turn-2")]);
+    let text = fleet.lead.next_steer(cx);
     assert!(
         text.ends_with(&format!(
             "{}{report}",
@@ -4480,690 +4391,837 @@ fn an_unreported_fallback_is_the_final_message_of_the_last_turn() {
     );
 }
 
+/// A subagent's report steered into its lead's running turn, the lead's
+/// thread not shown anywhere, is recorded under the id the provider was sent,
+/// so the provider's answer finds it.
 #[test]
 fn steering_parked_orchestrator_callback_uses_recorded_id() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-steer-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (commands, receiver) = smol::channel::unbounded();
-    let mut recorded_request_id = String::new();
-
-    state.update(cx, |state, cx| {
-        let mut parent = live_session(ProviderKind::Codex, commands);
-        parent.meta.id = "parent".into();
-        parent.turn_in_flight = true;
-        state
-            .residents
-            .parked
-            .insert(parent.meta.id.clone(), parent);
-
-        state.deliver_orchestrate_callback_to_parent(
-            "parent",
-            "[orchestrate] child-a completed.\nfull result".into(),
-            cx,
-        );
-
-        let command = receiver.try_recv().unwrap();
-        let SessionCommand::Steer {
-            request_id, text, ..
-        } = command
-        else {
-            panic!("callback did not steer")
-        };
-        recorded_request_id = request_id;
-        assert!(text.contains("full result"));
-    });
-    cx.run_until_parked();
-    state.update(cx, |state, _| {
-        let timeline = Timeline::fold_events(state.store.read_events("parent").unwrap());
-        assert!(timeline.entries.iter().any(|entry| matches!(
-            &entry.content,
-            EntryContent::Steer {
-                text,
-                status: tcode_core::session::SteeringStatus::Pending,
-                ..
-            } if entry.id == recorded_request_id && text.contains("child-a completed")
-        )));
-    });
+    let fleet = Fleet::new(cx, &test_store, ProviderKind::Codex, &["child-a"], |_| {});
+    fleet.state.leave(cx, "parent");
+    fleet.child("child-a").play([
+        report_result_event("rep-1", "full result"),
+        completed_turn("turn-1"),
+    ]);
+    let SessionCommand::Steer {
+        request_id, text, ..
+    } = fleet.lead.next_command(cx)
+    else {
+        panic!("callback did not steer")
+    };
+    assert!(text.contains("full result"));
+    fleet.state.open(cx, "parent");
+    assert!(
+        cx.seen()
+            .timeline("parent")
+            .entries
+            .iter()
+            .any(|entry| matches!(
+                &entry.content,
+                EntryContent::Steer {
+                    text,
+                    status: tcode_core::session::SteeringStatus::Pending,
+                    ..
+                } if entry.id == request_id && text.contains("thread child-a")
+            ))
+    );
 }
 
+/// A user's steer, and a queued message the user steers, are sent under an
+/// id their client's request names and recorded under the same id; a message
+/// the host is already delivering as a turn is neither steered nor dropped.
 #[test]
 fn steering_user_and_queue_paths_send_the_same_id_they_record() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-user-steer-id-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (commands, receiver) = smol::channel::unbounded();
-
-    state.update(cx, |state, cx| {
-        let mut active = live_session(ProviderKind::Codex, commands);
-        active.meta.id = "active".into();
-        active.turn_in_flight = true;
-        active.timeline.apply_at(
-            None,
-            &AgentEvent::ItemCompleted(ThreadItem {
-                id: "opening".into(),
-                parent_item_id: None,
-                content: ItemContent::UserMessage {
-                    text: "start".into(),
-                    attachments: Vec::new(),
+    stored_thread(
+        &test_store,
+        "active",
+        ProviderKind::Codex,
+        &test_store.root().join("active"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    let provider = first_turn(&state, cx, &providers, "active", 0);
+    let queued = |cx: &TestAppContext| {
+        cx.seen()
+            .status("active")
+            .queued_messages
+            .iter()
+            .map(|message| (message.id, message.text.clone()))
+            .collect::<Vec<_>>()
+    };
+    let send = |cx: &mut TestAppContext, text: &str, key: &str| {
+        state
+            .command_keyed(
+                cx,
+                key,
+                Command::SendTurn {
+                    session_id: "active".into(),
+                    text: text.into(),
+                    attachment_paths: Vec::new(),
                 },
-            }),
-        );
-        let sentinel = active.push_queued("queued sentinel".into(), Vec::new());
-        state.install_selected(active);
+            )
+            .unwrap();
+        queued(cx).last().unwrap().0
+    };
+    let steered = |cx: &TestAppContext, request_id: &str, text: &str| {
+        cx.seen().timeline("active").entries.iter().any(|entry| {
+            matches!(
+                &entry.content,
+                EntryContent::Steer {
+                    text: steered,
+                    status: tcode_core::session::SteeringStatus::Pending,
+                    ..
+                } if entry.id == request_id && steered == text
+            )
+        })
+    };
 
-        cx.delivery_key = Some("steer-send".into());
-        state.steer("active", "redirect".into(), Vec::new(), cx);
-        let SessionCommand::Steer { request_id, .. } = receiver.try_recv().unwrap() else {
-            panic!("user steer command missing")
-        };
-        assert_eq!(request_id, "local-steer-steer-send");
-        let active = state.selected_session().unwrap();
-        assert!(active.timeline.entries.iter().any(|entry| matches!(
-            &entry.content,
-            EntryContent::Steer {
-                text,
-                status: tcode_core::session::SteeringStatus::Pending,
-                ..
-            } if entry.id == request_id && text == "redirect"
-        )));
-
-        state.drop_queued("active", sentinel, cx);
-        let active = state.selected_session_mut().unwrap();
-        let first = active.push_queued("first".into(), Vec::new());
-        let queued_id = active.push_queued("queued redirect".into(), Vec::new());
-        let third = active.push_queued("third".into(), Vec::new());
-        active
-            .queue
-            .iter_mut()
-            .find(|message| message.id == queued_id)
-            .unwrap()
-            .delivery_key = Some("queue-send".into());
-        cx.delivery_key = Some("queue-steer-click".into());
-        state.steer_queued("active", queued_id, cx);
-        let SessionCommand::Steer { request_id, .. } = receiver.try_recv().unwrap() else {
-            panic!("queue-to-steer command missing")
-        };
-        assert_eq!(request_id, "local-steer-queue-send");
-        let active = state.selected_session().unwrap();
-        assert_eq!(
-            active
-                .queue
-                .iter()
-                .map(|m| m.text.as_str())
-                .collect::<Vec<_>>(),
-            ["first", "third"]
-        );
-        assert!(active.timeline.entries.iter().any(|entry| matches!(
-            &entry.content,
-            EntryContent::Steer {
-                text,
-                status: tcode_core::session::SteeringStatus::Pending,
-                ..
-            } if entry.id == request_id && text == "queued redirect"
-        )));
-        state.drop_queued("active", first, cx);
-        state.drop_queued("active", queued_id, cx);
-        let active = state.selected_session_mut().unwrap();
-        active.delivery_in_flight = Some(third);
-        state.drop_queued("active", third, cx);
-        state.steer_queued("active", third, cx);
-        assert_eq!(state.selected_session().unwrap().queue[0].id, third);
-        assert!(
-            receiver.try_recv().is_err(),
-            "an unacknowledged delivery cannot be steered twice"
-        );
+    let sentinel = send(cx, "queued sentinel", "sentinel-send");
+    state
+        .command_keyed(
+            cx,
+            "steer-send",
+            Command::Steer {
+                session_id: "active".into(),
+                text: "redirect".into(),
+                attachment_paths: Vec::new(),
+            },
+        )
+        .unwrap();
+    let SessionCommand::Steer { request_id, .. } = provider.next_command(cx) else {
+        panic!("user steer command missing")
+    };
+    assert_eq!(request_id, "local-steer-steer-send");
+    cx.run_until_seen(|view| {
+        has_record(view, "active", |event| {
+            matches!(event, AgentEvent::SteerRequested { .. })
+        })
     });
+    assert!(steered(cx, &request_id, "redirect"));
+
+    state
+        .command(
+            cx,
+            Command::DropQueued {
+                session_id: "active".into(),
+                id: sentinel,
+            },
+        )
+        .unwrap();
+    let first = send(cx, "first", "first-send");
+    let queued_id = send(cx, "queued redirect", "queue-send");
+    let third = send(cx, "third", "third-send");
+    state
+        .command_keyed(
+            cx,
+            "queue-steer-click",
+            Command::SteerQueued {
+                session_id: "active".into(),
+                id: queued_id,
+            },
+        )
+        .unwrap();
+    let SessionCommand::Steer { request_id, .. } = provider.next_command(cx) else {
+        panic!("queue-to-steer command missing")
+    };
+    assert_eq!(request_id, "local-steer-queue-send");
+    cx.run_until_seen(|view| {
+        has_record(view, "active", |event| {
+            matches!(event, AgentEvent::SteerRequested { request_id: recorded, .. } if *recorded == request_id)
+        })
+    });
+    assert_eq!(
+        queued(cx),
+        [(first, "first".to_string()), (third, "third".to_string())]
+    );
+    assert!(steered(cx, &request_id, "queued redirect"));
+
+    state
+        .command(
+            cx,
+            Command::DropQueued {
+                session_id: "active".into(),
+                id: first,
+            },
+        )
+        .unwrap();
+    // The turn ends, and the host delivers the next message as a turn.
+    provider.play([completed_turn("turn")]);
+    let (delivery_id, text) = provider.next_turn(cx);
+    assert_eq!((delivery_id, text.as_str()), (third, "third"));
+    for command in [
+        Command::DropQueued {
+            session_id: "active".into(),
+            id: third,
+        },
+        Command::SteerQueued {
+            session_id: "active".into(),
+            id: third,
+        },
+    ] {
+        let _ = state.command(cx, command);
+    }
+    assert_eq!(queued(cx)[0].0, third);
+    assert!(
+        next_command(&provider.commands).is_err(),
+        "an unacknowledged delivery cannot be steered twice"
+    );
 }
 
 /// The runtime routes a steer by its own turn flag, but the provider's
 /// `turn/completed` can already be on the wire. The provider then rejects the
-/// steer by id, and the text goes out as the next ordinary turn instead of
-/// vanishing behind a notice.
+/// steer by id, and the text goes out as the next ordinary turn, from whoever
+/// sent it, instead of vanishing behind a notice.
 #[test]
 fn steer_rejected_after_turn_end_is_resent_as_a_new_turn() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-steer-rejected-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (commands, receiver) = smol::channel::unbounded();
-
-    state.update(cx, |state, cx| {
-        let mut active = live_session(ProviderKind::Codex, commands);
-        active.meta.id = "active".into();
-        active.turn_in_flight = true;
-        state.install_selected(active);
-
-        cx.origin = Some(MessageOrigin::Agent);
-        state.steer("active", "redirect".into(), Vec::new(), cx);
-        cx.origin = None;
-        let SessionCommand::Steer { request_id, .. } = next_command(&receiver).unwrap() else {
-            panic!("steer command missing")
-        };
-
-        state.on_event(
-            "active",
-            AgentEvent::TurnCompleted {
-                turn_id: "turn-1".into(),
-                status: TurnStatus::Completed,
-                usage: None,
+    for id in ["active", "sender"] {
+        stored_thread(
+            &test_store,
+            id,
+            ProviderKind::Codex,
+            &test_store.root().join(id),
+            |meta| {
+                meta.project_id = Some("project".into());
             },
-            cx,
         );
-        assert!(next_command(&receiver).is_err(), "nothing queued yet");
+    }
+    let (state, providers) = controlled_host(cx, &test_store);
+    let active = first_turn(&state, cx, &providers, "active", 0);
+    // Another thread's agent steers it.
+    first_turn(&state, cx, &providers, "sender", 1)
+        .control(
+            cx,
+            "send_message",
+            serde_json::json!({ "thread_ids": ["active"], "text": "redirect", "mode": "steer" }),
+        )
+        .unwrap();
+    let SessionCommand::Steer { request_id, .. } = active.next_command(cx) else {
+        panic!("steer command missing")
+    };
 
-        state.on_event(
-            "active",
-            AgentEvent::SteerRejected {
-                request_id: request_id.clone(),
-            },
-            cx,
-        );
-        match next_command(&receiver).unwrap() {
-            SessionCommand::SendTurn { text, .. } => assert_eq!(text, "redirect"),
-            other => panic!("expected the rejected steer to be sent as a turn, got {other:?}"),
-        }
-        let active = state.selected_session().unwrap();
-        assert!(
-            !active
-                .timeline
-                .entries
-                .iter()
-                .any(|entry| entry.id == request_id),
-            "the pending steer bubble is gone; the send records its own message"
-        );
-        assert_eq!(active.queue[0].origin, MessageOrigin::Agent);
+    active.play([completed_turn("turn-1")]);
+    active.fence(cx, "active");
+    assert!(
+        next_command(&active.commands).is_err(),
+        "nothing queued yet"
+    );
 
-        state.on_event(
-            "active",
-            AgentEvent::SteerRejected {
-                request_id: request_id.clone(),
-            },
-            cx,
-        );
-        assert!(
-            next_command(&receiver).is_err(),
-            "a rejection for an already resolved steer sends nothing"
-        );
+    active.play([AgentEvent::SteerRejected {
+        request_id: request_id.clone(),
+    }]);
+    let (delivery_id, text) = active.next_turn(cx);
+    assert_eq!(text, "redirect");
+    assert!(
+        !cx.seen()
+            .timeline("active")
+            .entries
+            .iter()
+            .any(|entry| entry.id == request_id),
+        "the pending steer bubble is gone; the send records its own message"
+    );
+    active.play([AgentEvent::TurnAccepted { delivery_id }]);
+    cx.run_until_seen(|view| {
+        view.records("active").iter().any(|record| {
+            record.origin == Some(MessageOrigin::Agent)
+                && matches!(
+                    &record.event,
+                    AgentEvent::ItemCompleted(ThreadItem {
+                        content: ItemContent::UserMessage { text, .. },
+                        ..
+                    }) if text == "redirect"
+                )
+        })
     });
+
+    active.play([AgentEvent::SteerRejected {
+        request_id: request_id.clone(),
+    }]);
+    active.fence(cx, "active");
+    assert!(
+        next_command(&active.commands).is_err(),
+        "a rejection for an already resolved steer sends nothing"
+    );
 }
 
+/// Reports that reach a lead whose provider is still starting wait for it,
+/// and wake it with one turn that carries all of them.
 #[test]
 fn callbacks_racing_provider_start_share_one_wakeup_turn() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-start-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-
-    state.update(cx, |state, cx| {
-        let mut parent = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);
-        parent.meta.id = "parent".into();
-        parent.runtime = Runtime::Starting { generation: 1 };
-        state
-            .residents
-            .parked
-            .insert(parent.meta.id.clone(), parent);
-
-        state.deliver_orchestrate_callback_to_parent(
-            "parent",
-            "[orchestrate] child-a completed.\nresult a".into(),
-            cx,
-        );
-        state.deliver_orchestrate_callback_to_parent(
-            "parent",
-            "[orchestrate] child-b completed.\nresult b".into(),
-            cx,
-        );
-
-        let (commands, receiver) = smol::channel::unbounded();
-        state.residents.parked.get_mut("parent").unwrap().runtime = Runtime::Live(commands);
-        state.on_background_turn_completed("parent", cx);
-
-        let delivery_id = match receiver.try_recv() {
-            Ok(SessionCommand::SendTurn {
-                delivery_id, text, ..
-            }) if text.contains("result a") && text.contains("result b") => delivery_id,
-            other => panic!("expected merged callback SendTurn, got {other:?}"),
-        };
-        state.on_event("parent", AgentEvent::TurnAccepted { delivery_id }, cx);
+    let fleet = Fleet::new(
+        cx,
+        &test_store,
+        ProviderKind::ClaudeCode,
+        &["child-a", "child-b"],
+        |_| {},
+    );
+    // The lead's turn ends and its harness exits; reports start it again.
+    fleet.lead.play([
+        completed_turn("turn"),
+        AgentEvent::SessionClosed { reason: None },
+    ]);
+    cx.run_until_seen(|view| {
+        has_record(view, "parent", |event| {
+            matches!(event, AgentEvent::SessionClosed { .. })
+        })
     });
+    fleet.providers.hold();
+    for (child, result) in [("child-a", "result a"), ("child-b", "result b")] {
+        fleet.child(child).play([
+            report_result_event(&format!("{child}-report"), result),
+            completed_turn("turn-1"),
+        ]);
+        fleet.child(child).fence(cx, child);
+    }
+    let restarted = fleet.providers.started(cx, 3);
+    assert_eq!(restarted.options.cwd, fleet.root.join("parent"));
+    assert_eq!(fleet.providers.count(), 4, "one start for both");
+    fleet.providers.let_go();
+    let (delivery_id, text) = restarted.next_turn(cx);
+    assert!(
+        text.contains("result a") && text.contains("result b"),
+        "{text}"
+    );
+    restarted.play([AgentEvent::TurnAccepted { delivery_id }]);
+    restarted.fence(cx, "parent");
+    assert!(
+        next_command(&restarted.commands).is_err(),
+        "one turn wakes it"
+    );
 }
 
+/// Queued messages go in the order the user last moved them to.
 #[test]
 fn moved_queue_entries_dispatch_in_their_new_order() {
-    let (commands, receiver) = smol::channel::unbounded();
-    let mut active = live_session(ProviderKind::Codex, commands);
-    let first = active.push_queued("first".into(), Vec::new());
-    active.push_queued("second".into(), Vec::new());
-    let third = active.push_queued("third".into(), Vec::new());
-    active.move_queued(third, Some(first));
-    active.move_queued(first, None);
-
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-moved-queue-test");
+    stored_thread(
+        &test_store,
+        "thread",
+        ProviderKind::Codex,
+        &test_store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    let provider = first_turn(&state, cx, &providers, "thread", 0);
+    for text in ["first", "second", "third"] {
+        state.send(cx, "thread", text);
+    }
+    let id = |cx: &TestAppContext, text: &str| {
+        cx.seen()
+            .status("thread")
+            .queued_messages
+            .iter()
+            .find(|message| message.text == text)
+            .unwrap()
+            .id
+    };
+    let (first, third) = (id(cx, "first"), id(cx, "third"));
+    for (moved, before) in [(third, Some(first)), (first, None)] {
+        state
+            .command(
+                cx,
+                Command::MoveQueued {
+                    session_id: "thread".into(),
+                    id: moved,
+                    before,
+                },
+            )
+            .unwrap();
+    }
     let mut sent = Vec::new();
-    while active.dispatch_next_pending(test_start()) == Ok(true) {
-        let Ok(SessionCommand::SendTurn {
-            delivery_id, text, ..
-        }) = receiver.try_recv()
-        else {
-            panic!("expected SendTurn");
-        };
+    for turn in 0..3 {
+        provider.play([completed_turn(&format!("turn-{turn}"))]);
+        let (delivery_id, text) = provider.next_turn(cx);
         sent.push(text);
-        active.accept_turn_delivery(delivery_id).unwrap();
-        active.turn_in_flight = false;
+        provider.play([
+            AgentEvent::TurnAccepted { delivery_id },
+            AgentEvent::TurnStarted {
+                turn_id: format!("turn-{}", turn + 1),
+            },
+        ]);
     }
     assert_eq!(sent, ["third", "second", "first"]);
 }
 
+/// A message scheduled for later lets an ordinary one sent after it go
+/// first, and stays scheduled once that one is taken.
 #[test]
 fn future_scheduled_head_does_not_block_ordinary_dispatch_or_acceptance() {
-    let (commands, receiver) = smol::channel::unbounded();
-    let mut active = live_session(ProviderKind::Codex, commands);
-    let scheduled_id = active.push_scheduled(
-        "later".into(),
-        Vec::new(),
-        test_start() + Duration::from_secs(3_600),
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-scheduled-head-test");
+    stored_thread(
+        &test_store,
+        "thread",
+        ProviderKind::Codex,
+        &test_store.root().join("thread"),
+        |_| {},
     );
-    let ordinary_id = active.push_queued("now".into(), Vec::new());
-
-    assert_eq!(active.dispatch_next_pending(test_start()), Ok(true));
-    assert!(matches!(
-        receiver.try_recv(),
-        Ok(SessionCommand::SendTurn {
-            delivery_id,
-            text,
-            ..
-        }) if delivery_id == ordinary_id && text == "now"
-    ));
-    let accepted = active.accept_turn_delivery(ordinary_id).unwrap();
-    assert_eq!(accepted.text, "now");
-    assert_eq!(active.queue.len(), 1);
-    assert_eq!(active.queue[0].id, scheduled_id);
+    let (state, providers) = played_host(cx, &test_store);
+    state.open(cx, "thread");
+    state
+        .command(
+            cx,
+            Command::ScheduleTurn {
+                session_id: "thread".into(),
+                text: "later".into(),
+                attachment_paths: Vec::new(),
+                due: tcode_protocol::TurnDue::AfterSecs(3_600),
+            },
+        )
+        .unwrap();
+    state.send(cx, "thread", "now");
+    let provider = providers.started(cx, 0);
+    let (delivery_id, text) = provider.next_turn(cx);
+    assert_eq!(text, "now");
+    provider.play([AgentEvent::TurnAccepted { delivery_id }]);
+    cx.run_until_seen(|view| view.status("thread").delivery_in_flight.is_none());
+    let queued = &cx.seen().status("thread").queued_messages;
+    assert_eq!(
+        queued
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        ["later"]
+    );
+    assert!(queued[0].fire_at_unix_secs.is_some());
 }
 
+/// A scheduled message shows when it is due and can be edited; steering it
+/// sends it now, no longer scheduled or editable; dropping one removes it.
 #[test]
 fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-scheduled-status-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (commands, receiver) = smol::channel::unbounded();
+    stored_thread(
+        &test_store,
+        "scheduled-active",
+        ProviderKind::Codex,
+        &test_store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    let provider = first_turn(&state, cx, &providers, "scheduled-active", 0);
+    provider.play([completed_turn("turn")]);
+    cx.run_until_seen(|view| view.status("scheduled-active").running_turn.is_none());
+    let schedule = |cx: &mut TestAppContext, text: &str, fire_at: u64| {
+        state
+            .command(
+                cx,
+                Command::ScheduleTurn {
+                    session_id: "scheduled-active".into(),
+                    text: text.into(),
+                    attachment_paths: Vec::new(),
+                    due: tcode_protocol::TurnDue::AtUnixSecs(fire_at),
+                },
+            )
+            .unwrap();
+    };
+    let status = |cx: &TestAppContext| cx.seen().status("scheduled-active").clone();
     let fire_at = cx.now_secs() + 3_600;
+    schedule(cx, "scheduled", fire_at);
+    let queued = status(cx).queued_messages;
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].fire_at_unix_secs, Some(fire_at));
+    assert!(queued[0].editable);
+    let scheduled_id = queued[0].id;
 
-    state.update(cx, |state, cx| {
-        let mut active = live_session(ProviderKind::Codex, commands);
-        active.meta.id = "scheduled-active".into();
-        state.install_selected(active);
-        state.schedule_turn(
-            "scheduled-active",
-            "scheduled".into(),
-            Vec::new(),
-            tcode_protocol::TurnDue::AtUnixSecs(fire_at),
+    state
+        .command(
             cx,
-        );
+            Command::SteerQueued {
+                session_id: "scheduled-active".into(),
+                id: scheduled_id,
+            },
+        )
+        .unwrap();
+    let (delivery_id, text) = provider.next_turn(cx);
+    assert_eq!(text, "scheduled");
+    let status_now = status(cx);
+    assert_eq!(status_now.queued_messages.len(), 1);
+    assert_eq!(status_now.queued_messages[0].id, delivery_id);
+    assert_eq!(status_now.queued_messages[0].fire_at_unix_secs, None);
+    assert!(!status_now.queued_messages[0].editable);
+    assert_eq!(status_now.delivery_in_flight, Some(delivery_id));
 
-        let status = state.session_status_snapshot("scheduled-active").unwrap();
-        assert_eq!(status.queued_messages.len(), 1);
-        assert_eq!(status.queued_messages[0].fire_at_unix_secs, Some(fire_at));
-        assert!(status.queued_messages[0].editable);
-        let scheduled_id = status.queued_messages[0].id;
-
-        state.steer_queued("scheduled-active", scheduled_id, cx);
-        let status = state.session_status_snapshot("scheduled-active").unwrap();
-        assert_eq!(status.queued_messages.len(), 1);
-        assert_eq!(status.queued_messages[0].fire_at_unix_secs, None);
-        assert!(!status.queued_messages[0].editable);
-        assert_eq!(
-            status.delivery_in_flight,
-            Some(status.queued_messages[0].id)
-        );
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(SessionCommand::SendTurn { .. })
-        ));
-
-        let active = state.selected_session_mut().unwrap();
-        active.delivery_in_flight = None;
-        active.turn_in_flight = false;
-        active.queue.clear();
-        let drop_id = active.push_scheduled(
-            "drop me".into(),
-            Vec::new(),
-            cx.clock().wall() + Duration::from_secs(7_200),
-        );
-        state.drop_queued("scheduled-active", drop_id, cx);
-        assert!(state.selected_session().unwrap().queue.is_empty());
-    });
+    provider.play([
+        AgentEvent::TurnAccepted { delivery_id },
+        AgentEvent::TurnStarted {
+            turn_id: "scheduled".into(),
+        },
+        completed_turn("scheduled"),
+    ]);
+    cx.run_until_seen(|view| has_record(view, "scheduled-active", |event| {
+        matches!(event, AgentEvent::TurnCompleted { turn_id, .. } if turn_id == "scheduled")
+    }));
+    schedule(cx, "drop me", cx.now_secs() + 7_200);
+    let drop_id = status(cx).queued_messages[0].id;
+    state
+        .command(
+            cx,
+            Command::DropQueued {
+                session_id: "scheduled-active".into(),
+                id: drop_id,
+            },
+        )
+        .unwrap();
+    assert!(status(cx).queued_messages.is_empty());
 }
 
+/// While the harness retries a failed turn itself, what the user queued
+/// waits rather than racing the retry; stopping the retry releases it. With
+/// a retry the user starts, the next message goes as usual, and a start the
+/// harness refuses clears the offer.
 #[test]
 fn native_retry_keeps_queue_waiting_and_cancellation_releases_it() {
     for automatic in [true, false] {
         let cx = &mut TestAppContext::default();
         let test_store = TestStore::new("native-retry-queue");
-        let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-        let (commands, receiver) = smol::channel::unbounded();
-        state.update(cx, |state, cx| {
-            let mut active = live_session(ProviderKind::Codex, commands);
-            active.meta.id = "retry".into();
-            if automatic {
-                active.push_queued("queued user message".into(), Vec::new());
-            }
-            state.install_selected(active);
-            state.on_event(
-                "retry",
-                AgentEvent::TurnStarted {
-                    turn_id: "failed".into(),
-                },
-                cx,
-            );
-            let retry = agent::TurnRetry {
-                turn_id: "failed".into(),
-                retry_at: automatic.then(|| cx.clock().unix_secs() + 10),
-            };
-            state.on_event(
-                "retry",
-                AgentEvent::TurnRetry {
-                    retry: Some(retry.clone()),
-                },
-                cx,
-            );
-            state.on_event(
-                "retry",
-                AgentEvent::TurnCompleted {
-                    turn_id: "failed".into(),
-                    status: TurnStatus::Failed,
-                    usage: None,
-                },
-                cx,
-            );
-            let status = state.session_status_snapshot("retry").unwrap();
-            assert_eq!(status.activity.working, automatic);
-            assert!(!status.activity.turn_running);
-            assert_eq!(status.turn_retry, Some(retry));
-            assert!(
-                next_command(&receiver).is_err(),
-                "queued text must not race the native retry"
-            );
-            if automatic {
-                state.interrupt("retry", true, cx).unwrap();
-                assert!(matches!(
-                    next_command(&receiver),
-                    Ok(SessionCommand::Interrupt)
-                ));
-                state.on_event("retry", AgentEvent::TurnRetry { retry: None }, cx);
-            } else {
-                state
-                    .selected_session_mut()
-                    .unwrap()
-                    .push_queued("queued user message".into(), Vec::new());
-                state.dispatch_next_queued("retry", cx).unwrap();
-            }
-            let Ok(SessionCommand::SendTurn {
-                delivery_id, text, ..
-            }) = next_command(&receiver)
-            else {
-                panic!("queued message was not sent")
-            };
-            assert_eq!(text, "queued user message");
-            state.on_event("retry", AgentEvent::TurnAccepted { delivery_id }, cx);
-            // A rejected new start has no TurnStarted to clear the previous offer.
-            state.on_event(
-                "retry",
-                AgentEvent::TurnCompleted {
-                    turn_id: String::new(),
-                    status: TurnStatus::Failed,
-                    usage: None,
-                },
-                cx,
-            );
-            let status = state.session_status_snapshot("retry").unwrap();
-            assert!(status.turn_retry.is_none());
-            assert!(!status.activity.working);
-            assert!(state.retry_turn("retry", "failed".into(), cx).is_err());
+        stored_thread(
+            &test_store,
+            "retry",
+            ProviderKind::Codex,
+            &test_store.root().join("retry"),
+            |_| {},
+        );
+        let (state, providers) = played_host(cx, &test_store);
+        state.open(cx, "retry");
+        state.send(cx, "retry", "Go");
+        let provider = providers.started(cx, 0);
+        provider.start_turn(cx, "failed");
+        if automatic {
+            state.send(cx, "retry", "queued user message");
+        }
+        let retry = agent::TurnRetry {
+            turn_id: "failed".into(),
+            retry_at: automatic.then(|| cx.now_secs() + 10),
+        };
+        provider.play([
+            AgentEvent::TurnRetry {
+                retry: Some(retry.clone()),
+            },
+            completed_turn("failed"),
+        ]);
+        cx.run_until_seen(|view| has_record(view, "retry", is_turn_end));
+        let status = cx.seen().status("retry");
+        assert_eq!(status.activity.working, automatic);
+        assert!(!status.activity.turn_running);
+        assert_eq!(status.turn_retry, Some(retry));
+        assert!(
+            next_command(&provider.commands).is_err(),
+            "queued text must not race the native retry"
+        );
+        if automatic {
+            state
+                .command(
+                    cx,
+                    Command::Interrupt {
+                        session_id: "retry".into(),
+                    },
+                )
+                .unwrap();
+            assert!(matches!(
+                provider.next_command(cx),
+                SessionCommand::Interrupt
+            ));
+            provider.play([AgentEvent::TurnRetry { retry: None }]);
+        } else {
+            state.send(cx, "retry", "queued user message");
+        }
+        let (delivery_id, text) = provider.next_turn(cx);
+        assert_eq!(text, "queued user message");
+        // A rejected new start has no TurnStarted to clear the previous offer.
+        provider.play([
+            AgentEvent::TurnAccepted { delivery_id },
+            turn_completed("", TurnStatus::Failed),
+        ]);
+        cx.run_until_seen(|view| {
+            view.records("retry")
+                .iter()
+                .filter(|record| is_turn_end(&record.event))
+                .count()
+                == 2
         });
+        let status = cx.seen().status("retry");
+        assert!(status.turn_retry.is_none());
+        assert!(!status.activity.working);
+        assert!(
+            state
+                .command(
+                    cx,
+                    Command::RetryTurn {
+                        session_id: "retry".into(),
+                        turn_id: "failed".into(),
+                    },
+                )
+                .is_err()
+        );
     }
 }
 
+/// A usage limit the harness reports queues the resume prompt for when the
+/// limit resets, unless the user turned that off.
 #[test]
 fn usage_limit_event_schedules_resume_when_enabled_only() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-usage-limit-resume-test");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    for id in ["resume-enabled", "resume-disabled"] {
+        stored_thread(
+            &test_store,
+            id,
+            ProviderKind::ClaudeCode,
+            &test_store.root().join(id),
+            |_| {},
+        );
+    }
+    let (state, providers) = played_host(cx, &test_store);
     let resets_at = cx.now_secs() + 3_600;
-
-    state.update(cx, |state, cx| {
-        let (commands, _) = smol::channel::unbounded();
-        let mut active = live_session(ProviderKind::ClaudeCode, commands);
-        active.meta.id = "resume-enabled".into();
-        state.install_selected(active);
-        state.on_event(
-            "resume-enabled",
-            AgentEvent::UsageLimitReached { resets_at },
-            cx,
-        );
-
-        let queue = &state.selected_session().unwrap().queue;
-        assert_eq!(queue.len(), 1);
-        assert_eq!(queue[0].text, tcode_core::session::RESUME_PROMPT);
-        assert_eq!(
-            queue[0].not_before,
-            Some(UNIX_EPOCH + Duration::from_secs(resets_at))
-        );
-
-        let (commands, _) = smol::channel::unbounded();
-        let mut active = live_session(ProviderKind::ClaudeCode, commands);
-        active.meta.id = "resume-disabled".into();
-        state.install_selected(active);
-        state.settings.resume_on_limit_reset = false;
-        state.on_event(
-            "resume-disabled",
-            AgentEvent::UsageLimitReached { resets_at },
-            cx,
-        );
-        assert!(state.selected_session().unwrap().queue.is_empty());
-    });
+    for (n, id) in ["resume-enabled", "resume-disabled"]
+        .into_iter()
+        .enumerate()
+    {
+        if n == 1 {
+            state
+                .command(
+                    cx,
+                    Command::PatchSettings {
+                        patch: SettingsPatch::ResumeOnLimitReset(false),
+                    },
+                )
+                .unwrap();
+        }
+        let provider = first_turn(&state, cx, &providers, id, n);
+        provider.play([AgentEvent::UsageLimitReached { resets_at }]);
+        provider.fence(cx, id);
+    }
+    let queued = &cx.seen().status("resume-enabled").queued_messages;
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].text, tcode_core::session::RESUME_PROMPT);
+    assert_eq!(queued[0].fire_at_unix_secs, Some(resets_at));
+    assert!(
+        cx.seen()
+            .status("resume-disabled")
+            .queued_messages
+            .is_empty()
+    );
 }
 
+/// A scheduled message goes out as an ordinary message when it comes due.
 #[test]
 fn due_scheduled_message_reenters_the_ordinary_send_path() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-scheduled-fire-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (commands, receiver) = smol::channel::unbounded();
-
-    state.update(cx, |state, cx| {
-        let mut active = live_session(ProviderKind::Codex, commands);
-        active.meta.id = "due-active".into();
-        active.push_scheduled(
-            "due now".into(),
-            Vec::new(),
-            cx.clock().wall() - Duration::from_secs(1),
-        );
-        state.install_selected(active);
-
-        state.fire_due_scheduled(cx);
-
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(SessionCommand::SendTurn { text, .. }) if text == "due now"
-        ));
-    });
+    stored_thread(
+        &test_store,
+        "due-active",
+        ProviderKind::Codex,
+        &test_store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state.open(cx, "due-active");
+    state
+        .command(
+            cx,
+            Command::ScheduleTurn {
+                session_id: "due-active".into(),
+                text: "due now".into(),
+                attachment_paths: Vec::new(),
+                due: tcode_protocol::TurnDue::AfterSecs(60),
+            },
+        )
+        .unwrap();
+    cx.clock.advance(Duration::from_secs(60));
+    assert_eq!(providers.started(cx, 0).next_turn(cx).1, "due now");
 }
 
+/// Same provider, another profile: a different backend. Choosing it waits
+/// for the user to confirm handing the conversation over, and binds the
+/// thread to that profile for its next launch; choosing the original back
+/// needs no handover.
 #[test]
 fn profile_switch_within_one_provider_requires_a_relay() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-profile-relay-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (commands, _receiver) = smol::channel::unbounded();
-
-    state.update(cx, |state, cx| {
-        let mut active = live_session(ProviderKind::ClaudeCode, commands);
-        active.meta.id = "profile-relay".into();
-        active.meta.model = Some("claude-opus-5".into());
-        active.timeline.apply_at(
-            None,
-            &AgentEvent::ItemCompleted(ThreadItem {
-                id: "user-1".into(),
-                parent_item_id: None,
-                content: ItemContent::UserMessage {
-                    text: "hello".into(),
-                    attachments: Vec::new(),
-                },
-            }),
-        );
-        active.timeline.apply_at(
-            None,
-            &AgentEvent::TurnCompleted {
-                turn_id: "turn-1".into(),
-                status: TurnStatus::Completed,
-                usage: None,
+    stored_thread(
+        &test_store,
+        "profile-relay",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("thread"),
+        |meta| {
+            meta.model = Some("claude-opus-5".into());
+        },
+    );
+    for (ts, event) in [
+        AgentEvent::ItemCompleted(ThreadItem {
+            id: "user-1".into(),
+            parent_item_id: None,
+            content: ItemContent::UserMessage {
+                text: "hello".into(),
+                attachments: Vec::new(),
             },
-        );
-        state.install_selected(active);
+        }),
+        completed_turn("turn-1"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        test_store
+            .append_event("profile-relay", ts as u64, event)
+            .unwrap();
+    }
+    let (state, _providers) = played_host(cx, &test_store);
+    state.open(cx, "profile-relay");
+    let choose = |cx: &mut TestAppContext, model: &str, profile_id: Option<&str>| {
+        state
+            .command(
+                cx,
+                Command::SetActiveModel {
+                    session_id: "profile-relay".into(),
+                    provider: ProviderKind::ClaudeCode,
+                    model: Some(model.into()),
+                    profile_id: profile_id.map(Into::into),
+                },
+            )
+            .unwrap();
+    };
+    choose(cx, "kimi-k3", Some("kimi"));
+    let status = cx.seen().status("profile-relay");
+    assert_eq!(status.requested_profile_id.as_deref(), Some("kimi"));
+    assert_eq!(status.requested_model.as_deref(), Some("kimi-k3"));
+    assert_eq!(
+        status.relay_confirmation,
+        Some(("Claude Code".into(), "kimi".into()))
+    );
 
-        // Same ProviderKind, different profile: a different backend. The
-        // selection must park behind the relay confirmation and rebind the
-        // session's profile so the next launch uses the new endpoint.
-        state.set_active_model(
-            "profile-relay",
-            ProviderKind::ClaudeCode,
-            Some("kimi-k3".into()),
-            Some("kimi".into()),
-            cx,
-        );
-        let active = state.selected_session().unwrap();
-        assert_eq!(active.meta.profile_id.as_deref(), Some("kimi"));
-        assert_eq!(active.meta.model.as_deref(), Some("kimi-k3"));
-        assert_eq!(
-            state.relay_confirmation("profile-relay"),
-            Some(("Claude Code".into(), "kimi".into()))
-        );
-
-        // Returning to the original profile cancels the pending relay.
-        state.set_active_model(
-            "profile-relay",
-            ProviderKind::ClaudeCode,
-            Some("claude-opus-5".into()),
-            None,
-            cx,
-        );
-        let active = state.selected_session().unwrap();
-        assert_eq!(active.meta.profile_id, None);
-        assert!(state.relay_confirmation("profile-relay").is_none());
-    });
+    choose(cx, "claude-opus-5", None);
+    let status = cx.seen().status("profile-relay");
+    assert_eq!(status.requested_profile_id, None);
+    assert!(status.relay_confirmation.is_none());
 }
 
 /// Switching provider while the only turn is still streaming keeps what it
 /// produced: the switch arms a relay instead of silently dropping the cursor,
 /// and confirming it closes the abandoned turn so the handoff opens a new one.
 /// A scheduled message that comes due meanwhile waits for the confirmation and
-/// follows the message that carries the handoff.
+/// follows the message that carries the handoff, which goes out as the
+/// timeline discloses it and alone carries the conversation.
 #[test]
 fn provider_switch_mid_turn_relays_the_partial_answer() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-mid-turn-relay-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity({
-        let mut state = TestClientState::new(store);
-        state.set_provider_launcher(ProviderLauncher(Arc::new(|_, _| {
-            Box::pin(std::future::pending())
-        })));
-        state
-    });
-    let (commands, _receiver) = smol::channel::unbounded();
-
-    state.update(cx, |state, cx| {
-        let mut active = live_session(ProviderKind::Codex, commands);
-        active.meta.id = "mid-turn-relay".into();
-        active.turn_in_flight = true;
-        for event in [
-            AgentEvent::TurnStarted {
-                turn_id: "codex-turn".into(),
+    stored_thread(
+        &test_store,
+        "mid-turn-relay",
+        ProviderKind::Codex,
+        &test_store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state.open(cx, "mid-turn-relay");
+    state.send(cx, "mid-turn-relay", "compare them");
+    let codex = providers.started(cx, 0);
+    codex.start_turn(cx, "codex-turn");
+    codex.play([AgentEvent::ItemStarted(ThreadItem {
+        id: "assistant-1".into(),
+        parent_item_id: None,
+        content: ItemContent::AssistantMessage {
+            text: "They differ in".into(),
+            summarized: false,
+        },
+    })]);
+    codex.fence(cx, "mid-turn-relay");
+    state
+        .command(
+            cx,
+            Command::ScheduleTurn {
+                session_id: "mid-turn-relay".into(),
+                text: "check the logs".into(),
+                attachment_paths: Vec::new(),
+                due: tcode_protocol::TurnDue::AfterSecs(0),
             },
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "user-1".into(),
-                parent_item_id: None,
-                content: ItemContent::UserMessage {
-                    text: "compare them".into(),
-                    attachments: Vec::new(),
-                },
-            }),
-            AgentEvent::ItemStarted(ThreadItem {
-                id: "assistant-1".into(),
-                parent_item_id: None,
-                content: ItemContent::AssistantMessage {
-                    text: "They differ in".into(),
-                    summarized: false,
-                },
-            }),
-        ] {
-            active.timeline.apply_at(None, &event);
-        }
-        state.sessions.push(active.meta.clone());
-        state.install_selected(active);
-        state.schedule_turn(
-            "mid-turn-relay",
-            "check the logs".into(),
-            Vec::new(),
-            tcode_protocol::TurnDue::AfterSecs(0),
+        )
+        .unwrap();
+    state
+        .command(
             cx,
-        );
+            Command::SetActiveModel {
+                session_id: "mid-turn-relay".into(),
+                provider: ProviderKind::ClaudeCode,
+                model: Some("claude-opus-5-5".into()),
+                profile_id: None,
+            },
+        )
+        .unwrap();
+    let queued = |cx: &TestAppContext| {
+        cx.seen()
+            .status("mid-turn-relay")
+            .queued_messages
+            .iter()
+            .map(|message| message.text.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        cx.seen().status("mid-turn-relay").relay_confirmation,
+        Some(("Codex".into(), "Claude Code".into()))
+    );
+    // A message that comes due while the relay waits waits with it.
+    assert_eq!(queued(cx), ["check the logs"]);
 
-        state.set_active_model(
-            "mid-turn-relay",
-            ProviderKind::ClaudeCode,
-            Some("claude-opus-5-5".into()),
-            None,
+    // Claude Code takes the seconds a harness takes to start.
+    providers.hold();
+    state
+        .command(
             cx,
-        );
-        assert_eq!(
-            state.relay_confirmation("mid-turn-relay"),
-            Some(("Codex".into(), "Claude Code".into()))
-        );
-        // A message that comes due while the relay waits waits with it.
-        state.fire_due_scheduled(cx);
-        let queued = |state: &TestClientState| {
-            state
-                .selected_session()
-                .unwrap()
-                .queue
-                .iter()
-                .map(|message| message.text.clone())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(queued(state), ["check the logs"]);
-
-        state.confirm_relay_and_send("mid-turn-relay", "now review it".into(), Vec::new(), cx);
-        assert_eq!(queued(state), ["now review it", "check the logs"]);
-        let active = state.selected_session().unwrap();
-        assert_eq!(
-            active.timeline.turns[0].status,
-            Some(TurnStatus::Interrupted)
-        );
-        let relay = active
-            .timeline
+            Command::ConfirmRelayAndSend {
+                session_id: "mid-turn-relay".into(),
+                text: "now review it".into(),
+                attachment_paths: Vec::new(),
+            },
+        )
+        .unwrap();
+    cx.run_until_seen(|view| {
+        view.timeline("mid-turn-relay")
             .entries
             .iter()
-            .find(|entry| matches!(entry.content, EntryContent::ProviderRelay { .. }))
-            .expect("relay entry");
-        assert_eq!(relay.turn, 1);
-        let transcript = active.queue[0].relay_transcript.as_deref().unwrap();
-        assert!(transcript.contains("They differ in"));
-        assert!(transcript.contains("still running when the conversation was handed over"));
-        // The timeline discloses the handoff exactly as it goes out.
-        let EntryContent::ProviderRelay { prompt, .. } = &relay.content else {
-            unreachable!();
-        };
-        assert_eq!(
-            prompt.as_deref(),
-            Some(active.queue[0].wire_text(&[]).as_str())
-        );
+            .any(|entry| matches!(entry.content, EntryContent::ProviderRelay { .. }))
     });
+    assert_eq!(queued(cx), ["now review it", "check the logs"]);
+    let timeline = cx.seen().timeline("mid-turn-relay");
+    assert_eq!(timeline.turns[0].status, Some(TurnStatus::Interrupted));
+    let relay = timeline
+        .entries
+        .iter()
+        .find(|entry| matches!(entry.content, EntryContent::ProviderRelay { .. }))
+        .unwrap();
+    assert_eq!(relay.turn, 1);
+    let EntryContent::ProviderRelay { prompt, .. } = &relay.content else {
+        unreachable!();
+    };
+    let prompt = prompt.clone().unwrap();
+    assert!(prompt.contains("They differ in"));
+    assert!(prompt.contains("still running when the conversation was handed over"));
+    // The timeline discloses the handoff exactly as it goes out.
+    providers.let_go();
+    let claude = providers.started(cx, 1);
+    assert_eq!(claude.provider, ProviderKind::ClaudeCode);
+    let (delivery_id, handoff) = claude.next_turn(cx);
+    assert_eq!(handoff, prompt);
+    // Only the first message carries the conversation.
+    claude.play([
+        AgentEvent::TurnAccepted { delivery_id },
+        AgentEvent::TurnStarted {
+            turn_id: "claude-turn".into(),
+        },
+        completed_turn("claude-turn"),
+    ]);
+    assert_eq!(claude.next_turn(cx).1, "check the logs");
 }
 
 /// One provider process a test launched: the options it started with, and its command and
@@ -5451,20 +5509,23 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
 }
 
 /// A moved thread's first message hands the provider the conversation in the host's
-/// log even when the provider is up before the host has read that log: the message
-/// waits for the read, and the thread forgets where it moved from only once the
-/// handoff went out.
+/// log whichever comes first, the provider up or the log read: the message waits for
+/// the read, and the thread forgets where it moved from only once the handoff went out.
 #[test]
 fn a_moved_threads_handoff_waits_for_its_log() {
     let test_store = TestStore::new("tcode-handoff-waits-for-log");
     let quick = test_store.root().join("quick");
     let demo = test_store.root().join("demo");
     std::fs::create_dir_all(&quick).unwrap();
-    std::fs::create_dir_all(&demo).unwrap();
-    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, demo.clone(), None);
-    meta.id = "thread".into();
-    meta.moved_from = Some(quick.clone());
-    test_store.upsert_meta(&meta).unwrap();
+    stored_thread(
+        &test_store,
+        "thread",
+        ProviderKind::ClaudeCode,
+        &demo,
+        |meta| {
+            meta.moved_from = Some(quick.clone());
+        },
+    );
     for (ts, event) in [
         AgentEvent::TurnStarted {
             turn_id: "turn-1".into(),
@@ -5477,11 +5538,7 @@ fn a_moved_threads_handoff_waits_for_its_log() {
                 summarized: false,
             },
         }),
-        AgentEvent::TurnCompleted {
-            turn_id: "turn-1".into(),
-            status: TurnStatus::Completed,
-            usage: None,
-        },
+        completed_turn("turn-1"),
     ]
     .iter()
     .enumerate()
@@ -5489,40 +5546,35 @@ fn a_moved_threads_handoff_waits_for_its_log() {
         test_store.append_event("thread", ts as u64, event).unwrap();
     }
     let cx = &mut TestAppContext::default();
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let (commands, provider) = smol::channel::unbounded();
-    // Nothing the host hands off its own thread lands before the test runs the host,
-    // so the thread's log is still being read while its provider is up and the
-    // message is sent.
-    state.update(cx, |state, cx| {
-        state.select_session("thread", cx);
-        let thread = state.selected_session_mut().unwrap();
-        thread.runtime = Runtime::Live(commands);
-        thread.live_cwd = thread.meta.cwd.clone();
-    });
-    state.dispatch_command(
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    assert_eq!(
+        cx.seen().session("thread").unwrap().moved_from,
+        Some(quick.clone())
+    );
+    // The client opens the thread and sends at once: the host reads its log
+    // and starts its provider off the host, and either may land first.
+    state.deliver(
         cx,
         1,
+        tcode_protocol::ClientPayload::Subscribe(Subscription {
+            known_index: None,
+            topic: Topic::SessionStatus {
+                session_id: "thread".into(),
+            },
+            after: None,
+        }),
+    );
+    state.dispatch_command(
+        cx,
+        2,
         Command::SendTurn {
             session_id: "thread".into(),
             text: "what did we decide?".into(),
             attachment_paths: Vec::new(),
         },
     );
-    assert!(
-        next_command(&provider).is_err(),
-        "the message waits for the log"
-    );
-    state.read(|state| {
-        assert_eq!(
-            state.find_meta("thread").unwrap().moved_from,
-            Some(quick.clone())
-        );
-    });
-
-    let SessionCommand::SendTurn { text, .. } = cx.run_until_command(&provider) else {
-        panic!("the message goes out once the log is read");
-    };
+    let (_, text) = providers.started(cx, 0).next_turn(cx);
     assert!(
         text.starts_with(tcode_core::relay::RELAY_PREAMBLE),
         "{text}"
@@ -5540,7 +5592,7 @@ fn a_moved_threads_handoff_waits_for_its_log() {
         text.ends_with("what did we decide?\n</new-user-message>"),
         "{text}"
     );
-    state.read(|state| assert!(state.find_meta("thread").unwrap().moved_from.is_none()));
+    cx.run_until_seen(|view| view.session("thread").unwrap().moved_from.is_none());
 }
 
 /// A thread on a harness whose native session goes along to another directory keeps that
@@ -6255,59 +6307,597 @@ fn live_session(
     }
 }
 
+/// A harness that describes its own controls takes back the ones it no
+/// longer lists: they leave the thread's controls, what it runs at, and what
+/// the user asked for.
 #[test]
 fn provider_config_options_remove_retired_wire_controls() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-provider-config-retirement");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    state.update(cx, |state, cx| {
-        let (commands, _receiver) = smol::channel::unbounded();
-        let mut session = live_session(ProviderKind::Acp, commands);
-        session.meta.id = "config-session".into();
-        state.sessions.push(session.meta.clone());
-        state.install_selected(session);
-        state.on_event(
-            "config-session",
-            AgentEvent::ProviderOptions {
-                descriptors: vec![OptionDescriptor::Boolean {
-                    id: "acp:config:thinking".into(),
-                    label: "Thinking".into(),
-                    default_value: true,
-                    role: Default::default(),
-                    apply: Default::default(),
-                    recommended: None,
-                    permissive: None,
-                }],
-                selections: vec![OptionSelection {
-                    id: "acp:config:thinking".into(),
-                    value: serde_json::json!(true),
-                }],
-            },
-            cx,
-        );
-        state.set_active_option(
-            "config-session",
-            "acp:config:thinking",
-            Some(serde_json::json!(false)),
-            cx,
-        );
-        let offered = state.session_status_snapshot("config-session").unwrap();
-        assert_eq!(offered.provider_option_descriptors.len(), 1);
-        assert!(!offered.provider_option_selections.is_empty());
-        assert!(!offered.provider_option_requested_selections.is_empty());
-        state.on_event(
-            "config-session",
-            AgentEvent::ProviderOptions {
-                descriptors: Vec::new(),
-                selections: Vec::new(),
-            },
-            cx,
-        );
-        let removed = state.session_status_snapshot("config-session").unwrap();
-        assert!(removed.provider_option_descriptors.is_empty());
-        assert!(removed.provider_option_selections.is_empty());
-        assert!(removed.provider_option_requested_selections.is_empty());
+    stored_thread(
+        &store,
+        "config-session",
+        ProviderKind::Grok,
+        &store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &store);
+    let provider = first_turn(&state, cx, &providers, "config-session", 0);
+    provider.play([AgentEvent::ProviderOptions {
+        descriptors: vec![OptionDescriptor::Boolean {
+            id: "thinking".into(),
+            label: "Thinking".into(),
+            default_value: true,
+            role: Default::default(),
+            apply: Default::default(),
+            recommended: None,
+            permissive: None,
+        }],
+        selections: vec![OptionSelection {
+            id: "thinking".into(),
+            value: serde_json::json!(true),
+        }],
+    }]);
+    cx.run_until_seen(|view| {
+        view.status("config-session")
+            .provider_option_descriptors
+            .iter()
+            .any(|descriptor| matches!(descriptor, OptionDescriptor::Boolean { id, .. } if id == "thinking"))
     });
+    state
+        .command(
+            cx,
+            Command::SetActiveOption {
+                session_id: "config-session".into(),
+                id: "thinking".into(),
+                value: Some(serde_json::json!(false)),
+            },
+        )
+        .unwrap();
+    let offered = cx.seen().status("config-session").clone();
+    let thinking = |selections: &[OptionSelection]| {
+        selections
+            .iter()
+            .any(|selection| selection.id == "thinking")
+    };
+    assert!(thinking(&offered.provider_option_selections));
+    assert!(thinking(&offered.provider_option_requested_selections));
+    provider.play([AgentEvent::ProviderOptions {
+        descriptors: Vec::new(),
+        selections: Vec::new(),
+    }]);
+    provider.fence(cx, "config-session");
+    let removed = cx.seen().status("config-session");
+    assert!(
+        !removed
+            .provider_option_descriptors
+            .iter()
+            .any(|descriptor| {
+                matches!(descriptor, OptionDescriptor::Boolean { id, .. } if id == "thinking")
+            })
+    );
+    assert!(!thinking(&removed.provider_option_selections));
+    assert!(!thinking(&removed.provider_option_requested_selections));
+}
+
+/// A permission the user picks is asked of the running harness, or waits for
+/// its restart where the harness takes one only at launch, and shows as
+/// asked for, not as in force, until the harness says it is.
+#[test]
+fn native_permission_selection_stays_pending_until_provider_confirmation() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-permission-confirmation");
+    let cases = [
+        (
+            ProviderKind::ClaudeCode,
+            "permissionMode",
+            serde_json::json!("default"),
+            serde_json::json!("auto"),
+            false,
+        ),
+        (
+            ProviderKind::Codex,
+            "permissions",
+            serde_json::json!("ask"),
+            serde_json::json!("full_access"),
+            false,
+        ),
+        (
+            ProviderKind::OpenCode,
+            "permission_mode",
+            serde_json::json!("normal"),
+            serde_json::json!("auto"),
+            false,
+        ),
+        (
+            ProviderKind::Grok,
+            "permissionMode",
+            serde_json::json!("default"),
+            serde_json::json!("auto"),
+            true,
+        ),
+    ];
+    for (provider, ..) in &cases {
+        let id = format!("permission-{provider:?}");
+        stored_thread(&store, &id, *provider, &store.root().join(&id), |_| {});
+    }
+    let (state, providers) = played_host(cx, &store);
+    for (n, (provider, id, initial, requested, restart)) in cases.into_iter().enumerate() {
+        let session_id = format!("permission-{provider:?}");
+        let session_id = session_id.as_str();
+        let played = first_turn(&state, cx, &providers, session_id, n);
+        let confirmed = |value| AgentEvent::ProviderOptions {
+            descriptors: vec![permission_control(provider).unwrap()],
+            selections: vec![OptionSelection {
+                id: id.into(),
+                value,
+            }],
+        };
+        let value_of = |selections: &[OptionSelection]| {
+            selections
+                .iter()
+                .find(|selection| selection.id == id)
+                .map(|selection| selection.value.clone())
+        };
+        played.play([confirmed(initial.clone())]);
+        played.fence(cx, session_id);
+        // What a launch asks of the harness for the thread's permission went
+        // before it said what it runs at.
+        while let Ok(command) = next_command(&played.commands) {
+            assert!(
+                matches!(command, SessionCommand::SetOption { .. }),
+                "{command:?}"
+            );
+        }
+        assert!(!cx.seen().status(session_id).options_pending_restart);
+        state
+            .command(
+                cx,
+                Command::SetActiveOption {
+                    session_id: session_id.into(),
+                    id: id.into(),
+                    value: Some(requested.clone()),
+                },
+            )
+            .unwrap();
+        if restart {
+            assert!(next_command(&played.commands).is_err());
+        } else {
+            assert!(matches!(
+                played.next_command(cx),
+                SessionCommand::SetOption { id: sent_id, value } if sent_id == id && value == requested
+            ));
+        }
+        played.play([confirmed(initial.clone())]);
+        played.fence(cx, session_id);
+        let pending = cx.seen().status(session_id);
+        assert_eq!(
+            value_of(&pending.provider_option_selections),
+            Some(initial.clone())
+        );
+        assert_eq!(
+            value_of(&pending.provider_option_requested_selections),
+            Some(requested.clone())
+        );
+        assert_eq!(pending.options_pending_restart, restart);
+        if !restart {
+            played.play([confirmed(requested.clone())]);
+            played.fence(cx, session_id);
+            let applied = cx.seen().status(session_id);
+            assert_eq!(
+                value_of(&applied.provider_option_selections),
+                Some(requested.clone())
+            );
+            assert_eq!(
+                applied.provider_option_requested_selections,
+                applied.provider_option_selections
+            );
+            assert!(!applied.options_pending_restart);
+        }
+        assert!(next_command(&played.commands).is_err());
+    }
+}
+
+/// A message sent after the user chose another context window, while the
+/// harness still runs at the old one, says so as it goes out.
+#[test]
+fn queued_message_stamps_live_context_window_change() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-context-window-stamp");
+    stored_thread(
+        &store,
+        "thread",
+        ProviderKind::ClaudeCode,
+        &store.root().join("thread"),
+        |meta| {
+            meta.model = Some("claude-opus-5".into());
+            meta.option_selections.push(OptionSelection {
+                id: agent::context_window::OPTION_ID.into(),
+                value: serde_json::json!("1m"),
+            });
+        },
+    );
+    let (state, providers) = played_host(cx, &store);
+    let provider = first_turn(&state, cx, &providers, "thread", 0);
+    state
+        .command(
+            cx,
+            Command::SetActiveOption {
+                session_id: "thread".into(),
+                id: agent::context_window::OPTION_ID.into(),
+                value: Some(serde_json::json!(500_000)),
+            },
+        )
+        .unwrap();
+    state.send(cx, "thread", "queued");
+    provider.play([completed_turn("turn")]);
+    // Claude Code takes the new window where it runs.
+    assert!(matches!(
+        provider.next_command(cx),
+        SessionCommand::ApplySettings { .. }
+    ));
+    provider.play([AgentEvent::SettingsApplied { applied: true }]);
+    let (delivery_id, text) = provider.next_turn(cx);
+    assert_eq!(text, "queued");
+    provider.play([AgentEvent::TurnAccepted { delivery_id }]);
+    cx.run_until_seen(|view| {
+        has_record(view, "thread", |event| {
+            matches!(event, AgentEvent::ContextWindowChanged { window: 500_000 })
+        })
+    });
+}
+
+/// Stopping everything stops every harness running, shown or not.
+#[test]
+fn shutdown_all_notifies_active_and_parked_live_providers() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-app-test");
+    let threads = [
+        ("viewed", ProviderKind::Codex),
+        ("parked", ProviderKind::ClaudeCode),
+        ("other", ProviderKind::OpenCode),
+    ];
+    for (id, provider) in threads {
+        stored_thread(
+            &test_store,
+            id,
+            provider,
+            &test_store.root().join(id),
+            |_| {},
+        );
+    }
+    let (state, providers) = played_host(cx, &test_store);
+    let mut played = Vec::new();
+    for (n, (id, _)) in threads.into_iter().enumerate() {
+        let provider = first_turn(&state, cx, &providers, id, n);
+        provider.play([completed_turn("turn")]);
+        cx.run_until_seen(|view| view.status(id).running_turn.is_none());
+        if id != "viewed" {
+            state.leave(cx, id);
+        }
+        played.push(provider);
+    }
+    state.command(cx, Command::ShutdownAllAndFlush).unwrap();
+    for provider in &played {
+        assert!(matches!(
+            provider.next_command(cx),
+            SessionCommand::Shutdown
+        ));
+    }
+}
+
+/// A provider start the user gave up on, landing before or after the start
+/// that replaced it, is shut down and delivers nothing; the current start
+/// takes what waited for it, once.
+#[test]
+fn startup_generation_rejects_stale_same_session_attempt() {
+    for stale_after_live in [false, true] {
+        let cx = &mut TestAppContext::default();
+        let store = TestStore::new("tcode-startup-generation");
+        stored_thread(
+            &store,
+            "same-session",
+            ProviderKind::Codex,
+            &store.root().join("thread"),
+            |_| {},
+        );
+        let (state, providers) = played_host(cx, &store);
+        providers.hold();
+        state.open(cx, "same-session");
+        state.send(cx, "same-session", "first message");
+        let stale = providers.started(cx, 0);
+        // The user gives up on the start, and sends again.
+        state
+            .command(
+                cx,
+                Command::ForceTerminate {
+                    session_id: "same-session".into(),
+                },
+            )
+            .unwrap();
+        state.send(cx, "same-session", "second message");
+        let current = providers.started(cx, 1);
+        if stale_after_live {
+            providers.let_go_of(1);
+            assert_eq!(current.next_turn(cx).1, "first message");
+            providers.let_go_of(0);
+            assert!(matches!(stale.next_command(cx), SessionCommand::Shutdown));
+        } else {
+            providers.let_go_of(0);
+            assert!(matches!(stale.next_command(cx), SessionCommand::Shutdown));
+            providers.let_go_of(1);
+            assert_eq!(current.next_turn(cx).1, "first message");
+        }
+        let delivery_id = cx.seen().status("same-session").delivery_in_flight.unwrap();
+        current.play([AgentEvent::TurnAccepted { delivery_id }]);
+        current.fence(cx, "same-session");
+        assert!(next_command(&stale.commands).is_err());
+        assert!(
+            next_command(&current.commands).is_err(),
+            "stale completion must not restart or duplicate current delivery"
+        );
+    }
+}
+
+/// A message the harness had not taken when its process closed waits, and
+/// goes once to the process that resumes the thread; taking it twice records
+/// it once.
+#[test]
+fn unaccepted_send_survives_eof_and_is_delivered_once_after_resume() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-acked-delivery-data");
+    stored_thread(
+        &test_store,
+        "thread",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    // The preceding model turn has completed, but Claude still owns a
+    // background process. This is the idle-send window from the repro.
+    let first = first_turn(&state, cx, &providers, "thread", 0);
+    first.play([
+        AgentEvent::BackgroundTasksChanged { count: 1 },
+        completed_turn("turn"),
+    ]);
+    cx.run_until_seen(|view| view.status("thread").running_turn.is_none());
+    state.send(cx, "thread", "survive the eof race");
+    let (delivery_id, submitted) = first.next_turn(cx);
+    let delivered = |cx: &TestAppContext| {
+        cx.seen()
+            .records("thread")
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    AgentEvent::ItemCompleted(ThreadItem {
+                        content: ItemContent::UserMessage { text, .. },
+                        ..
+                    }) if text == "survive the eof race"
+                )
+            })
+            .count()
+    };
+    assert_eq!(delivered(cx), 0);
+
+    // EOF wins before the first actor writes, so no TurnAccepted exists.
+    first.play([AgentEvent::SessionClosed {
+        reason: Some("claude closed stdout".into()),
+    }]);
+    cx.run_until_seen(|view| {
+        has_record(view, "thread", |event| {
+            matches!(event, AgentEvent::SessionClosed { .. })
+        })
+    });
+    // Coming back to the thread resumes it.
+    state.leave(cx, "thread");
+    state.open(cx, "thread");
+    let resumed = providers.started(cx, 1);
+    let (retried, text) = resumed.next_turn(cx);
+    assert_eq!((retried, text), (delivery_id, submitted));
+    // A duplicate acceptance cannot remove or persist anything twice.
+    resumed.play([
+        AgentEvent::TurnAccepted {
+            delivery_id: retried,
+        },
+        AgentEvent::TurnAccepted {
+            delivery_id: retried,
+        },
+    ]);
+    resumed.fence(cx, "thread");
+    assert_eq!(delivered(cx), 1);
+}
+
+/// The model a harness says it started on becomes the thread's, and the
+/// next message goes to that process without restarting it for the "change".
+#[test]
+fn inferred_startup_model_updates_live_model_without_restart() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-live-model-sync-test");
+    stored_thread(
+        &test_store,
+        "model-sync",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state.open(cx, "model-sync");
+    state.send(cx, "model-sync", "first message");
+    let provider = providers.started(cx, 0);
+    provider.play([AgentEvent::SessionStarted {
+        provider_session_id: "provider-session".into(),
+        resume: agent::ResumeCursor(serde_json::json!({
+            "session_id": "provider-session"
+        })),
+        model: Some("claude-sonnet-4-6".into()),
+    }]);
+    let (delivery_id, _) = provider.next_turn(cx);
+    provider.play([
+        AgentEvent::TurnAccepted { delivery_id },
+        AgentEvent::TurnStarted {
+            turn_id: "turn".into(),
+        },
+        completed_turn("turn"),
+    ]);
+    cx.run_until_seen(|view| has_record(view, "model-sync", is_turn_end));
+    assert_eq!(
+        cx.seen().status("model-sync").requested_model.as_deref(),
+        Some("claude-sonnet-4-6")
+    );
+    state.send(cx, "model-sync", "second message");
+    assert_eq!(
+        provider.next_turn(cx).1,
+        "second message",
+        "phantom restart sent Shutdown"
+    );
+}
+
+/// Coming back to a thread whose harness waits idle takes the same process
+/// up again, and is no activity of the thread's.
+#[test]
+fn select_session_readopts_idle_resident_without_changing_recency_or_shutdown() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-idle-resident-readopt-test");
+    stored_thread(
+        &test_store,
+        "idle-resident",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    let provider = first_turn(&state, cx, &providers, "idle-resident", 0);
+    provider.play([completed_turn("turn")]);
+    cx.run_until_seen(|view| view.status("idle-resident").running_turn.is_none());
+    let updated_at = cx.seen().session("idle-resident").unwrap().updated_at;
+    // The thread was last active a minute ago.
+    cx.clock.advance(Duration::from_secs(60));
+    state.leave(cx, "idle-resident");
+    state.open(cx, "idle-resident");
+    provider.fence(cx, "idle-resident");
+    assert!(
+        next_command(&provider.commands).is_err(),
+        "re-adoption sent Shutdown"
+    );
+    assert_eq!(providers.count(), 1);
+    assert_eq!(
+        cx.seen().session("idle-resident").unwrap().updated_at,
+        updated_at
+    );
+    assert_eq!(
+        test_store
+            .load_index()
+            .unwrap()
+            .into_iter()
+            .find(|meta| meta.id == "idle-resident")
+            .unwrap()
+            .updated_at,
+        updated_at
+    );
+}
+
+/// A harness left idle in a thread nobody shows is stopped once the grace a
+/// harness is kept for has passed since its turn ended, however the thread
+/// was left and come back to meanwhile.
+#[test]
+fn idle_grace_runs_from_the_last_turn_end_whether_viewed_or_parked() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-idle-grace-turn-end-test");
+    stored_thread(
+        &test_store,
+        "idle-resident",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    let provider = first_turn(&state, cx, &providers, "idle-resident", 0);
+    provider.play([completed_turn("turn")]);
+    cx.run_until_seen(|view| view.status("idle-resident").running_turn.is_none());
+    // Leaving the thread a minute later does not start the grace again.
+    cx.clock.advance(Duration::from_secs(60));
+    state.leave(cx, "idle-resident");
+    cx.clock
+        .advance(RESIDENT_IDLE_GRACE - Duration::from_secs(60));
+    assert!(matches!(
+        provider.next_command(cx),
+        SessionCommand::Shutdown
+    ));
+}
+
+/// A harness left idle is stopped once the grace has passed since its last
+/// turn ended, not its first.
+#[test]
+fn a_later_turn_end_starts_the_idle_grace_again() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-idle-grace-second-turn-test");
+    stored_thread(
+        &test_store,
+        "idle-resident",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    let provider = first_turn(&state, cx, &providers, "idle-resident", 0);
+    provider.play([completed_turn("turn")]);
+    cx.run_until_seen(|view| view.status("idle-resident").running_turn.is_none());
+    cx.clock.advance(Duration::from_secs(60));
+    state.send(cx, "idle-resident", "again");
+    provider.start_turn(cx, "second");
+    provider.play([completed_turn("second")]);
+    cx.run_until_seen(|view| has_record(view, "idle-resident", |event| {
+        matches!(event, AgentEvent::TurnCompleted { turn_id, .. } if turn_id == "second")
+    }));
+    state.leave(cx, "idle-resident");
+    cx.clock.advance(RESIDENT_IDLE_GRACE);
+    assert!(matches!(
+        provider.next_command(cx),
+        SessionCommand::Shutdown
+    ));
+}
+
+/// The host keeps a bounded number of idle harnesses for threads nobody
+/// shows: leaving one more stops the one left longest ago, and only that one.
+#[test]
+fn resident_idle_lru_evicts_only_oldest_provider() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-idle-resident-lru-test");
+    let ids = (0..=MAX_IDLE_RESIDENTS)
+        .map(|index| format!("resident-{index}"))
+        .collect::<Vec<_>>();
+    for id in &ids {
+        stored_thread(
+            &test_store,
+            id,
+            ProviderKind::ClaudeCode,
+            &test_store.root().join(id),
+            |_| {},
+        );
+    }
+    let (state, providers) = played_host(cx, &test_store);
+    let mut played = Vec::new();
+    for (n, id) in ids.iter().enumerate() {
+        let provider = first_turn(&state, cx, &providers, id, n);
+        provider.play([completed_turn("turn")]);
+        cx.run_until_seen(|view| view.status(id).running_turn.is_none());
+        cx.clock.advance(Duration::from_secs(1));
+        state.leave(cx, id);
+        played.push(provider);
+    }
+    assert!(matches!(
+        next_command(&played[0].commands),
+        Ok(SessionCommand::Shutdown)
+    ));
+    for provider in &played[1..] {
+        assert!(
+            next_command(&provider.commands).is_err(),
+            "non-LRU resident was shut down"
+        );
+    }
 }
 
 /// A new thread starts at what its project names, else at what its Harness
@@ -6340,146 +6930,107 @@ fn a_new_threads_permission_is_its_projects_then_its_harness_then_the_recommende
     });
 }
 
+/// While a harness runs, an option it reports runs at what it reported and
+/// at nothing until it has, never at its default; one it does not report runs
+/// at what Tcode sent, and says so. What it reports leaves the thread's own
+/// choice as it was.
 #[test]
-fn native_permission_selection_stays_pending_until_provider_confirmation() {
+fn a_running_harness_options_are_what_it_reported_or_what_was_sent() {
     let cx = &mut TestAppContext::default();
-    let store = TestStore::new("tcode-permission-confirmation");
+    let store = TestStore::new("tcode-confirmed-options");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
-    for (provider, id, initial, requested, restart) in [
-        (
-            ProviderKind::ClaudeCode,
-            "permissionMode",
-            serde_json::json!("default"),
-            serde_json::json!("auto"),
-            false,
-        ),
-        (
-            ProviderKind::Codex,
-            "permissions",
-            serde_json::json!("ask"),
-            serde_json::json!("full_access"),
-            false,
-        ),
-        (
-            ProviderKind::OpenCode,
-            "permission_mode",
-            serde_json::json!("normal"),
-            serde_json::json!("auto"),
-            false,
-        ),
-        (
-            ProviderKind::Grok,
-            "permissionMode",
-            serde_json::json!("default"),
-            serde_json::json!("auto"),
-            true,
-        ),
-    ] {
-        let session_id = format!("permission-{provider:?}");
-        let session_id = session_id.as_str();
-        let (commands, receiver) = smol::channel::unbounded();
-        state.update(cx, |state, cx| {
-            let mut session = live_session(provider, commands);
-            session.meta.id = session_id.into();
-            state.sessions.push(session.meta.clone());
-            state.install_selected(session);
-            let confirmed = |value| AgentEvent::ProviderOptions {
-                descriptors: vec![permission_control(provider).unwrap()],
-                selections: vec![OptionSelection { id: id.into(), value }],
-            };
-            state.on_event(session_id, confirmed(initial.clone()), cx);
-            assert!(!state.session_status_snapshot(session_id).unwrap().options_pending_restart);
-            state.set_active_option(session_id, id, Some(requested.clone()), cx);
-            if restart {
-                assert!(receiver.try_recv().is_err());
-            } else {
-                assert!(matches!(receiver.try_recv(), Ok(SessionCommand::SetOption { id: sent_id, value }) if sent_id == id && value == requested));
-            }
-            state.on_event(session_id, confirmed(initial.clone()), cx);
-            let pending = state.session_status_snapshot(session_id).unwrap();
-            assert_eq!(pending.provider_option_selections.iter().find(|selection| selection.id == id).unwrap().value, initial);
-            assert_eq!(pending.provider_option_requested_selections.iter().find(|selection| selection.id == id).unwrap().value, requested);
-            assert_eq!(pending.options_pending_restart, restart);
-            if !restart {
-                state.on_event(session_id, confirmed(requested.clone()), cx);
-                let applied = state.session_status_snapshot(session_id).unwrap();
-                assert_eq!(applied.provider_option_selections.iter().find(|selection| selection.id == id).unwrap().value, requested);
-                assert_eq!(applied.provider_option_requested_selections, applied.provider_option_selections);
-                assert!(!applied.options_pending_restart);
-            }
-            assert!(receiver.try_recv().is_err());
-        });
-    }
-}
-
-#[test]
-fn queued_message_stamps_live_context_window_change() {
-    let mut active = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);
-    active.meta.model = Some("claude-opus-5".into());
-    active.live_option_selections.push(OptionSelection {
-        id: "contextWindow".into(),
-        value: serde_json::json!("1m"),
-    });
-    active.meta.option_selections.push(OptionSelection {
-        id: "contextWindow".into(),
-        value: serde_json::json!(500_000),
-    });
-
-    active.push_queued("queued".into(), Vec::new());
-    active.stamp_context_window_change(None);
-    assert_eq!(active.queue[0].context_window_changed, Some(500_000));
-
-    // Choosing the model's default preset while the provider already runs at
-    // it changes nothing.
-    active.live_option_selections.clear();
-    active.meta.option_selections.clear();
-    active.meta.option_selections.push(OptionSelection {
-        id: "contextWindow".into(),
-        value: serde_json::json!("1m"),
-    });
-    active.push_queued("default".into(), Vec::new());
-    active.stamp_context_window_change(Some(1_000_000));
-    assert_eq!(active.queue[1].context_window_changed, None);
-
-    active.runtime = Runtime::Idle;
-    active.push_scheduled("idle".into(), Vec::new(), test_start());
-    active.stamp_context_window_change(Some(1_000_000));
-    assert_eq!(active.queue[2].context_window_changed, None);
-}
-
-#[test]
-fn shutdown_all_notifies_active_and_parked_live_providers() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-app-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-
-    let (active_commands, active_receiver) = smol::channel::unbounded();
-    let (parked_commands, parked_receiver) = smol::channel::unbounded();
-    let parked = live_session(ProviderKind::ClaudeCode, parked_commands);
-    let (other_commands, other_receiver) = smol::channel::unbounded();
-    let other = live_session(ProviderKind::Acp, other_commands);
+    let chosen = |id: &str, value: serde_json::Value| OptionSelection {
+        id: id.into(),
+        value,
+    };
+    let value = |status: &SessionStatus, id: &str| {
+        status
+            .provider_option_selections
+            .iter()
+            .find(|selection| selection.id == id)
+            .map(|selection| selection.value.clone())
+    };
     state.update(cx, |state, cx| {
-        state.install_selected(live_session(ProviderKind::Codex, active_commands));
-        state
-            .residents
-            .parked
-            .insert(parked.meta.id.clone(), parked);
-        state.residents.parked.insert(other.meta.id.clone(), other);
-        state.shutdown_all(cx);
+        let mut session = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);
+        session.meta.id = "confirmed".into();
+        session.meta.option_selections = vec![
+            chosen(agent::EFFORT_OPTION_ID, serde_json::json!("high")),
+            chosen("thinking", serde_json::json!(true)),
+        ];
+        session
+            .live_option_selections
+            .clone_from(&session.meta.option_selections);
+        state.sessions.push(session.meta.clone());
+        state.install_selected(session);
+        let level = |value: &str| agent::SelectOption {
+            value: value.into(),
+            label: value.into(),
+            description: None,
+            unavailable: None,
+            speed: None,
+            summary: None,
+            approval: None,
+        };
+        state.on_event(
+            "confirmed",
+            AgentEvent::ProviderOptions {
+                descriptors: vec![
+                    OptionDescriptor::Select {
+                        id: agent::EFFORT_OPTION_ID.into(),
+                        label: "Effort".into(),
+                        options: vec![level("medium"), level("high")],
+                        default_value: Some("medium".into()),
+                        role: agent::OptionRole::Effort,
+                        apply: Default::default(),
+                        recommended: None,
+                        permissive: None,
+                        minimum: None,
+                    },
+                    OptionDescriptor::Boolean {
+                        id: "thinking".into(),
+                        label: "Thinking".into(),
+                        default_value: false,
+                        role: agent::OptionRole::Thinking,
+                        apply: Default::default(),
+                        recommended: None,
+                        permissive: None,
+                    },
+                ],
+                selections: Vec::new(),
+            },
+            cx,
+        );
+        let before = state.session_status_snapshot("confirmed").unwrap();
+        assert_eq!(value(&before, agent::EFFORT_OPTION_ID), None);
+        assert_eq!(value(&before, "thinking"), Some(serde_json::json!(true)));
+        assert_eq!(before.provider_option_unconfirmed, ["thinking"]);
+        assert_eq!(before.running_model, None);
 
-        assert!(matches!(
-            active_receiver.try_recv(),
-            Ok(SessionCommand::Shutdown)
-        ));
-        assert!(matches!(
-            parked_receiver.try_recv(),
-            Ok(SessionCommand::Shutdown)
-        ));
-        assert!(matches!(
-            other_receiver.try_recv(),
-            Ok(SessionCommand::Shutdown)
-        ));
+        state.on_event(
+            "confirmed",
+            AgentEvent::ProviderOptions {
+                descriptors: Vec::new(),
+                selections: vec![chosen(agent::EFFORT_OPTION_ID, serde_json::json!("medium"))],
+            },
+            cx,
+        );
+        state.on_event(
+            "confirmed",
+            AgentEvent::SessionModel {
+                model: "claude-test".into(),
+            },
+            cx,
+        );
+        let after = state.session_status_snapshot("confirmed").unwrap();
+        assert_eq!(
+            value(&after, agent::EFFORT_OPTION_ID),
+            Some(serde_json::json!("medium"))
+        );
+        assert_eq!(
+            after.provider_option_requested_selections[0],
+            chosen(agent::EFFORT_OPTION_ID, serde_json::json!("high"))
+        );
+        assert_eq!(after.running_model.as_deref(), Some("claude-test"));
     });
 }
 
@@ -6515,421 +7066,44 @@ fn skill_mentions_use_the_providers_native_invocation() {
     }
 }
 
-#[test]
-fn relay_context_rides_only_with_the_first_handoff_message() {
-    let (commands, receiver) = smol::channel::unbounded();
-    let mut active = live_session(ProviderKind::Codex, commands);
-    active.push_queued("continue here".into(), Vec::new());
-    active.queue[0].relay_transcript = Some("# prior work".into());
-    active.push_queued("follow up".into(), Vec::new());
-
-    assert_eq!(active.dispatch_next_pending(test_start()), Ok(true));
-    let first = receiver.try_recv().unwrap();
-    let SessionCommand::SendTurn {
-        delivery_id, text, ..
-    } = first
-    else {
-        panic!("expected first send turn");
-    };
-    assert!(text.starts_with(tcode_core::relay::RELAY_PREAMBLE));
-    assert!(text.contains("<conversation-transcript>\n# prior work\n</conversation-transcript>"));
-    assert!(text.contains("<new-user-message>\ncontinue here\n</new-user-message>"));
-    assert_eq!(active.dispatch_next_pending(test_start()), Ok(false));
-    assert!(receiver.try_recv().is_err());
-
-    assert_eq!(
-        active.accept_turn_delivery(delivery_id).unwrap().text,
-        "continue here"
+/// A Claude Code thread whose harness runs `live` and whose turn has ended,
+/// with `background` pieces of work going on, the user then choosing
+/// `chosen` for its next message.
+fn settings_scene(
+    cx: &mut TestAppContext,
+    store: &SessionStore,
+    id: &str,
+    background: usize,
+    chosen: &str,
+) -> (TestEntity, Providers, Played) {
+    stored_thread(
+        store,
+        id,
+        ProviderKind::ClaudeCode,
+        &store.root().join(id),
+        |meta| {
+            meta.model = Some("claude-opus-4-8".into());
+        },
     );
-    active.turn_in_flight = false;
-    assert_eq!(active.dispatch_next_pending(test_start()), Ok(true));
-    assert!(matches!(
-        receiver.try_recv(),
-        Ok(SessionCommand::SendTurn { text, .. }) if text == "follow up"
-    ));
-}
-
-#[test]
-fn startup_generation_rejects_stale_same_session_attempt() {
-    for stale_after_live in [false, true] {
-        let cx = &mut TestAppContext::default();
-        let store = TestStore::new("tcode-startup-generation");
-        let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
-        meta.id = "same-session".into();
-        store.upsert_meta(&meta).unwrap();
-        let (starts, started) = smol::channel::unbounded();
-        let launcher = ProviderLauncher(Arc::new(move |_, _| {
-            let (complete, completed) = smol::channel::bounded(1);
-            starts.try_send(complete).unwrap();
-            Box::pin(async move { Ok(completed.recv().await.unwrap()) })
-        }));
-        let state = cx.new_entity({
-            let mut state = TestClientState::new((*store).clone());
-            state.set_provider_launcher(launcher);
-            state
-        });
-        state.update(cx, |state, cx| {
-            state.select_session("same-session", cx);
-            state.send_turn("same-session", "obsolete attempt".into(), Vec::new(), cx);
-        });
-        let first = cx.run_until_recv(&started);
-        state.update(cx, |state, cx| {
-            state.shutdown_active("same-session", cx);
-            state.host.select_session("same-session", cx);
-            state.send_turn("same-session", "current attempt".into(), Vec::new(), cx);
-        });
-        let second = cx.run_until_recv(&started);
-        let (stale_commands, stale_actor) = smol::channel::unbounded();
-        let (_stale_events, stale_events_rx) = smol::channel::unbounded();
-        let stale_handle = SessionHandle {
-            provider: ProviderKind::Codex,
-            commands: stale_commands,
-            events: stale_events_rx,
-        };
-        let (current_commands, current_actor) = smol::channel::unbounded();
-        let (_current_events, current_events_rx) = smol::channel::unbounded();
-        let current_handle = SessionHandle {
-            provider: ProviderKind::Codex,
-            commands: current_commands.clone(),
-            events: current_events_rx,
-        };
-        if stale_after_live {
-            second.try_send(current_handle).unwrap();
-            cx.run_until(|_| !current_actor.is_empty());
-            first.try_send(stale_handle).unwrap();
-        } else {
-            first.try_send(stale_handle).unwrap();
-            cx.run_until(|_| !stale_actor.is_empty());
-            second.try_send(current_handle).unwrap();
-        }
-        cx.run_until(|_| !stale_actor.is_empty() && !current_actor.is_empty());
-        assert!(matches!(
-            stale_actor.try_recv(),
-            Ok(SessionCommand::Shutdown)
-        ));
-        assert!(stale_actor.try_recv().is_err());
-        let delivery_id = match current_actor.try_recv().unwrap() {
-            SessionCommand::SendTurn {
-                delivery_id, text, ..
-            } => {
-                assert_eq!(text, "current attempt");
-                delivery_id
-            }
-            other => panic!("expected current delivery, got {other:?}"),
-        };
-        state.update(cx, |state, cx| {
-            state.on_event("same-session", AgentEvent::TurnAccepted { delivery_id }, cx);
-            let active = state.resident("same-session").unwrap();
-            assert!(matches!(&active.runtime, Runtime::Live(commands) if commands.same_channel(&current_commands)));
-        });
-        assert!(
-            current_actor.try_recv().is_err(),
-            "stale completion must not restart or duplicate current delivery"
-        );
-    }
-}
-
-#[test]
-fn unaccepted_send_survives_eof_and_is_delivered_once_after_resume() {
-    let cx = &mut TestAppContext::default();
-    let cwd = std::env::temp_dir().join(format!(
-        "tcode-acked-delivery-test-{}",
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&cwd).unwrap();
-    let test_store = TestStore::new("tcode-acked-delivery-data");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (session, first_actor) = fake_live_session(cwd.clone());
-    let session_id = session.meta.id.clone();
-
-    state.update(cx, |state, cx| {
-        state.install_selected(session);
-        // The preceding model turn has completed, but Claude still owns a
-        // background process. This is the idle-send window from the repro.
-        state.on_event(
-            &session_id,
-            AgentEvent::TurnStarted {
-                turn_id: "background-launch".into(),
+    let (state, providers) = played_host(cx, store);
+    let provider = first_turn(&state, cx, &providers, id, 0);
+    provider.play([
+        AgentEvent::BackgroundTasksChanged { count: background },
+        completed_turn("turn"),
+    ]);
+    cx.run_until_seen(|view| view.status(id).running_turn.is_none());
+    state
+        .command(
+            cx,
+            Command::SetActiveModel {
+                session_id: id.into(),
+                provider: ProviderKind::ClaudeCode,
+                model: Some(chosen.into()),
+                profile_id: None,
             },
-            cx,
-        );
-        state.on_event(
-            &session_id,
-            AgentEvent::BackgroundTasksChanged { count: 1 },
-            cx,
-        );
-        state.on_event(
-            &session_id,
-            AgentEvent::TurnCompleted {
-                turn_id: "background-launch".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            cx,
-        );
-
-        state.send_turn(&session_id, "survive the eof race".into(), Vec::new(), cx);
-        let (delivery_id, submitted_text) = match next_command(&first_actor) {
-            Ok(SessionCommand::SendTurn {
-                delivery_id, text, ..
-            }) => (delivery_id, text),
-            other => panic!("expected submitted SendTurn, got {other:?}"),
-        };
-        assert!(
-            !state
-                .store
-                .read_events(&session_id)
-                .unwrap()
-                .iter()
-                .any(|stored| {
-                    matches!(
-                        &stored.event,
-                        AgentEvent::ItemCompleted(ThreadItem {
-                            content: ItemContent::UserMessage { text, .. },
-                            ..
-                        }) if text == "survive the eof race"
-                    )
-                })
-        );
-
-        // EOF wins before the first actor writes, so no TurnAccepted exists.
-        state.on_event(
-            &session_id,
-            AgentEvent::SessionClosed {
-                reason: Some("claude closed stdout".into()),
-            },
-            cx,
-        );
-
-        let (resumed_commands, resumed_actor) = smol::channel::unbounded();
-        state.selected_session_mut().unwrap().runtime = Runtime::Live(resumed_commands);
-        assert_eq!(state.dispatch_next_queued(&session_id, cx), Ok(true));
-        let retried_delivery = match next_command(&resumed_actor) {
-            Ok(SessionCommand::SendTurn {
-                delivery_id: retried_id,
-                text,
-                ..
-            }) if text == submitted_text => retried_id,
-            other => panic!("expected retried SendTurn, got {other:?}"),
-        };
-        assert_eq!(retried_delivery, delivery_id);
-
-        state.on_event(
-            &session_id,
-            AgentEvent::TurnAccepted {
-                delivery_id: retried_delivery,
-            },
-            cx,
-        );
-        // A duplicate acceptance cannot remove or persist anything twice.
-        state.on_event(
-            &session_id,
-            AgentEvent::TurnAccepted {
-                delivery_id: retried_delivery,
-            },
-            cx,
-        );
-    });
-    cx.run_until_parked();
-    state.update(cx, |state, _| {
-        let delivered = state
-            .store
-            .read_events(&session_id)
-            .unwrap()
-            .iter()
-            .filter(|stored| {
-                matches!(
-                    &stored.event,
-                    AgentEvent::ItemCompleted(ThreadItem {
-                        content: ItemContent::UserMessage { text, .. },
-                        ..
-                    }) if text == "survive the eof race"
-                )
-            })
-            .count();
-        assert_eq!(delivered, 1);
-    });
-
-    let _ = std::fs::remove_dir_all(&cwd);
-}
-
-#[test]
-fn inferred_startup_model_updates_live_model_without_restart() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-live-model-sync-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (commands, actor) = smol::channel::unbounded();
-    let mut session = live_session(ProviderKind::ClaudeCode, commands);
-    session.meta.id = "model-sync".into();
-
-    state.update(cx, |state, cx| {
-        state.install_selected(session);
-        state.on_event(
-            "model-sync",
-            AgentEvent::SessionStarted {
-                provider_session_id: "provider-session".into(),
-                resume: agent::ResumeCursor(serde_json::json!({
-                    "session_id": "provider-session"
-                })),
-                model: Some("claude-sonnet-4-6".into()),
-            },
-            cx,
-        );
-        let active = state.selected_session().unwrap();
-        assert_eq!(active.meta.model.as_deref(), Some("claude-sonnet-4-6"));
-
-        state.send_turn("model-sync", "first message".into(), Vec::new(), cx);
-        assert!(matches!(
-            actor.try_recv(),
-            Ok(SessionCommand::SendTurn { .. })
-        ));
-        assert!(actor.try_recv().is_err(), "phantom restart sent Shutdown");
-    });
-}
-
-#[test]
-fn select_session_readopts_idle_resident_without_changing_recency_or_shutdown() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-idle-resident-readopt-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (commands, actor) = smol::channel::unbounded();
-    let mut session = live_session(ProviderKind::ClaudeCode, commands);
-    session.meta.id = "idle-resident".into();
-    // The thread was last active an hour ago.
-    let updated_at = cx.now_secs();
-    cx.clock.advance(Duration::from_secs(3600));
-    session.meta.updated_at = updated_at;
-    let meta = session.meta.clone();
-    test_store.upsert_meta(&meta).unwrap();
-
-    state.update(cx, |state, cx| {
-        state.sessions.push(meta);
-        state.install_selected(session);
-        state.park_active(cx);
-        state.select_session("idle-resident", cx);
-
-        let active = state.selected_session().unwrap();
-        assert_eq!(active.meta.id, "idle-resident");
-        assert_eq!(active.meta.updated_at, updated_at);
-        assert_eq!(state.sessions[0].updated_at, updated_at);
-        assert!(actor.try_recv().is_err(), "re-adoption sent Shutdown");
-    });
-    cx.run_until_parked();
-    assert_eq!(test_store.load_index().unwrap()[0].updated_at, updated_at);
-}
-
-#[test]
-fn resident_idle_reaper_shuts_down_untouched_provider() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-idle-resident-reaper-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (commands, actor) = smol::channel::unbounded();
-    let mut session = live_session(ProviderKind::ClaudeCode, commands);
-    session.meta.id = "idle-resident".into();
-
-    state.update(cx, |state, cx| {
-        state.install_selected(session);
-        state.park_active(cx);
-    });
-    cx.clock.advance(RESIDENT_IDLE_GRACE);
-    // The grace timer's completion lands through the mailbox.
-    cx.run_until(|state| !state.residents.parked.contains_key("idle-resident"));
-
-    assert!(matches!(actor.try_recv(), Ok(SessionCommand::Shutdown)));
-}
-
-#[test]
-fn idle_grace_runs_from_the_last_turn_end_whether_viewed_or_parked() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-idle-grace-turn-end-test");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let (commands, actor) = smol::channel::unbounded();
-    let mut session = live_session(ProviderKind::ClaudeCode, commands);
-    session.meta.id = "idle-resident".into();
-    let meta = session.meta.clone();
-    let complete_turn = |state: &mut AppState, turn: &str, cx: &mut HostCx| {
-        state.on_event(
-            "idle-resident",
-            AgentEvent::TurnStarted {
-                turn_id: turn.into(),
-            },
-            cx,
-        );
-        state.on_event(
-            "idle-resident",
-            AgentEvent::TurnCompleted {
-                turn_id: turn.into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            cx,
-        );
-        state.residents.live["idle-resident"].idle_since.unwrap()
-    };
-
-    let clock = cx.clock.clone();
-    state.update(cx, |state, cx| {
-        state.sessions.push(meta);
-        state.install_selected(session);
-        let first_turn_end = complete_turn(state, "first", cx);
-        clock.advance(Duration::from_secs(60));
-        state.park_active(cx);
-        assert_eq!(
-            state.residents.parked["idle-resident"].idle_since,
-            Some(first_turn_end),
-            "parking restarted the grace"
-        );
-        state.select_session("idle-resident", cx);
-        let second_turn_end = complete_turn(state, "second", cx);
-        // Fire both grace timers now; the real ones would land identically
-        // but later. The first idle period ended with the second turn.
-        state.reap_idle_resident("idle-resident", first_turn_end, cx);
-        assert!(next_command(&actor).is_err(), "stale timer sent Shutdown");
-        state.reap_idle_resident("idle-resident", second_turn_end, cx);
-
-        assert!(matches!(next_command(&actor), Ok(SessionCommand::Shutdown)));
-    });
-}
-
-#[test]
-fn resident_idle_lru_evicts_only_oldest_provider() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-idle-resident-lru-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let base = cx.clock.host_clock().now();
-    let mut actors = Vec::new();
-
-    state.update(cx, |state, cx| {
-        for index in 0..MAX_IDLE_RESIDENTS {
-            let (commands, actor) = smol::channel::unbounded();
-            let mut resident = live_session(ProviderKind::ClaudeCode, commands);
-            resident.meta.id = format!("resident-{index}");
-            resident.idle_since =
-                Some(base - Duration::from_secs((MAX_IDLE_RESIDENTS - index) as u64));
-            state
-                .residents
-                .parked
-                .insert(resident.meta.id.clone(), resident);
-            actors.push(actor);
-        }
-
-        let (commands, newest_actor) = smol::channel::unbounded();
-        let mut newest = live_session(ProviderKind::ClaudeCode, commands);
-        newest.meta.id = "resident-newest".into();
-        state.install_selected(newest);
-        state.park_active(cx);
-        actors.push(newest_actor);
-    });
-
-    assert!(matches!(actors[0].try_recv(), Ok(SessionCommand::Shutdown)));
-    for actor in &actors[1..] {
-        assert!(actor.try_recv().is_err(), "non-LRU resident was shut down");
-    }
+        )
+        .unwrap();
+    (state, providers, provider)
 }
 
 /// A restart would kill a background task, so it waits for the task; a message
@@ -6939,101 +7113,63 @@ fn resident_idle_lru_evicts_only_oldest_provider() {
 fn settings_restart_waits_for_background_follow_up() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-background-restart-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (commands, actor) = smol::channel::unbounded();
-    let mut session = live_session(ProviderKind::ClaudeCode, commands);
-    session.meta.id = "background-restart".into();
-    session.live_model = Some("claude-opus-4-8".into());
-    session.meta.model = Some("claude-sonnet-4-6".into());
-    session.background_task_count = 1;
-
-    state.update(cx, |state, _| {
-        state
-            .settings
-            .provider_mut(ProviderKind::ClaudeCode)
-            .binary_path = Some("/nonexistent/tcode-test-claude".into());
-        state.sessions.push(session.meta.clone());
-        state.install_selected(session);
-    });
-    let send = |state: &TestEntity, cx: &mut TestAppContext, id, text: &str| {
-        state.dispatch_command(
-            cx,
-            id,
-            Command::SendTurn {
-                session_id: "background-restart".into(),
-                text: text.into(),
-                attachment_paths: Vec::new(),
-            },
-        );
-    };
-
-    send(&state, cx, 1, "goes out beside the task");
+    let (state, providers, actor) = settings_scene(
+        cx,
+        &test_store,
+        "background-restart",
+        1,
+        "claude-sonnet-4-6",
+    );
+    state.send(cx, "background-restart", "goes out beside the task");
     assert!(matches!(
-        next_command(&actor),
-        Ok(SessionCommand::ApplySettings { .. })
+        actor.next_command(cx),
+        SessionCommand::ApplySettings { .. }
     ));
-    state.update(cx, |state, cx| {
-        state.on_event(
-            "background-restart",
-            AgentEvent::SettingsApplied { applied: false },
-            cx,
-        );
-    });
-    let delivery_id = match next_command(&actor) {
-        Ok(SessionCommand::SendTurn {
-            delivery_id, text, ..
-        }) => {
-            assert_eq!(text, "goes out beside the task");
-            delivery_id
-        }
-        other => panic!("the message must go out on the running process: {other:?}"),
-    };
-    state.update(cx, |state, cx| {
-        state.on_event(
-            "background-restart",
-            AgentEvent::TurnAccepted { delivery_id },
-            cx,
-        );
-        let session = state.selected_session().unwrap();
-        let entries = &session.timeline.entries;
-        assert!(
-            matches!(entries.last().unwrap().content, EntryContent::SettingsKept),
-            "the message says it kept the old settings: {:?}",
-            entries
-                .iter()
-                .map(|entry| &entry.content)
-                .collect::<Vec<_>>()
-        );
-        state.on_event(
-            "background-restart",
-            AgentEvent::TurnCompleted {
-                turn_id: "beside-the-task".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            cx,
-        );
-    });
+    actor.play([AgentEvent::SettingsApplied { applied: false }]);
+    let (delivery_id, text) = actor.next_turn(cx);
+    assert_eq!(text, "goes out beside the task");
+    actor.play([AgentEvent::TurnAccepted { delivery_id }]);
+    actor.fence(cx, "background-restart");
+    let entries = cx.seen().timeline("background-restart").entries;
     assert!(
-        next_command(&actor).is_err(),
+        matches!(entries.last().unwrap().content, EntryContent::SettingsKept),
+        "the message says it kept the old settings: {:?}",
+        entries
+            .iter()
+            .map(|entry| &entry.content)
+            .collect::<Vec<_>>()
+    );
+    actor.play([
+        AgentEvent::TurnStarted {
+            turn_id: "beside-the-task".into(),
+        },
+        completed_turn("beside-the-task"),
+    ]);
+    actor.fence(cx, "background-restart");
+    assert!(
+        next_command(&actor.commands).is_err(),
         "the running task keeps its process"
     );
 
     // An early drain still cannot restart the provider: its self-invoked
     // follow-up turn may be about to start.
-    state.update(cx, |state, cx| {
-        state.on_event(
-            "background-restart",
-            AgentEvent::BackgroundTasksChanged { count: 0 },
-            cx,
-        );
-    });
-    assert!(next_command(&actor).is_err());
+    actor.play([AgentEvent::BackgroundTasksChanged { count: 0 }]);
+    actor.fence(cx, "background-restart");
+    assert!(next_command(&actor.commands).is_err());
 
-    send(&state, cx, 2, "takes the new model");
-    assert!(matches!(next_command(&actor), Ok(SessionCommand::Shutdown)));
-    state.read(|state| assert_eq!(state.selected_session().unwrap().queue.len(), 1));
+    providers.hold();
+    state.send(cx, "background-restart", "takes the new model");
+    assert!(matches!(actor.next_command(cx), SessionCommand::Shutdown));
+    assert_eq!(
+        cx.seen()
+            .status("background-restart")
+            .queued_messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        ["takes the new model"]
+    );
+    providers.let_go();
 }
 
 /// A harness that can take a new model and effort where it runs is asked to,
@@ -7043,75 +7179,51 @@ fn settings_restart_waits_for_background_follow_up() {
 fn a_new_model_is_taken_on_the_running_process() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-live-settings-test");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let (commands, actor) = smol::channel::unbounded();
-    let mut session = live_session(ProviderKind::ClaudeCode, commands);
-    session.meta.id = "live-settings".into();
-    session.live_model = Some("claude-opus-4-8".into());
-    session.meta.model = Some("claude-sonnet-4-6".into());
-    session.background_task_count = 1;
+    let (state, _providers, actor) =
+        settings_scene(cx, &test_store, "live-settings", 1, "claude-sonnet-4-6");
     let effort = OptionSelection {
         id: "reasoningEffort".into(),
         value: serde_json::json!("low"),
     };
-    session.meta.option_selections.push(effort.clone());
-
-    state.update(cx, |state, _| {
-        state.sessions.push(session.meta.clone());
-        state.install_selected(session);
-    });
-    state.dispatch_command(
-        cx,
-        1,
-        Command::SendTurn {
-            session_id: "live-settings".into(),
-            text: "on the new model".into(),
-            attachment_paths: Vec::new(),
-        },
-    );
-    match next_command(&actor) {
-        Ok(SessionCommand::ApplySettings {
+    state
+        .command(
+            cx,
+            Command::SetActiveOption {
+                session_id: "live-settings".into(),
+                id: effort.id.clone(),
+                value: Some(effort.value.clone()),
+            },
+        )
+        .unwrap();
+    state.send(cx, "live-settings", "on the new model");
+    match actor.next_command(cx) {
+        SessionCommand::ApplySettings {
             model,
             option_selections,
-        }) => {
+        } => {
             assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
-            assert_eq!(option_selections, [effort]);
+            assert!(option_selections.contains(&effort), "{option_selections:?}");
         }
         other => panic!("expected the settings to go first: {other:?}"),
     }
     assert!(
-        next_command(&actor).is_err(),
+        next_command(&actor.commands).is_err(),
         "the message waits its answer"
     );
-
-    state.update(cx, |state, cx| {
-        state.on_event(
-            "live-settings",
-            AgentEvent::SettingsApplied { applied: true },
-            cx,
-        );
-    });
-    let delivery_id = match next_command(&actor) {
-        Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
-        other => panic!("the message goes out behind the answer: {other:?}"),
-    };
-    state.update(cx, |state, cx| {
-        state.on_event(
-            "live-settings",
-            AgentEvent::TurnAccepted { delivery_id },
-            cx,
-        );
-        let session = state.selected_session().unwrap();
-        assert!(
-            !session
-                .timeline
-                .entries
-                .iter()
-                .any(|entry| matches!(entry.content, EntryContent::SettingsKept)),
-            "the message ran on the settings it asked for"
-        );
-        assert!(!session.launch_settings_changed_while_live());
-    });
+    actor.play([AgentEvent::SettingsApplied { applied: true }]);
+    let (delivery_id, _) = actor.next_turn(cx);
+    actor.play([AgentEvent::TurnAccepted { delivery_id }]);
+    actor.fence(cx, "live-settings");
+    assert!(
+        !cx.seen()
+            .timeline("live-settings")
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.content, EntryContent::SettingsKept)),
+        "the message ran on the settings it asked for"
+    );
+    let status = cx.seen().status("live-settings");
+    assert!(!status.model_pending_restart && !status.options_pending_restart);
 }
 
 /// What the process refuses takes a restart at once when nothing would be
@@ -7121,32 +7233,15 @@ fn a_new_model_is_taken_on_the_running_process() {
 fn a_refused_settings_change_falls_back_to_the_restart() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-refused-settings-test");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let (commands, actor) = smol::channel::unbounded();
-    let mut session = live_session(ProviderKind::ClaudeCode, commands);
-    session.meta.id = "refused-settings".into();
-    session.live_model = Some("claude-opus-4-8".into());
-    session.meta.model = Some("claude-sonnet-4-6".into());
-
-    state.update(cx, |state, cx| {
-        state
-            .settings
-            .provider_mut(ProviderKind::ClaudeCode)
-            .binary_path = Some("/nonexistent/tcode-test-claude".into());
-        state.sessions.push(session.meta.clone());
-        state.install_selected(session);
-        state.send_turn("refused-settings", "go".into(), Vec::new(), cx);
-        assert!(matches!(
-            next_command(&actor),
-            Ok(SessionCommand::ApplySettings { .. })
-        ));
-        state.on_event(
-            "refused-settings",
-            AgentEvent::SettingsApplied { applied: false },
-            cx,
-        );
-    });
-    assert!(matches!(next_command(&actor), Ok(SessionCommand::Shutdown)));
+    let (state, _providers, actor) =
+        settings_scene(cx, &test_store, "refused-settings", 0, "claude-sonnet-4-6");
+    state.send(cx, "refused-settings", "go");
+    assert!(matches!(
+        actor.next_command(cx),
+        SessionCommand::ApplySettings { .. }
+    ));
+    actor.play([AgentEvent::SettingsApplied { applied: false }]);
+    assert!(matches!(actor.next_command(cx), SessionCommand::Shutdown));
 }
 
 /// Whether a lead's agents hold it: one still runs, or a dispatched one
@@ -7165,8 +7260,22 @@ fn children_hold(activity: &tcode_protocol::SessionActivity) -> bool {
 fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-background-stop-test");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let (commands, actor) = smol::channel::unbounded();
+    stored_thread(
+        &test_store,
+        "lists",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("lists"),
+        |_| {},
+    );
+    stored_thread(
+        &test_store,
+        "cannot",
+        ProviderKind::Pi,
+        &test_store.root().join("cannot"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
     let task = agent::BackgroundTask {
         id: "bl5ti808a".into(),
         name: "sleep 300".into(),
@@ -7175,79 +7284,63 @@ fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
         started_at: 1,
         started_reported: false,
     };
-    let listed = |state: &TestEntity| {
-        state.read(|state| {
-            state
-                .session_status_snapshot("lists")
-                .unwrap()
-                .background_tasks
+    let listed = |cx: &TestAppContext| cx.seen().status("lists").background_tasks.clone();
+    let actor = first_turn(&state, cx, &providers, "lists", 0);
+    let started = |id: &str, content| {
+        AgentEvent::ItemStarted(ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content,
         })
     };
-    state.update(cx, |state, cx| {
-        let mut session = live_session(ProviderKind::ClaudeCode, commands.clone());
-        session.meta.id = "lists".into();
-        state.sessions.push(session.meta.clone());
-        state.install_selected(session);
-        let started = |id: &str, content| {
-            AgentEvent::ItemStarted(ThreadItem {
-                id: id.into(),
-                parent_item_id: None,
-                content,
-            })
-        };
-        let backgrounded = |id: &str| AgentEvent::ItemBackgrounded {
-            item_id: id.into(),
-            parent_item_id: None,
-        };
-        for event in [
-            AgentEvent::TurnStarted {
-                turn_id: "t1".into(),
+    let backgrounded = |id: &str| AgentEvent::ItemBackgrounded {
+        item_id: id.into(),
+        parent_item_id: None,
+    };
+    actor.play([
+        started(
+            "toolu-sleep",
+            ItemContent::CommandExecution {
+                command: "sleep 300".into(),
+                input: Vec::new(),
+                output: String::new(),
+                exit_code: None,
+                status: ItemStatus::InProgress,
             },
-            started(
-                "toolu-sleep",
-                ItemContent::CommandExecution {
-                    command: "sleep 300".into(),
-                    input: Vec::new(),
-                    output: String::new(),
-                    exit_code: None,
-                    status: ItemStatus::InProgress,
-                },
-            ),
-            backgrounded("toolu-sleep"),
-            started(
-                "toolu-review",
-                ItemContent::Subagent {
-                    agent_type: "general".into(),
-                    description: "Review the migration".into(),
-                    status: ItemStatus::InProgress,
-                    summary: None,
-                    model: None,
-                    effort: None,
-                },
-            ),
-            backgrounded("toolu-review"),
-            // The subagent's own work opens its mirror's turn.
-            AgentEvent::ItemStarted(ThreadItem {
-                id: "toolu-review-read".into(),
-                parent_item_id: Some("toolu-review".into()),
-                content: ItemContent::CommandExecution {
-                    command: "cat migration.sql".into(),
-                    input: Vec::new(),
-                    output: String::new(),
-                    exit_code: None,
-                    status: ItemStatus::InProgress,
-                },
-            }),
-            AgentEvent::BackgroundTaskList {
-                tasks: vec![task.clone()],
+        ),
+        backgrounded("toolu-sleep"),
+        started(
+            "toolu-review",
+            ItemContent::Subagent {
+                agent_type: "general".into(),
+                description: "Review the migration".into(),
+                status: ItemStatus::InProgress,
+                summary: None,
+                model: None,
+                effort: None,
             },
-        ] {
-            state.on_event("lists", event, cx);
-        }
-    });
+        ),
+        backgrounded("toolu-review"),
+        // The subagent's own work opens its mirror's turn.
+        AgentEvent::ItemStarted(ThreadItem {
+            id: "toolu-review-read".into(),
+            parent_item_id: Some("toolu-review".into()),
+            content: ItemContent::CommandExecution {
+                command: "cat migration.sql".into(),
+                input: Vec::new(),
+                output: String::new(),
+                exit_code: None,
+                status: ItemStatus::InProgress,
+            },
+        }),
+        AgentEvent::BackgroundTaskList {
+            tasks: vec![task.clone()],
+        },
+    ]);
+    actor.fence(cx, "lists");
     // The subagent runs in the background, and counts there alone.
     assert_eq!(
-        state.read(|state| state.index_snapshot().summary.activity["lists"].background),
+        cx.seen().activity("lists").unwrap().background,
         tcode_protocol::BackgroundActivity {
             tasks: 2,
             agents: 0
@@ -7266,7 +7359,7 @@ fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
                 )
             })
     };
-    let now = listed(&state);
+    let now = listed(cx);
     assert_eq!(
         (
             now.len(),
@@ -7285,34 +7378,24 @@ fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
             "Review the migration".into()
         ))
     );
-    state.update(cx, |state, _| {
-        let mut session = live_session(ProviderKind::Pi, commands);
-        session.meta.id = "cannot".into();
-        state.sessions.push(session.meta.clone());
-        state
-            .residents
-            .live
-            .insert(session.meta.id.clone(), session);
-    });
+    let pi = first_turn(&state, cx, &providers, "cannot", 1);
 
-    for (id, session_id, task_id) in [
-        (1, "lists", Some(task.id.clone())),
-        (2, "lists", None),
-        (3, "cannot", None),
+    for (session_id, task_id) in [
+        ("lists", Some(task.id.clone())),
+        ("lists", None),
+        ("cannot", None),
     ] {
-        state.dispatch_command(
+        let _ = state.command(
             cx,
-            id,
             Command::StopBackgroundTask {
                 session_id: session_id.into(),
                 task_id,
             },
         );
     }
-    for (id, session_id) in [(4, "lists"), (5, "cannot")] {
-        state.dispatch_command(
+    for session_id in ["lists", "cannot"] {
+        let _ = state.command(
             cx,
-            id,
             Command::MoveToBackground {
                 session_id: session_id.into(),
                 item_id: "toolu-build".into(),
@@ -7320,31 +7403,27 @@ fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
         );
     }
     assert!(matches!(
-        next_command(&actor),
-        Ok(SessionCommand::StopBackgroundTask { task_id: Some(id) }) if id == task.id
+        actor.next_command(cx),
+        SessionCommand::StopBackgroundTask { task_id: Some(id) } if id == task.id
     ));
     assert!(matches!(
-        next_command(&actor),
-        Ok(SessionCommand::StopBackgroundTask { task_id: None })
+        actor.next_command(cx),
+        SessionCommand::StopBackgroundTask { task_id: None }
     ));
     assert!(matches!(
-        next_command(&actor),
-        Ok(SessionCommand::MoveToBackground { item_id }) if item_id == "toolu-build"
+        actor.next_command(cx),
+        SessionCommand::MoveToBackground { item_id } if item_id == "toolu-build"
     ));
-    assert!(next_command(&actor).is_err());
+    assert!(next_command(&actor.commands).is_err());
+    assert!(next_command(&pi.commands).is_err(), "Pi is never asked");
     assert!(
-        listed(&state)[0].stopping_since.is_some(),
+        listed(cx)[0].stopping_since.is_some(),
         "the stop shows until the harness drops the task"
     );
 
-    state.update(cx, |state, cx| {
-        state.on_event(
-            "lists",
-            AgentEvent::BackgroundTaskList { tasks: Vec::new() },
-            cx,
-        )
-    });
-    let now = listed(&state);
+    actor.play([AgentEvent::BackgroundTaskList { tasks: Vec::new() }]);
+    actor.fence(cx, "lists");
+    let now = listed(cx);
     let sleep = now
         .iter()
         .find(|status| status.task.id == "toolu-sleep")
@@ -7362,54 +7441,48 @@ fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
 fn force_terminate_kills_a_harness_that_does_not_answer_a_stop() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-force-terminate-test");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let (commands, actor) = smol::channel::unbounded();
-    let mut session = live_session(ProviderKind::ClaudeCode, commands);
-    session.meta.id = "unanswering".into();
-    state.update(cx, |state, cx| {
-        state.sessions.push(session.meta.clone());
-        state.install_selected(session);
-        state.on_event(
-            "unanswering",
-            AgentEvent::TurnStarted {
-                turn_id: "hung".into(),
-            },
+    stored_thread(
+        &test_store,
+        "unanswering",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    let actor = first_turn(&state, cx, &providers, "unanswering", 0);
+    state
+        .command(
             cx,
-        );
-    });
-    state.dispatch_command(
-        cx,
-        1,
-        Command::Interrupt {
-            session_id: "unanswering".into(),
-        },
-    );
-    assert!(matches!(
-        next_command(&actor),
-        Ok(SessionCommand::Interrupt)
-    ));
-    state.read(|state| {
-        let status = state.session_status_snapshot("unanswering").unwrap();
-        assert!(status.stopping && status.stopping_since.is_some());
-    });
+            Command::Interrupt {
+                session_id: "unanswering".into(),
+            },
+        )
+        .unwrap();
+    assert!(matches!(actor.next_command(cx), SessionCommand::Interrupt));
+    let status = cx.seen().status("unanswering");
+    assert!(status.stopping && status.stopping_since.is_some());
 
-    state.dispatch_command(
-        cx,
-        2,
-        Command::ForceTerminate {
-            session_id: "unanswering".into(),
-        },
+    state
+        .command(
+            cx,
+            Command::ForceTerminate {
+                session_id: "unanswering".into(),
+            },
+        )
+        .unwrap();
+    assert!(matches!(actor.next_command(cx), SessionCommand::Shutdown));
+    cx.run_until_seen(|view| has_record(view, "unanswering", is_turn_end));
+    assert_eq!(
+        cx.seen()
+            .timeline("unanswering")
+            .turns
+            .last()
+            .unwrap()
+            .status,
+        Some(TurnStatus::Interrupted)
     );
-    assert!(matches!(next_command(&actor), Ok(SessionCommand::Shutdown)));
-    state.read(|state| {
-        let session = state.selected_session().unwrap();
-        assert_eq!(
-            session.timeline.turns.last().unwrap().status,
-            Some(TurnStatus::Interrupted)
-        );
-        let status = state.session_status_snapshot("unanswering").unwrap();
-        assert!(!status.stopping && !status.activity.turn_running);
-    });
+    let status = cx.seen().status("unanswering");
+    assert!(!status.stopping && !status.activity.turn_running);
 }
 
 /// A provider still starting has no turn to interrupt: Stop leaves the start
@@ -7455,16 +7528,16 @@ fn a_stop_while_the_provider_starts_hands_the_message_back_and_force_quit_ends_t
         state.set_provider_launcher(launcher);
         state
     });
-    state.dispatch_command(
+    let Ok(CommandResponse::SessionId(Some(session_id))) = state.command(
         cx,
-        1,
         Command::StartDraft {
             project_id: project.id.clone(),
             cwd,
         },
-    );
-    let session_id = state.read(|state| state.residents.live.keys().next().unwrap().clone());
-    state.update(cx, |state, cx| state.select_session(&session_id, cx));
+    ) else {
+        panic!("the host starts a draft")
+    };
+    state.open(cx, &session_id);
     state.dispatch_command(
         cx,
         2,
@@ -7474,11 +7547,7 @@ fn a_stop_while_the_provider_starts_hands_the_message_back_and_force_quit_ends_t
             attachment_paths: Vec::new(),
         },
     );
-    cx.run_until(|state| {
-        state
-            .session_status_snapshot(&session_id)
-            .is_some_and(|status| status.preparing_turn)
-    });
+    cx.run_until_seen(|view| view.status(&session_id).preparing_turn);
 
     let stopped = through_pipe(
         &state,
@@ -7494,11 +7563,9 @@ fn a_stop_while_the_provider_starts_hands_the_message_back_and_force_quit_ends_t
             if unsent.len() == 1 && unsent[0].text == "start"
     )));
     assert!(ended.try_recv().is_err(), "the start goes on");
-    state.read(|state| {
-        let status = state.session_status_snapshot(&session_id).unwrap();
-        assert!(status.stopping);
-        assert!(status.queued_messages.is_empty());
-    });
+    let status = cx.seen().status(&session_id);
+    assert!(status.stopping);
+    assert!(status.queued_messages.is_empty());
 
     state.dispatch_command(
         cx,
@@ -7508,9 +7575,9 @@ fn a_stop_while_the_provider_starts_hands_the_message_back_and_force_quit_ends_t
         },
     );
     assert_eq!(ended.recv_blocking(), Ok(true));
-    state.read(|state| {
-        let status = state.session_status_snapshot(&session_id).unwrap();
-        assert!(!status.preparing_turn && !status.stopping && !status.activity.working);
+    cx.run_until_seen(|view| {
+        let status = view.status(&session_id);
+        !status.preparing_turn && !status.stopping && !status.activity.working
     });
 }
 
@@ -7520,31 +7587,28 @@ fn a_stop_while_the_provider_starts_hands_the_message_back_and_force_quit_ends_t
 fn an_interrupt_leaves_a_thread_with_only_background_work_alone() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-background-interrupt-test");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let (commands, actor) = smol::channel::unbounded();
-    let mut session = live_session(ProviderKind::ClaudeCode, commands);
-    session.meta.id = "only-background".into();
-    session.background_task_count = 1;
-    state.update(cx, |state, _| {
-        state.sessions.push(session.meta.clone());
-        state.install_selected(session);
-    });
-    state.dispatch_command(
+    stored_thread(
+        &test_store,
+        "only-background",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    let actor = first_turn(&state, cx, &providers, "only-background", 0);
+    actor.play([
+        AgentEvent::BackgroundTasksChanged { count: 1 },
+        completed_turn("turn"),
+    ]);
+    cx.run_until_seen(|view| view.status("only-background").running_turn.is_none());
+    let _ = state.command(
         cx,
-        1,
         Command::Interrupt {
             session_id: "only-background".into(),
         },
     );
-    assert!(next_command(&actor).is_err());
-    state.read(|state| {
-        assert!(
-            !state
-                .session_status_snapshot("only-background")
-                .unwrap()
-                .stopping
-        )
-    });
+    assert!(next_command(&actor.commands).is_err());
+    assert!(!cx.seen().status("only-background").stopping);
 }
 
 /// A report arriving while a restart waits on background work, with no turn to
@@ -7553,30 +7617,44 @@ fn an_interrupt_leaves_a_thread_with_only_background_work_alone() {
 fn a_report_reaches_a_lead_whose_restart_waits_for_background_work() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-background-report-test");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let (commands, actor) = smol::channel::unbounded();
-    let mut lead = live_session(ProviderKind::ClaudeCode, commands);
-    lead.meta.id = "lead".into();
-    lead.live_model = Some("claude-opus-4-8".into());
-    lead.meta.model = Some("claude-sonnet-4-6".into());
-    lead.background_task_count = 1;
-
-    state.update(cx, |state, cx| {
-        state.sessions.push(lead.meta.clone());
-        state.install_selected(lead);
-        state.deliver_orchestrate_callback_to_parent("lead", "the report".into(), cx);
-    });
+    let fleet = Fleet::new(
+        cx,
+        &test_store,
+        ProviderKind::ClaudeCode,
+        &["child"],
+        |meta| {
+            meta.model = Some("claude-opus-4-8".into());
+        },
+    );
+    fleet.lead.play([
+        AgentEvent::BackgroundTasksChanged { count: 1 },
+        completed_turn("turn"),
+    ]);
+    cx.run_until_seen(|view| view.status("parent").running_turn.is_none());
+    fleet
+        .state
+        .command(
+            cx,
+            Command::SetActiveModel {
+                session_id: "parent".into(),
+                provider: ProviderKind::ClaudeCode,
+                model: Some("claude-sonnet-4-6".into()),
+                profile_id: None,
+            },
+        )
+        .unwrap();
+    fleet.child("child").play([
+        report_result_event("rep-1", "the report"),
+        completed_turn("turn-1"),
+    ]);
     assert!(matches!(
-        next_command(&actor),
-        Ok(SessionCommand::ApplySettings { .. })
+        fleet.lead.next_command(cx),
+        SessionCommand::ApplySettings { .. }
     ));
-    state.update(cx, |state, cx| {
-        state.on_event("lead", AgentEvent::SettingsApplied { applied: false }, cx);
-    });
-    assert!(matches!(
-        next_command(&actor),
-        Ok(SessionCommand::SendTurn { text, .. }) if text.contains("the report")
-    ));
+    fleet
+        .lead
+        .play([AgentEvent::SettingsApplied { applied: false }]);
+    assert!(fleet.lead.next_turn(cx).1.contains("the report"));
 }
 
 /// A lead's queue does not outlive the host: a report waiting there when the
@@ -7585,59 +7663,43 @@ fn a_report_reaches_a_lead_whose_restart_waits_for_background_work() {
 #[test]
 fn a_report_queued_when_the_host_stops_reaches_the_lead_once_after_it_starts() {
     let test_store = TestStore::new("tcode-report-restart-test");
-    let mut lead = SessionMeta::new(ProviderKind::Acp, test_store.root().clone(), None);
-    lead.id = "lead".into();
-    let mut child = SessionMeta::new(ProviderKind::Codex, test_store.root().clone(), None);
-    child.id = "child".into();
-    child.parent_session_id = Some("lead".into());
-    child.expectation = Some(ChildExpectation::opened(1));
-    test_store.upsert_meta(&lead).unwrap();
-    test_store.upsert_meta(&child).unwrap();
-
-    let start = |lead_busy: bool| {
-        let mut cx = TestAppContext::default();
-        let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-        let (commands, actor) = smol::channel::unbounded();
-        state.update(&mut cx, |state, cx| {
-            let meta = state.find_meta("lead").unwrap();
-            let mut session = ActiveSession {
-                runtime: Runtime::Live(commands),
-                ..ActiveSession::new(meta, false, Vec::new())
-            };
-            session.turn_in_flight = lead_busy;
-            state.install_selected(session);
-            state.resume_undelivered_reports(cx);
-        });
-        (cx, state, actor)
-    };
-
     // The lead's turn runs on a harness that cannot steer, so the report waits.
-    let (mut cx, state, actor) = start(true);
-    state.update(&mut cx, |state, cx| {
-        state.fail_child_expectation("child", "the provider closed", cx);
+    let cx = &mut TestAppContext::default();
+    let fleet = Fleet::new(cx, &test_store, ProviderKind::Cursor, &["child"], |_| {});
+    fleet.child("child").play([AgentEvent::SessionClosed {
+        reason: Some("the provider closed".into()),
+    }]);
+    cx.run_until_seen(|view| {
+        view.status("parent")
+            .queued_messages
+            .iter()
+            .any(|message| message.text.contains("the provider closed"))
     });
-    cx.run_until_parked();
-    assert!(next_command(&actor).is_err());
-    drop((cx, state));
+    assert!(next_command(&fleet.lead.commands).is_err());
+    fleet
+        .state
+        .command(cx, Command::ShutdownAllAndFlush)
+        .unwrap();
 
-    let (mut cx, state, actor) = start(false);
-    let delivery_id = match next_command(&actor) {
-        Ok(SessionCommand::SendTurn {
-            delivery_id, text, ..
-        }) => {
-            assert!(text.contains("the provider closed"), "{text}");
-            delivery_id
-        }
-        other => panic!("the report goes out after the restart: {other:?}"),
-    };
-    state.update(&mut cx, |state, cx| {
-        state.on_event("lead", AgentEvent::TurnAccepted { delivery_id }, cx);
-    });
-    cx.run_until_parked();
-    drop((cx, state));
+    let cx = &mut TestAppContext::default();
+    let (state, providers) = played_host(cx, &test_store);
+    let lead = providers.started(cx, 0);
+    let (delivery_id, text) = lead.next_turn(cx);
+    assert!(text.contains("the provider closed"), "{text}");
+    lead.play([AgentEvent::TurnAccepted { delivery_id }]);
+    state.open(cx, "parent");
+    lead.fence(cx, "parent");
+    state.command(cx, Command::ShutdownAllAndFlush).unwrap();
 
-    let (_cx, _state, actor) = start(false);
-    assert!(next_command(&actor).is_err(), "taken once, sent once");
+    let cx = &mut TestAppContext::default();
+    let (state, providers) = played_host(cx, &test_store);
+    state.open(cx, "parent");
+    let status = cx.seen().status("parent");
+    assert!(
+        status.queued_messages.is_empty() && !status.preparing_turn,
+        "taken once, sent once"
+    );
+    assert_eq!(providers.count(), 0);
 }
 
 /// Work a thread left running in the background ends as interrupted when
@@ -7646,14 +7708,11 @@ fn a_report_queued_when_the_host_stops_reaches_the_lead_once_after_it_starts() {
 /// a native subagent's mirror whose parent's process does.
 #[test]
 fn background_work_no_process_can_finish_ends_as_interrupted_on_load() {
-    fn backgrounded(state: &mut AppState, id: &str, cx: &mut HostCx) {
-        for event in [
-            AgentEvent::TurnStarted {
-                turn_id: "turn".into(),
-            },
+    fn backgrounded(parent: Option<&str>) -> Vec<AgentEvent> {
+        vec![
             AgentEvent::ItemStarted(ThreadItem {
                 id: "serve".into(),
-                parent_item_id: None,
+                parent_item_id: parent.map(Into::into),
                 content: ItemContent::CommandExecution {
                     command: "serve".into(),
                     input: Vec::new(),
@@ -7664,88 +7723,62 @@ fn background_work_no_process_can_finish_ends_as_interrupted_on_load() {
             }),
             AgentEvent::ItemBackgrounded {
                 item_id: "serve".into(),
-                parent_item_id: None,
+                parent_item_id: parent.map(Into::into),
             },
-            AgentEvent::TurnCompleted {
-                turn_id: "turn".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-        ] {
-            state.record_event(id, &event, cx);
-        }
+        ]
     }
-    fn status(state: &AppState, id: &str) -> ItemStatus {
-        state
-            .resident(id)
-            .unwrap()
-            .timeline
+    fn status(view: &ClientView, id: &str) -> ItemStatus {
+        view.timeline(id)
             .entries
             .iter()
             .find_map(|entry| match &entry.content {
-                tcode_core::session::EntryContent::Item(ItemContent::CommandExecution {
-                    status,
-                    ..
-                }) => Some(*status),
+                EntryContent::Item(ItemContent::CommandExecution { status, .. }) => Some(*status),
                 _ => None,
             })
             .unwrap()
     }
     let test_store = TestStore::new("tcode-unowned-background-test");
-    let (commands, _actor) = smol::channel::unbounded();
-    let mut live = live_session(ProviderKind::ClaudeCode, commands);
-    live.meta.id = "live".into();
-    let mut cold = SessionMeta::new(ProviderKind::ClaudeCode, test_store.root().clone(), None);
-    cold.id = "cold".into();
+    for id in ["cold", "live"] {
+        stored_thread(
+            &test_store,
+            id,
+            ProviderKind::ClaudeCode,
+            &test_store.root().join(id),
+            |_| {},
+        );
+    }
     {
-        let mut cx = TestAppContext::default();
-        let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-        state.update(&mut cx, |state, cx| {
-            state.sessions.push(cold.clone());
-            state.persist_meta(&cold, cx);
-            let mut process = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);
-            process.meta = cold.clone();
-            state.residents.live.insert(cold.id.clone(), process);
-            backgrounded(state, "cold", cx);
-        });
-        cx.run_until_parked();
+        // A host that stopped while the cold thread's work ran.
+        let cx = &mut TestAppContext::default();
+        let (state, providers) = played_host(cx, &test_store);
+        let cold = first_turn(&state, cx, &providers, "cold", 0);
+        cold.play(backgrounded(None));
+        cold.play([completed_turn("turn")]);
+        cx.run_until_seen(|view| has_record(view, "cold", is_turn_end));
     }
 
-    let mut cx = TestAppContext::default();
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    state.update(&mut cx, |state, cx| {
-        let mut mirror =
-            SessionMeta::new(ProviderKind::ClaudeCode, test_store.root().clone(), None);
-        mirror.id = "mirror".into();
-        mirror.parent_session_id = Some("live".into());
-        mirror.native_subagent = Some("task".into());
-        state.sessions.push(mirror.clone());
-        state.persist_meta(&mirror, cx);
-        state.residents.parked.insert(
-            mirror.id.clone(),
-            ActiveSession::new(mirror, false, Vec::new()),
-        );
-        backgrounded(state, "mirror", cx);
-        state.sessions.push(live.meta.clone());
-        state.install_selected(live);
-        backgrounded(state, "live", cx);
-        state.park_active(cx);
-        state.select_session("cold", cx);
-    });
-    // The reopened thread's log is read and folded off the host.
-    cx.run_until(|state| {
-        state
-            .resident("cold")
-            .is_some_and(|cold| !cold.timeline.entries.is_empty())
-    });
-    state.read(|state| assert_eq!(status(state, "cold"), ItemStatus::Interrupted));
-    state.reopen(&mut cx, "live");
-    state.read(|state| assert_eq!(status(state, "live"), ItemStatus::InProgress));
-    state.reopen(&mut cx, "mirror");
-    state.read(|state| assert_eq!(status(state, "mirror"), ItemStatus::InProgress));
-    let log = test_store.read_events("cold").unwrap();
+    let cx = &mut TestAppContext::default();
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    let live = first_turn(&state, cx, &providers, "live", 0);
+    live.play([AgentEvent::ItemStarted(subagent_item(
+        "task",
+        None,
+        "general",
+        "Serve the docs",
+        ItemStatus::InProgress,
+    ))]);
+    live.play(backgrounded(Some("task")));
+    live.play(backgrounded(None));
+    live.play([completed_turn("turn")]);
+    cx.run_until_seen(|view| has_record(view, "live", is_turn_end));
+    let mirror = cx.seen().mirror("task").unwrap().id.clone();
+    state.leave(cx, "live");
+
+    state.open(cx, "cold");
+    cx.run_until_seen(|view| status(view, "cold") == ItemStatus::Interrupted);
     assert!(matches!(
-        &log.last().unwrap().event,
+        &cx.seen().records("cold").last().unwrap().event,
         AgentEvent::ItemCompleted(ThreadItem {
             content: ItemContent::CommandExecution {
                 status: ItemStatus::Interrupted,
@@ -7754,86 +7787,11 @@ fn background_work_no_process_can_finish_ends_as_interrupted_on_load() {
             ..
         })
     ));
-}
-
-/// The record that the lead's provider took a child's report and the child no
-/// longer owing it are saved together: a host that stops right after saving
-/// that record, as a turn or as a steer, does not send the report again.
-#[test]
-fn a_report_the_lead_took_is_saved_as_taken_with_the_record_of_it() {
-    for steered in [false, true] {
-        let test_store = TestStore::new("tcode-report-taken-with-record-test");
-        let mut child = SessionMeta::new(ProviderKind::Codex, test_store.root().clone(), None);
-        child.id = "child".into();
-        child.parent_session_id = Some("lead".into());
-        child.expectation = Some(ChildExpectation::opened(1));
-        let (commands, actor) = smol::channel::unbounded();
-        let mut lead = live_session(ProviderKind::ClaudeCode, commands);
-        lead.meta.id = "lead".into();
-        lead.turn_in_flight = steered;
-        test_store.upsert_meta(&lead.meta).unwrap();
-        test_store.upsert_meta(&child).unwrap();
-
-        let mut cx = TestAppContext::default();
-        let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-        let taken = state.update(&mut cx, |state, cx| {
-            state.sessions.push(lead.meta.clone());
-            state.install_selected(lead);
-            state.fail_child_expectation("child", "the provider closed", cx);
-            match next_command(&actor) {
-                Ok(SessionCommand::Steer { request_id, .. }) if steered => {
-                    AgentEvent::SteerAccepted { request_id }
-                }
-                Ok(SessionCommand::SendTurn { delivery_id, .. }) if !steered => {
-                    AgentEvent::TurnAccepted { delivery_id }
-                }
-                other => panic!("the report goes to the lead: {other:?}"),
-            }
-        });
-        cx.run_until_parked();
-
-        // The host stops once the record of the lead taking the report is
-        // saved, before anything written after it.
-        let (writes, held) = smol::channel::unbounded();
-        state.update(&mut cx, |state, cx| {
-            drop(std::mem::replace(&mut state.store_writes, writes));
-            state.store_writer.take().unwrap().join().unwrap();
-            state.on_event("lead", taken, cx);
-        });
-        let held: Vec<_> = std::iter::from_fn(|| held.try_recv().ok()).collect();
-        let record = held
-            .iter()
-            .position(|write| {
-                matches!(write, StoreWrite::AppendEvent { id, event, .. } if id == "lead"
-                && matches!(**event, AgentEvent::SteerAccepted { .. }
-                    | AgentEvent::ItemCompleted(ThreadItem {
-                        content: ItemContent::UserMessage { .. },
-                        ..
-                    })))
-            })
-            .expect("the lead's log records it");
-        let (failures, _) = smol::channel::unbounded();
-        let writer = StoreWriter::new(
-            (*test_store).clone(),
-            SettingsStore::new(test_store.root().clone()),
-            failures,
-            cx.clock.host_clock(),
-        );
-        let (saved, queue) = smol::channel::unbounded();
-        for write in held.into_iter().take(record + 1) {
-            saved.try_send(write).unwrap();
-        }
-        drop(saved);
-        writer.run(queue);
-        drop((cx, state));
-
-        let mut cx = TestAppContext::default();
-        let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-        state.update(&mut cx, |state, _| {
-            let expectation = state.find_meta("child").unwrap().expectation.unwrap();
-            assert_eq!(expectation.undelivered, None, "steered: {steered}");
-        });
-    }
+    state.open(cx, "live");
+    state.open(cx, &mirror);
+    live.fence(cx, "live");
+    assert_eq!(status(cx.seen(), "live"), ItemStatus::InProgress);
+    assert_eq!(status(cx.seen(), &mirror), ItemStatus::InProgress);
 }
 
 /// A provider that refuses a steer because the turn just ended has not seen it:
@@ -7842,40 +7800,22 @@ fn a_report_the_lead_took_is_saved_as_taken_with_the_record_of_it() {
 fn a_rejected_steer_of_a_report_goes_out_as_a_turn() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-rejected-report-test");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let (commands, actor) = smol::channel::unbounded();
-    let mut lead = live_session(ProviderKind::Codex, commands);
-    lead.meta.id = "lead".into();
-
-    state.update(cx, |state, cx| {
-        state.sessions.push(lead.meta.clone());
-        state.install_selected(lead);
-        state.on_event(
-            "lead",
-            AgentEvent::TurnStarted {
-                turn_id: "ending".into(),
-            },
-            cx,
-        );
-        state.deliver_orchestrate_callback_to_parent("lead", "the report".into(), cx);
-        let Ok(SessionCommand::Steer { request_id, .. }) = next_command(&actor) else {
-            panic!("a running turn takes the report as a steer");
-        };
-        state.on_event(
-            "lead",
-            AgentEvent::TurnCompleted {
-                turn_id: "ending".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            cx,
-        );
-        state.on_event("lead", AgentEvent::SteerRejected { request_id }, cx);
-    });
-    assert!(matches!(
-        next_command(&actor),
-        Ok(SessionCommand::SendTurn { text, .. }) if text == "the report"
-    ));
+    let fleet = Fleet::new(cx, &test_store, ProviderKind::Codex, &["child"], |_| {});
+    fleet.child("child").play([
+        report_result_event("rep-1", "the report"),
+        completed_turn("turn-1"),
+    ]);
+    let SessionCommand::Steer {
+        request_id, text, ..
+    } = fleet.lead.next_command(cx)
+    else {
+        panic!("a running turn takes the report as a steer");
+    };
+    fleet.lead.play([
+        completed_turn("turn"),
+        AgentEvent::SteerRejected { request_id },
+    ]);
+    assert_eq!(fleet.lead.next_turn(cx).1, text);
 }
 
 /// A steer the provider never confirmed died with its process, so it goes back
@@ -7884,41 +7824,52 @@ fn a_rejected_steer_of_a_report_goes_out_as_a_turn() {
 fn a_steer_lost_with_its_process_goes_back_on_the_queue() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-lost-steer-test");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let (commands, actor) = smol::channel::unbounded();
-    let mut lead = live_session(ProviderKind::ClaudeCode, commands);
-    lead.meta.id = "lead".into();
-
-    state.update(cx, |state, cx| {
-        state
-            .settings
-            .provider_mut(ProviderKind::ClaudeCode)
-            .binary_path = Some("/nonexistent/tcode-test-claude".into());
-        state.sessions.push(lead.meta.clone());
-        state.install_selected(lead);
-        state.on_event(
-            "lead",
-            AgentEvent::TurnStarted {
-                turn_id: "running".into(),
-            },
-            cx,
-        );
-        state.deliver_orchestrate_callback_to_parent("lead", "the report".into(), cx);
-        assert!(matches!(
-            next_command(&actor),
-            Ok(SessionCommand::Steer { .. })
-        ));
-        state.on_event(
-            "lead",
-            AgentEvent::SessionClosed {
-                reason: Some("claude exited".into()),
-            },
-            cx,
-        );
-        let session = state.selected_session().unwrap();
-        assert_eq!(session.queue.len(), 1);
-        assert_eq!(session.queue[0].text, "the report");
-        assert_eq!(session.queue[0].origin, MessageOrigin::Agent);
+    let fleet = Fleet::new(
+        cx,
+        &test_store,
+        ProviderKind::ClaudeCode,
+        &["child"],
+        |_| {},
+    );
+    fleet.child("child").play([
+        report_result_event("rep-1", "the report"),
+        completed_turn("turn-1"),
+    ]);
+    let report = fleet.lead.next_steer(cx);
+    fleet.lead.play([AgentEvent::SessionClosed {
+        reason: Some("claude exited".into()),
+    }]);
+    cx.run_until_seen(|view| {
+        has_record(view, "parent", |event| {
+            matches!(event, AgentEvent::SessionClosed { .. })
+        })
+    });
+    let queued = &cx.seen().status("parent").queued_messages;
+    assert_eq!(
+        queued
+            .iter()
+            .map(|message| &message.text)
+            .collect::<Vec<_>>(),
+        [&report]
+    );
+    // It goes out as the agent's when the lead runs again.
+    fleet.state.leave(cx, "parent");
+    fleet.state.open(cx, "parent");
+    let resumed = fleet.providers.started(cx, 2);
+    let (delivery_id, text) = resumed.next_turn(cx);
+    assert_eq!(text, report);
+    resumed.play([AgentEvent::TurnAccepted { delivery_id }]);
+    cx.run_until_seen(|view| {
+        view.records("parent").iter().any(|record| {
+            record.origin == Some(MessageOrigin::Agent)
+                && matches!(
+                    &record.event,
+                    AgentEvent::ItemCompleted(ThreadItem {
+                        content: ItemContent::UserMessage { text, .. },
+                        ..
+                    }) if *text == report
+                )
+        })
     });
 }
 
@@ -7928,232 +7879,235 @@ fn a_steer_lost_with_its_process_goes_back_on_the_queue() {
 fn settings_restart_waits_for_the_running_turn() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-running-turn-restart-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (commands, actor) = smol::channel::unbounded();
-    let mut session = live_session(ProviderKind::Grok, commands);
-    session.meta.id = "running-turn-restart".into();
-    session.live_model = Some("grok-4".into());
-    session.meta.model = Some("grok-5".into());
-
-    state.update(cx, |state, cx| {
-        state.settings.provider_mut(ProviderKind::Grok).binary_path =
-            Some("/nonexistent/tcode-test-grok".into());
-        state.install_selected(session);
-        state.on_event(
-            "running-turn-restart",
-            AgentEvent::TurnStarted {
-                turn_id: "compact".into(),
+    stored_thread(
+        &test_store,
+        "running-turn-restart",
+        ProviderKind::Grok,
+        &test_store.root().join("thread"),
+        |meta| {
+            meta.model = Some("grok-4".into());
+        },
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    let actor = first_turn(&state, cx, &providers, "running-turn-restart", 0);
+    state
+        .command(
+            cx,
+            Command::SetActiveModel {
+                session_id: "running-turn-restart".into(),
+                provider: ProviderKind::Grok,
+                model: Some("grok-5".into()),
+                profile_id: None,
             },
-            cx,
-        );
-        state.send_turn(
-            "running-turn-restart",
-            "continue on the new model".into(),
-            Vec::new(),
-            cx,
-        );
-        assert!(next_command(&actor).is_err());
-
-        state.on_event(
-            "running-turn-restart",
-            AgentEvent::TurnCompleted {
-                turn_id: "compact".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            cx,
-        );
-        assert!(matches!(next_command(&actor), Ok(SessionCommand::Shutdown)));
-        assert_eq!(state.selected_session().unwrap().queue.len(), 1);
-    });
+        )
+        .unwrap();
+    state.send(cx, "running-turn-restart", "continue on the new model");
+    assert!(next_command(&actor.commands).is_err());
+    providers.hold();
+    actor.play([completed_turn("turn")]);
+    assert!(matches!(actor.next_command(cx), SessionCommand::Shutdown));
+    assert_eq!(
+        cx.seen()
+            .status("running-turn-restart")
+            .queued_messages
+            .len(),
+        1
+    );
+    providers.let_go();
 }
 
+/// A thread forks only while no turn of it runs, background work or not. The
+/// fork takes the source's log with its restore points ended, the provider's
+/// session to fork from at the next send, and none of the source's pull
+/// requests or its worktree, which it shares; a turn a stopped host left open
+/// in the source ends in the fork, since no process of the fork can finish
+/// it. A source with nothing logged forks from its provider's session alone.
 #[test]
 fn fork_thread_clones_timeline_and_provider_cursor() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-fork-test");
     let root = test_store.root().clone();
-    let store = (*test_store).clone();
-    let mut source = SessionMeta::new(
+    let source = stored_thread(
+        &test_store,
+        "source",
         ProviderKind::Codex,
-        PathBuf::from("/tmp/source-worktree"),
-        Some("gpt-5.4".into()),
+        &root.join("source-worktree"),
+        |source| {
+            source.model = Some("gpt-5.4".into());
+            source.title = "Investigate parser".into();
+            source.resume_cursor = Some(agent::ResumeCursor(
+                serde_json::json!({"thread_id": "native-source"}),
+            ));
+            source.worktree = Some(WorktreeInfo {
+                root_project_path: root.join("project"),
+                base: "main".into(),
+                branch: "tcode/source".into(),
+            });
+            tcode_core::pull_request::link_pull_request(
+                &mut source.pull_requests,
+                tcode_core::pull_request::PullRequestKey::new("github.com", "sample/project", 1),
+                "https://github.com/sample/project/pull/1".into(),
+                tcode_core::pull_request::PullRequestSource::Manual,
+                1,
+                true,
+            );
+        },
     );
-    source.title = "Investigate parser".into();
-    source.resume_cursor = Some(agent::ResumeCursor(
-        serde_json::json!({"thread_id": "native-source"}),
-    ));
-    source.worktree = Some(WorktreeInfo {
-        root_project_path: PathBuf::from("/tmp/project"),
-        base: "main".into(),
-        branch: "tcode/source".into(),
-    });
-    tcode_core::pull_request::link_pull_request(
-        &mut source.pull_requests,
-        tcode_core::pull_request::PullRequestKey::new("github.com", "sample/project", 1),
-        "https://github.com/sample/project/pull/1".into(),
-        tcode_core::pull_request::PullRequestSource::Manual,
-        1,
-        true,
-    );
-    store.upsert_meta(&source).unwrap();
-    store
+    test_store
         .append_event(
-            &source.id,
+            "source",
             1,
             &AgentEvent::TurnStarted {
                 turn_id: "turn-1".into(),
             },
         )
         .unwrap();
-    let mut empty_source = SessionMeta::new(
+    let empty_source = stored_thread(
+        &test_store,
+        "empty-source",
         ProviderKind::Codex,
-        root.join("empty-source"),
-        Some("gpt-5.4".into()),
+        &root.join("empty-source"),
+        |meta| {
+            meta.model = Some("gpt-5.4".into());
+            meta.title = "Native conversation without local events".into();
+            meta.resume_cursor = Some(agent::ResumeCursor(
+                serde_json::json!({"thread_id": "native-empty-source"}),
+            ));
+        },
     );
-    empty_source.title = "Native conversation without local events".into();
-    empty_source.resume_cursor = Some(agent::ResumeCursor(
-        serde_json::json!({"thread_id": "native-empty-source"}),
+    stored_thread(
+        &test_store,
+        "busy",
+        ProviderKind::Codex,
+        &root.join("busy"),
+        |meta| {
+            meta.resume_cursor = Some(agent::ResumeCursor(
+                serde_json::json!({"thread_id": "native-busy"}),
+            ));
+        },
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    let fork_of = |state: &TestEntity, cx: &mut TestAppContext, id: &str| {
+        state.command(
+            cx,
+            Command::ForkThread {
+                id: id.into(),
+                at: None,
+            },
+        )
+    };
+    let availability = |cx: &TestAppContext, id: &str| cx.seen().activity(id).unwrap().fork;
+    assert_eq!(availability(cx, "source"), ForkAvailability::Available);
+
+    let busy = first_turn(&state, cx, &providers, "busy", 0);
+    cx.run_until_seen(|view| view.activity("busy").unwrap().fork == ForkAvailability::Running);
+    assert!(fork_of(&state, cx, "busy").is_err());
+    busy.play([
+        AgentEvent::BackgroundTasksChanged { count: 1 },
+        completed_turn("turn"),
+    ]);
+    cx.run_until_seen(|view| view.activity("busy").unwrap().fork == ForkAvailability::Available);
+
+    let Ok(CommandResponse::SessionId(Some(fork_id))) = fork_of(&state, cx, "source") else {
+        panic!("the source forks")
+    };
+    state.open(cx, &fork_id);
+    cx.run_until_seen(|view| view.records(&fork_id).len() == 3);
+    let fork = cx.seen().session(&fork_id).unwrap().clone();
+    assert_eq!(fork.pending_fork, Some(agent::ForkPoint::Tail));
+    assert!(fork.pull_requests.is_empty());
+    assert_eq!(
+        fork.resume_cursor.as_ref().unwrap().0["thread_id"],
+        "native-source"
+    );
+    assert_eq!(fork.cwd, source.cwd);
+    assert_eq!(fork.worktree, None);
+    assert!(cx.seen().worktree_shared("source"));
+    assert!(!cx.seen().timeline(&fork_id).turn_running);
+    // The source's log, then the restore points' end in the new session,
+    // and the end of the turn the source left open.
+    let records = cx.seen().records(&fork_id).to_vec();
+    assert!(matches!(records[0].event, AgentEvent::TurnStarted { .. }));
+    assert!(matches!(records[1].event, AgentEvent::CheckpointsCleared));
+    assert!(matches!(
+        records[2].event,
+        AgentEvent::TurnCompleted {
+            status: TurnStatus::Interrupted,
+            ..
+        }
     ));
-    store.upsert_meta(&empty_source).unwrap();
-    assert!(store.read_event_log(&empty_source.id).unwrap().is_empty());
-    let state = cx.new_entity(TestClientState::new(store));
 
-    state.update(cx, |state, cx| {
-        assert_eq!(
-            state.index_snapshot().summary.activity[&source.id].fork,
-            ForkAvailability::Available
-        );
-        let mut resident = ActiveSession::new(source.clone(), false, Vec::new());
-        resident.turn_in_flight = true;
-        state.install_selected(resident);
-        assert_eq!(
-            state.index_snapshot().summary.activity[&source.id].fork,
-            ForkAvailability::Running
-        );
-        assert!(state.host.fork_thread(&source.id, cx).is_err());
-        state.selected_session_mut().unwrap().turn_in_flight = false;
-        state.selected_session_mut().unwrap().background_task_count = 1;
-        assert_eq!(
-            state.index_snapshot().summary.activity[&source.id].fork,
-            ForkAvailability::Available
-        );
-    });
-    state.update(cx, |state, cx| state.fork_thread(&source.id, cx));
-    cx.run_until(|state| {
-        state
-            .selected_session()
-            .is_some_and(|session| session.timeline.turns.len() == 1)
-    });
-
-    state.update(cx, |state, _cx| {
-        let active = state.selected_session().unwrap();
-        let fork = &active.meta;
-        assert_ne!(fork.id, source.id);
-        assert_eq!(fork.pending_fork, Some(agent::ForkPoint::Tail));
-        assert!(fork.pull_requests.is_empty());
-        assert_eq!(
-            fork.resume_cursor.as_ref().unwrap().0["thread_id"],
-            "native-source"
-        );
-        assert_eq!(fork.cwd, source.cwd);
-        assert_eq!(fork.worktree, None);
-        assert!(
-            state
-                .index_snapshot()
-                .summary
-                .worktree_shared
-                .contains(&source.id)
-        );
-        assert!(!active.timeline.turn_running);
-        // The source's log, then the restore points' end in the new session,
-        // and the end of the turn the source left open, which no process of
-        // the fork can finish.
-        let events = state.store.read_events(&fork.id).unwrap();
-        assert_eq!(events.len(), 3);
-        assert!(matches!(events[1].event, AgentEvent::CheckpointsCleared));
-        assert!(matches!(
-            events[2].event,
-            AgentEvent::TurnCompleted {
-                status: TurnStatus::Interrupted,
-                ..
-            }
-        ));
-        assert!(
-            state
-                .store
-                .read_event_log(&fork.id)
-                .unwrap()
-                .starts_with(&state.store.read_event_log(&source.id).unwrap())
-        );
-    });
-
-    state.update(cx, |state, cx| state.fork_thread(&empty_source.id, cx));
-    cx.run_until(|state| {
-        state
-            .selected_session()
-            .is_some_and(|session| session.meta.resume_cursor == empty_source.resume_cursor)
-    });
-    state.read(|state| {
-        let active = state.selected_session().unwrap();
-        let fork = &active.meta;
-        assert_ne!(fork.id, empty_source.id);
-        assert_eq!(fork.pending_fork, Some(agent::ForkPoint::Tail));
-        assert_eq!(
-            fork.title,
-            "Native conversation without local events (fork)"
-        );
-        assert_eq!(fork.cwd, empty_source.cwd);
-        assert_eq!(fork.model, empty_source.model);
-        assert_eq!(fork.resume_cursor, empty_source.resume_cursor);
-        assert!(active.timeline.turns.is_empty());
-        assert!(
-            state
-                .store
-                .load_index()
-                .unwrap()
-                .iter()
-                .any(|meta| meta.id == fork.id)
-        );
-        assert!(
-            state
-                .store
-                .read_event_log(&empty_source.id)
-                .unwrap()
-                .is_empty()
-        );
-        // Nothing local was copied: only the end of the parent's restore points.
-        assert!(matches!(
-            state.store.read_events(&fork.id).unwrap().as_slice(),
-            [record] if matches!(record.event, AgentEvent::CheckpointsCleared)
-        ));
-    });
+    let Ok(CommandResponse::SessionId(Some(fork_id))) = fork_of(&state, cx, "empty-source") else {
+        panic!("a source with nothing logged forks")
+    };
+    state.open(cx, &fork_id);
+    let fork = cx.seen().session(&fork_id).unwrap().clone();
+    assert_eq!(fork.pending_fork, Some(agent::ForkPoint::Tail));
+    assert_eq!(
+        fork.title,
+        "Native conversation without local events (fork)"
+    );
+    assert_eq!(fork.cwd, empty_source.cwd);
+    assert_eq!(fork.model, empty_source.model);
+    assert_eq!(fork.resume_cursor, empty_source.resume_cursor);
+    assert!(cx.seen().timeline(&fork_id).turns.is_empty());
+    // Nothing local was copied: only the end of the parent's restore points.
+    assert!(matches!(
+        cx.seen().records(&fork_id),
+        [record] if matches!(record.event, AgentEvent::CheckpointsCleared)
+    ));
+    assert!(
+        test_store
+            .read_event_log("empty-source")
+            .unwrap()
+            .is_empty()
+    );
 }
 
+/// What a host was told to keep is on disk, in order, once it stops: a
+/// thread's metadata and records, and a profile's secret.
 #[test]
 fn store_writer_flush_persists_ordered_events_metadata_and_secrets_for_reopening() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-writer-reopen");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/upsert"), None);
-    meta.title = "persisted by writer".into();
-    let id = meta.id.clone();
-    state.update(cx, |state, cx| {
-        state.persist_meta(&meta, cx);
-        state.record_event(&id, &persisted_assistant_event("first"), cx);
-        state.set_profile_secret("profile", "ANTHROPIC_API_KEY", Some("writer-secret"), cx);
-        state.record_event(&id, &persisted_assistant_event("second"), cx);
-        // More than one batch's worth, so the flush waits for several commits.
-        for index in 0..600 {
-            state.record_event(
-                &id,
-                &persisted_assistant_event(&format!("bulk {index}")),
-                cx,
-            );
-        }
-    });
-    cx.run_until_parked();
+    stored_thread(
+        &test_store,
+        "thread",
+        ProviderKind::Codex,
+        &test_store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    let provider = first_turn(&state, cx, &providers, "thread", 0);
+    state
+        .command(
+            cx,
+            Command::RenameSession {
+                session_id: "thread".into(),
+                title: "persisted by writer".into(),
+            },
+        )
+        .unwrap();
+    provider.play([persisted_assistant_event("first")]);
+    provider.fence(cx, "thread");
+    state
+        .command(
+            cx,
+            Command::SetProfileSecret {
+                profile_id: Settings::builtin_profile_id(ProviderKind::ClaudeCode).into(),
+                name: "ANTHROPIC_API_KEY".into(),
+                value: Some("writer-secret".into()),
+            },
+        )
+        .unwrap();
+    // More than one batch's worth, so the flush waits for several commits.
+    provider.play(
+        std::iter::once(persisted_assistant_event("second"))
+            .chain((0..600).map(|index| persisted_assistant_event(&format!("bulk {index}")))),
+    );
+    provider.fence(cx, "thread");
+    state.command(cx, Command::ShutdownAllAndFlush).unwrap();
 
     let fresh = SessionStore::open_at(test_store.root().clone()).unwrap();
     assert_eq!(
@@ -8161,29 +8115,29 @@ fn store_writer_flush_persists_ordered_events_metadata_and_secrets_for_reopening
             .load_index()
             .unwrap()
             .iter()
-            .find(|meta| meta.id == id)
+            .find(|meta| meta.id == "thread")
             .unwrap()
             .title,
         "persisted by writer"
     );
-    let events = fresh.read_events(&id).unwrap();
-    let texts: Vec<_> = events
-        .iter()
-        .filter_map(|stored| match &stored.event {
+    let texts: Vec<_> = fresh
+        .read_events("thread")
+        .unwrap()
+        .into_iter()
+        .filter_map(|stored| match stored.event {
             AgentEvent::ItemCompleted(ThreadItem {
                 content: ItemContent::AssistantMessage { text, .. },
                 ..
-            }) => Some(text.as_str()),
+            }) => Some(text),
             _ => None,
         })
         .collect();
     let bulk: Vec<_> = (0..600).map(|index| format!("bulk {index}")).collect();
     assert_eq!(texts[..2], ["first", "second"]);
     assert_eq!(texts[2..], bulk);
-    let settings = SettingsStore::new(test_store.root().clone());
     assert_eq!(
-        settings
-            .profile_secrets("profile")
+        SettingsStore::new(test_store.root().clone())
+            .profile_secrets(Settings::builtin_profile_id(ProviderKind::ClaudeCode))
             .unwrap()
             .get("ANTHROPIC_API_KEY")
             .map(String::as_str),
@@ -8448,91 +8402,582 @@ fn a_drafts_terminal_starts_in_its_project_directory() {
     });
 }
 
-/// Compaction is a turn of the provider's own, as is a goal change where the
-/// harness runs it as one (Claude Code's `/goal`), so each is forwarded only to
-/// an idle live provider; over a running turn the command is refused.
+/// Compacting or clearing the goal goes to the harness only between turns;
+/// over a running turn the command is refused.
 #[test]
 fn compaction_waits_for_the_running_turn() {
     let cx = &mut TestAppContext::default();
-    let cwd = std::env::temp_dir().join(format!("tcode-compact-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&cwd).unwrap();
     let test_store = TestStore::new("tcode-compact-data");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (session, commands) = fake_live_session(cwd.clone());
-    let id = session.meta.id.clone();
+    stored_thread(
+        &test_store,
+        "thread",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    let provider = first_turn(&state, cx, &providers, "thread", 0);
+    let compact = || Command::CompactContext {
+        session_id: "thread".into(),
+    };
+    let clear = || Command::ClearGoal {
+        session_id: "thread".into(),
+    };
+    assert!(state.command(cx, compact()).is_err());
+    assert!(state.command(cx, clear()).is_err());
+    assert!(next_command(&provider.commands).is_err());
 
-    state.update(cx, |state, cx| {
-        state.store.upsert_meta(&session.meta).unwrap();
-        state.sessions = state.store.load_index().unwrap().into();
-        state.install_selected(session);
-        state.send_turn(&id, "finish this task".into(), Vec::new(), cx);
-        let delivery_id = match next_command(&commands) {
-            Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
-            other => panic!("expected SendTurn, got {other:?}"),
-        };
-        state.on_event(&id, AgentEvent::TurnAccepted { delivery_id }, cx);
-        state.on_event(
-            &id,
-            AgentEvent::TurnStarted {
-                turn_id: "turn-1".into(),
-            },
-            cx,
-        );
-        assert!(state.compact_context(&id, cx).is_err());
-        assert!(
-            state
-                .change_goal(&id, SessionCommand::ClearGoal, cx)
-                .is_err()
-        );
-        assert!(next_command(&commands).is_err());
-
-        state.on_event(
-            &id,
-            AgentEvent::TurnCompleted {
-                turn_id: "turn-1".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            cx,
-        );
-        state.compact_context(&id, cx).unwrap();
-        assert!(matches!(
-            next_command(&commands),
-            Ok(SessionCommand::Compact)
-        ));
-        state
-            .change_goal(&id, SessionCommand::ClearGoal, cx)
-            .unwrap();
-        assert!(matches!(
-            next_command(&commands),
-            Ok(SessionCommand::ClearGoal)
-        ));
-    });
-
-    let _ = std::fs::remove_dir_all(&cwd);
+    provider.play([completed_turn("turn")]);
+    cx.run_until_seen(|view| view.status("thread").running_turn.is_none());
+    state.command(cx, compact()).unwrap();
+    assert!(matches!(provider.next_command(cx), SessionCommand::Compact));
+    state.command(cx, clear()).unwrap();
+    assert!(matches!(
+        provider.next_command(cx),
+        SessionCommand::ClearGoal
+    ));
 }
 
-/// An `ActiveSession` wired to a fake live provider: commands land on the
-/// returned receiver, nothing real is spawned.
-fn fake_live_session(cwd: PathBuf) -> (ActiveSession, smol::channel::Receiver<SessionCommand>) {
-    let (commands, receiver) = smol::channel::unbounded();
-    let mut session = AppState::build_draft_session(
-        "proj-t3".into(),
-        cwd,
-        ProviderKind::ClaudeCode,
-        None,
-        None,
-        Vec::new(),
+/// A client that leaves one thread for another before the first's log has
+/// reached it is sent only the second's.
+#[test]
+fn stale_timeline_completion_cannot_land_on_another_session() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-stale-timeline-load-test");
+    for (id, text) in [("a", "only session A"), ("b", "only session B")] {
+        stored_thread(
+            &test_store,
+            id,
+            ProviderKind::Codex,
+            &test_store.root().join(id),
+            |_| {},
+        );
+        test_store
+            .append_event(id, 1, &persisted_assistant_event(text))
+            .unwrap();
+    }
+    let (state, _providers) = played_host(cx, &test_store);
+    let events = |id: &str| {
+        tcode_protocol::ClientPayload::Subscribe(Subscription {
+            known_index: None,
+            topic: Topic::SessionEvents {
+                session_id: id.into(),
+            },
+            after: None,
+        })
+    };
+    state.deliver(cx, 1, events("a"));
+    state.deliver(
+        cx,
+        2,
+        tcode_protocol::ClientPayload::Unsubscribe(Subscription {
+            known_index: None,
+            topic: Topic::SessionEvents {
+                session_id: "a".into(),
+            },
+            after: None,
+        }),
     );
-    session.draft = false;
-    session.runtime = Runtime::Live(commands);
-    // What `ensure_started` records at launch — without these, `send_turn`
-    // sees a live-config mismatch and restarts the provider instead of
-    // dispatching.
-    session.live_model = session.meta.model.clone();
-    session.live_option_selections = session.meta.option_selections.clone();
-    (session, receiver)
+    state.open(cx, "b");
+    let texts = |cx: &TestAppContext, id: &str| {
+        cx.seen()
+            .timeline(id)
+            .entries
+            .iter()
+            .filter_map(|entry| match &entry.content {
+                EntryContent::Item(ItemContent::AssistantMessage { text, .. }) => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(texts(cx, "b"), ["only session B"]);
+}
+
+/// After stopping one thread, the next thread's first accepted message must
+/// remain visible and durable without inheriting the interrupted thread's error.
+#[test]
+fn stop_then_new_thread_keeps_the_first_message_visible() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-t3-data");
+    let cwd = test_store.root().join("project");
+    let project = tcode_core::project::Project::from_root(cwd.clone());
+    test_store.upsert_project(&project).unwrap();
+    stored_thread(&test_store, "a", ProviderKind::ClaudeCode, &cwd, |meta| {
+        meta.project_id = Some(project.id.clone());
+    });
+    let (state, providers) = played_host(cx, &test_store);
+    let a = first_turn(&state, cx, &providers, "a", 0);
+    // Stop. The provider reports an error and an interrupted turn.
+    state
+        .command(
+            cx,
+            Command::Interrupt {
+                session_id: "a".into(),
+            },
+        )
+        .unwrap();
+    assert!(matches!(a.next_command(cx), SessionCommand::Interrupt));
+    a.play([
+        AgentEvent::Error {
+            message: "Request was aborted\nwith a second line the toast never showed".into(),
+            fatal: false,
+        },
+        turn_completed("turn", TurnStatus::Interrupted),
+    ]);
+    cx.run_until_seen(|view| has_record(view, "a", is_turn_end));
+
+    // Immediately: a new thread, and its first message.
+    let Ok(CommandResponse::SessionId(Some(b))) = state.command(
+        cx,
+        Command::StartDraft {
+            project_id: project.id.clone(),
+            cwd: cwd.clone(),
+        },
+    ) else {
+        panic!("a new thread")
+    };
+    assert_ne!(b, "a");
+    state.open(cx, &b);
+    state.send(cx, &b, "second message");
+    let second = providers.started(cx, 1);
+    let (delivery_id, _) = second.next_turn(cx);
+    second.play([AgentEvent::TurnAccepted { delivery_id }]);
+    cx.run_until_seen(|view| !view.timeline(&b).entries.is_empty());
+    let timeline = cx.seen().timeline(&b);
+    let users: Vec<&str> = timeline
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.content {
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(users, ["second message"]);
+    let entry_turn = timeline.entries[0].turn;
+    assert!(
+        entry_turn < timeline.turns.len(),
+        "user entry must belong to a rendered turn (turn {entry_turn} of {})",
+        timeline.turns.len()
+    );
+    assert!(
+        !timeline
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.content, EntryContent::Error { .. })),
+        "session A's interrupt error leaked into the new thread"
+    );
+    // And it is durable: a replay of the log shows the same thing.
+    let replayed = Timeline::fold_events(test_store.read_events(&b).unwrap());
+    assert!(replayed.entries.iter().any(|entry| matches!(
+        &entry.content,
+        EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "second message"
+    )));
+}
+
+/// A user message is activity: once the provider accepts it the thread's
+/// updated time moves, which is what lifts it in the threads list.
+#[test]
+fn an_accepted_user_message_moves_the_thread_updated_time() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-message-activity-data");
+    stored_thread(
+        &test_store,
+        "thread",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("thread"),
+        |meta| {
+            meta.title = "Tidy the parser".into();
+            meta.updated_at = 100;
+        },
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    state.open(cx, "thread");
+    state.send(cx, "thread", "one more change");
+    let provider = providers.started(cx, 0);
+    let (delivery_id, _) = provider.next_turn(cx);
+    assert_eq!(cx.seen().session("thread").unwrap().updated_at, 100);
+    provider.play([AgentEvent::TurnAccepted { delivery_id }]);
+    let now = cx.now_secs();
+    cx.run_until_seen(|view| view.session("thread").unwrap().updated_at == now);
+    assert_eq!(test_store.load_index().unwrap()[0].updated_at, now);
+}
+
+/// A message the user takes back while the provider is already taking it
+/// cannot keep the thread working once the turn it opened ends.
+#[test]
+fn submitted_queue_head_cannot_leak_delivery_after_turn_completion() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-submitted-drop-data");
+    stored_thread(
+        &test_store,
+        "thread",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    state.open(cx, "thread");
+    state.send(cx, "thread", "finish this task");
+    let provider = providers.started(cx, 0);
+    let (delivery_id, _) = provider.next_turn(cx);
+    // The submitted head remains in the visible queue strip until its
+    // provider acknowledgement. Its ✕ must not invalidate correlation.
+    let _ = state.command(
+        cx,
+        Command::DropQueued {
+            session_id: "thread".into(),
+            id: delivery_id,
+        },
+    );
+    provider.play([
+        AgentEvent::TurnAccepted { delivery_id },
+        AgentEvent::TurnStarted {
+            turn_id: "turn-1".into(),
+        },
+        completed_turn("turn-1"),
+    ]);
+    cx.run_until_seen(|view| has_record(view, "thread", is_turn_end));
+    let running = |cx: &TestAppContext| cx.seen().activity("thread").unwrap().turn_running;
+    assert!(!running(cx));
+    state.leave(cx, "thread");
+    assert!(!running(cx));
+    state.open(cx, "thread");
+    state.leave(cx, "thread");
+    assert!(
+        !running(cx),
+        "the completed delivery became Working again after reparking"
+    );
+}
+
+/// Only the event stream of the provider a thread runs ends that thread's
+/// provider, shown or not: its turn ends and the close is recorded. A stream
+/// left over from a provider the thread has since replaced changes nothing.
+#[test]
+fn event_stream_end_closes_only_its_own_live_provider_in_any_residency() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-stream-ownership");
+    let cases = [(false, true), (false, false), (true, true), (true, false)];
+    for (parked, current) in cases {
+        let id = format!("session-{parked}-{current}");
+        stored_thread(
+            &store,
+            &id,
+            ProviderKind::ClaudeCode,
+            &store.root().join(&id),
+            |meta| {
+                meta.model = Some("claude-opus-4-8".into());
+            },
+        );
+    }
+    let (state, providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    let mut launches = 0;
+    for (parked, current) in cases {
+        let id = format!("session-{parked}-{current}");
+        let id = id.as_str();
+        let mut provider = first_turn(&state, cx, &providers, id, launches);
+        launches += 1;
+        let ending = if current {
+            provider.clone()
+        } else {
+            // The thread takes another model: its provider is replaced, and
+            // the old one's stream ends afterwards.
+            state
+                .command(
+                    cx,
+                    Command::SetActiveModel {
+                        session_id: id.into(),
+                        provider: ProviderKind::ClaudeCode,
+                        model: Some("claude-sonnet-4-6".into()),
+                        profile_id: None,
+                    },
+                )
+                .unwrap();
+            state.send(cx, id, "on the new model");
+            provider.play([completed_turn("turn")]);
+            assert!(matches!(
+                provider.next_command(cx),
+                SessionCommand::ApplySettings { .. }
+            ));
+            provider.play([AgentEvent::SettingsApplied { applied: false }]);
+            assert!(matches!(
+                provider.next_command(cx),
+                SessionCommand::Shutdown
+            ));
+            let old = provider;
+            provider = providers.started(cx, launches);
+            launches += 1;
+            provider.start_turn(cx, "new");
+            cx.run_until_seen(|view| view.status(id).running_turn.is_some());
+            old
+        };
+        provider.play([AgentEvent::BackgroundTasksChanged { count: 2 }]);
+        provider.fence(cx, id);
+        if parked {
+            state.leave(cx, id);
+        }
+        ending.end_stream();
+        if current {
+            cx.run_until_seen(|view| !view.activity(id).unwrap().turn_running);
+        } else {
+            // What the replacement says after the old stream ended reaches
+            // the thread, so the end has been taken in.
+            state.open(cx, id);
+            provider.fence(cx, id);
+            assert!(cx.seen().activity(id).unwrap().turn_running);
+        }
+        let closes = store
+            .read_events(id)
+            .unwrap()
+            .iter()
+            .filter(|stored| matches!(stored.event, AgentEvent::SessionClosed { .. }))
+            .count();
+        assert_eq!(
+            closes,
+            usize::from(current),
+            "only the owning stream may persist a close: parked={parked}"
+        );
+    }
+}
+
+/// A thread's activity reads the same whether a client shows it or not:
+/// working while its own turn runs, its message is being taken or waits for
+/// the provider, and background work counted apart; a turn a gone process
+/// left open in its log is not working.
+#[test]
+fn a_threads_activity_reads_the_same_viewed_or_parked() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-working-location-test");
+    let ids = [
+        "idle",
+        "turn",
+        "delivery",
+        "queued",
+        "background",
+        "stale-timeline",
+    ];
+    for id in ids {
+        stored_thread(
+            &test_store,
+            id,
+            ProviderKind::ClaudeCode,
+            &test_store.root().join(id),
+            |_| {},
+        );
+    }
+    test_store
+        .append_event(
+            "stale-timeline",
+            1,
+            &AgentEvent::TurnStarted {
+                turn_id: "stale".into(),
+            },
+        )
+        .unwrap();
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    let mut launches = 0;
+    for (id, working, background) in [
+        ("idle", false, false),
+        ("turn", true, false),
+        ("delivery", true, true),
+        ("queued", true, false),
+        ("background", false, true),
+        ("stale-timeline", false, false),
+    ] {
+        match id {
+            "stale-timeline" => state.open(cx, id),
+            "queued" => {
+                // The provider takes its time to start.
+                providers.hold();
+                state.open(cx, id);
+                state.send(cx, id, "waiting");
+                providers.started(cx, launches);
+                launches += 1;
+            }
+            _ => {
+                let provider = first_turn(&state, cx, &providers, id, launches);
+                launches += 1;
+                match id {
+                    "turn" => {}
+                    "delivery" => {
+                        provider.play([
+                            AgentEvent::BackgroundTasksChanged { count: 1 },
+                            completed_turn("turn"),
+                        ]);
+                        cx.run_until_seen(|view| view.status(id).running_turn.is_none());
+                        state.send(cx, id, "being taken");
+                        provider.next_turn(cx);
+                    }
+                    "background" => provider.play([
+                        AgentEvent::BackgroundTasksChanged { count: 1 },
+                        completed_turn("turn"),
+                    ]),
+                    _ => provider.play([completed_turn("turn")]),
+                }
+                provider.fence(cx, id);
+            }
+        }
+        let read = |cx: &TestAppContext| {
+            let activity = cx.seen().activity(id).unwrap();
+            (activity.working, activity.background.tasks > 0)
+        };
+        assert_eq!(read(cx), (working, background), "{id}");
+        assert_eq!(cx.seen().status(id).activity.working, working, "{id}");
+        state.leave(cx, id);
+        assert_eq!(read(cx), (working, background), "{id} parked");
+        providers.let_go();
+    }
+}
+
+/// A running grandchild keeps every thread above it running an agent, not
+/// only its own lead, though none of them has work of its own.
+#[test]
+fn a_running_grandchild_keeps_every_ancestor_running_an_agent() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-waiting-child-test");
+    for (id, parent) in [
+        ("parent", None),
+        ("child", Some("parent")),
+        ("grandchild", Some("child")),
+    ] {
+        stored_thread(
+            &test_store,
+            id,
+            ProviderKind::ClaudeCode,
+            &test_store.root().join(id),
+            |meta| {
+                meta.parent_session_id = parent.map(Into::into);
+            },
+        );
+    }
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    first_turn(&state, cx, &providers, "grandchild", 0);
+    state.leave(cx, "grandchild");
+    state.open(cx, "parent");
+    let activity = |id: &str| cx.seen().activity(id).unwrap().clone();
+    assert!(activity("parent").background.agents == 1 && !activity("parent").working);
+    assert!(activity("child").background.agents == 1 && !activity("child").working);
+    assert!(activity("grandchild").background.is_idle() && activity("grandchild").working);
+}
+
+/// Switching to another thread must not kill a session whose turn is still
+/// running. The session parks in the background — process and queue alive,
+/// events still recorded, sidebar still "Working" — and selecting it again
+/// re-adopts it with the streamed-while-parked content visible.
+#[test]
+fn switching_threads_parks_a_working_session_instead_of_killing_it() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-park-data");
+    stored_thread(
+        &test_store,
+        "a",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("a"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    let a = first_turn(&state, cx, &providers, "a", 0);
+    state.send(cx, "a", "queued follow-up");
+
+    // Glance at another thread: the session must survive, not die.
+    state.leave(cx, "a");
+    assert!(
+        next_command(&a.commands).is_err(),
+        "switching threads must not send Shutdown to a working session"
+    );
+    assert!(
+        cx.seen().activity("a").unwrap().turn_running,
+        "a parked working session keeps its sidebar Working status"
+    );
+
+    // The parked session keeps streaming, and its turn completes in the
+    // background: the queued follow-up goes out as the next turn, on the
+    // same process.
+    a.play([
+        AgentEvent::ItemCompleted(ThreadItem {
+            id: "bg-1".into(),
+            parent_item_id: None,
+            content: ItemContent::AssistantMessage {
+                text: "Migration step 1 done.".into(),
+                summarized: false,
+            },
+        }),
+        completed_turn("turn"),
+    ]);
+    let (delivery_id, text) = a.next_turn(cx);
+    assert_eq!(text, "queued follow-up");
+    a.play([AgentEvent::TurnAccepted { delivery_id }]);
+    cx.run_until_seen(|view| view.activity("a").unwrap().turn_running);
+
+    // Coming back: everything that happened while parked is there, and the
+    // turn still runs.
+    state.open(cx, "a");
+    let timeline = cx.seen().timeline("a");
+    assert!(timeline.entries.iter().any(|entry| matches!(
+        &entry.content,
+        EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "Migration step 1 done."
+    )));
+    assert!(timeline.entries.iter().any(|entry| matches!(
+        &entry.content,
+        EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "queued follow-up"
+    )));
+    a.play([completed_turn("turn-2")]);
+    cx.run_until_seen(|view| !view.activity("a").unwrap().turn_running);
+}
+
+/// A failed provider start must not destroy what the user typed: the queued
+/// message stays in the queue instead of being cleared, the failure is on the
+/// record, and it names the Harness and its account.
+#[test]
+fn failed_provider_start_keeps_the_queued_message() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-t3f-data");
+    let cwd = test_store.root().join("project");
+    stored_thread(
+        &test_store,
+        "thread",
+        ProviderKind::ClaudeCode,
+        &cwd,
+        |_| {},
+    );
+    let mut settings = Settings::default();
+    settings.provider_mut(ProviderKind::ClaudeCode).display_name = Some("work".into());
+    SettingsStore::new(test_store.root().clone())
+        .save(&settings)
+        .unwrap();
+    let (state, providers) = played_host(cx, &test_store);
+    providers.refuse_in(&cwd, "the harness would not start".into());
+    state.open(cx, "thread");
+    state.send(cx, "thread", "do not lose me");
+    cx.run_until_seen(|view| {
+        view.timeline("thread")
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.content, EntryContent::ProviderStartError { .. }))
+    });
+    assert_eq!(
+        cx.seen()
+            .status("thread")
+            .queued_messages
+            .first()
+            .map(|message| message.text.as_str()),
+        Some("do not lose me"),
+        "the user's text must survive a failed provider start"
+    );
+    assert!(
+        cx.seen().notifications().iter().any(|notification| matches!(
+            notification,
+            RuntimeEvent::Error(RuntimeError::ProviderStart { harness, .. }) if harness == "Claude Code (work)"
+        )),
+        "the failure names the Harness and its account"
+    );
 }
 
 fn persisted_assistant_event(text: &str) -> AgentEvent {
@@ -8544,766 +8989,6 @@ fn persisted_assistant_event(text: &str) -> AgentEvent {
             summarized: false,
         },
     })
-}
-
-#[test]
-fn parked_readopt_refolds_events_appended_while_parked() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-parked-readopt-async-test");
-    let store = (*test_store).clone();
-    let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/parked"), None);
-    store.upsert_meta(&meta).unwrap();
-    store
-        .append_event(&meta.id, 1, &persisted_assistant_event("before parking"))
-        .unwrap();
-    let id = meta.id.clone();
-    let state = cx.new_entity(TestClientState::new(store));
-
-    state.update(cx, |state, cx| state.select_session(&id, cx));
-    cx.run_until(|state| {
-        state.selected_session().is_some_and(|session| {
-            session
-                .timeline
-                .entries
-                .iter()
-                .any(|entry| entry.id == "item-before parking")
-        })
-    });
-    state.update(cx, |state, cx| {
-        let active = state.selected_session_mut().unwrap();
-        active.turn_in_flight = true;
-        active.runtime = Runtime::Starting { generation: 1 };
-        state.start_draft("other".into(), PathBuf::from("/tmp/other"), cx);
-        state.record_event(&id, &persisted_assistant_event("while parked"), cx);
-        state.select_session(&id, cx);
-    });
-
-    cx.run_until(|state| {
-        state.selected_session().is_some_and(|session| {
-            session
-                .timeline
-                .entries
-                .iter()
-                .any(|entry| entry.id == "item-while parked")
-        })
-    });
-
-    state.update(cx, |state, _| {
-        assert!(state.selected_session().unwrap().timeline.entries.iter().any(
-            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "while parked")
-        ));
-    });
-}
-
-#[test]
-fn stale_timeline_completion_cannot_land_on_another_session() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-stale-timeline-load-test");
-    let store = (*test_store).clone();
-    let a = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/a"), None);
-    let b = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/b"), None);
-    store.upsert_meta(&a).unwrap();
-    store.upsert_meta(&b).unwrap();
-    store
-        .append_event(&a.id, 1, &persisted_assistant_event("only session A"))
-        .unwrap();
-    store
-        .append_event(&b.id, 1, &persisted_assistant_event("only session B"))
-        .unwrap();
-    let (id_a, id_b) = (a.id.clone(), b.id.clone());
-    let state = cx.new_entity(TestClientState::new(store));
-
-    state.update(cx, |state, cx| {
-        state.select_session(&id_a, cx);
-        state.select_session(&id_b, cx);
-        assert_eq!(state.active_session_id(), Some(id_b.as_str()));
-    });
-
-    cx.run_until(|state| {
-        state.selected_session().is_some_and(|session| {
-            session
-                .timeline
-                .entries
-                .iter()
-                .any(|entry| entry.id == "item-only session B")
-        })
-    });
-
-    state.update(cx, |state, _| {
-        let active = state.selected_session().unwrap();
-        assert_eq!(active.meta.id, id_b);
-        assert!(active.timeline.entries.iter().any(
-            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "only session B")
-        ));
-        assert!(!active.timeline.entries.iter().any(
-            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "only session A")
-        ));
-    });
-}
-
-#[test]
-fn timeline_load_keeps_records_appended_during_the_fold() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-timeline-watermark-test");
-    let store = (*test_store).clone();
-    let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/watermark"), None);
-    store.upsert_meta(&meta).unwrap();
-    store
-        .append_event(&meta.id, 1, &persisted_assistant_event("before load"))
-        .unwrap();
-    let id = meta.id.clone();
-    let state = cx.new_entity(TestClientState::new(store));
-
-    state.update(cx, |state, cx| {
-        state.select_session(&id, cx);
-        state.record_event(&id, &persisted_assistant_event("raced append"), cx);
-    });
-
-    cx.run_until(|state| {
-        state.selected_session().is_some_and(|session| {
-            session
-                .timeline
-                .entries
-                .iter()
-                .any(|entry| entry.id == "item-before load")
-        })
-    });
-
-    state.update(cx, |state, _| {
-        let timeline = &state.selected_session().unwrap().timeline;
-        assert!(timeline.entries.iter().any(
-            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "before load")
-        ));
-        assert!(timeline.entries.iter().any(
-            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "raced append")
-        ));
-    });
-}
-
-/// After stopping one thread, the next thread's first accepted message must
-/// remain visible and durable without inheriting the interrupted thread's error.
-#[test]
-fn stop_then_new_thread_keeps_the_first_message_visible() {
-    let cx = &mut TestAppContext::default();
-    let cwd = std::env::temp_dir().join(format!("tcode-t3-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&cwd).unwrap();
-    let test_store = TestStore::new("tcode-t3-data");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-
-    // Session A, live (fake provider: commands land on `commands_a`).
-    let (session, commands_a) = fake_live_session(cwd.clone());
-    let (commands_b, receiver_b) = smol::channel::unbounded();
-    let mut id_b = String::new();
-
-    state.update(cx, |state, cx| {
-        // No real provider may spawn if a start slips through.
-        state
-            .settings
-            .provider_mut(ProviderKind::ClaudeCode)
-            .binary_path = Some("/nonexistent/tcode-test-claude".into());
-
-        // Send → the provider command is queued, then the adapter's
-        // acceptance commits the user bubble.
-        state.install_selected(session);
-        state.host.send_turn(state.selected.as_deref().unwrap_or_default(), "first message".into(), Vec::new(), cx);
-        let id_a = state.selected_session().unwrap().meta.id.clone();
-        let first_delivery = match commands_a.try_recv() {
-            Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
-            other => panic!("expected first SendTurn, got {other:?}"),
-        };
-        state.on_event(
-            &id_a,
-            AgentEvent::TurnAccepted {
-                delivery_id: first_delivery,
-            },
-            cx,
-        );
-        assert!(state.selected_session().unwrap().timeline.entries.iter().any(
-            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "first message")
-        ));
-
-        state.on_event(
-            &id_a,
-            AgentEvent::TurnStarted {
-                turn_id: "turn-1".into(),
-            },
-            cx,
-        );
-
-        // Stop. The provider reports an error and an interrupted turn while
-        // preserving the complete multi-line error for later presentation.
-        state.host.interrupt(state.selected.as_deref().unwrap_or_default(), true, cx).expect("interrupt delivered");
-        assert!(matches!(
-            commands_a.try_recv(),
-            Ok(SessionCommand::Interrupt)
-        ));
-        state.on_event(
-            &id_a,
-            AgentEvent::Error {
-                message: "Request was aborted\nwith a second line the toast never showed"
-                    .into(),
-                fatal: false,
-            },
-            cx,
-        );
-        state.on_event(
-            &id_a,
-            AgentEvent::TurnCompleted {
-                turn_id: "turn-1".into(),
-                status: TurnStatus::Interrupted,
-                usage: None,
-            },
-            cx,
-        );
-
-        // Immediately: new thread, send. The draft commits to a NEW session;
-        // the message waits in the queue while the provider starts (still
-        // visible in the queue strip — never dropped).
-        state.start_draft("proj-t3".into(), cwd.clone(), cx);
-        state.host.send_turn(state.selected.as_deref().unwrap_or_default(), "second message".into(), Vec::new(), cx);
-        let active = state.selected_session().unwrap();
-        id_b = active.meta.id.clone();
-        assert_ne!(id_a, id_b);
-
-        // Provider comes up (simulated — the queue flush on start).
-        state.selected_session_mut().unwrap().runtime = Runtime::Live(commands_b);
-        let _ = state.host.dispatch_next_queued(state.selected.as_deref().unwrap_or_default(), cx);
-        let second_delivery = match receiver_b.try_recv() {
-            Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
-            other => panic!("expected second SendTurn, got {other:?}"),
-        };
-        state.on_event(
-            &id_b,
-            AgentEvent::TurnAccepted {
-                delivery_id: second_delivery,
-            },
-            cx,
-        );
-
-        // THE assertion: the new thread's first message is a visible user
-        // entry in a rendered turn, and session A's error did not leak in.
-        let active = state.selected_session().unwrap();
-        let users: Vec<&str> = active
-            .timeline
-            .entries
-            .iter()
-            .filter_map(|e| match &e.content {
-                EntryContent::Item(ItemContent::UserMessage { text, .. }) => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(users, vec!["second message"]);
-        let entry_turn = active.timeline.entries[0].turn;
-        assert!(
-            entry_turn < active.timeline.turns.len(),
-            "user entry must belong to a rendered turn (turn {entry_turn} of {})",
-            active.timeline.turns.len()
-        );
-        assert!(
-            !active
-                .timeline
-                .entries
-                .iter()
-                .any(|e| matches!(e.content, EntryContent::Error { .. })),
-            "session A's interrupt error leaked into the new thread"
-        );
-    });
-    cx.run_until_parked();
-    state.update(cx, |state, _| {
-        // And it is durable: a replay of the JSONL shows the same thing.
-        let replayed = Timeline::fold_events(state.store.read_events(&id_b).unwrap());
-        assert!(replayed.entries.iter().any(
-            |e| matches!(&e.content, EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "second message")
-        ));
-    });
-
-    let _ = std::fs::remove_dir_all(&cwd);
-}
-
-/// A user message is activity: once the provider accepts it the thread's
-/// updated time moves, which is what lifts it in the threads list.
-#[test]
-fn an_accepted_user_message_moves_the_thread_updated_time() {
-    let cx = &mut TestAppContext::default();
-    let cwd = std::env::temp_dir().join(format!("tcode-message-activity-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&cwd).unwrap();
-    let test_store = TestStore::new("tcode-message-activity-data");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (mut session, commands) = fake_live_session(cwd.clone());
-    session.meta.title = "Tidy the parser".into();
-    session.meta.updated_at = 100;
-    let id = session.meta.id.clone();
-
-    state.update(cx, |state, cx| {
-        state.store.upsert_meta(&session.meta).unwrap();
-        state.sessions = state.store.load_index().unwrap().into();
-        state.install_selected(session);
-        state.send_turn(&id, "one more change".into(), Vec::new(), cx);
-        let delivery_id = match commands.try_recv() {
-            Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
-            other => panic!("expected SendTurn, got {other:?}"),
-        };
-        assert_eq!(state.find_meta(&id).unwrap().updated_at, 100);
-        state.on_event(&id, AgentEvent::TurnAccepted { delivery_id }, cx);
-        assert_eq!(
-            state.find_meta(&id).unwrap().updated_at,
-            cx.clock().unix_secs()
-        );
-    });
-    cx.run_until_parked();
-    let persisted = test_store.load_index().unwrap();
-    assert_eq!(persisted[0].updated_at, cx.now_secs());
-
-    let _ = std::fs::remove_dir_all(&cwd);
-}
-
-#[test]
-fn submitted_queue_head_cannot_leak_delivery_after_turn_completion() {
-    let cx = &mut TestAppContext::default();
-    let cwd = std::env::temp_dir().join(format!("tcode-submitted-drop-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&cwd).unwrap();
-    let test_store = TestStore::new("tcode-submitted-drop-data");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (session, commands) = fake_live_session(cwd.clone());
-    let id = session.meta.id.clone();
-
-    state.update(cx, |state, cx| {
-        state.store.upsert_meta(&session.meta).unwrap();
-        state.sessions = state.store.load_index().unwrap().into();
-        state.install_selected(session);
-        state.send_turn(&id, "finish this task".into(), Vec::new(), cx);
-        let delivery_id = match commands.try_recv() {
-            Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
-            other => panic!("expected SendTurn, got {other:?}"),
-        };
-
-        // The submitted head remains in the visible queue strip until its
-        // provider acknowledgement. Its ✕ must not invalidate correlation.
-        state.drop_queued(&id, delivery_id, cx);
-        state.on_event(&id, AgentEvent::TurnAccepted { delivery_id }, cx);
-        state.on_event(
-            &id,
-            AgentEvent::TurnStarted {
-                turn_id: "turn-1".into(),
-            },
-            cx,
-        );
-        state.on_event(
-            &id,
-            AgentEvent::TurnCompleted {
-                turn_id: "turn-1".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            cx,
-        );
-        assert!(!state.turn_running_for(&id));
-
-        state.start_draft("proj".into(), cwd.clone(), cx);
-        state.select_session(&id, cx);
-        assert!(!state.turn_running_for(&id));
-        state.start_draft("proj".into(), cwd.clone(), cx);
-        assert!(
-            !state.turn_running_for(&id),
-            "the completed delivery became Working again after reparking"
-        );
-    });
-
-    let _ = std::fs::remove_dir_all(&cwd);
-}
-
-#[test]
-fn event_stream_end_closes_only_its_own_live_provider_in_any_residency() {
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("tcode-stream-ownership");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    for parked in [false, true] {
-        for (live, current) in [(true, true), (true, false), (false, false)] {
-            let id = format!("session-{parked}-{live}-{current}");
-            let id = id.as_str();
-            let (commands, _receiver) = smol::channel::unbounded();
-            let (old_commands, _old_receiver) = smol::channel::unbounded();
-            state.update(cx, |state, cx| {
-                let mut session = live_session(ProviderKind::ClaudeCode, commands.clone());
-                session.meta.id = id.into();
-                session.turn_in_flight = live;
-                session.background_task_count = if live { 2 } else { 0 };
-                if !live {
-                    session.runtime = Runtime::Idle;
-                }
-                state.store.upsert_meta(&session.meta).unwrap();
-                state.sessions.push(session.meta.clone());
-                if parked {
-                    state.residents.parked.insert(id.into(), session);
-                } else {
-                    state.install_selected(session);
-                }
-                state.on_event_stream_ended(
-                    id,
-                    if current { &commands } else { &old_commands },
-                    cx,
-                );
-                assert_eq!(
-                    state.turn_running_for(id),
-                    live && !current,
-                    "parked={parked}, live={live}, current={current}"
-                );
-            });
-            cx.run_until_parked();
-            let closes = store
-                .read_events(id)
-                .unwrap()
-                .iter()
-                .filter(|stored| matches!(stored.event, AgentEvent::SessionClosed { .. }))
-                .count();
-            assert_eq!(
-                closes,
-                usize::from(live && current),
-                "only the owning stream may persist a close"
-            );
-        }
-    }
-}
-
-#[test]
-fn a_threads_activity_reads_the_same_viewed_or_parked() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-working-location-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let commands = smol::channel::unbounded().0;
-
-    let mut idle = live_session(ProviderKind::ClaudeCode, commands.clone());
-    idle.meta.id = "idle".into();
-
-    let mut turn = live_session(ProviderKind::ClaudeCode, commands.clone());
-    turn.meta.id = "turn".into();
-    turn.turn_in_flight = true;
-
-    let mut delivery = live_session(ProviderKind::ClaudeCode, commands.clone());
-    delivery.meta.id = "delivery".into();
-    delivery.delivery_in_flight = Some(7);
-    delivery.background_task_count = 1;
-
-    let mut queued = live_session(ProviderKind::ClaudeCode, commands.clone());
-    queued.meta.id = "queued".into();
-    queued.push_queued("waiting".into(), Vec::new());
-
-    let mut background = live_session(ProviderKind::ClaudeCode, commands.clone());
-    background.meta.id = "background".into();
-    background.background_task_count = 1;
-
-    let mut stale_timeline = live_session(ProviderKind::ClaudeCode, commands);
-    stale_timeline.meta.id = "stale-timeline".into();
-    stale_timeline.timeline.apply_at(
-        None,
-        &AgentEvent::TurnStarted {
-            turn_id: "stale".into(),
-        },
-    );
-
-    state.update(cx, |state, _| {
-        for (label, session, expected) in [
-            ("idle", idle, false),
-            ("turn", turn, true),
-            ("delivery", delivery, true),
-            ("queued", queued, true),
-            ("background", background, true),
-            ("stale timeline", stale_timeline, false),
-        ] {
-            let id = session.meta.id.clone();
-            let expected_background = matches!(label, "delivery" | "background");
-            state.sessions.push(session.meta.clone());
-            state.install_selected(session);
-            let index = state.index_snapshot();
-            assert_eq!(
-                index.summary.activity[&id].background.tasks > 0,
-                expected_background,
-                "{label}"
-            );
-            // Background work keeps the provider resident and shows as such;
-            // Working describes this thread's own turn or queued human input.
-            let expected_working = expected && label != "background";
-            assert_eq!(
-                state.session_status_snapshot(&id).unwrap().activity.working,
-                expected_working,
-                "{label}"
-            );
-
-            let parked = state.take_selected().unwrap();
-            state.residents.parked.insert(id.clone(), parked);
-            assert_eq!(
-                state.session_status_snapshot(&id).unwrap().activity.working,
-                expected_working,
-                "{label} parked"
-            );
-            assert_eq!(
-                state.index_snapshot().summary.activity[&id]
-                    .background
-                    .tasks
-                    > 0,
-                expected_background,
-                "{label} parked"
-            );
-            state.residents.parked.remove(&id);
-        }
-    });
-}
-
-/// A running grandchild keeps every thread above it running an agent, not
-/// only its own lead, though none of them has work of its own.
-#[test]
-fn a_running_grandchild_keeps_every_ancestor_running_an_agent() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-waiting-child-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let commands = smol::channel::unbounded().0;
-
-    let mut parent = live_session(ProviderKind::ClaudeCode, commands.clone());
-    parent.meta.id = "parent".into();
-    let mut child = live_session(ProviderKind::ClaudeCode, commands.clone());
-    child.meta.id = "child".into();
-    child.meta.parent_session_id = Some("parent".into());
-    let mut grandchild = live_session(ProviderKind::ClaudeCode, commands);
-    grandchild.meta.id = "grandchild".into();
-    grandchild.meta.parent_session_id = Some("child".into());
-    grandchild.turn_in_flight = true;
-
-    state.update(cx, |state, _| {
-        for session in [&parent, &child, &grandchild] {
-            state.sessions.push(session.meta.clone());
-        }
-        state.install_selected(parent);
-        state.residents.parked.insert("child".into(), child);
-        state
-            .residents
-            .parked
-            .insert("grandchild".into(), grandchild);
-
-        let activity = state.index_snapshot().summary.activity;
-        assert!(activity["parent"].background.agents == 1 && !activity["parent"].working);
-        assert!(activity["child"].background.agents == 1 && !activity["child"].working);
-        assert!(activity["grandchild"].background.is_idle() && activity["grandchild"].working);
-    });
-}
-
-/// Switching to another thread must not kill a session whose turn is still
-/// running. The session parks in the background — process and queue alive,
-/// events still recorded, sidebar still "Working" — and selecting it again
-/// re-adopts it with the streamed-while-parked content visible.
-#[test]
-fn switching_threads_parks_a_working_session_instead_of_killing_it() {
-    let cx = &mut TestAppContext::default();
-    let cwd = std::env::temp_dir().join(format!("tcode-park-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&cwd).unwrap();
-    let test_store = TestStore::new("tcode-park-data");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-
-    // A live session (fake provider: commands land on `commands_a`).
-    let (session, commands_a) = fake_live_session(cwd.clone());
-    let id_a = session.meta.id.clone();
-
-    state.update(cx, |state, cx| {
-        state
-            .settings
-            .provider_mut(ProviderKind::ClaudeCode)
-            .binary_path = Some("/nonexistent/tcode-test-claude".into());
-
-        // A live session with a running turn (the overnight workflow).
-        state.store.upsert_meta(&session.meta).unwrap();
-        state.sessions = state.store.load_index().unwrap().into();
-        state.install_selected(session);
-        state.send_turn(&id_a, "run the long migration".into(), Vec::new(), cx);
-        state.send_turn(&id_a, "queued follow-up".into(), Vec::new(), cx);
-        let first_delivery = match next_command(&commands_a) {
-            Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
-            other => panic!("expected migration SendTurn, got {other:?}"),
-        };
-        state.on_event(
-            &id_a,
-            AgentEvent::TurnAccepted {
-                delivery_id: first_delivery,
-            },
-            cx,
-        );
-        state.on_event(
-            &id_a,
-            AgentEvent::TurnStarted {
-                turn_id: "turn-1".into(),
-            },
-            cx,
-        );
-
-        // Glance at another thread: the session must survive, not die.
-        state.start_draft("proj-t3".into(), cwd.clone(), cx);
-        assert!(
-            next_command(&commands_a).is_err(),
-            "switching threads must not send Shutdown to a working session"
-        );
-        assert!(
-            state.turn_running_for(&id_a),
-            "a parked working session keeps its sidebar Working status"
-        );
-
-        // The parked session keeps streaming; its events keep landing in
-        // the JSONL even though another thread is on screen.
-        state.on_event(
-            &id_a,
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "bg-1".into(),
-                parent_item_id: None,
-                content: ItemContent::AssistantMessage {
-                    text: "Migration step 1 done.".into(),
-                    summarized: false,
-                },
-            }),
-            cx,
-        );
-
-        // Its turn completes in the background → the queued follow-up goes
-        // out as the next turn, on the same process.
-        state.on_event(
-            &id_a,
-            AgentEvent::TurnCompleted {
-                turn_id: "turn-1".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            cx,
-        );
-        let follow_up_delivery = match next_command(&commands_a) {
-            Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
-            other => panic!("expected follow-up SendTurn, got {other:?}"),
-        };
-        state.on_event(
-            &id_a,
-            AgentEvent::TurnAccepted {
-                delivery_id: follow_up_delivery,
-            },
-            cx,
-        );
-        assert!(state.turn_running_for(&id_a));
-
-        // Coming back re-adopts the live session: everything that happened
-        // while parked is in the timeline, and the turn is still running.
-        state.select_session(&id_a, cx);
-    });
-
-    cx.run_until_parked();
-
-    state.update(cx, |state, cx| {
-        let active = state.selected_session().unwrap();
-        assert_eq!(active.meta.id, id_a);
-        assert!(active.timeline.entries.iter().any(|e| matches!(
-            &e.content,
-            EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "Migration step 1 done."
-        )));
-        assert!(active.timeline.entries.iter().any(|e| matches!(
-            &e.content,
-            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "queued follow-up"
-        )));
-
-        state.on_event(
-            &id_a,
-            AgentEvent::TurnCompleted {
-                turn_id: "turn-2".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            cx,
-        );
-        assert!(
-            !state.turn_running_for(&id_a),
-            "a completed active session must not remain Working"
-        );
-    });
-
-    let _ = std::fs::remove_dir_all(&cwd);
-}
-
-/// A failed provider start must not destroy what the user typed: the queued
-/// message stays in the queue (visible in the strip, flushed by the next
-/// successful start) instead of being cleared.
-#[test]
-fn failed_provider_start_keeps_the_queued_message() {
-    let cx = &mut TestAppContext::default();
-    let cwd = std::env::temp_dir().join(format!("tcode-t3f-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&cwd).unwrap();
-    let test_store = TestStore::new("tcode-t3f-data");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-
-    state.update(cx, |state, cx| {
-        // A binary that cannot exist → start_session fails fast.
-        state
-            .settings
-            .provider_mut(ProviderKind::ClaudeCode)
-            .binary_path = Some("/nonexistent/tcode-test-claude".into());
-        state
-            .settings
-            .provider_mut(ProviderKind::ClaudeCode)
-            .display_name = Some("work".into());
-        state.start_draft("proj-fail".into(), cwd.clone(), cx);
-        state.host.send_turn(
-            state.selected.as_deref().unwrap_or_default(),
-            "do not lose me".into(),
-            Vec::new(),
-            cx,
-        );
-    });
-
-    cx.run_until(|state| {
-        state
-            .selected_session()
-            .is_some_and(|session| matches!(session.runtime, Runtime::Idle))
-    });
-
-    state.update(cx, |state, _| {
-        let active = state.selected_session().unwrap();
-        assert_eq!(
-            active.queue.first().map(|m| m.text.as_str()),
-            Some("do not lose me"),
-            "the user's text must survive a failed provider start"
-        );
-        // The failure itself is on the record.
-        assert!(
-            active
-                .timeline
-                .entries
-                .iter()
-                .any(|e| matches!(e.content, EntryContent::ProviderStartError { .. })),
-            "the start failure must be recorded in the timeline"
-        );
-    });
-    assert!(
-        cx.drain_outgoing().iter().any(|message| matches!(
-            message,
-            HostMessage::Event(EventEnvelope {
-                event: ServerEvent::Runtime(RuntimeEvent::Error(RuntimeError::ProviderStart {
-                    harness,
-                    ..
-                })),
-                ..
-            }) if harness == "Claude Code (work)"
-        )),
-        "the failure names the Harness and its account"
-    );
-
-    let _ = std::fs::remove_dir_all(&cwd);
-}
-
-fn recv_dispatch_reply<T>(cx: &mut TestAppContext, rx: &smol::channel::Receiver<T>) -> T {
-    let mut reply = None;
-    cx.run_until(|_| {
-        reply = rx.try_recv().ok();
-        reply.is_some()
-    });
-    reply.expect("dispatch reply observed above")
 }
 
 /// A repository at `root` on `main` with one commit of `tracked.txt`.
@@ -9483,41 +9168,36 @@ fn a_subagent_started_in_a_worktree_works_in_it() {
 
     let test_store = TestStore::new("tcode-dispatch-worktree-data");
     let data_worktrees = test_store.root().join("worktrees");
-    let scripted = scripted_provider(ProviderKind::Codex);
-    let state = cx.new_entity({
-        let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher(scripted.launcher);
-        state
-    });
-    let (reply, response) = smol::channel::bounded(1);
-
-    state.update(cx, |state, cx| {
-        let project_id = state.create_project(root.clone(), cx).unwrap();
-        let mut parent = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
-        parent.id = "parent".into();
-        parent.project_id = Some(project_id);
-        state.sessions.push(parent);
-        state.handle_control_op(
-            "parent".into(),
-            control_mcp::ControlOp::StartThread(control_mcp::StartThreadParams {
-                project_id: None,
-                cwd: None,
-                workspace: Some(control_mcp::Workspace::Worktree),
-                subagent: Some(true),
-                provider: "codex".into(),
-                model: Some("gpt-6.1-sol".into()),
-                profile: None,
-                options: None,
-                title: Some("Isolated child".into()),
-                message: "Inspect the workspace".into(),
-                attachments: None,
-                request_id: "isolated".into(),
-            }),
-            reply,
+    let project = Project::from_root(root.clone());
+    test_store.upsert_project(&project).unwrap();
+    stored_thread(
+        &test_store,
+        "parent",
+        ProviderKind::Codex,
+        &root,
+        |parent| {
+            parent.project_id = Some(project.id.clone());
+        },
+    );
+    let (state, providers) = controlled_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    let lead = first_turn(&state, cx, &providers, "parent", 0);
+    let response = lead
+        .control(
             cx,
-        );
-    });
-    let response = recv_dispatch_reply(cx, &response).unwrap();
+            "start_thread",
+            serde_json::json!({
+                "workspace": "worktree",
+                "subagent": true,
+                "provider": "codex",
+                "model": "gpt-6.1-sol",
+                "title": "Isolated child",
+                "message": "Inspect the workspace",
+                "request_id": "isolated",
+            }),
+        )
+        .unwrap();
+
     let child_id = response["thread_id"].as_str().unwrap().to_string();
     let expected_branch = format!("tcode/{child_id}");
     let expected_path = PathBuf::from(response["cwd"].as_str().unwrap());
@@ -9526,8 +9206,9 @@ fn a_subagent_started_in_a_worktree_works_in_it() {
         "start_thread response: {response}"
     );
     assert_eq!(response["worktree_branch"], expected_branch);
-    state.update(cx, |state, _| {
-        let child = state.find_meta(&child_id).unwrap();
+    cx.run_until_seen(|view| view.session(&child_id).is_some());
+    {
+        let child = cx.seen().session(&child_id).unwrap();
         assert_eq!(child.parent_session_id.as_deref(), Some("parent"));
         assert_eq!(child.cwd, expected_path);
         assert_eq!(
@@ -9537,7 +9218,8 @@ fn a_subagent_started_in_a_worktree_works_in_it() {
                 .map(|worktree| worktree.branch.as_str()),
             Some(expected_branch.as_str())
         );
-    });
+    }
+    assert_eq!(providers.started(cx, 1).options.cwd, expected_path);
     remove_git_worktree(&root, &expected_path).unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -9626,6 +9308,7 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
     let second = scripted_provider(ProviderKind::ClaudeCode);
     let first_commands = first.commands.clone();
     let second_commands = second.commands.clone();
+    let provider_events = [first.events.clone(), second.events.clone()];
     let launcher = ProviderLauncher(Arc::new(move |kind, options| {
         let launcher = if options.cwd.ends_with("one") {
             first.launcher.clone()
@@ -9710,24 +9393,31 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
     };
     receive_turn(&first_commands, "from desktop");
     receive_turn(&second_commands, "from phone");
-    let ids = (id_one.clone(), id_two.clone());
-    smol::block_on(host.update_state_for_test(move |state, cx| {
-        for id in [&ids.0, &ids.1] {
-            for text in ["first", "second", "third"] {
-                state.record_event(
-                    id,
-                    &AgentEvent::Warning {
-                        message: text.into(),
-                    },
-                    cx,
-                );
-            }
+    for events in &provider_events {
+        for text in ["first", "second", "third"] {
+            events
+                .try_send(AgentEvent::Warning {
+                    message: text.into(),
+                })
+                .unwrap();
         }
-    }))
-    .unwrap();
-    for (link, id) in [(&one, &id_one), (&two, &id_two)] {
+    }
+    // Each client is sent its thread's third record; what either was sent
+    // went out before the acknowledgement of a command sent after that.
+    let mut received = [Vec::new(), Vec::new()];
+    for (link, received) in [&one, &two].into_iter().zip(&mut received) {
         let events = link.events();
-        let mut received = Vec::new();
+        while received
+            .iter()
+            .filter(|event: &&EventEnvelope| matches!(event.event, ServerEvent::SessionEvent(_)))
+            .count()
+            < 3
+        {
+            received.push(events.recv_blocking().unwrap());
+        }
+    }
+    for ((link, id), mut received) in [(&one, &id_one), (&two, &id_two)].into_iter().zip(received) {
+        let events = link.events();
         // The app consumes events while commands await their FIFO acknowledgement.
         smol::block_on(smol::future::race(
             async {
@@ -9833,93 +9523,287 @@ fn archived_revision_invalidates_sharing_facts_when_another_thread_or_draft_leav
     });
 }
 
+/// The status a client is sent carries the thread's usage and context window
+/// however little of the log the client holds: one opening the thread after
+/// many later records gets a window that starts after the usage.
 #[test]
 fn usage_projection_survives_a_partial_history_window() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("session-plan-usage-window");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
     let id = "plan-usage";
-    state.update(cx, |state, cx| {
-        let mut meta = SessionMeta::new(
-            ProviderKind::ClaudeCode,
-            store.root().clone(),
-            Some("claude-sonnet-4-6".into()),
-        );
-        meta.id = id.into();
-        meta.option_selections = vec![OptionSelection {
-            id: "contextWindow".into(),
-            value: serde_json::json!(500_000),
-        }];
-        state.install_selected(ActiveSession::new(meta, false, Vec::new()));
-        state.on_event(
-            id,
-            AgentEvent::TurnStarted {
-                turn_id: "first".into(),
-            },
-            cx,
-        );
-        state.on_event(
-            id,
-            AgentEvent::TokenUsage(agent::TokenUsage {
-                context_window: Some(1_000_000),
-                used_tokens: Some(1234),
-                total_processed_tokens: Some(9876),
-                freshness: agent::ContextFreshness::Current,
-                ..Default::default()
-            }),
-            cx,
-        );
-        state.on_event(
-            id,
-            AgentEvent::TurnCompleted {
-                turn_id: "first".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            cx,
-        );
-        state.on_event(
-            id,
-            AgentEvent::TurnStarted {
-                turn_id: "second".into(),
-            },
-            cx,
-        );
-        for index in 0..401 {
-            state.on_event(
-                id,
-                AgentEvent::Warning {
-                    message: format!("later record {index}"),
-                },
-                cx,
-            );
-        }
+    stored_thread(
+        &store,
+        id,
+        ProviderKind::ClaudeCode,
+        &store.root().join("thread"),
+        |meta| {
+            meta.model = Some("claude-sonnet-4-6".into());
+            meta.option_selections = vec![OptionSelection {
+                id: "contextWindow".into(),
+                value: serde_json::json!(500_000),
+            }];
+        },
+    );
+    let (state, providers) = played_host(cx, &store);
+    let provider = first_turn(&state, cx, &providers, id, 0);
+    provider.play([
+        AgentEvent::TokenUsage(agent::TokenUsage {
+            context_window: Some(1_000_000),
+            used_tokens: Some(1234),
+            total_processed_tokens: Some(9876),
+            freshness: agent::ContextFreshness::Current,
+            ..Default::default()
+        }),
+        completed_turn("turn"),
+    ]);
+    state.send(cx, id, "again");
+    provider.start_turn(cx, "second");
+    provider.play((0..401).map(|index| AgentEvent::Warning {
+        message: format!("later record {index}"),
+    }));
+    provider.fence(cx, id);
+    state.leave(cx, id);
+    state.open(cx, id);
+    let partial = cx.seen().timeline(id);
+    assert!(
+        !cx.seen()
+            .records(id)
+            .iter()
+            .any(|record| matches!(record.event, AgentEvent::TokenUsage(_))),
+        "the window starts after the usage"
+    );
+    assert!(partial.usage.is_none());
+    let status = cx.seen().status(id);
+    let usage = status.usage.unwrap();
+    assert_eq!(usage.used_tokens, Some(1234));
+    assert_eq!(usage.total_processed_tokens, Some(9876));
+    assert_eq!(usage.context_window, Some(1_000_000));
+    assert_eq!(status.context_window, Some(500_000));
+}
+
+/// Whether the computer-use server takes `registration`'s token.
+fn computer_use_accepts(registration: &agent::McpRegistration) -> bool {
+    let response = ureq::post(&registration.url)
+        .set("Authorization", &format!("Bearer {}", registration.bearer_token))
+        .set("Accept", "application/json, text/event-stream")
+        .set("Content-Type", "application/json")
+        .send_string(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"played-provider","version":"1"}}}"#);
+    match response {
+        Ok(_) => true,
+        Err(ureq::Error::Status(401 | 403, _)) => false,
+        Err(error) => panic!("{error}"),
+    }
+}
+
+/// Each provider is given computer use under a token of its own. Stop keeps
+/// the token for the provider's next turn; a provider shut down loses it, and
+/// the one that replaces it gets another, while other providers keep theirs.
+#[test]
+fn computer_use_registrations_survive_stop_but_are_replaced_after_provider_shutdown() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-cu-registration-lifecycle");
+    for (id, provider) in [
+        ("a", ProviderKind::ClaudeCode),
+        ("b", ProviderKind::OpenCode),
+    ] {
+        stored_thread(&store, id, provider, &store.root().join(id), |_| {});
+    }
+    let mut settings = Settings::default();
+    settings.computer_use.enabled = true;
+    SettingsStore::new(store.root().clone())
+        .save(&settings)
+        .unwrap();
+    let mut host = mcp_host::Host::bind().unwrap();
+    let server = computer_use_mcp::start(&mut host);
+    host.start().unwrap();
+    let providers = Providers::default();
+    let state = cx.new_entity({
+        let mut state = TestClientState::new((*store).clone());
+        state.set_provider_launcher(providers.launcher());
+        state.attach_computer_use_mcp(server.url, server.tokens);
+        state
     });
-    cx.run_until(|state| state.event_records.contains_key(id));
-    state.update(cx, |state, _| {
-        let snapshot = events_reply(
-            state,
-            &Subscription {
-                known_index: None,
-                topic: Topic::SessionEvents {
-                    session_id: id.into(),
-                },
-                after: None,
+    let registration = |played: &Played| {
+        played
+            .options
+            .mcp_servers
+            .iter()
+            .find(|server| server.name == agent::McpRegistration::SERVER_NAME_COMPUTER_USE)
+            .cloned()
+            .expect("the provider is given computer use")
+    };
+    let a = first_turn(&state, cx, &providers, "a", 0);
+    let b = first_turn(&state, cx, &providers, "b", 1);
+    let (first, second) = (registration(&a), registration(&b));
+    assert!(
+        first.bearer_token != second.bearer_token,
+        "provider sessions must not share one cancellation scope"
+    );
+    state
+        .command(
+            cx,
+            Command::Interrupt {
+                session_id: "a".into(),
             },
-        );
-        let ServerEvent::SessionSnapshot { from, records, .. } = snapshot.event else {
-            panic!("history snapshot")
-        };
-        assert!(from > 0);
-        let partial = Timeline::fold_events(records);
-        assert!(partial.usage.is_none());
-        let status = state.session_status_snapshot(id).unwrap();
-        let usage = status.usage.unwrap();
-        assert_eq!(usage.used_tokens, Some(1234));
-        assert_eq!(usage.total_processed_tokens, Some(9876));
-        assert_eq!(usage.context_window, Some(1_000_000));
-        assert_eq!(status.context_window, Some(500_000));
-    });
+        )
+        .unwrap();
+    assert!(matches!(a.next_command(cx), SessionCommand::Interrupt));
+    assert!(
+        computer_use_accepts(&first),
+        "Stop permits the same provider to start its next turn"
+    );
+    a.play([turn_completed("turn", TurnStatus::Interrupted)]);
+    cx.run_until_seen(|view| has_record(view, "a", is_turn_end));
+    // Archiving the thread shuts its provider down; bringing it back starts
+    // another.
+    state
+        .command(
+            cx,
+            Command::ArchiveSession {
+                session_id: "a".into(),
+            },
+        )
+        .unwrap();
+    assert!(matches!(a.next_command(cx), SessionCommand::Shutdown));
+    assert!(
+        !computer_use_accepts(&first),
+        "a shut down provider's token is revoked"
+    );
+    assert!(
+        computer_use_accepts(&second),
+        "another provider retains its registration"
+    );
+    state
+        .command(
+            cx,
+            Command::UnarchiveSession {
+                session_id: "a".into(),
+            },
+        )
+        .unwrap();
+    state.leave(cx, "a");
+    state.open(cx, "a");
+    state.send(cx, "a", "again");
+    let restarted = registration(&providers.started(cx, 2));
+    assert!(
+        restarted.bearer_token != first.bearer_token,
+        "a restarted provider must not inherit revoked credentials"
+    );
+    state.command(cx, Command::ShutdownAllAndFlush).unwrap();
+}
+
+/// A stopped turn reads as stopping until the harness ends it.
+#[test]
+fn interrupt_reports_stopping_until_the_turn_completes() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("interrupt-stopping");
+    stored_thread(
+        &store,
+        "thread",
+        ProviderKind::ClaudeCode,
+        &store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &store);
+    let provider = first_turn(&state, cx, &providers, "thread", 0);
+    assert!(!cx.seen().status("thread").stopping);
+    state
+        .command(
+            cx,
+            Command::Interrupt {
+                session_id: "thread".into(),
+            },
+        )
+        .unwrap();
+    assert!(cx.seen().status("thread").stopping);
+    assert!(matches!(
+        provider.next_command(cx),
+        SessionCommand::Interrupt
+    ));
+    provider.play([turn_completed("turn", TurnStatus::Interrupted)]);
+    cx.run_until_seen(|view| has_record(view, "thread", is_turn_end));
+    let status = cx.seen().status("thread");
+    assert!(!status.stopping);
+    assert!(!status.activity.turn_running);
+}
+
+/// The status says which turn runs and since when, and the requests open on
+/// the running harness: a background subagent's approval stays open after
+/// the turn that spawned it ends.
+#[test]
+fn status_carries_the_running_turn_while_in_flight_and_open_requests_while_live() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("status-running-turn");
+    stored_thread(
+        &store,
+        "thread",
+        ProviderKind::ClaudeCode,
+        &store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &store);
+    let provider = first_turn(&state, cx, &providers, "thread", 0);
+    provider.play([completed_turn("turn")]);
+    state.send(cx, "thread", "again");
+    provider.start_turn(cx, "turn-2");
+    provider.play([AgentEvent::UserInputRequested {
+        request_id: "ask".into(),
+        questions: Vec::new(),
+        delivery: agent::UserInputDelivery::Blocking,
+    }]);
+    provider.fence(cx, "thread");
+    let started_at = cx.seen().timeline("thread").turns[1].start_ts;
+    assert!(started_at.is_some());
+    let status = cx.seen().status("thread");
+    assert_eq!(
+        status.running_turn,
+        Some(tcode_core::session::RunningTurn {
+            turn: 1,
+            started_at
+        })
+    );
+    assert_eq!(
+        status
+            .pending_user_input
+            .as_ref()
+            .map(|pending| pending.request_id.as_str()),
+        Some("ask")
+    );
+
+    // A background subagent keeps running, and asking, after the turn that
+    // spawned it ends.
+    let approval = |id: &str| {
+        AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+            id: id.into(),
+            turn_id: None,
+            parent_item_id: Some("toolu_agent".into()),
+            kind: agent::ApprovalKind::ExecCommand {
+                command: "cp a b".into(),
+                cwd: None,
+                description: None,
+            },
+            reason: None,
+            blocked_path: None,
+            options: Vec::new(),
+        })
+    };
+    provider.play([
+        approval("subagent-during-turn"),
+        completed_turn("turn-2"),
+        approval("subagent-between-turns"),
+    ]);
+    provider.fence(cx, "thread");
+    let status = cx.seen().status("thread");
+    assert_eq!(status.running_turn, None);
+    assert_eq!(
+        status
+            .pending_approvals
+            .iter()
+            .map(|request| request.id.as_str())
+            .collect::<Vec<_>>(),
+        ["subagent-during-turn", "subagent-between-turns"]
+    );
+    assert!(status.activity.waiting_for_approval);
 }
 
 /// A client back at a thread asks for what followed its cursor. What fits
@@ -10251,34 +10135,29 @@ fn an_appended_record_reaches_the_window_and_the_pages_after_it() {
     let store = TestStore::new("history-log-residency");
     open_stored_session(&store, "resident");
     let persisted = persist_streamed_turns(&store, "resident", 2).len() as u64;
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (state, providers) = played_host(cx, &store);
 
     window_reply(
         &through_pipe(&state, cx, 1, subscribe_events("resident", None)),
         1,
     );
-    state.update(cx, |state, cx| {
-        state.record_event(
-            "resident",
-            &AgentEvent::ItemCompleted(ThreadItem {
-                id: "user-late".into(),
-                parent_item_id: None,
-                content: ItemContent::UserMessage {
-                    text: "one more question".into(),
-                    attachments: Vec::new(),
-                },
-            }),
-            cx,
-        )
-    });
+    // The user asks one more question, which the provider takes.
+    state.send(cx, "resident", "one more question");
+    let provider = providers.started(cx, 0);
+    let (delivery_id, _) = provider.next_turn(cx);
+    provider.play([AgentEvent::TurnAccepted { delivery_id }]);
+    let asked = |event: &AgentEvent| {
+        matches!(event, AgentEvent::ItemCompleted(ThreadItem {
+            content: ItemContent::UserMessage { text, .. }, ..
+        }) if text == "one more question")
+    };
+    cx.run_until_seen(|view| has_record(view, "resident", asked));
     let window = window_reply(
         &through_pipe(&state, cx, 2, subscribe_events("resident", Some(persisted))),
         2,
     );
     assert_eq!((window.total, window.total_turns), (persisted + 1, 3));
-    assert!(
-        matches!(&window.records[..], [record] if matches!(&record.event, AgentEvent::ItemCompleted(item) if item.id == "user-late"))
-    );
+    assert!(matches!(&window.records[..], [record] if asked(&record.event)));
     let page = tcode_protocol::ClientPayload::Query(tcode_protocol::Query::SessionHistoryPage {
         session_id: "resident".into(),
         before: persisted + 1,
@@ -10290,224 +10169,6 @@ fn an_appended_record_reaches_the_window_and_the_pages_after_it() {
         panic!("page")
     };
     assert_eq!((from, records.len()), (persisted, 1));
-}
-
-#[test]
-fn computer_use_registrations_survive_stop_but_are_replaced_after_provider_shutdown() {
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("tcode-cu-registration-lifecycle");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let mut host = mcp_host::Host::bind().unwrap();
-    let server = computer_use_mcp::start(&mut host);
-    let (mut session, commands) = fake_live_session(std::env::temp_dir());
-    // Stop is only offered while a turn runs.
-    session.turn_in_flight = true;
-    state.update(cx, |state, cx| {
-        state
-            .host
-            .attach_computer_use_mcp(server.url, server.tokens);
-        let meta = session.meta.clone();
-        let other = SessionMeta::new(ProviderKind::Codex, std::env::temp_dir(), None);
-        state.install_selected(session);
-        let first = state.host.computer_use_registration_for(&meta).unwrap();
-        let second = state.host.computer_use_registration_for(&other).unwrap();
-        assert!(
-            first.bearer_token != second.bearer_token,
-            "provider sessions must not share one cancellation scope"
-        );
-        state.host.interrupt(&meta.id, true, cx).unwrap();
-        assert!(matches!(commands.try_recv(), Ok(SessionCommand::Interrupt)));
-        assert!(
-            state
-                .host
-                .computer_use_registration_for(&meta)
-                .unwrap()
-                .bearer_token
-                == first.bearer_token,
-            "Stop permits the same provider to start its next turn"
-        );
-        state.host.shutdown_active(&meta.id, cx);
-        assert!(matches!(commands.try_recv(), Ok(SessionCommand::Shutdown)));
-        assert!(
-            state
-                .host
-                .computer_use_registration_for(&other)
-                .unwrap()
-                .bearer_token
-                == second.bearer_token,
-            "another provider retains its registration"
-        );
-        assert!(
-            state
-                .host
-                .computer_use_registration_for(&meta)
-                .unwrap()
-                .bearer_token
-                != first.bearer_token,
-            "a restarted provider must not inherit revoked credentials"
-        );
-        state.host.shutdown_all(cx);
-    });
-}
-
-#[test]
-fn interrupt_reports_stopping_until_the_turn_completes() {
-    let store = TestStore::new("interrupt-stopping");
-    let mut state = AppState::new((*store).clone()).unwrap();
-    let context = TestAppContext::default();
-    let mut cx = context.host_cx();
-    let id = state.start_draft("fixture".into(), std::env::temp_dir(), &mut cx);
-    let (commands, _receiver) = smol::channel::unbounded();
-    let active = state.resident_mut(&id).unwrap();
-    active.runtime = Runtime::Live(commands);
-    active.turn_in_flight = true;
-    assert!(!state.session_status_snapshot(&id).unwrap().stopping);
-
-    state.interrupt(&id, true, &mut cx).unwrap();
-    assert!(state.session_status_snapshot(&id).unwrap().stopping);
-
-    state.on_event(
-        &id,
-        AgentEvent::TurnCompleted {
-            turn_id: "turn-1".into(),
-            status: TurnStatus::Interrupted,
-            usage: None,
-        },
-        &mut cx,
-    );
-    let status = state.session_status_snapshot(&id).unwrap();
-    assert!(!status.stopping);
-    assert!(!status.activity.turn_running);
-}
-
-#[test]
-fn status_carries_the_running_turn_while_in_flight_and_open_requests_while_live() {
-    let store = TestStore::new("status-running-turn");
-    let mut state = AppState::new((*store).clone()).unwrap();
-    let context = TestAppContext::default();
-    let mut cx = context.host_cx();
-    let id = state.start_draft("fixture".into(), std::env::temp_dir(), &mut cx);
-    let (commands, _receiver) = smol::channel::unbounded();
-    state.resident_mut(&id).unwrap().runtime = Runtime::Live(commands);
-    for turn in ["turn-1", "turn-2"] {
-        state.on_event(
-            &id,
-            AgentEvent::TurnStarted {
-                turn_id: turn.into(),
-            },
-            &mut cx,
-        );
-        if turn == "turn-1" {
-            state.on_event(
-                &id,
-                AgentEvent::TurnCompleted {
-                    turn_id: turn.into(),
-                    status: TurnStatus::Completed,
-                    usage: None,
-                },
-                &mut cx,
-            );
-        }
-    }
-    state.on_event(
-        &id,
-        AgentEvent::UserInputRequested {
-            request_id: "ask".into(),
-            questions: Vec::new(),
-            delivery: agent::UserInputDelivery::Blocking,
-        },
-        &mut cx,
-    );
-    let status = state.session_status_snapshot(&id).unwrap();
-    let started_at = state.resident(&id).unwrap().timeline.turns[1].start_ts;
-    assert!(started_at.is_some());
-    assert_eq!(
-        status.running_turn,
-        Some(tcode_core::session::RunningTurn {
-            turn: 1,
-            started_at
-        })
-    );
-    assert_eq!(
-        status.pending_user_input.map(|pending| pending.request_id),
-        Some("ask".into())
-    );
-
-    // A background subagent keeps running, and asking, after the turn that
-    // spawned it ends.
-    let approval = |id: &str, parent_item_id: Option<&str>| agent::ApprovalRequest {
-        id: id.into(),
-        turn_id: None,
-        parent_item_id: parent_item_id.map(Into::into),
-        kind: agent::ApprovalKind::ExecCommand {
-            command: "cp a b".into(),
-            cwd: None,
-            description: None,
-        },
-        reason: None,
-        blocked_path: None,
-        options: Vec::new(),
-    };
-    state.on_event(
-        &id,
-        AgentEvent::ApprovalRequested(approval("subagent-during-turn", Some("toolu_agent"))),
-        &mut cx,
-    );
-    state.on_event(
-        &id,
-        AgentEvent::TurnCompleted {
-            turn_id: "turn-2".into(),
-            status: TurnStatus::Completed,
-            usage: None,
-        },
-        &mut cx,
-    );
-    state.on_event(
-        &id,
-        AgentEvent::ApprovalRequested(approval("subagent-between-turns", Some("toolu_agent"))),
-        &mut cx,
-    );
-    let pending = |state: &AppState| {
-        state
-            .session_status_snapshot(&id)
-            .unwrap()
-            .pending_approvals
-            .into_iter()
-            .map(|request| request.id)
-            .collect::<Vec<_>>()
-    };
-    let status = state.session_status_snapshot(&id).unwrap();
-    assert_eq!(status.running_turn, None);
-    assert_eq!(
-        pending(&state),
-        ["subagent-during-turn", "subagent-between-turns"]
-    );
-    assert!(status.activity.waiting_for_approval);
-
-    // Shut down without a closing record: the timeline still holds the turn
-    // and its question.
-    state.on_event(
-        &id,
-        AgentEvent::TurnStarted {
-            turn_id: "turn-3".into(),
-        },
-        &mut cx,
-    );
-    state.on_event(
-        &id,
-        AgentEvent::UserInputRequested {
-            request_id: "ask-again".into(),
-            questions: Vec::new(),
-            delivery: agent::UserInputDelivery::Blocking,
-        },
-        &mut cx,
-    );
-    state.resident_mut(&id).unwrap().shutdown_to_idle();
-    assert!(state.resident(&id).unwrap().timeline.turn_running);
-    let status = state.session_status_snapshot(&id).unwrap();
-    assert_eq!(status.running_turn, None);
-    assert_eq!(status.pending_user_input, None);
-    assert!(status.pending_approvals.is_empty());
 }
 
 /// Opening or archiving one thread must cost that thread on the wire, not the
@@ -11380,7 +11041,8 @@ fn a_completion_drops_the_deltas_it_repeats_in_the_same_commit() {
 
 /// A thread opens with about half a megabyte of history however long its
 /// records are, a single record larger than that still arrives alone, and one
-/// larger than the client's line arrives as its size.
+/// larger than the client's line arrives as its size and the row to read it
+/// from.
 #[test]
 fn history_windows_are_byte_budgeted() {
     let cx = &mut TestAppContext::default();
@@ -11474,7 +11136,10 @@ fn history_windows_are_byte_budgeted() {
                 origin: None,
                 author: None,
                 ts: Some(199),
-                event: AgentEvent::RecordWithheld { bytes: huge_len },
+                event: AgentEvent::RecordWithheld {
+                    bytes: huge_len,
+                    row: Some(199),
+                },
                 elided: None,
             }
         );
@@ -11703,7 +11368,15 @@ fn clients_opening_a_cold_thread_through_the_mux_get_each_record_once() {
         .unwrap();
     }
     let persisted = root.read_events("cold").unwrap();
-    let host = spawn_host((*root).clone(), HostServices::default()).unwrap();
+    let provider = scripted_provider(ProviderKind::ClaudeCode);
+    let host = spawn_host(
+        (*root).clone(),
+        HostServices {
+            provider_launcher: provider.launcher.clone(),
+            ..HostServices::default()
+        },
+    )
+    .unwrap();
     let mux = tcode_traverse::HostMux::new(host.attachments.clone(), host.from_host.clone());
     let clients: Vec<HostLink> = (0..2)
         .map(|_| {
@@ -11720,6 +11393,28 @@ fn clients_opening_a_cold_thread_through_the_mux_get_each_record_once() {
             link
         })
         .collect();
+    // One client shows the thread's status and sends to it; its log has not
+    // reached any client.
+    clients[0]
+        .subscribe(Subscription {
+            known_index: None,
+            topic: Topic::SessionStatus {
+                session_id: "cold".into(),
+            },
+            after: None,
+        })
+        .unwrap();
+    clients[0]
+        .command_blocking(Command::SendTurn {
+            session_id: "cold".into(),
+            text: "go".into(),
+            attachment_paths: Vec::new(),
+        })
+        .unwrap();
+    assert!(matches!(
+        crate::app::next_command_blocking(&provider.commands),
+        Ok(SessionCommand::SendTurn { .. })
+    ));
     for link in &clients {
         link.subscribe(Subscription {
             known_index: None,
@@ -11730,16 +11425,12 @@ fn clients_opening_a_cold_thread_through_the_mux_get_each_record_once() {
         })
         .unwrap();
     }
-    smol::block_on(host.update_state_for_test(|state, cx| {
-        state.record_event(
-            "cold",
-            &AgentEvent::Warning {
-                message: "first live".into(),
-            },
-            cx,
-        );
-    }))
-    .unwrap();
+    provider
+        .events
+        .try_send(AgentEvent::Warning {
+            message: "first live".into(),
+        })
+        .unwrap();
     for link in &clients {
         let mut received = Vec::new();
         let events = link.events();
@@ -11759,14 +11450,17 @@ fn clients_opening_a_cold_thread_through_the_mux_get_each_record_once() {
                 } else if let ServerEvent::SessionEvent(record) = event {
                     assert!(has_window, "baseline precedes live records");
                     received.push(record);
-                } else {
+                } else if !matches!(event, ServerEvent::SessionStatusReplaced(_)) {
                     panic!("unexpected {event:?}");
                 }
             }
             // A FIFO reply proves all preceding records have reached the pump.
             link.query(tcode_protocol::Query::Ping).await.unwrap();
             assert!(
-                events.try_recv().is_err(),
+                std::iter::from_fn(|| events.try_recv().ok()).all(|event| !matches!(
+                    event.event,
+                    ServerEvent::SessionEvent(_) | ServerEvent::SessionSnapshot { .. }
+                )),
                 "no duplicate records after the tail"
             );
         });
@@ -11855,57 +11549,127 @@ fn pages_and_outputs_of_a_thread_nobody_opened_are_read_from_its_log() {
     cx.run_until(|state| state.log_hydrations.is_empty());
 }
 
-/// A child whose turn completes while its log is still being read reports
-/// that turn: its status and result, and the callback to its parent, see the
-/// completion and the final message accepted just before it.
+/// A child whose turn completes while its long log is still being read
+/// reports that turn: the callback to its parent sees the report it made in
+/// it.
 #[test]
 fn a_child_completing_while_its_log_is_read_reports_that_turn() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("child-completing-while-read");
-    let mut child = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
-    child.id = "child".into();
-    child.parent_session_id = Some("parent".into());
-    child.expectation = Some(ChildExpectation::opened(1));
-    store.upsert_meta(&child).unwrap();
+    stored_thread(
+        &store,
+        "child",
+        ProviderKind::Codex,
+        &store.root().join("child"),
+        |_| {},
+    );
     persist_streamed_turns(&store, "child", 1);
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let (parent_commands, parent_receiver) = smol::channel::unbounded();
-
-    state.update(cx, |state, cx| {
-        let mut parent = live_session(ProviderKind::Codex, parent_commands);
-        parent.meta.id = "parent".into();
-        parent.turn_in_flight = true;
-        state
-            .residents
-            .parked
-            .insert(parent.meta.id.clone(), parent);
-        state.load_background_session(child, cx);
-        for event in [
-            AgentEvent::TurnStarted {
-                turn_id: "turn-new".into(),
-            },
-            report_result_event("rep-new", "the new report"),
-            persisted_assistant_event("the new answer"),
-            AgentEvent::TurnCompleted {
-                turn_id: "turn-new".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-        ] {
-            state.on_event("child", event, cx);
-        }
-        assert!(state.log_hydrations.contains_key("child"));
-    });
-
-    cx.run_until(|_| !parent_receiver.is_empty());
-    let callback = std::iter::from_fn(|| parent_receiver.try_recv().ok())
-        .find_map(|command| match command {
-            SessionCommand::Steer { text, .. } => Some(text),
-            _ => None,
-        })
-        .expect("the parent is called back");
+    let fleet = Fleet::new(cx, &store, ProviderKind::Codex, &["child"], |_| {});
+    fleet.child("child").play([
+        report_result_event("rep-new", "the new report"),
+        persisted_assistant_event("the new answer"),
+        completed_turn("turn-1"),
+    ]);
+    let callback = fleet.lead.next_steer(cx);
     assert!(callback.starts_with("[orchestrate] thread child"));
     assert!(callback.ends_with("\nthe new report"));
+}
+
+/// A message whose attachment cannot be read is not sent: nothing of it
+/// reaches the provider or the queue, and the error names the file.
+#[test]
+fn a_message_with_an_unreadable_attachment_is_not_sent() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("unreadable-attachment");
+    stored_thread(
+        &store,
+        "thread",
+        ProviderKind::Codex,
+        &store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &store);
+    let provider = first_turn(&state, cx, &providers, "thread", 0);
+    provider.play([completed_turn("turn")]);
+    cx.run_until_seen(|view| view.status("thread").running_turn.is_none());
+    let readable = store.root().join("readable.png");
+    std::fs::write(&readable, b"png").unwrap();
+    let missing = store.root().join("missing.png");
+    let _ = state.command(
+        cx,
+        Command::SendTurn {
+            session_id: "thread".into(),
+            text: "what is in these?".into(),
+            attachment_paths: vec![readable, missing.clone()],
+        },
+    );
+    cx.run_until_seen(|view| {
+        view.notifications().iter().any(|notification| {
+            matches!(notification, RuntimeEvent::Error(RuntimeError::External(error))
+                if error.starts_with(&missing.display().to_string()))
+        })
+    });
+    assert!(next_command(&provider.commands).is_err());
+    assert!(cx.seen().status("thread").queued_messages.is_empty());
+}
+
+/// Each message is recorded with who it came from: the user's, another
+/// thread's agent's, and none for what the provider reports on its own; a
+/// top-level thread's own provider message counts as the human's.
+#[test]
+fn message_origins_survive_queue_acknowledgement_and_callback_steering() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("message-origin");
+    let fleet = Fleet::new(cx, &store, ProviderKind::Codex, &["child"], |_| {});
+    // The child's report is an agent's message to the lead.
+    fleet.child("child").play([
+        report_result_event("rep-1", "agent completion"),
+        completed_turn("turn-1"),
+    ]);
+    let SessionCommand::Steer { request_id, .. } = fleet.lead.next_command(cx) else {
+        panic!("the report is steered into the lead's turn")
+    };
+    fleet.lead.play([
+        AgentEvent::SteerAccepted { request_id },
+        // A message the provider reports on its own, such as an answer it
+        // steers into the running turn.
+        AgentEvent::SteerRequested {
+            request_id: "provider-reply".into(),
+            text: "A".into(),
+            attachments: vec![],
+        },
+    ]);
+    fleet.lead.fence(cx, "parent");
+    let messages: Vec<_> = cx
+        .seen()
+        .records("parent")
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.event,
+                AgentEvent::ItemCompleted(ThreadItem {
+                    content: ItemContent::UserMessage { .. },
+                    ..
+                }) | AgentEvent::SteerRequested { .. }
+            )
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        messages
+            .iter()
+            .map(|record| record.origin)
+            .collect::<Vec<_>>(),
+        [Some(MessageOrigin::Human), Some(MessageOrigin::Agent), None]
+    );
+    let fold =
+        |record: &StoredEvent| tcode_core::settlement::ThreadActivity::fold_stored([record], false);
+    assert_eq!(fold(&messages[1]).last_human_message_at, None);
+    assert_eq!(
+        fold(&messages[2]).last_human_message_at,
+        messages[2].ts,
+        "a top-level thread's own provider message is the human's"
+    );
 }
 
 #[test]
@@ -12038,119 +11802,6 @@ fn an_unindexed_cold_thread_opens_through_hydration() {
     );
     assert_eq!(page, whole.history_page(window.end, 200, None));
     assert!(store.turn_index("legacy").unwrap().is_none());
-}
-
-/// A message whose attachment cannot be read is not sent without it: nothing
-/// reaches the provider or the queue, and the error names the file.
-#[test]
-fn a_message_with_an_unreadable_attachment_is_not_sent() {
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("unreadable-attachment");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let (commands, received) = smol::channel::unbounded();
-    let mut session = live_session(ProviderKind::Codex, commands);
-    session.meta.id = "thread".into();
-    state.update(cx, |state, _| state.install_selected(session));
-    let readable = store.root().join("readable.png");
-    std::fs::write(&readable, b"png").unwrap();
-    let missing = store.root().join("missing.png");
-    state.dispatch_command(
-        cx,
-        1,
-        Command::SendTurn {
-            session_id: "thread".into(),
-            text: "what is in these?".into(),
-            attachment_paths: vec![readable, missing.clone()],
-        },
-    );
-    let (error, _) = cx.run_until_sent(|message| match message {
-        HostMessage::Event(EventEnvelope {
-            event: ServerEvent::Runtime(RuntimeEvent::Error(RuntimeError::External(error))),
-            ..
-        }) => Some(error.clone()),
-        _ => None,
-    });
-    assert!(error.starts_with(&missing.display().to_string()), "{error}");
-    assert!(received.try_recv().is_err());
-    state.read(|state| assert!(state.resident("thread").unwrap().queue.is_empty()));
-}
-
-#[test]
-fn message_origins_survive_queue_acknowledgement_and_callback_steering() {
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("message-origin");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let (commands, received) = smol::channel::unbounded();
-    let mut session = live_session(ProviderKind::Codex, commands);
-    session.meta.id = "thread".into();
-    state.update(cx, |state, _| state.install_selected(session));
-    state.dispatch_command(
-        cx,
-        1,
-        Command::SendTurn {
-            session_id: "thread".into(),
-            text: "human work".into(),
-            attachment_paths: vec![],
-        },
-    );
-    let SessionCommand::SendTurn { delivery_id, .. } = received.try_recv().unwrap() else {
-        panic!("send")
-    };
-    state.update(cx, |state, cx| {
-        state.on_event("thread", AgentEvent::TurnAccepted { delivery_id }, cx);
-        state.on_event(
-            "thread",
-            AgentEvent::TurnStarted {
-                turn_id: "run".into(),
-            },
-            cx,
-        );
-        state.deliver_orchestrate_callback_to_parent("thread", "agent completion".into(), cx);
-        // A message the provider reports on its own, such as an answer it
-        // steers into the running turn.
-        state.on_event(
-            "thread",
-            AgentEvent::SteerRequested {
-                request_id: "provider-reply".into(),
-                text: "A".into(),
-                attachments: vec![],
-            },
-            cx,
-        );
-    });
-    assert!(matches!(
-        received.try_recv().unwrap(),
-        SessionCommand::Steer { .. }
-    ));
-    cx.run_until_parked();
-    let records = store.read_events("thread").unwrap();
-    let messages: Vec<_> = records
-        .iter()
-        .filter(|record| {
-            matches!(
-                record.event,
-                AgentEvent::ItemCompleted(ThreadItem {
-                    content: ItemContent::UserMessage { .. },
-                    ..
-                }) | AgentEvent::SteerRequested { .. }
-            )
-        })
-        .collect();
-    assert_eq!(
-        messages
-            .iter()
-            .map(|record| record.origin)
-            .collect::<Vec<_>>(),
-        [Some(MessageOrigin::Human), Some(MessageOrigin::Agent), None]
-    );
-    let fold =
-        |record: &StoredEvent| tcode_core::settlement::ThreadActivity::fold_stored([record], false);
-    assert_eq!(fold(messages[1]).last_human_message_at, None);
-    assert_eq!(
-        fold(messages[2]).last_human_message_at,
-        messages[2].ts,
-        "a top-level thread's own provider message is the human's"
-    );
 }
 
 fn next_host_event(events: &async_channel::Receiver<EventEnvelope>) -> EventEnvelope {
@@ -12469,46 +12120,77 @@ fn first_index_snapshot_includes_persisted_child_runs_and_human_resume_status() 
     host.stopped.recv_blocking().unwrap();
 }
 
+/// A thread whose harness still runs background work says the host will not
+/// settle it, and settling it is refused.
 #[test]
 fn a_thread_the_host_will_not_settle_says_so_in_its_activity() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("settle-blocked");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let (commands, _received) = smol::channel::unbounded();
-    state.update(cx, |state, _| {
-        let mut session = live_session(ProviderKind::Codex, commands);
-        session.meta.id = "background".into();
-        session.background_task_count = 1;
-        state.sessions.push(session.meta.clone());
-        state.install_selected(session);
-    });
-    let activity =
-        state.read(|state| state.index_snapshot().summary.activity["background"].clone());
+    stored_thread(
+        &store,
+        "background",
+        ProviderKind::Codex,
+        &store.root().join("thread"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    let provider = first_turn(&state, cx, &providers, "background", 0);
+    provider.play([
+        AgentEvent::BackgroundTasksChanged { count: 1 },
+        completed_turn("turn"),
+    ]);
+    provider.fence(cx, "background");
+    let activity = cx.seen().activity("background").unwrap();
     assert!(!activity.working);
     assert!(activity.settle_blocked);
-    let refused = through_pipe(
-        &state,
-        cx,
-        1,
-        tcode_protocol::ClientPayload::Command(Command::SettleSession {
-            session_id: "background".into(),
-        }),
+    let refused = state
+        .command(
+            cx,
+            Command::SettleSession {
+                session_id: "background".into(),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(refused.code, "thread_busy");
+}
+
+/// A thread whose turn runs cannot be archived.
+#[test]
+fn archiving_a_thread_with_a_turn_in_flight_is_refused() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("archive-busy");
+    stored_thread(
+        &store,
+        "busy",
+        ProviderKind::Codex,
+        &store.root().join("thread"),
+        |_| {},
     );
-    assert!(refused.iter().any(|message| matches!(
-        message,
-        HostMessage::Ack { id: 1, result: Err(error) } if error.code == "thread_busy"
-    )));
+    let (state, providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    first_turn(&state, cx, &providers, "busy", 0);
+    let refused = state
+        .command(
+            cx,
+            Command::ArchiveSession {
+                session_id: "busy".into(),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(refused.code, "thread_busy");
+    assert_eq!(cx.seen().session("busy").unwrap().archived_at, None);
 }
 
 #[test]
 fn forking_a_thread_that_cannot_be_forked_is_refused_with_the_reason() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("fork-refused");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
     let mut empty = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
     empty.id = "empty".into();
     store.upsert_meta(&empty).unwrap();
-    state.update(cx, |state, _| state.sessions.push(empty.clone()));
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+
     let answered = through_pipe(
         &state,
         cx,
@@ -12546,39 +12228,6 @@ fn a_relaunch_marker_the_host_cannot_write_is_refused_with_the_reason() {
         message,
         HostMessage::Ack { id: 1, result: Err(error) } if error.code == "relaunch_marker"
     )));
-}
-
-#[test]
-fn archiving_a_thread_with_a_turn_in_flight_is_refused() {
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("archive-busy");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let (commands, _received) = smol::channel::unbounded();
-    state.update(cx, |state, _| {
-        let mut session = live_session(ProviderKind::Codex, commands);
-        session.meta.id = "busy".into();
-        session.turn_in_flight = true;
-        state.sessions.push(session.meta.clone());
-        state.install_selected(session);
-    });
-    let answered = through_pipe(
-        &state,
-        cx,
-        1,
-        tcode_protocol::ClientPayload::Command(Command::ArchiveSession {
-            session_id: "busy".into(),
-        }),
-    );
-    assert!(answered.iter().any(|message| matches!(
-        message,
-        HostMessage::Ack { id: 1, result: Err(error) } if error.code == "thread_busy"
-    )));
-    assert!(state.read(|state| {
-        state
-            .sessions
-            .iter()
-            .all(|meta| meta.id != "busy" || meta.archived_at.is_none())
-    }));
 }
 
 #[test]
@@ -12947,47 +12596,41 @@ fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one()
     }
 }
 
+/// Settling a thread whose harness runs background work is refused and stops
+/// nothing; once the work ends it settles.
 #[test]
 fn manual_settle_waits_for_the_harness_background_work() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("settle-background-work");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let (commands, received) = smol::channel::unbounded();
-    state.update(cx, |state, cx| {
-        let mut session = live_session(ProviderKind::ClaudeCode, commands);
-        session.meta.id = "shell".into();
-        state.sessions.push(session.meta.clone());
-        state.install_selected(session);
-        state.on_event("shell", AgentEvent::BackgroundTasksChanged { count: 1 }, cx);
-    });
-    let settle = || {
-        tcode_protocol::ClientPayload::Command(Command::SettleSession {
-            session_id: "shell".into(),
-        })
+    stored_thread(
+        &store,
+        "shell",
+        ProviderKind::ClaudeCode,
+        &store.root().join("shell"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    let provider = first_turn(&state, cx, &providers, "shell", 0);
+    provider.play([
+        AgentEvent::BackgroundTasksChanged { count: 1 },
+        completed_turn("turn"),
+    ]);
+    provider.fence(cx, "shell");
+    let settle = || Command::SettleSession {
+        session_id: "shell".into(),
     };
-    let denied = through_pipe(&state, cx, 1, settle());
-    assert!(denied.iter().any(|message| matches!(
-        message,
-        HostMessage::Ack { id: 1, result: Err(error) } if error.code == "thread_busy"
-    )));
-    state.read(|state| assert!(!state.find_meta("shell").unwrap().is_settled()));
+    assert_eq!(state.command(cx, settle()).unwrap_err().code, "thread_busy");
+    assert!(!cx.seen().session("shell").unwrap().is_settled());
     assert!(
-        received.try_recv().is_err(),
+        next_command(&provider.commands).is_err(),
         "a refused settle leaves the harness and its background work running"
     );
 
-    state.update(cx, |state, cx| {
-        state.on_event("shell", AgentEvent::BackgroundTasksChanged { count: 0 }, cx)
-    });
-    let accepted = through_pipe(&state, cx, 2, settle());
-    assert!(accepted.iter().any(|message| matches!(
-        message,
-        HostMessage::Ack {
-            id: 2,
-            result: Ok(_)
-        }
-    )));
-    state.read(|state| assert!(state.find_meta("shell").unwrap().is_settled()));
+    provider.play([AgentEvent::BackgroundTasksChanged { count: 0 }]);
+    provider.fence(cx, "shell");
+    state.command(cx, settle()).unwrap();
+    cx.run_until_seen(|view| view.session("shell").unwrap().is_settled());
 }
 
 #[test]
@@ -14072,14 +13715,6 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
     std::fs::create_dir_all(&cwd).unwrap();
     let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, cwd, None);
     meta.id = "thread".into();
-    let task = AgentEvent::ItemCompleted(ThreadItem {
-        id: "local-user-task".into(),
-        parent_item_id: None,
-        content: ItemContent::UserMessage {
-            text: "Do the task".into(),
-            attachments: Vec::new(),
-        },
-    });
     let work = [
         AgentEvent::TurnStarted {
             turn_id: "turn-1".into(),
@@ -14098,24 +13733,19 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
     ];
     // The host stopped an hour before the thread was opened again.
     let stopped = test_clock().host_clock().unix_millis();
+    test_store.upsert_meta(&meta).unwrap();
     if restarted {
-        let mut cx = TestAppContext::default();
-        let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-        state.update(&mut cx, |state, cx| {
-            state.sessions.push(meta.clone());
-            state.persist_meta(&meta, cx);
-            let mut process = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);
-            process.meta = meta.clone();
-            state.residents.live.insert(meta.id.clone(), process);
-            for event in std::iter::once(&task).chain(&work) {
-                state.record_event_at("thread", stopped, event, Vec::new(), cx);
-            }
-        });
-        cx.run_until_parked();
-    } else {
-        test_store.upsert_meta(&meta).unwrap();
+        // A host whose turn was running when it stopped.
+        let cx = &mut TestAppContext::default();
+        let (state, providers) = played_host(cx, &test_store);
+        state.open(cx, "thread");
+        state.send(cx, "thread", "Do the task");
+        let provider = providers.started(cx, 0);
+        provider.start_turn(cx, "turn-1");
+        provider.play([work[1].clone()]);
+        provider.fence(cx, "thread");
+        assert_eq!(cx.now_millis(), stopped);
     }
-
     let scripted = scripted_provider(ProviderKind::ClaudeCode);
     let commands = scripted.commands.clone();
     let mut cx = TestAppContext::default();
