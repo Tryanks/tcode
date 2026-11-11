@@ -2029,7 +2029,7 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
     let state = cx.new_entity({
         let mut state = TestClientState::new((*store).clone());
         state.ai_title_generation_enabled = true;
-        state.set_provider_launcher_for_test(scripted.launcher);
+        state.set_provider_launcher(scripted.launcher);
         state
     });
     state.deliver(
@@ -2213,7 +2213,7 @@ fn title_regeneration_rejects_empty_history_without_calling_the_provider() {
     let state = cx.new_entity({
         let mut state = TestClientState::new((*store).clone());
         state.ai_title_generation_enabled = true;
-        state.set_provider_launcher_for_test(scripted.launcher);
+        state.set_provider_launcher(scripted.launcher);
         state
     });
     state.dispatch_command(
@@ -3792,7 +3792,7 @@ fn a_follow_up_to_an_unloaded_subagent_is_not_answered_by_its_earlier_report() {
     let scripted = scripted_provider(ProviderKind::Codex);
     let state = cx.new_entity({
         let mut state = TestClientState::new((*store).clone());
-        state.set_provider_launcher_for_test(scripted.launcher);
+        state.set_provider_launcher(scripted.launcher);
         state
     });
     let (parent_commands, parent_receiver) = smol::channel::unbounded();
@@ -5070,7 +5070,7 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
     let store = (*test_store).clone();
     let state = cx.new_entity({
         let mut state = TestClientState::new(store);
-        state.set_provider_launcher_for_test(ProviderLauncher(Arc::new(|_, _| {
+        state.set_provider_launcher(ProviderLauncher(Arc::new(|_, _| {
             Box::pin(std::future::pending())
         })));
         state
@@ -5263,7 +5263,7 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
     let (launcher, launches) = recording_launcher();
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher_for_test(launcher.clone());
+        state.set_provider_launcher(launcher.clone());
         state
     });
 
@@ -5383,7 +5383,7 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
     let cx = &mut TestAppContext::default();
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher_for_test(launcher);
+        state.set_provider_launcher(launcher);
         state
     });
     state.read(|state| {
@@ -5592,7 +5592,7 @@ fn a_moved_thread_keeps_a_native_session_that_can_move() {
     let (launcher, launches) = recording_launcher();
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher_for_test(launcher);
+        state.set_provider_launcher(launcher);
         state
     });
     let move_to = |project: &Project| Command::MoveSession {
@@ -5757,7 +5757,7 @@ fn a_subagents_claude_worktree_belongs_to_the_thread_and_goes_with_it() {
     let (launcher, launches) = recording_launcher();
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher_for_test(launcher);
+        state.set_provider_launcher(launcher);
         state
     });
     state.update(cx, |state, cx| state.select_session("thread", cx));
@@ -5868,7 +5868,7 @@ impl AccountSwitch {
         // would otherwise start the CLI.
         let binary = Some(store.root().join("no-claude"));
         let mut host = TestClientState::new((*store).clone());
-        host.set_provider_launcher_for_test(launcher);
+        host.set_provider_launcher(launcher);
         let builtin = host.settings.provider_mut(ProviderKind::ClaudeCode);
         builtin.home_path = Some(default_home.clone());
         builtin.binary_path = binary.clone();
@@ -6565,7 +6565,7 @@ fn startup_generation_rejects_stale_same_session_attempt() {
         }));
         let state = cx.new_entity({
             let mut state = TestClientState::new((*store).clone());
-            state.set_provider_launcher_for_test(launcher);
+            state.set_provider_launcher(launcher);
             state
         });
         state.update(cx, |state, cx| {
@@ -7452,7 +7452,7 @@ fn a_stop_while_the_provider_starts_hands_the_message_back_and_force_quit_ends_t
     }));
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher_for_test(launcher);
+        state.set_provider_launcher(launcher);
         state
     });
     state.dispatch_command(
@@ -9341,7 +9341,7 @@ fn a_worktree_draft_starts_from_the_picked_base() {
     let (launcher, launches) = recording_launcher();
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher_for_test(launcher);
+        state.set_provider_launcher(launcher);
         state
     });
 
@@ -9486,7 +9486,7 @@ fn a_subagent_started_in_a_worktree_works_in_it() {
     let scripted = scripted_provider(ProviderKind::Codex);
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher_for_test(scripted.launcher);
+        state.set_provider_launcher(scripted.launcher);
         state
     });
     let (reply, response) = smol::channel::bounded(1);
@@ -9634,9 +9634,12 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
         };
         Box::pin(async move { launcher.launch(kind, options).await })
     }));
-    let host = spawn_host((*root).clone(), HostServices::default()).unwrap();
-    smol::block_on(
-        host.update_state_for_test(move |state, _| state.set_provider_launcher_for_test(launcher)),
+    let host = spawn_host(
+        (*root).clone(),
+        HostServices {
+            provider_launcher: launcher,
+            ..HostServices::default()
+        },
     )
     .unwrap();
     let mux = tcode_traverse::HostMux::new(host.attachments.clone(), host.from_host.clone());
@@ -14119,7 +14122,7 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
     cx.clock.advance(Duration::from_secs(3_600));
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher_for_test(scripted.launcher);
+        state.set_provider_launcher(scripted.launcher);
         state
     });
     state.update(&mut cx, |state, cx| state.select_session("thread", cx));

@@ -32,6 +32,7 @@ struct Phone {
     store: gpui::Entity<WorkspaceStore>,
     driver: LocalHostDriver,
     host: SpawnedHost,
+    scripts: tcode_runtime::app::Scripts,
     root: std::path::PathBuf,
     /// The provider of `swipe-0`'s running turn.
     provider: Option<crate::chat::tests::ScriptedHandles>,
@@ -61,7 +62,15 @@ fn phone<'a>(
     for meta in &sessions {
         disk.upsert_meta(meta).unwrap();
     }
-    let host = spawn_host(disk, HostServices::default()).unwrap();
+    let scripts = tcode_runtime::app::Scripts::default();
+    let host = spawn_host(
+        disk,
+        HostServices {
+            provider_launcher: scripts.launcher(),
+            ..HostServices::default()
+        },
+    )
+    .unwrap();
     let mut driver = LocalHostDriver::new(&host);
     let store = cx.new(|cx| {
         WorkspaceStore::new_attached(
@@ -87,6 +96,7 @@ fn phone<'a>(
             store,
             driver,
             host,
+            scripts,
             root,
             provider: None,
         },
@@ -171,7 +181,7 @@ impl Phone {
     fn turn(&mut self, cx: &mut VisualTestContext, running: bool) {
         if running {
             let provider = crate::chat::tests::scripted_turn(
-                &self.host,
+                &self.scripts,
                 &mut self.driver,
                 "swipe-0",
                 agent::ProviderKind::ClaudeCode,
@@ -329,11 +339,7 @@ fn a_refused_settle_returns_the_row_and_leaves_the_thread_active(cx: &mut TestAp
     phone.open_first(cx);
     // The user sends the thread a turn, which the host hears of before the
     // store does: what the host answers is read only when the test pumps it.
-    let scripted = tcode_runtime::app::scripted_provider(agent::ProviderKind::ClaudeCode);
-    smol::block_on(phone.host.update_state_for_test(move |state, _| {
-        state.set_provider_launcher_for_test(scripted.launcher)
-    }))
-    .unwrap();
+    let _ = phone.scripts.script(agent::ProviderKind::ClaudeCode);
     let _sent = phone
         .driver
         .link

@@ -193,7 +193,7 @@ fn thread_in_moved_project(
     }
     let state = cx.new_entity({
         let mut state = TestClientState::new((**store).clone());
-        state.set_provider_launcher_for_test(launcher);
+        state.set_provider_launcher(launcher);
         state
     });
     state.update(cx, |state, cx| state.select_session("thread", cx));
@@ -419,7 +419,7 @@ fn a_host_without_its_mcp_servers_says_so_when_the_first_thread_starts() {
     let scripted = scripted_provider(ProviderKind::ClaudeCode);
     let state = cx.new_entity({
         let mut state = TestClientState::new((*store).clone());
-        state.set_provider_launcher_for_test(scripted.launcher);
+        state.set_provider_launcher(scripted.launcher);
         state
     });
     state.update(cx, |state, _| {

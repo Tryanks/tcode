@@ -374,7 +374,7 @@ mod tests {
         // Each thread's turn is a provider's, which runs the commands.
         let start = |threads: &mut TwoThreads, thread: &str, cx: &mut VisualTestContext| {
             let turn = scripted_turn(
-                &threads.host,
+                &threads.scripts,
                 &mut threads.driver,
                 thread,
                 agent::ProviderKind::ClaudeCode,

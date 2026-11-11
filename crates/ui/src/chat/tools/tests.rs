@@ -22,6 +22,7 @@ pub(in crate::chat) struct StoredThread {
     pub(in crate::chat) store: Entity<WorkspaceStore>,
     pub(in crate::chat) driver: crate::store::tests::LocalHostDriver,
     host: tcode_runtime::pipe::SpawnedHost,
+    scripts: tcode_runtime::app::Scripts,
     /// The provider [`Self::provider`] started, held while it runs.
     scripted: Option<crate::chat::tests::ScriptedHandles>,
 }
@@ -47,9 +48,15 @@ impl StoredThread {
         sessions
             .apply(&[Mutation::replace_event_log(&session_id, log.into())])
             .expect("store the thread's log");
-        let host =
-            tcode_runtime::pipe::spawn_host(sessions, tcode_runtime::pipe::HostServices::default())
-                .expect("spawn test host");
+        let scripts = tcode_runtime::app::Scripts::default();
+        let host = tcode_runtime::pipe::spawn_host(
+            sessions,
+            tcode_runtime::pipe::HostServices {
+                provider_launcher: scripts.launcher(),
+                ..Default::default()
+            },
+        )
+        .expect("spawn test host");
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -93,6 +100,7 @@ impl StoredThread {
                 store,
                 driver,
                 host,
+                scripts,
                 scripted: None,
             },
             cx,
@@ -152,12 +160,8 @@ impl StoredThread {
             .store
             .read_with(cx, |store, _| store.sole_thread())
             .expect("the thread is shown");
-        let scripted = tcode_runtime::app::scripted_provider(agent::ProviderKind::ClaudeCode);
+        let scripted = self.scripts.script(agent::ProviderKind::ClaudeCode);
         let (commands, sender) = (scripted.commands.clone(), scripted.events.clone());
-        smol::block_on(self.host.update_state_for_test(move |state, _| {
-            state.set_provider_launcher_for_test(scripted.launcher)
-        }))
-        .unwrap();
         self.driver.command(
             cx,
             tcode_protocol::Command::SendTurn {

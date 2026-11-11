@@ -138,6 +138,35 @@ pub struct ScriptedProvider {
     pub launches: smol::channel::Receiver<SessionOptions>,
 }
 
+/// The scripts a host started with [`Self::launcher`] plays: each launch
+/// is the provider [`Self::script`] set last, for a test that scripts a
+/// turn after the host is running. A launch before any script fails.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Default)]
+pub struct Scripts(Arc<std::sync::Mutex<Option<ProviderLauncher>>>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl Scripts {
+    pub fn launcher(&self) -> ProviderLauncher {
+        let scripts = self.0.clone();
+        ProviderLauncher(Arc::new(move |provider, options| {
+            match scripts.lock().unwrap().clone() {
+                Some(script) => script.launch(provider, options),
+                None => Box::pin(async {
+                    Err(AgentError::Protocol("no provider is scripted yet".into()))
+                }),
+            }
+        }))
+    }
+
+    /// The next launches are `provider`'s, played on the returned channels.
+    pub fn script(&self, provider: ProviderKind) -> ScriptedProvider {
+        let scripted = scripted_provider(provider);
+        *self.0.lock().unwrap() = Some(scripted.launcher.clone());
+        scripted
+    }
+}
+
 /// Build a provider launcher whose command and event channels are owned by the test.
 #[cfg(any(test, feature = "test-support"))]
 pub fn scripted_provider(provider: ProviderKind) -> ScriptedProvider {
@@ -722,8 +751,7 @@ impl AppState {
         })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn set_provider_launcher_for_test(&mut self, launcher: ProviderLauncher) {
+    pub(crate) fn set_provider_launcher(&mut self, launcher: ProviderLauncher) {
         self.provider_launcher = launcher;
     }
 

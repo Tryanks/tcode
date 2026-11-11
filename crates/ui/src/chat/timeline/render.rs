@@ -2262,7 +2262,7 @@ mod tests {
         cx.update(|cx| cx.set_reduce_motion(true));
         // A provider runs the command, and its output grows.
         let turn = scripted_turn(
-            &threads.host,
+            &threads.scripts,
             &mut threads.driver,
             &threads.first.clone(),
             agent::ProviderKind::ClaudeCode,
@@ -2292,6 +2292,7 @@ mod tests {
             host,
             first: session_id,
             second: other_id,
+            ..
         } = threads;
         driver.wait_until(cx, "the running command", |cx| {
             store.read_with(cx, |store, cx| {

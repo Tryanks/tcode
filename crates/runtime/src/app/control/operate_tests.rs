@@ -11,7 +11,7 @@ fn idle_launcher() -> ProviderLauncher {
 
 fn host(store: &TestStore, cx: &mut TestAppContext) -> TestEntity {
     let mut state = TestClientState::new((**store).clone());
-    state.set_provider_launcher_for_test(idle_launcher());
+    state.set_provider_launcher(idle_launcher());
     cx.new_entity(state)
 }
 
@@ -343,7 +343,7 @@ fn an_untitled_started_thread_is_titled_from_its_first_message() {
     let (commands, events) = (provider.commands.clone(), provider.events.clone());
     let state = cx.new_entity({
         let mut state = TestClientState::new((*store).clone());
-        state.set_provider_launcher_for_test(provider.launcher);
+        state.set_provider_launcher(provider.launcher);
         state
     });
     let project_id = state.update(cx, |state, cx| {

@@ -6932,6 +6932,21 @@ pub(crate) mod tests {
         spawn_host(store, HostServices::default()).expect("spawn test host")
     }
 
+    /// A test host that starts providers with `launcher`.
+    fn launching_host(
+        store: SessionStore,
+        launcher: tcode_runtime::app::ProviderLauncher,
+    ) -> SpawnedHost {
+        spawn_host(
+            store,
+            HostServices {
+                provider_launcher: launcher,
+                ..HostServices::default()
+            },
+        )
+        .expect("spawn test host")
+    }
+
     macro_rules! update_host {
         ($host:expr, $update:expr) => {
             smol::block_on($host.update_state_for_test($update)).expect("update test host")
@@ -8343,7 +8358,10 @@ pub(crate) mod tests {
         let session_id = meta.id.clone();
         session_store.upsert_meta(&meta).expect("persist session");
 
-        let host = test_host(session_store);
+        let host = launching_host(
+            session_store,
+            tcode_runtime::app::scripted_provider(ProviderKind::Codex).launcher,
+        );
         let mut driver = LocalHostDriver::new(&host);
         let workspace = driver.workspace(cx);
         workspace.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
@@ -8354,9 +8372,6 @@ pub(crate) mod tests {
                     .is_some_and(|status| status.session_id == session_id)
             })
         });
-        let scripted = tcode_runtime::app::scripted_provider(ProviderKind::Codex);
-        update_host!(&host, move |state, _| state
-            .set_provider_launcher_for_test(scripted.launcher));
         driver.command(
             cx,
             Command::SendTurn {
@@ -8594,7 +8609,8 @@ pub(crate) mod tests {
         let disk = SessionStore::open_at(root.clone()).expect("open test store");
         disk.upsert_project(&project_at("p", &root))
             .expect("persist project");
-        let host = test_host(disk);
+        let scripts = tcode_runtime::app::Scripts::default();
+        let host = launching_host(disk, scripts.launcher());
         let mut driver = LocalHostDriver::new(&host);
         let workspace = driver.workspace(cx);
 
@@ -8620,10 +8636,7 @@ pub(crate) mod tests {
         });
 
         let provider = workspace.read_with(cx, |store, cx| store.sole_status(cx).unwrap().provider);
-        let scripted = tcode_runtime::app::scripted_provider(provider);
-        let launcher = scripted.launcher.clone();
-        update_host!(&host, move |state, _| state
-            .set_provider_launcher_for_test(launcher));
+        let _provider = scripts.script(provider);
         driver.command(
             cx,
             Command::SendTurn {

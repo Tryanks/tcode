@@ -43,6 +43,9 @@ pub struct HostServices {
     pub login_shell_unread: Option<String>,
     /// The host's time; the system's unless a test turns it.
     pub clock: crate::clock::HostClock,
+    /// How the host starts a provider's adapter: [`agent::start_session`]
+    /// unless a test plays the adapter's half of the canonical stream.
+    pub provider_launcher: crate::app::ProviderLauncher,
 }
 
 impl HostServices {
@@ -282,6 +285,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             }
             state.mcp_unavailable(services.mcp_unavailable.take());
             state.login_shell_unread(services.login_shell_unread.take());
+            state.set_provider_launcher(services.provider_launcher);
             let mut cx = HostCx::new(mailbox_tx, event_tx, services.clock.clone());
             state.pump_pull_request_requests(services.pull_requests.take(), &mut cx);
             state.start_pull_request_workers(&mut cx);

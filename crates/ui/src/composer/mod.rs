@@ -3032,42 +3032,55 @@ mod replica_tests {
         let project = tcode_core::project::Project::from_root(root.clone());
         let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
         disk.upsert_project(&project).unwrap();
-        let host =
-            tcode_runtime::pipe::spawn_host(disk, tcode_runtime::pipe::HostServices::default())
-                .unwrap();
-        let scripted = tcode_runtime::app::scripted_provider(ProviderKind::ClaudeCode);
-        let (launcher, launches, project_id, cwd) = (
-            scripted.launcher.clone(),
-            scripted.launches.clone(),
-            project.id.clone(),
-            root.clone(),
-        );
-        let session_id = smol::block_on(host.update_state_for_test(move |state, cx| {
-            let spec = |id: &str| agent::ModelSpec {
-                id: id.into(),
-                display_name: id.into(),
-                is_default: false,
-                options: Vec::new(),
-            };
-            state.providers.model_catalogs.insert(
-                ProviderKind::ClaudeCode,
-                vec![spec("first-model"), spec("shared-model")],
-            );
-            state.settings.profiles.insert(
-                "second-account".to_owned(),
-                tcode_core::settings::ProviderProfile {
-                    kind: ProviderKind::ClaudeCode,
-                    settings: tcode_core::settings::ProviderSettings {
-                        home_path: Some("/profile-homes/second-account".into()),
-                        ..Default::default()
-                    },
+        let spec = |id: &str| agent::ModelSpec {
+            id: id.into(),
+            display_name: id.into(),
+            is_default: false,
+            options: Vec::new(),
+        };
+        disk.save_models(
+            ProviderKind::ClaudeCode,
+            &[spec("first-model"), spec("shared-model")],
+        )
+        .unwrap();
+        let mut settings = tcode_core::settings::Settings::default();
+        settings.profiles.insert(
+            "second-account".to_owned(),
+            tcode_core::settings::ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: tcode_core::settings::ProviderSettings {
+                    home_path: Some("/profile-homes/second-account".into()),
+                    ..Default::default()
                 },
-            );
-            state.set_provider_launcher_for_test(launcher);
-            state.start_draft(project_id, cwd, cx)
-        }))
+            },
+        );
+        tcode_services::settings::SettingsStore::new(root.clone())
+            .save(&settings)
+            .unwrap();
+        let scripted = tcode_runtime::app::scripted_provider(ProviderKind::ClaudeCode);
+        let launches = scripted.launches.clone();
+        let host = tcode_runtime::pipe::spawn_host(
+            disk,
+            tcode_runtime::pipe::HostServices {
+                provider_launcher: scripted.launcher.clone(),
+                ..Default::default()
+            },
+        )
         .unwrap();
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let link = driver.link.clone();
+        let tcode_protocol::CommandResponse::SessionId(Some(session_id)) = driver
+            .await_with_events(
+                cx,
+                link.command(tcode_protocol::Command::StartDraft {
+                    project_id: project.id.clone(),
+                    cwd: root.clone(),
+                }),
+            )
+            .unwrap()
+        else {
+            panic!("the host starts a draft");
+        };
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
                 driver.link.clone(),

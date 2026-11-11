@@ -1373,7 +1373,7 @@ pub(crate) mod tests {
         meta.model = Some("effort-layout".into());
         record_thread(&disk, &meta, log_of(&timeline));
         let session_id = meta.id;
-        let host = spawn_chat_host(disk);
+        let host = spawn_chat_host(disk, Default::default());
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -1571,7 +1571,7 @@ pub(crate) mod tests {
         timeline: Timeline,
         paged: bool,
     ) -> (tcode_runtime::pipe::SpawnedHost, String) {
-        seeded_chat_host_on(cx, log_of(&timeline), paged, None)
+        seeded_chat_host_on(cx, log_of(&timeline), paged, None, Default::default())
     }
 
     /// The log a host holds for `timeline`: each turn started, its entries
@@ -1717,7 +1717,8 @@ pub(crate) mod tests {
         let disk = chat_store(cx);
         let meta = thread_meta(None);
         record_thread(&disk, &meta, []);
-        let host = spawn_chat_host(disk);
+        let scripts = tcode_runtime::app::Scripts::default();
+        let host = spawn_chat_host(disk, scripts.launcher());
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -1738,7 +1739,7 @@ pub(crate) mod tests {
             })
         });
         let provider = scripted_turn(
-            &host,
+            &scripts,
             &mut driver,
             &meta.id,
             agent::ProviderKind::ClaudeCode,
@@ -1770,25 +1771,21 @@ pub(crate) mod tests {
         let store = chat_store(cx);
         let meta = thread_meta(None);
         record_thread(&store, &meta, log);
-        (spawn_chat_host(store), meta.id)
+        (spawn_chat_host(store, Default::default()), meta.id)
     }
 
     /// The user sends `thread` a turn that a scripted `provider` plays: what
     /// the test sends on the returned channel reaches the host as the
     /// provider's events, and the commands it gets back are the provider's.
     pub(crate) fn scripted_turn(
-        host: &tcode_runtime::pipe::SpawnedHost,
+        scripts: &tcode_runtime::app::Scripts,
         driver: &mut crate::store::tests::LocalHostDriver,
         thread: &str,
         provider: agent::ProviderKind,
         cx: &mut TestAppContext,
     ) -> ScriptedHandles {
-        let scripted = tcode_runtime::app::scripted_provider(provider);
+        let scripted = scripts.script(provider);
         let handles = (scripted.commands.clone(), scripted.events.clone());
-        smol::block_on(host.update_state_for_test(move |state, _| {
-            state.set_provider_launcher_for_test(scripted.launcher)
-        }))
-        .expect("script the provider");
         driver.command(
             cx,
             tcode_protocol::Command::SendTurn {
@@ -1820,11 +1817,19 @@ pub(crate) mod tests {
         .expect("test session store")
     }
 
+    /// A host over `store` that starts providers with `launcher`.
     pub(crate) fn spawn_chat_host(
         store: tcode_services::store::SessionStore,
+        launcher: tcode_runtime::app::ProviderLauncher,
     ) -> tcode_runtime::pipe::SpawnedHost {
-        tcode_runtime::pipe::spawn_host(store, tcode_runtime::pipe::HostServices::default())
-            .expect("spawn test host")
+        tcode_runtime::pipe::spawn_host(
+            store,
+            tcode_runtime::pipe::HostServices {
+                provider_launcher: launcher,
+                ..Default::default()
+            },
+        )
+        .expect("spawn test host")
     }
 
     /// A host started over a store holding one thread with `log`, on
@@ -1835,6 +1840,7 @@ pub(crate) mod tests {
         log: Vec<agent::AgentEvent>,
         paged: bool,
         provider: Option<agent::ProviderKind>,
+        launcher: tcode_runtime::app::ProviderLauncher,
     ) -> (tcode_runtime::pipe::SpawnedHost, String) {
         let store = chat_store(cx);
         let meta = thread_meta(provider);
@@ -1842,7 +1848,7 @@ pub(crate) mod tests {
             message: "short".into(),
         });
         record_thread(&store, &meta, warnings.chain(log));
-        (spawn_chat_host(store), meta.id)
+        (spawn_chat_host(store, launcher), meta.id)
     }
 
     /// Two threads on one host, the first selected and holding `first`, the
@@ -1851,6 +1857,7 @@ pub(crate) mod tests {
         pub(in crate::chat) store: Entity<WorkspaceStore>,
         pub(in crate::chat) driver: crate::store::tests::LocalHostDriver,
         pub(in crate::chat) host: tcode_runtime::pipe::SpawnedHost,
+        pub(in crate::chat) scripts: tcode_runtime::app::Scripts,
         pub(in crate::chat) first: String,
         pub(in crate::chat) second: String,
     }
@@ -1864,7 +1871,8 @@ pub(crate) mod tests {
         let (first_meta, second_meta) = (thread_meta(None), thread_meta(None));
         record_thread(&store, &first_meta, log_of(&first));
         record_thread(&store, &second_meta, log_of(&second));
-        let host = spawn_chat_host(store);
+        let scripts = tcode_runtime::app::Scripts::default();
+        let host = spawn_chat_host(store, scripts.launcher());
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -1888,6 +1896,7 @@ pub(crate) mod tests {
             store,
             driver,
             host,
+            scripts,
             first: first_meta.id,
             second: second_meta.id,
         }
@@ -1987,16 +1996,16 @@ pub(crate) mod tests {
         crate::store::tests::LocalHostDriver,
         Option<ScriptedHandles>,
     ) {
-        let (host, session_id) = seeded_chat_host_on(cx, log, paged, provider);
-        let scripted = provider.filter(|_| script).map(|provider| {
-            let scripted = tcode_runtime::app::scripted_provider(provider);
-            let handles = (scripted.commands.clone(), scripted.events.clone());
-            smol::block_on(host.update_state_for_test(move |state, _| {
-                state.set_provider_launcher_for_test(scripted.launcher)
-            }))
-            .expect("script the provider");
-            handles
-        });
+        let scripted = provider
+            .filter(|_| script)
+            .map(tcode_runtime::app::scripted_provider);
+        let launcher = scripted
+            .as_ref()
+            .map(|scripted| scripted.launcher.clone())
+            .unwrap_or_default();
+        let (host, session_id) = seeded_chat_host_on(cx, log, paged, provider, launcher);
+        let scripted =
+            scripted.map(|scripted| (scripted.commands.clone(), scripted.events.clone()));
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let workspace_store = cx.new(|cx| {
             WorkspaceStore::new_attached(
