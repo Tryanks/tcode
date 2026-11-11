@@ -261,6 +261,33 @@ From the rounds over the UI and across the layers:
   accident.
 - **Queued in the order work finished**, not the order the user gave.
 
+From the round that worked through what was carried forward:
+
+- **Production tolerating what only a test lacks**: `try_global` where the
+  app always installs the global, kept so that tests which never installed
+  it would run. Install it in the tests' mount, then read it plainly.
+- **A test build that draws another tree**: a selector or a wrapper element
+  under `cfg(test)`, so the test looks at something the app never draws.
+- **Cleanup asserted**: a test that requires its scratch directory to be
+  gone. A stopped host can still have work in it; removing it is cleanup.
+- **A wait on something that tells nobody**: a deletion run off the host
+  with no event when it ends. A test that waits on events for it passes
+  only when the work finished before the wait began. The finding is the
+  missing event, in production.
+- **One limit kept twice**: a history window withheld a record too long for
+  a network line and a live push sent it whole. A limit has one owner, and
+  every path that meets it goes through that owner.
+- **A sentence for the model the user never sees**: text added to a message
+  because a harness was thought to need some. None did.
+- **A branch per platform compiled on one**: a parameter mutated only on
+  Unix, a module only its tests kept alive elsewhere. This machine's Clippy
+  cannot see either; read a change that touches `cfg` for what the other
+  side is left holding.
+- **A setting that does not survive a conversion**: stdio set on a `std`
+  command that is then turned into an async one, which puts back to inherit
+  whatever its own setters did not set. Every plugin listing read nothing
+  for a round, and no test could have said so.
+
 ## What the audit did wrong
 
 - **It reported in place of verifying.** Four rounds merged with every
@@ -299,6 +326,15 @@ From the rounds over the UI and across the layers:
   waited a round for the answer.
 - **It stopped a lane and not what the lane had started.** Three subagents
   and watchers ran on after their parents were stopped.
+- **It broke `main` and did not know.** Making plugin changes cancellable
+  left every plugin listing empty. The lane had written that only a real
+  CLI could prove the path, and nobody ran one. A later lane found it by
+  using the same call. What only the real thing proves is run before the
+  merge, not listed after it.
+- **It guessed how much was left.** "About seventy percent of what was found
+  is dealt with" was said from memory; a count against the code gave 139
+  done or void and 151 still there. The carried-forward list is counted
+  against the code before anything is said about what remains.
 
 ## Families beyond the defence
 
