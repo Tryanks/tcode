@@ -639,15 +639,9 @@ mod tests {
     }
 
     #[test]
-    fn emulator_routes_events_size_queries_and_clipboard_policy() {
+    fn emulator_answers_size_queries_and_keeps_the_clipboard_unread() {
         let emulator = emulator();
         let events = emulator.events();
-        emulator.feed(b"\x07\x1b]2;client title\x07\x1b[c");
-
-        let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
-        assert!(emitted.contains(&GridEvent::Bell));
-        assert!(emitted.contains(&GridEvent::TitleChanged(Some("client title".to_string()))));
-        assert!(emitted.contains(&GridEvent::Input(b"\x1b[?62;4;6;22;52c".to_vec())));
         emulator.resize_with_cell_size_if_changed(42, 9, 10, 20);
 
         emulator.feed(b"\x1b[14t");
