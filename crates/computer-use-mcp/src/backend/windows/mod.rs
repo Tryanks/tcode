@@ -35,7 +35,6 @@ use self::uia::{
     root_kind_for_control_type,
 };
 
-const MAX_DEPTH: usize = 18;
 const MAX_NODES: usize = 3_000;
 const MAX_CHILDREN_PER_NODE: usize = 500;
 const PROCESS_PATH_CAPACITY: usize = 32_768;
@@ -516,7 +515,12 @@ fn locate_root_element(
         .map(Handle::from)
         .ok()
         .filter(|handle| !handle.is_invalid())
-        .ok_or_else(|| gone(format!("window id {} is not a window handle", root.window_id)))?;
+        .ok_or_else(|| {
+            gone(format!(
+                "window id {} is not a window handle",
+                root.window_id
+            ))
+        })?;
     let element = automation
         .element_from_handle(handle)
         .map_err(|error| gone(uia_error_text(&error)))?;
@@ -581,7 +585,7 @@ fn observe_tree(opened: &AutomationRoot, root: &RootInfo) -> Result<UiNode, Back
         root_frame: root.frame,
         walker: &opened.walker,
     };
-    let mut tree = walk_element(&opened.element, 0, &mut context)
+    let mut tree = walk_tree(&opened.element, &mut context)
         .ok_or_else(|| {
             backend_error(
                 BackendErrorCode::ObservationFailed,
@@ -598,11 +602,40 @@ fn observe_tree(opened: &AutomationRoot, root: &RootInfo) -> Result<UiNode, Back
     Ok(tree)
 }
 
-fn walk_element(
+/// The subtree under `root`, depth first, ending once [`MAX_NODES`] nodes are
+/// read. The walk keeps its own stack: a web area's tree can be deeper than
+/// the thread's stack would allow one frame per level.
+fn walk_tree(root: &UIElement, context: &mut WalkContext<'_>) -> Option<ElementNode> {
+    let mut stack = vec![read_element(root, context)?];
+    loop {
+        let (tree, children) = stack.last_mut()?;
+        let child = if context.count < MAX_NODES {
+            children.next()
+        } else {
+            tree.node.children_omitted |= children.len() > 0;
+            None
+        };
+        if let Some(child) = child {
+            if let Some(entry) = read_element(&child, context) {
+                stack.push(entry);
+            }
+            continue;
+        }
+        let (tree, _) = stack.pop()?;
+        let Some((parent, _)) = stack.last_mut() else {
+            return Some(tree);
+        };
+        if !is_invisible_leaf(&tree, context.root_frame) {
+            parent.children.push(tree);
+        }
+    }
+}
+
+/// One element's node, without its children yet, and the children to walk.
+fn read_element(
     element: &UIElement,
-    depth: usize,
     context: &mut WalkContext<'_>,
-) -> Option<ElementNode> {
+) -> Option<(ElementNode, std::vec::IntoIter<UIElement>)> {
     if context.count >= MAX_NODES {
         return None;
     }
@@ -621,7 +654,10 @@ fn walk_element(
         .filter_map(Result::ok)
         .find(|description| !description.is_empty() && description != &title)
         .unwrap_or_default();
-    let mut tree = ElementNode {
+    let maximum = (MAX_NODES - context.count).min(MAX_CHILDREN_PER_NODE);
+    let (children, children_omitted, children_error) =
+        raw_children(context.walker, element, maximum);
+    let tree = ElementNode {
         element: element.clone(),
         node: UiNode {
             ref_id: String::new(),
@@ -634,34 +670,12 @@ fn walk_element(
             enabled: element.is_enabled().unwrap_or(true),
             focused: element.has_keyboard_focus().unwrap_or(false),
             children: Vec::new(),
-            children_error: None,
-            children_omitted: false,
+            children_error,
+            children_omitted,
         },
         children: Vec::new(),
     };
-
-    let maximum = if depth < MAX_DEPTH {
-        (MAX_NODES - context.count).min(MAX_CHILDREN_PER_NODE)
-    } else {
-        0
-    };
-    let (children, more, children_error) = raw_children(context.walker, element, maximum);
-    tree.node.children_error = children_error;
-    let mut walked = 0;
-    for child in &children {
-        if context.count >= MAX_NODES {
-            break;
-        }
-        walked += 1;
-        let Some(child) = walk_element(child, depth + 1, context) else {
-            continue;
-        };
-        if !is_invisible_leaf(&child, context.root_frame) {
-            tree.children.push(child);
-        }
-    }
-    tree.node.children_omitted = more || walked < children.len();
-    Some(tree)
+    Some((tree, children.into_iter()))
 }
 
 /// Up to `maximum` of an element's children, whether it has more, and why
@@ -905,7 +919,7 @@ impl Target {
         let vertical = scroll_amount(y, true);
         let mut failures = Vec::new();
         let mut current = self.element.clone();
-        for _ in 0..=MAX_DEPTH {
+        loop {
             if let Ok(pattern) = current.get_pattern::<UIScrollPattern>() {
                 match pattern.scroll(horizontal, vertical) {
                     Ok(()) => return Ok("uiautomation ScrollPattern completed"),
@@ -986,7 +1000,7 @@ fn locate_target(
         root_frame: root.frame,
         walker: &opened.walker,
     };
-    let tree = walk_element(&opened.element, 0, &mut context).ok_or_else(|| {
+    let tree = walk_tree(&opened.element, &mut context).ok_or_else(|| {
         backend_error(
             BackendErrorCode::OperationFailed,
             "the target's UIAutomation tree disappeared; call observe_ui again",
