@@ -3089,7 +3089,7 @@ impl Mapper {
             msg.get("handback_report"),
             msg.get("summary")
                 .and_then(Value::as_str)
-                .map(one_line_summary),
+                .map(str::to_owned),
         );
         // A Command still held here is a background Bash: foreground ones
         // leave `tool_items` with their tool_result.
@@ -3785,9 +3785,7 @@ impl Mapper {
                         summary: handback_summary(
                             result.and_then(|result| result.get("handback")),
                             result.and_then(|result| result.get("handbackReport")),
-                            summary.or_else(|| {
-                                (!output.trim().is_empty()).then(|| one_line_summary(&output))
-                            }),
+                            summary.or_else(|| (!output.trim().is_empty()).then_some(output)),
                         ),
                         model,
                         effort,
@@ -4772,10 +4770,6 @@ fn exited(text: &str) -> Option<(i32, &str)> {
     let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
     let code = first.strip_prefix("Exit code ")?.trim().parse().ok()?;
     Some((code, rest))
-}
-
-pub(crate) fn one_line_summary(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// What a finished subagent's record leaves to show. A `handback` outcome
@@ -8397,7 +8391,7 @@ mod tests {
             matches!(
                 events.last(),
                 Some(AgentEvent::ItemCompleted(ThreadItem { id, parent_item_id: Some(parent), content: ItemContent::Subagent { agent_type, status: ItemStatus::Completed, summary: Some(summary), .. }, .. }))
-                    if id == "toolu_nested" && parent == "toolu_child" && agent_type == "Explore" && summary == "Tests are green."
+                    if id == "toolu_nested" && parent == "toolu_child" && agent_type == "Explore" && summary == "Tests   are\ngreen."
             ),
             "{events:?}"
         );

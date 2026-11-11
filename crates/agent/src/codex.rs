@@ -4388,9 +4388,7 @@ fn item_status(content: &ItemContent) -> ItemStatus {
 
 fn item_summary(content: &ItemContent) -> Option<String> {
     match content {
-        ItemContent::ToolCall { output, .. } => output
-            .as_deref()
-            .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" ")),
+        ItemContent::ToolCall { output, .. } => output.clone(),
         _ => None,
     }
 }
