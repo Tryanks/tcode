@@ -16,8 +16,8 @@ impl ClientHost for Desktop {
     fn device_name(&self) -> String {
         "Desktop".into()
     }
-    fn device_id(&self) -> String {
-        "desktop".into()
+    fn device_id(&self) -> Result<String, FileFailure> {
+        Ok("desktop".into())
     }
     fn device_platform(&self) -> Option<String> {
         None
