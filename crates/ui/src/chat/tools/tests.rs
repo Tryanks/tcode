@@ -1388,7 +1388,7 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
     for (id, expected) in [
         (
             outline,
-            read("Outlined", None, Some("打包 Go 与 Rust SDK 发布包"), None),
+            read("Outlined", None, Some("示例线程：整理示例模块文档"), None),
         ),
         (
             "toolu_010000000000000000000082",
@@ -1397,7 +1397,7 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
         (
             "toolu_010000000000000000000084",
             with(
-                read("Searched", None, Some("抽象"), None),
+                read("Searched", None, Some("示例"), None),
                 Some("00000055"),
                 vec![Chip::Count("0 hits".to_owned())],
             ),
@@ -1407,7 +1407,7 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
             read(
                 "Searched",
                 None,
-                Some("心智"),
+                Some("样例"),
                 Some("refused: scope host is wider than your grant's project"),
             ),
         ),
@@ -1422,7 +1422,7 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
         (
             "toolu_010000000000000000000092",
             with(
-                read("Listed threads", None, Some("多窗格"), None),
+                read("Listed threads", None, Some("示例窗格"), None),
                 None,
                 vec![Chip::Count("1 thread".to_owned())],
             ),
@@ -1433,7 +1433,7 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
                 read(
                     "Started a thread",
                     None,
-                    Some("工作包 8：设置页与导出"),
+                    Some("示例工作 8：示例页与导出"),
                     None,
                 ),
                 Some("claude · claude-fable-5-1"),
@@ -1477,8 +1477,8 @@ fn a_harness_call_reads_as_what_it_did_to_the_session(cx: &mut TestAppContext) {
     let codex_ask = "call_000000000000000000000113";
     let viewed = "exec-00000073-0000-0000-0000-000000000073";
     let generated = "exec-00000074-0000-0000-0000-000000000074";
-    let rationale = "该脚本通过页面脚本直接改写表单状态，违反用户明确要求只用可见控件完成操作、\
-                     不得绕过页面校验的限制；应改用点击和输入重新操作。";
+    let rationale = "这段理由是编出来的示例：该调用直接改写了示例页面的状态，\
+                     不符合示例任务只用可见控件的要求；应改用点击和输入重新操作。";
     for (id, expected) in [
         (
             review,
