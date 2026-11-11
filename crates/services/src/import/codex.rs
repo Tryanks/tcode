@@ -340,8 +340,9 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                         if let Some(command) = stdin.remove(call_id) {
                             let (result, _) =
                                 call_output(payload.get("output").unwrap_or(&Value::Null));
-                            if let Some(ConvertedEntry::Item { item, .. }) =
-                                entries.get_mut(command)
+                            if let Some(ConvertedEntry::Item {
+                                item, finished_ts, ..
+                            }) = entries.get_mut(command)
                                 && let ItemContent::CommandExecution {
                                     output,
                                     exit_code,
@@ -353,6 +354,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                 let (code, printed) = exec_result(&result.text);
                                 output.push_str(printed);
                                 if let Some(code) = code {
+                                    *finished_ts = Some(ts);
                                     *exit_code = Some(code);
                                     *status = if code != 0 {
                                         ItemStatus::Failed
@@ -367,11 +369,17 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                         let Some(index) = pending.remove(call_id) else {
                             continue;
                         };
-                        let Some(ConvertedEntry::Item { item, .. }) = entries.get_mut(index) else {
+                        let Some(ConvertedEntry::Item {
+                            item, finished_ts, ..
+                        }) = entries.get_mut(index)
+                        else {
                             continue;
                         };
                         let (result, failed) =
                             call_output(payload.get("output").unwrap_or(&Value::Null));
+                        // The call ran until its output, unless it never
+                        // ran or what it started goes on past it.
+                        *finished_ts = (result.text != NOT_DISPATCHED).then_some(ts);
                         match &mut item.content {
                             ItemContent::CommandExecution {
                                 output,
@@ -393,6 +401,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                         (Some(code), _) if code != 0 => ItemStatus::Failed,
                                         (None, Some(session)) => {
                                             sessions.insert(session, index);
+                                            *finished_ts = None;
                                             ItemStatus::InProgress
                                         }
                                         _ => ItemStatus::Completed,
@@ -530,7 +539,9 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                         else {
                             continue;
                         };
-                        if let Some(ConvertedEntry::Item { item, .. }) = entries.get_mut(index)
+                        if let Some(ConvertedEntry::Item {
+                            item, finished_ts, ..
+                        }) = entries.get_mut(index)
                             && let ItemContent::ToolCall {
                                 output,
                                 status,
@@ -538,6 +549,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                 ..
                             } = &mut item.content
                         {
+                            *finished_ts = Some(ts);
                             let found = found_tools(payload.get("tools"));
                             *output = Some(found.join("\n"));
                             if let Some(ToolFamily::LoadTools { tools, .. }) = family.as_deref_mut()
@@ -684,13 +696,18 @@ fn record(
     let call = (!id.is_empty())
         .then(|| {
             entries.iter_mut().rev().find_map(|entry| match entry {
-                ConvertedEntry::Item { item, .. } if item.id == id => Some(item),
+                ConvertedEntry::Item {
+                    item, finished_ts, ..
+                } if item.id == id => Some((item, finished_ts)),
                 _ => None,
             })
         })
         .flatten();
     match call {
-        Some(item) => item.content = content,
+        Some((item, finished_ts)) => {
+            item.content = content;
+            *finished_ts = Some(ts);
+        }
         None => push_item(entries, ts, next_id, content, Some(id)),
     }
 }
@@ -705,6 +722,7 @@ fn push_item(
     *next_id += 1;
     entries.push(ConvertedEntry::Item {
         ts,
+        finished_ts: None,
         item: Box::new(ThreadItem {
             id: id
                 .filter(|id| !id.is_empty())
@@ -739,12 +757,16 @@ fn is_harness_text(text: &str) -> bool {
         .any(|prefix| text.starts_with(prefix))
 }
 
+/// What Codex writes for a call its interrupted turn dropped before it ran
+/// (`abort_message`, `core/src/tools/parallel.rs` at `rust-v0.167.0`).
+const NOT_DISPATCHED: &str = "aborted before dispatch";
+
 /// Whether `output` is what Codex writes for a call its interrupted turn
 /// cut off (`abort_message`, `core/src/tools/parallel.rs` at
 /// `rust-v0.167.0`): one it never dispatched, a command it stopped, or
 /// another call it stopped.
 fn aborted(output: &str) -> bool {
-    output == "aborted before dispatch"
+    output == NOT_DISPATCHED
         || output
             .strip_prefix("Wall time: ")
             .is_some_and(|rest| rest.ends_with(" seconds\naborted by user"))

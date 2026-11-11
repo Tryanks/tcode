@@ -104,6 +104,9 @@ struct ConvertedThread {
 enum ConvertedEntry {
     Item {
         ts: u64,
+        /// When the source recorded the item's end, for one whose start it
+        /// recorded first: the item then took the time between the two.
+        finished_ts: Option<u64>,
         item: Box<ThreadItem>,
     },
     Compacted {
@@ -209,10 +212,23 @@ pub fn import_thread(
     )];
     let mut open_turn: Option<String> = None;
     let mut turn_number = 0_u64;
+    // Items started and not yet ended, by when they end.
+    let mut ending = Vec::<(u64, ThreadItem)>::new();
     for entry in converted.entries {
+        let ts = match &entry {
+            ConvertedEntry::Item { ts, .. }
+            | ConvertedEntry::Compacted { ts }
+            | ConvertedEntry::Plan { ts, .. } => *ts,
+        };
+        end_items(&mut events, &mut ending, Some(ts));
         match entry {
-            ConvertedEntry::Item { ts, item } => {
+            ConvertedEntry::Item {
+                ts,
+                finished_ts,
+                item,
+            } => {
                 if matches!(item.content, agent::ItemContent::UserMessage { .. }) {
+                    end_items(&mut events, &mut ending, None);
                     if let Some(turn_id) = open_turn.take() {
                         events.push((
                             ts,
@@ -233,6 +249,10 @@ pub fn import_thread(
                         },
                     ));
                     open_turn = Some(turn_id);
+                } else if let Some(finished) = finished_ts {
+                    events.push((ts, AgentEvent::ItemStarted((*item).clone())));
+                    let at = ending.partition_point(|(ends, _)| *ends <= finished);
+                    ending.insert(at, (finished, *item));
                 } else {
                     events.push((ts, AgentEvent::ItemCompleted(*item)));
                 }
@@ -256,6 +276,7 @@ pub fn import_thread(
             }
         }
     }
+    end_items(&mut events, &mut ending, None);
     if let Some(turn_id) = open_turn {
         events.push((
             converted.updated_ms,
@@ -284,6 +305,21 @@ pub fn import_thread(
     }
     existing.insert(converted.external_id);
     ImportOutcome::Imported
+}
+
+/// The ends of the started items in `ending` that come by `until`, or all
+/// of them, each at its own time.
+fn end_items(
+    events: &mut Vec<(u64, AgentEvent)>,
+    ending: &mut Vec<(u64, ThreadItem)>,
+    until: Option<u64>,
+) {
+    let count = until.map_or(ending.len(), |until| {
+        ending.partition_point(|(ends, _)| *ends <= until)
+    });
+    for (ts, item) in ending.drain(..count) {
+        events.push((ts, AgentEvent::ItemCompleted(item)));
+    }
 }
 
 fn title_from_text(text: &str) -> String {
