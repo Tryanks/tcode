@@ -568,6 +568,9 @@ settings:
   scroll_to_latest_on_send:
     title: "Scroll to the latest message when you send"
     description: "When the thread is scrolled back, go to its end once a message you send gets through."
+  shorten_long_commands:
+    title: "Shorten long commands"
+    description: "Show the first 4 rows of a command longer than 5. Copying the command still gives all of it."
   live_command_panel:
     title: "Live command panel"
     description: "Automatically expand the latest command's output while a turn is running."

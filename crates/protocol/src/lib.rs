@@ -404,6 +404,7 @@ pub use wire::{
 // answer could not be read.
 // CommandResponse gains unsent, the UnsentMessage {text, attachments} list an
 // Interrupt answers with when the next turn had not reached the provider.
+// Settings gains shorten_long_commands with the ShortenLongCommands patch.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

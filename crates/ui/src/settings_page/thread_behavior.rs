@@ -102,6 +102,13 @@ impl SettingsPage {
                 this.dispatch_settings(|store| store.set_scroll_to_latest_on_send(true), cx)
             }),
         );
+        let shorten_commands_reset = crate::settings_rows::reset_action(
+            "reset-shorten-long-commands",
+            !settings.shorten_long_commands,
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_shorten_long_commands(true), cx)
+            }),
+        );
         let resume_on_limit_reset_reset = crate::settings_rows::reset_action(
             "reset-resume-on-limit-reset",
             !settings.resume_on_limit_reset,
@@ -128,6 +135,15 @@ impl SettingsPage {
                 scroll_on_send_reset,
                 cx,
                 WorkspaceStore::set_scroll_to_latest_on_send,
+            ),
+            self.toggle_row(
+                "shorten-long-commands",
+                crate::tr!("settings.shorten_long_commands.title"),
+                crate::tr!("settings.shorten_long_commands.description"),
+                settings.shorten_long_commands,
+                shorten_commands_reset,
+                cx,
+                WorkspaceStore::set_shorten_long_commands,
             ),
             self.toggle_row(
                 "resume-on-limit-reset",

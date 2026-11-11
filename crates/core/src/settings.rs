@@ -676,6 +676,7 @@ pub enum SettingsPatch {
     ProviderUpdateChecksDisabled(bool),
     InactiveFrameThrottleDisabled(bool),
     ScrollToLatestOnSend(bool),
+    ShortenLongCommands(bool),
     ResumeOnLimitReset(bool),
     AutoSettleAfterDays(Option<f64>),
     AutoSettleOnMerge(bool),
@@ -952,6 +953,10 @@ pub struct Settings {
     /// message sent from it reaches the host.
     #[serde(default = "default_true")]
     pub scroll_to_latest_on_send: bool,
+    /// Whether a command of more than five rows shows its first four in the
+    /// conversation. Copying it gives the whole command either way.
+    #[serde(default = "default_true")]
+    pub shorten_long_commands: bool,
     #[serde(default = "default_true")]
     pub resume_on_limit_reset: bool,
     #[serde(default = "default_auto_settle_after_days")]
@@ -1119,6 +1124,7 @@ impl Default for Settings {
             provider_update_checks_disabled: false,
             inactive_frame_throttle_disabled: false,
             scroll_to_latest_on_send: true,
+            shorten_long_commands: true,
             resume_on_limit_reset: true,
             auto_settle_after_days: default_auto_settle_after_days(),
             auto_settle_on_merge: false,
@@ -1217,6 +1223,9 @@ impl Settings {
             }
             SettingsPatch::ScrollToLatestOnSend(value) => {
                 self.scroll_to_latest_on_send = value;
+            }
+            SettingsPatch::ShortenLongCommands(value) => {
+                self.shorten_long_commands = value;
             }
             SettingsPatch::ResumeOnLimitReset(value) => {
                 self.resume_on_limit_reset = value;

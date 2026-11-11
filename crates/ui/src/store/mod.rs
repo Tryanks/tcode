@@ -2642,6 +2642,11 @@ impl WorkspaceStore {
         !self.settings_replica.live_command_panel_disabled
     }
 
+    /// Whether a command of more than five rows shows only its first four.
+    pub fn shortens_long_commands(&self) -> bool {
+        self.settings_replica.shorten_long_commands
+    }
+
     /// The `0xRRGGBB` color of `meta`'s sidebar provider mark, `None` while
     /// the Provider marks setting is off.
     pub fn provider_color(&self, meta: &SessionMeta) -> Option<u32> {

@@ -129,6 +129,7 @@ pub(in crate::chat) fn shell_body(run: ShellRun<'_>, ctx: &mut ToolCtx<'_, '_>) 
             });
         });
         let store = ctx.chat.workspace_store.read(ctx.cx);
+        let shorten = store.shortens_long_commands();
         let replica = store.command_output_for(ctx.chat.session_id.as_deref(), &id, ctx.cx);
         let watched = replica.and_then(|replica| replica.watched());
         let frame = replica.and_then(|replica| replica.frame()).cloned();
@@ -139,6 +140,7 @@ pub(in crate::chat) fn shell_body(run: ShellRun<'_>, ctx: &mut ToolCtx<'_, '_>) 
         ctx.chat.command_panels.borrow_mut().render(
             entry,
             command,
+            shorten,
             output,
             screen,
             Some(Box::new(on_cols_change)),
@@ -299,6 +301,7 @@ impl CommandPanelCache {
         &mut self,
         entry: &TimelineEntry,
         command: &str,
+        shorten: bool,
         output: &str,
         screen: OutputScreen<'_>,
         on_cols_change: Option<ColsChangeHandler>,
@@ -309,8 +312,9 @@ impl CommandPanelCache {
         let panel = self.entries.entry(entry.id.clone()).or_default();
         panel.turn = entry.turn;
         panel.rendered = true;
-        if panel.command != command {
+        if panel.command != command || panel.shorten != shorten {
             panel.command = command.to_string();
+            panel.shorten = shorten;
             panel.command_model = None;
         }
         panel.render(id, output, screen, on_cols_change, handlers, cx)
@@ -452,6 +456,9 @@ struct Panel {
     /// state, so it carries on when the chat is drawn under a new parent.
     glide: crate::motion::GlideState,
     command: String,
+    /// Whether a command of more than [`LONG_COMMAND_ROWS`] rows shows only
+    /// its first [`SHORT_COMMAND_ROWS`], as the user's settings say.
+    shorten: bool,
     /// Rendered lazily so the first paint already carries the theme colours.
     command_model: Option<(TerminalModel, usize, u16)>,
     command_theme: Option<CommandTheme>,
@@ -525,7 +532,12 @@ impl Panel {
             .as_ref()
             .is_none_or(|(_, _, built)| *built != cols)
         {
-            let (model, rows) = command_model(&self.command, cols, self.command_theme.as_ref());
+            let (model, rows) = command_model(
+                &self.command,
+                cols,
+                self.shorten,
+                self.command_theme.as_ref(),
+            );
             self.command_model = Some((model, rows, cols));
         }
         let (command_model, command_rows, _) = self.command_model.as_ref().expect("command model");
@@ -758,10 +770,16 @@ fn grid_element(
 fn command_model(
     command: &str,
     cols: u16,
+    shorten: bool,
     command_theme: Option<&CommandTheme>,
 ) -> (TerminalModel, usize) {
     let cols = cols.max(2);
     let command = command.replace('\r', "");
+    let command = if shorten {
+        shortened_command(&command, cols)
+    } else {
+        command
+    };
     let highlights = command_theme
         .map(|theme| highlight::highlight_source(&command, "bash", &theme.highlight_theme))
         .unwrap_or_default();
@@ -847,4 +865,79 @@ fn faded_command_rgb(foreground: Hsla, background: Hsla) -> (u8, u8, u8) {
         (faded.g * 255.) as u8,
         (faded.b * 255.) as u8,
     )
+}
+
+/// A command longer than this many rows is shortened.
+const LONG_COMMAND_ROWS: usize = 5;
+/// The rows a shortened command keeps, the last ending in an ellipsis.
+const SHORT_COMMAND_ROWS: usize = 4;
+
+/// `command` as the panel shows it at `cols` when long commands are
+/// shortened: whole up to [`LONG_COMMAND_ROWS`] rows, else its first
+/// [`SHORT_COMMAND_ROWS`] with an ellipsis ending the last. The maintainer's
+/// rule: one over five rows is cut to four, any other is shown whole.
+fn shortened_command(command: &str, cols: u16) -> String {
+    let cols = usize::from(cols.max(2));
+    // Where each row after the first starts, as the grid wraps the command.
+    let mut row_starts = Vec::new();
+    let mut col = 0;
+    for (offset, text) in command.grapheme_indices(true) {
+        if text == "\n" {
+            row_starts.push(offset + text.len());
+            col = 0;
+            continue;
+        }
+        let width = text.width().min(2);
+        if col + width > cols {
+            row_starts.push(offset);
+            col = 0;
+        }
+        col += width;
+    }
+    if row_starts.len() < LONG_COMMAND_ROWS {
+        return command.to_owned();
+    }
+    // The kept rows end where the next would start; the last gives up its
+    // final cell to the ellipsis when it is full.
+    let last_start = row_starts[SHORT_COMMAND_ROWS - 2];
+    let end = row_starts[SHORT_COMMAND_ROWS - 1];
+    let mut kept = command[..end].trim_end_matches('\n').to_owned();
+    let last_width: usize = kept[last_start.min(kept.len())..]
+        .graphemes(true)
+        .map(|text| text.width().min(2))
+        .sum();
+    if last_width + 1 > cols
+        && let Some((offset, _)) = kept.grapheme_indices(true).next_back()
+    {
+        kept.truncate(offset);
+    }
+    kept.push('…');
+    kept
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(command: &str, cols: u16, shorten: bool) -> usize {
+        command_model(command, cols, shorten, None).1
+    }
+
+    #[test]
+    fn a_command_over_five_rows_shows_four_and_any_other_is_whole() {
+        let lines = |count: usize| vec!["echo one"; count].join("\n");
+        assert_eq!(rows(&lines(5), 80, true), 5);
+        assert_eq!(rows(&lines(6), 80, true), 4);
+        // Rows the grid wraps count as rows a line break makes.
+        assert_eq!(rows(&"x".repeat(50), 10, true), 5);
+        assert_eq!(rows(&"x".repeat(51), 10, true), 4);
+        // The last row kept ends in the ellipsis, on its own row's last cell
+        // when the row was full.
+        let (model, _) = command_model(&"x".repeat(51), 10, true, None);
+        assert_eq!(model.cell(3, 9).unwrap().text, "…");
+        let (model, _) = command_model(&lines(6), 80, true, None);
+        assert_eq!(model.cell(3, 8).unwrap().text, "…");
+        // With the setting off a command is whole however long it is.
+        assert_eq!(rows(&lines(12), 80, false), 12);
+    }
 }

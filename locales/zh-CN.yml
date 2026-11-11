@@ -568,6 +568,9 @@ settings:
   scroll_to_latest_on_send:
     title: "发送消息时滚动到最新"
     description: "线程未停在最新处时，你发送的消息送达后自动滚动到最新内容。"
+  shorten_long_commands:
+    title: "折叠过长的命令"
+    description: "命令超过 5 行时只显示前 4 行；复制命令得到的仍是全文。"
   live_command_panel:
     title: "实时命令面板"
     description: "轮次进行中自动展开最新命令的输出。"

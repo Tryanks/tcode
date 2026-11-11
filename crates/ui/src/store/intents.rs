@@ -151,6 +151,9 @@ impl WorkspaceStore {
                 SettingsPatch::ScrollToLatestOnSend(value) => {
                     self.settings_replica.scroll_to_latest_on_send = value
                 }
+                SettingsPatch::ShortenLongCommands(value) => {
+                    self.settings_replica.shorten_long_commands = value
+                }
                 _ => return,
             }
             self.thread_list_revision += 1;
@@ -204,6 +207,9 @@ impl WorkspaceStore {
     }
     pub fn set_scroll_to_latest_on_send(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ScrollToLatestOnSend(value));
+    }
+    pub fn set_shorten_long_commands(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::ShortenLongCommands(value));
     }
     pub fn set_resume_on_limit_reset(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ResumeOnLimitReset(value));

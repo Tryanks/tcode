@@ -568,6 +568,9 @@ settings:
   scroll_to_latest_on_send:
     title: "送信時に最新のメッセージまでスクロール"
     description: "スレッドをさかのぼって表示しているとき、送信したメッセージが届いたらスレッドの末尾に移動します。"
+  shorten_long_commands:
+    title: "長いコマンドを短く表示"
+    description: "5 行を超えるコマンドは最初の 4 行だけ表示します。コピーするとコマンド全体が得られます。"
   live_command_panel:
     title: "ライブコマンドパネル"
     description: "ターンの実行中、最新のコマンドの出力を自動的に展開します。"
