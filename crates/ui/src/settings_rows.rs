@@ -597,8 +597,7 @@ pub fn dropdown_trigger(id: &'static str, label: impl Into<SharedString>, cx: &A
         .compact()
         .child(
             h_flex()
-                // One width for every select trigger, so a column of them lines up; gpui-base's
-                // Select is not adopted yet.
+                // One width for every select trigger, so a column of them lines up.
                 .w(px(160.))
                 .items_center()
                 .justify_between()
@@ -614,8 +613,7 @@ pub fn dropdown_trigger(id: &'static str, label: impl Into<SharedString>, cx: &A
         )
 }
 
-/// The height a [`select_row`]'s menu scrolls past; gpui-base's Select is not
-/// adopted yet.
+/// The height a [`select_row`]'s menu scrolls past.
 const SELECT_MENU_MAX_HEIGHT: f32 = 360.;
 
 /// One choice of a [`select_row`].
@@ -667,11 +665,17 @@ pub(crate) fn select_row<T: Clone + 'static>(
 }
 
 /// The menu of a [`select_row`], opened from `trigger`.
+///
+/// gpui-base's `Select` (0.9) is an unstyled root: it draws no trigger, list
+/// or popup, so the list is built here on gpui-base's popover. What the root
+/// does give, the combobox role and opening from the arrow keys, is not taken
+/// up: it wants the open state and two focus handles held by a view, and these
+/// rows are built without one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn select_menu<T: Clone + 'static>(
     trigger: Button,
     popover_id: &'static str,
-    menu_id: &'static str,
+    menu_id: impl Into<gpui::ElementId>,
     menu_width: f32,
     menu_label: SharedString,
     options: Vec<SelectRowOption<T>>,
@@ -680,16 +684,17 @@ pub(crate) fn select_menu<T: Clone + 'static>(
     cx: &App,
 ) -> crate::widgets::Popover {
     let on_select = Rc::new(on_select);
+    let menu_id = menu_id.into();
     crate::material::overlay_popover(popover_id, cx)
         .trigger(trigger)
         .content(move |_, _, cx| {
             v_flex()
-                .id(menu_id)
+                .id(menu_id.clone())
                 .role(Role::Menu)
                 .aria_label(menu_label.clone())
                 .p_1()
                 // Each menu names its own floor so its longest option fits, and
-                // a long list scrolls; gpui-base's Select is not adopted yet.
+                // a long list scrolls.
                 .min_w(px(menu_width))
                 .max_h(px(SELECT_MENU_MAX_HEIGHT))
                 .overflow_y_scroll_area()
