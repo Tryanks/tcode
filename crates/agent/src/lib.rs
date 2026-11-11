@@ -2041,7 +2041,7 @@ pub struct UserInputQuestion {
     pub prefill: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserInputOption {
     pub label: String,
     pub description: String,
@@ -3111,6 +3111,19 @@ pub enum ToolFamily {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hits: Option<Vec<SearchHit>>,
     },
+    /// Questions the model put to the user, and the answers each got.
+    Question { questions: Vec<AskedQuestion> },
+}
+
+/// A question as the model asked it, with what the user answered: the
+/// labels of the options chosen, or the user's own words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskedQuestion {
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<UserInputOption>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answers: Vec<String>,
 }
 
 /// What a search looked for.

@@ -21,12 +21,13 @@ use crate::process::{
 };
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
-    ApprovalRequest, Attachment, ChangeCompleteness, DeltaKind, FileChange, FileChangeKind, Goal,
-    GoalStatus, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection,
-    PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor,
-    SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
-    ToolOutput, TurnOptions, TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion,
-    file_changes_from_unified_diff, permission_control, selection_str,
+    ApprovalRequest, AskedQuestion, Attachment, ChangeCompleteness, DeltaKind, FileChange,
+    FileChangeKind, Goal, GoalStatus, ItemContent, ItemStatus, LaunchEnv, ModelSpec,
+    OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderCommand,
+    ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle,
+    SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput, TurnOptions, TurnStatus,
+    UserInputDelivery, UserInputOption, UserInputQuestion, file_changes_from_unified_diff,
+    permission_control, selection_str,
 };
 
 mod developer_instructions;
@@ -4008,7 +4009,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             input: json!({ "questions": item.get("questions").cloned().unwrap_or_default() }),
             output: None,
             status: ItemStatus::Completed,
-            family: None,
+            family: question_family(ASYNC_QUESTION_TOOL, item, None).map(Box::new),
         },
         "plan" | "proposed_plan" => ItemContent::Plan {
             markdown: string_field(item, "text"),
@@ -4173,6 +4174,76 @@ pub fn image_generation(item: &Value) -> ItemContent {
         status,
         family: None,
     }
+}
+
+/// The questions a call of Codex's question tool `name` asked, from its
+/// input, and the answers each got, from its output. `request_user_input`
+/// asks `{id, question, options: [{label, description}]}` and is answered
+/// `{"answers": {<id>: {"answers": [...]}}}`
+/// (`request_user_input_spec.rs`, `protocol/src/request_user_input.rs` at
+/// `rust-v0.167.0`); `request_user_input_async` asks `{title, options?}`
+/// with option labels alone (`AsyncUserInputQuestion`,
+/// `protocol/src/items.rs`) and is answered in a later message, not here.
+/// The importer reads a rollout's calls through this.
+pub fn question_family(name: &str, input: &Value, output: Option<&str>) -> Option<ToolFamily> {
+    let asked = input.get("questions")?.as_array()?;
+    let answered: Option<Value> = output.and_then(|output| serde_json::from_str(output).ok());
+    let text = |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
+    let questions = match name {
+        "request_user_input" => asked
+            .iter()
+            .filter_map(|question| {
+                let answers = question
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| answered.as_ref()?.get("answers")?.get(id)?.get("answers"))
+                    .and_then(Value::as_array);
+                Some(AskedQuestion {
+                    question: text(question, "question")?,
+                    options: question
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|option| {
+                            Some(UserInputOption {
+                                label: text(option, "label")?,
+                                description: text(option, "description").unwrap_or_default(),
+                            })
+                        })
+                        .collect(),
+                    answers: answers
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect(),
+                })
+            })
+            .collect(),
+        ASYNC_QUESTION_TOOL => asked
+            .iter()
+            .filter_map(|question| {
+                Some(AskedQuestion {
+                    question: text(question, "title")?,
+                    options: question
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(|label| UserInputOption {
+                            label: label.to_owned(),
+                            description: String::new(),
+                        })
+                        .collect(),
+                    answers: Vec::new(),
+                })
+            })
+            .collect(),
+        _ => return None,
+    };
+    Some(ToolFamily::Question { questions })
 }
 
 /// A command as a rollout records Codex's own `CommandExecution` turn item
@@ -4484,6 +4555,42 @@ fn model_reroute(params: &Value) -> Option<(String, Option<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// request_user_input is answered by question id (`{"answers": {<id>:
+    /// {"answers": [...]}}}`, `protocol/src/request_user_input.rs` at
+    /// rust-v0.167.0); request_user_input_async asks titles with bare
+    /// option labels and is answered later (`AsyncUserInputQuestion`,
+    /// `protocol/src/items.rs`). Content invented.
+    #[test]
+    fn a_question_is_what_it_asked_and_the_answers_by_its_id() {
+        let asked = question_family(
+            "request_user_input",
+            &json!({"questions": [{"id": "scope", "header": "Scope", "question": "Which part first?", "options": [{"label": "Sign-in", "description": "Accounts"}, {"label": "Sync, export", "description": "Data"}]}]}),
+            Some(r#"{"answers": {"scope": {"answers": ["Sync, export"]}}}"#),
+        );
+        let Some(ToolFamily::Question { questions }) = asked else {
+            panic!("{asked:?}");
+        };
+        assert_eq!(questions[0].question, "Which part first?");
+        assert_eq!(questions[0].answers, ["Sync, export"]);
+        let asked = question_family(
+            ASYNC_QUESTION_TOOL,
+            &json!({"questions": [{"title": "Ship it?", "options": ["Yes", "Not yet"]}]}),
+            None,
+        );
+        let Some(ToolFamily::Question { questions }) = asked else {
+            panic!("{asked:?}");
+        };
+        assert_eq!(
+            questions[0]
+                .options
+                .iter()
+                .map(|option| option.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Yes", "Not yet"]
+        );
+        assert!(questions[0].answers.is_empty());
+    }
 
     /// A `CODEX_HOME` the user set in the profile's environment is where the
     /// CLI keeps its sign-in and sessions, so it is where Tcode reads them.

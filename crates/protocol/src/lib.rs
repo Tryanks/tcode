@@ -357,7 +357,8 @@ pub use wire::{
 // ExternalThread gains profile_id, the profile whose CLI keeps the thread.
 // The tool_call item gains family, what its adapter read the call to be:
 // read {path, first_line, note}, whose output is the lines read; search
-// {scope, pattern, path, glob, hits}, each hit {path, line, text}.
+// {scope, pattern, path, glob, hits}, each hit {path, line, text}; question
+// {questions}, each {question, options, answers}.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

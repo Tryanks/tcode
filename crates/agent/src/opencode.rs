@@ -19,8 +19,8 @@ use smol::future;
 use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
-    ApprovalRequest, Attachment, ChangeCompleteness, Compaction, DeltaKind, FileChange,
-    FileChangeKind, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
+    ApprovalRequest, AskedQuestion, Attachment, ChangeCompleteness, Compaction, DeltaKind,
+    FileChange, FileChangeKind, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
     OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
     ResumeCursor, RewindMode, SearchHit, SearchScope, SelectOption, SessionCommand, SessionHandle,
     SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput, UserInputDelivery,
@@ -2182,8 +2182,8 @@ impl Mapper {
                     error.or(text)
                 };
                 let (family, output) = match status {
-                    ItemStatus::Completed => tool_family(name, input, output),
-                    _ => (tool_family(name, input, None).0, output),
+                    ItemStatus::Completed => tool_family(name, input, output, metadata),
+                    _ => (tool_family(name, input, None, None).0, output),
                 };
                 ItemContent::ToolCall {
                     image_reads: images,
@@ -2362,6 +2362,7 @@ fn tool_family(
     name: &str,
     input: &Value,
     output: Option<String>,
+    metadata: Option<&Value>,
 ) -> (Option<ToolFamily>, Option<String>) {
     let field = |key: &str| input.get(key).and_then(Value::as_str).map(str::to_owned);
     match name {
@@ -2420,6 +2421,50 @@ fn tool_family(
             }),
             output,
         ),
+        // `question.ts`: the questions as asked, and `metadata.answers`, the
+        // labels or words each got, in the questions' order.
+        "question" => {
+            let Some(asked) = input.get("questions").and_then(Value::as_array) else {
+                return (None, output);
+            };
+            let answers = metadata
+                .and_then(|metadata| metadata.get("answers"))
+                .and_then(Value::as_array);
+            let questions = asked
+                .iter()
+                .enumerate()
+                .filter_map(|(index, question)| {
+                    Some(AskedQuestion {
+                        question: question.get("question")?.as_str()?.to_owned(),
+                        options: question
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|option| {
+                                Some(UserInputOption {
+                                    label: option.get("label")?.as_str()?.to_owned(),
+                                    description: option
+                                        .get("description")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                })
+                            })
+                            .collect(),
+                        answers: answers
+                            .and_then(|answers| answers.get(index))
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect(),
+                    })
+                })
+                .collect();
+            (Some(ToolFamily::Question { questions }), output)
+        }
         // `glob.ts`: the absolute path of each file it found.
         "glob" => (
             Some(ToolFamily::Search {
@@ -3127,7 +3172,8 @@ mod tests {
             tool_family(
                 "read",
                 &json!({"path": "src/lib.rs", "offset": 40}),
-                Some(page.into())
+                Some(page.into()),
+                None
             ),
             (
                 Some(ToolFamily::Read {
@@ -3140,7 +3186,7 @@ mod tests {
         );
         let listing = "Read directory src, entries 1-2\nlib.rs\nbin/";
         assert_eq!(
-            tool_family("read", &json!({"path": "src"}), Some(listing.into())),
+            tool_family("read", &json!({"path": "src"}), Some(listing.into()), None),
             (
                 Some(ToolFamily::Search {
                     scope: SearchScope::Entries,
@@ -3165,6 +3211,7 @@ mod tests {
             "grep",
             &json!({"pattern": "fn new", "path": "src", "include": "*.rs"}),
             Some(grep.into()),
+            None,
         );
         assert_eq!(
             family,
@@ -3191,6 +3238,7 @@ mod tests {
             "glob",
             &json!({"pattern": "**/*.rs"}),
             Some("/work/src/a.rs\n/work/src/b.rs".into()),
+            None,
         );
         assert_eq!(
             family,
@@ -3200,6 +3248,37 @@ mod tests {
                 path: None,
                 glob: None,
                 hits: Some(vec![hit("/work/src/a.rs"), hit("/work/src/b.rs")]),
+            })
+        );
+    }
+
+    /// question reports each question's answers as a list in its metadata,
+    /// in the questions' order (v2.2.7's `question.ts`; content invented).
+    #[test]
+    fn a_question_is_what_it_asked_and_the_answers_its_metadata_lists() {
+        let (family, _) = tool_family(
+            "question",
+            &json!({"questions": [{"question": "Which colours?", "header": "Colours", "multiple": true, "options": [{"label": "Red, green", "description": "Warm and cool"}, {"label": "Blue", "description": "Cool"}]}]}),
+            Some("User has answered your questions: \"Which colours?\"=\"Red, green, Blue\". You can now continue with the user's answers in mind.".into()),
+            Some(&json!({"answers": [["Red, green", "Blue"]]})),
+        );
+        assert_eq!(
+            family,
+            Some(ToolFamily::Question {
+                questions: vec![AskedQuestion {
+                    question: "Which colours?".into(),
+                    options: vec![
+                        UserInputOption {
+                            label: "Red, green".into(),
+                            description: "Warm and cool".into(),
+                        },
+                        UserInputOption {
+                            label: "Blue".into(),
+                            description: "Cool".into(),
+                        },
+                    ],
+                    answers: vec!["Red, green".into(), "Blue".into()],
+                }],
             })
         );
     }

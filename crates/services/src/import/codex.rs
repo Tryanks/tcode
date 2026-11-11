@@ -281,16 +281,15 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             }
                             _ => ItemContent::ToolCall {
                                 image_reads: Vec::new(),
-                                family: (name == VIEW_IMAGE)
-                                    .then(|| input.get("path").and_then(Value::as_str))
-                                    .flatten()
-                                    .map(|path| {
-                                        Box::new(ToolFamily::Read {
-                                            path: path.to_owned(),
-                                            first_line: None,
-                                            note: None,
-                                        })
+                                family: match input.get("path").and_then(Value::as_str) {
+                                    Some(path) if name == VIEW_IMAGE => Some(ToolFamily::Read {
+                                        path: path.to_owned(),
+                                        first_line: None,
+                                        note: None,
                                     }),
+                                    _ => agent::codex::question_family(&name, &input, None),
+                                }
+                                .map(Box::new),
                                 name,
                                 input,
                                 output: None,
@@ -354,10 +353,17 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             }
                             ItemContent::ToolCall {
                                 image_reads,
+                                name,
+                                input,
                                 output,
                                 status,
-                                ..
+                                family,
                             } => {
+                                if let Some(asked) =
+                                    agent::codex::question_family(name, input, Some(&result.text))
+                                {
+                                    *family = Some(Box::new(asked));
+                                }
                                 *status = if failed {
                                     ItemStatus::Failed
                                 } else if aborted(&result.text) {

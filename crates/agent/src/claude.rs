@@ -41,12 +41,13 @@ use crate::claude_goal::GoalTranscript;
 use crate::claude_manifest::{CatalogModel, ClaudeCatalog};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
-    ApprovalRequest, Attachment, CatalogRefresh, DeltaKind, FileChange, FileChangeKind, GoalStatus,
-    ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep,
-    PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, RewindMode,
-    SearchHit, SearchScope, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
-    ToolFamily, ToolOutput, TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion,
-    WorktreeAnswer, WorktreeRequest, selection_bool, selection_str,
+    ApprovalRequest, AskedQuestion, Attachment, CatalogRefresh, DeltaKind, FileChange,
+    FileChangeKind, GoalStatus, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
+    OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
+    ResumeCursor, RewindMode, SearchHit, SearchScope, SessionCommand, SessionHandle,
+    SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput, TurnStatus, UserInputDelivery,
+    UserInputOption, UserInputQuestion, WorktreeAnswer, WorktreeRequest, selection_bool,
+    selection_str,
 };
 
 /// The hook callbacks `initialize` registers. With `onFailure: "block"` an error
@@ -4511,9 +4512,90 @@ fn tool_family(
             glob: None,
             hits: structured.and_then(filenames),
         },
+        // `AskUserQuestionInput`'s questions, and `AskUserQuestionOutput`'s
+        // `answers`, keyed by question text: one string, a multi-select's
+        // labels joined with ", " (a record written before 2.1.3xx joined
+        // them holds the list).
+        "AskUserQuestion" => {
+            let Some(asked) = input.get("questions").and_then(Value::as_array) else {
+                return (None, output);
+            };
+            let answers = structured.and_then(|result| result.get("answers"));
+            ToolFamily::Question {
+                questions: asked
+                    .iter()
+                    .filter_map(|question| {
+                        let text = question.get("question")?.as_str()?;
+                        let options: Vec<UserInputOption> = question
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|option| {
+                                Some(UserInputOption {
+                                    label: option.get("label")?.as_str()?.to_owned(),
+                                    description: option
+                                        .get("description")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                })
+                            })
+                            .collect();
+                        let answers = match answers.and_then(|answers| answers.get(text)) {
+                            Some(Value::String(answer)) => chosen(answer, &options),
+                            Some(Value::Array(answers)) => answers
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect(),
+                            _ => Vec::new(),
+                        };
+                        Some(AskedQuestion {
+                            question: text.to_owned(),
+                            options,
+                            answers,
+                        })
+                    })
+                    .collect(),
+            }
+        }
         _ => return (None, output),
     };
     (Some(family), output)
+}
+
+/// The options an AskUserQuestion answer names, in order. Claude Code joins
+/// a multi-select's labels with ", " (JSON-quoting a label that holds ", "
+/// or a quote when its own picker joined them), so the answer is read as
+/// the options it is made of rather than split at every comma; what no
+/// option begins is the user's own words.
+fn chosen(answer: &str, options: &[UserInputOption]) -> Vec<String> {
+    let mut picked = Vec::new();
+    let mut rest = answer;
+    while !rest.is_empty() {
+        let next = options
+            .iter()
+            .flat_map(|option| {
+                let quoted = serde_json::to_string(&option.label).unwrap_or_default();
+                [option.label.len(), quoted.len()]
+                    .into_iter()
+                    .zip([option.label.clone(), quoted])
+                    .map(move |(length, token)| (length, token, option.label.clone()))
+            })
+            .filter(|(length, token, _)| {
+                rest.starts_with(token.as_str())
+                    && (rest.len() == *length || rest[*length..].starts_with(", "))
+            })
+            .max_by_key(|(length, _, _)| *length);
+        let Some((length, _, label)) = next else {
+            picked.push(rest.to_owned());
+            break;
+        };
+        picked.push(label);
+        rest = rest[length..].strip_prefix(", ").unwrap_or_default();
+    }
+    picked
 }
 
 /// A Grep or Glob output's `filenames`, each a file it found.
@@ -6736,6 +6818,45 @@ mod tests {
             hits.as_deref()
                 .map(|hits| hits.iter().map(|hit| hit.path.as_str()).collect::<Vec<_>>()),
             Some(vec!["src/a.rs", "src/b.rs"])
+        );
+    }
+
+    /// An AskUserQuestion is the questions it asked and the options each
+    /// answer names: Claude Code joins a multi-select's labels with ", ",
+    /// so a label holding ", " stays whole, and words no option begins are
+    /// the user's own (`AskUserQuestionInput`, `AskUserQuestionOutput` of
+    /// `sdk-tools.d.ts` in `@anthropic-ai/claude-agent-sdk` 0.3.322; content
+    /// invented).
+    #[test]
+    fn a_question_is_what_it_asked_and_the_options_each_answer_names() {
+        let mut mapper = Mapper::new();
+        feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg_ask","content":[{"type":"tool_use","id":"toolu_ask","name":"AskUserQuestion","input":{"questions":[{"question":"Which colours?","header":"Colours","multiSelect":true,"options":[{"label":"Red, green","description":"Warm and cool"},{"label":"Blue","description":"Cool"}]},{"question":"Why?","header":"Why","multiSelect":false,"options":[{"label":"Taste","description":""},{"label":"Brand","description":""}]}]}}]}}"#,
+        );
+        let completed = feed(
+            &mut mapper,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_ask","content":"Your questions have been answered: \"Which colours?\"=\"Red, green, Blue\", \"Why?\"=\"It matches the logo\". You can now continue with these answers in mind."}]},"tool_use_result":{"questions":[],"answers":{"Which colours?":"Red, green, Blue","Why?":"It matches the logo"}}}"#,
+        );
+        let [AgentEvent::ItemCompleted(item)] = completed.as_slice() else {
+            panic!("{completed:?}");
+        };
+        let ItemContent::ToolCall { family, .. } = &item.content else {
+            panic!("{item:?}");
+        };
+        let Some(ToolFamily::Question { questions }) = family.as_deref() else {
+            panic!("{family:?}");
+        };
+        let answers: Vec<_> = questions
+            .iter()
+            .map(|question| question.answers.clone())
+            .collect();
+        assert_eq!(
+            answers,
+            [
+                vec!["Red, green".to_owned(), "Blue".to_owned()],
+                vec!["It matches the logo".to_owned()],
+            ]
         );
     }
 
