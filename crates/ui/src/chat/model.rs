@@ -414,18 +414,16 @@ pub(crate) fn work_log_capsule_label(counts: &WorkLogCounts, activity_count: usi
     clauses.join(" · ")
 }
 
-pub(crate) fn activity_run_duration_ms(
-    activities: &[&TimelineEntry],
-    turn: &TurnMeta,
-    is_last: bool,
-) -> u64 {
-    let first = activities.iter().find_map(|entry| entry.ts);
-    let last = activities.iter().rev().find_map(|entry| entry.ts);
-    match (first, last) {
-        (Some(first), Some(last)) => last.saturating_sub(first),
-        _ if is_last => turn.timing.map_or(0, |timing| timing.total_ms),
-        _ => 0,
-    }
+/// How long a run of activities took: from the first start seen to the
+/// last end seen. `None` when its times do not span any: one activity whose
+/// end was never seen took a time nobody knows.
+pub(crate) fn activity_run_duration_ms(activities: &[&TimelineEntry]) -> Option<u64> {
+    let start = activities.iter().filter_map(|entry| entry.ts).min()?;
+    let end = activities
+        .iter()
+        .filter_map(|entry| entry.finished_ts.or(entry.ts))
+        .max()?;
+    (end > start).then(|| end - start)
 }
 
 // A failed command inside a run is normal agent probing (grep exit 1, a

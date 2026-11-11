@@ -1356,7 +1356,7 @@ impl TimelineView {
             if capsule_label.is_empty() {
                 capsule_label = crate::tr!("chat.work_log").into_owned();
             }
-            let duration = format_elapsed(activity_run_duration_ms(folded, turn, is_last));
+            let duration = activity_run_duration_ms(folded).map(format_elapsed);
             let outcome = work_log_outcome(turn, is_last);
             let rows = if expanded && !header_only {
                 self.compose_work_log_rows(folded, cwd, live_reasoning_id, false, window, cx)

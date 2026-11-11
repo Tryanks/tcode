@@ -33,7 +33,8 @@ pub(crate) struct WorkLogData {
     pub(crate) compact: bool,
     pub(crate) segment_id: String,
     pub(crate) capsule_label: String,
-    pub(crate) duration: String,
+    /// How long the run took, when its times say.
+    pub(crate) duration: Option<String>,
     pub(crate) outcome: TurnStatus,
     pub(crate) expanded: bool,
     pub(crate) running: bool,
@@ -140,7 +141,7 @@ fn settled_state(
     running: bool,
     outcome: TurnStatus,
     label: String,
-    duration: String,
+    duration: Option<String>,
     cx: &App,
 ) -> AnyElement {
     let primary = cx.theme().primary;
@@ -165,17 +166,25 @@ fn settled_state(
                 };
                 let theme = cx.theme();
                 let typography = &theme.tokens.typography;
-                let drop = crate::typography::baseline_below_centre(
-                    SharedString::from(label.clone()),
-                    theme.font_family.clone(),
-                    typography.sm.size,
-                    window,
-                ) - crate::typography::baseline_below_centre(
-                    SharedString::from(duration.clone()),
-                    typography.mono.clone(),
-                    typography.xs.size,
-                    window,
-                );
+                let duration = duration.clone().map(|duration| {
+                    let drop = crate::typography::baseline_below_centre(
+                        SharedString::from(label.clone()),
+                        theme.font_family.clone(),
+                        typography.sm.size,
+                        window,
+                    ) - crate::typography::baseline_below_centre(
+                        SharedString::from(duration.clone()),
+                        typography.mono.clone(),
+                        typography.xs.size,
+                        window,
+                    );
+                    div()
+                        .flex_none()
+                        .text_meta_mono(false, cx)
+                        .relative()
+                        .top(drop)
+                        .child(duration)
+                });
                 h_flex()
                     .gap_1p5()
                     .items_center()
@@ -187,14 +196,7 @@ fn settled_state(
                             cx,
                         ))
                     })
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_meta_mono(false, cx)
-                            .relative()
-                            .top(drop)
-                            .child(duration.clone()),
-                    )
+                    .children(duration)
                     .into_any_element()
             },
         )
