@@ -29,8 +29,8 @@ use gpui_base::{PopoverState, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 
 use super::list::{
-    DiffList, DiffListHost, DiffSelectionMenu, FileMenu, LineSelection, file_header_index,
-    render_list, render_notice,
+    DiffList, DiffListHost, DiffSelectionMenu, FileMenu, GapState, LineSelection,
+    file_header_index, render_list, render_notice,
 };
 use super::model::{
     DiffColors, ExpandDir, FileDiffInput, RenderedFile, build_file, reconstruct_from_text,
@@ -94,20 +94,57 @@ struct RenderFileContext<'a> {
     whitespace_style: &'a HighlightStyle,
 }
 
+/// Why the lines around a file's hunks cannot be shown: the file as it is
+/// now was read to rebuild both sides of the diff, and that did not work.
+#[derive(Debug, Clone)]
+enum NoContext {
+    /// The host could not read the file, in its words.
+    Unreadable(String),
+    /// The file is not UTF-8 text.
+    NotText,
+    /// The file as it is now does not match the diff.
+    Changed,
+}
+
+impl NoContext {
+    fn describe(&self) -> String {
+        match self {
+            Self::Unreadable(reason) => {
+                crate::tr!("diff.context_unreadable", reason = reason).into_owned()
+            }
+            Self::NotText => crate::tr!("diff.context_not_text").into_owned(),
+            Self::Changed => crate::tr!("diff.context_changed").into_owned(),
+        }
+    }
+}
+
+/// `file` rendered from what is known of it, and why its unchanged lines
+/// cannot be shown when the file as it is now (`current`, when it was read)
+/// could not stand in for them.
 fn render_file(
     change: &FileChange,
     texts: Option<&GitFileText>,
-    fallback_new_text: Option<&str>,
+    current: Option<&Result<String, NoContext>>,
     context: RenderFileContext<'_>,
-) -> RenderedFile {
+) -> (RenderedFile, Option<NoContext>) {
     let needs_reconstruction = texts.is_none_or(|texts| texts.new.is_none());
+    let mut no_context = None;
     let reconstructed = needs_reconstruction
         .then(|| {
-            change.diff.as_deref().and_then(|patch| {
-                fallback_new_text
-                    .map(str::to_string)
-                    .and_then(|text| reconstruct_from_text(text, patch))
-            })
+            let patch = change.diff.as_deref()?;
+            match current? {
+                Ok(text) => {
+                    let reconstructed = reconstruct_from_text(text.clone(), patch);
+                    if reconstructed.is_none() {
+                        no_context = Some(NoContext::Changed);
+                    }
+                    reconstructed
+                }
+                Err(reason) => {
+                    no_context = Some(reason.clone());
+                    None
+                }
+            }
         })
         .flatten();
     let old_text = texts
@@ -117,7 +154,7 @@ fn render_file(
         .and_then(|texts| texts.new.as_deref())
         .or_else(|| reconstructed.as_ref().map(|(_, new)| new.as_str()));
 
-    build_file(
+    let file = build_file(
         &FileDiffInput {
             path: &change.path,
             kind: change.kind,
@@ -132,7 +169,8 @@ fn render_file(
         context.theme,
         context.colors,
         context.whitespace_style,
-    )
+    );
+    (file, no_context)
 }
 
 /// Cache of rendered files, invalidated when the session, selected turn, or
@@ -145,7 +183,10 @@ struct DiffCache {
     ignore_ws: bool,
     show_invisibles: bool,
     list: DiffList,
-    fallback_texts: HashMap<String, Option<String>>,
+    /// Each changed file as it was read now, by path.
+    fallback_texts: HashMap<String, Result<String, NoContext>>,
+    /// Why each file of `list`, by position, shows no lines around its hunks.
+    no_context: Vec<Option<NoContext>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -537,7 +578,7 @@ impl DiffPanel {
         cx.spawn(async move |this, cx| {
             let mut fallback_texts = changes
                 .iter()
-                .map(|change| reusable.get(&change.path).cloned().flatten())
+                .map(|change| reusable.get(&change.path).cloned())
                 .collect::<Vec<_>>();
             for first in (0..changes.len()).step_by(4) {
                 if !this
@@ -572,9 +613,10 @@ impl DiffPanel {
                     })
                     .collect::<Vec<_>>();
                 for (index, task) in reads {
-                    if let Ok(bytes) = task.await {
-                        fallback_texts[index] = String::from_utf8(bytes).ok();
-                    }
+                    fallback_texts[index] = Some(match task.await {
+                        Ok(bytes) => String::from_utf8(bytes).map_err(|_| NoContext::NotText),
+                        Err(error) => Err(NoContext::Unreadable(error.to_string())),
+                    });
                 }
             }
             if !this
@@ -588,7 +630,7 @@ impl DiffPanel {
             let sources = changes
                 .iter()
                 .zip(&fallback_texts)
-                .map(|(change, text)| (change.path.clone(), text.clone()))
+                .filter_map(|(change, text)| Some((change.path.clone(), text.clone()?)))
                 .collect();
             let files = cx
                 .background_executor()
@@ -600,7 +642,7 @@ impl DiffPanel {
                             render_file(
                                 change,
                                 texts.get(index),
-                                fallback_texts[index].as_deref(),
+                                fallback_texts[index].as_ref(),
                                 RenderFileContext {
                                     cwd: &cwd,
                                     options: DiffOptions {
@@ -613,9 +655,10 @@ impl DiffPanel {
                                 },
                             )
                         })
-                        .collect::<Vec<_>>()
+                        .unzip::<_, _, Vec<_>, Vec<_>>()
                 })
                 .await;
+            let (files, no_context) = files;
             let _ = this.update(cx, |panel, cx| {
                 if panel.render_loading_key.as_ref() == Some(&key) {
                     let previous = panel
@@ -638,6 +681,7 @@ impl DiffPanel {
                         show_invisibles: key.show_invisibles,
                         list,
                         fallback_texts: sources,
+                        no_context,
                     });
                     panel.render_loading_key = None;
                     panel.apply_pending_file_focus(&key.session, key.scope, cx);
@@ -1922,6 +1966,18 @@ impl DiffListHost for DiffPanel {
         cx.notify();
     }
 
+    fn gap_state(&self, file: usize, expandable: bool) -> GapState {
+        if expandable {
+            return GapState::Expandable;
+        }
+        GapState::Fixed(
+            self.cache
+                .as_ref()
+                .and_then(|cache| cache.no_context.get(file)?.as_ref())
+                .map(NoContext::describe),
+        )
+    }
+
     fn file_menu(&self, file: usize, cx: &App) -> FileMenu {
         let path = self
             .diff_list()
@@ -2252,7 +2308,7 @@ mod tests {
             removed_word_bg: gpui::hsla(0., 0.8, 0.5, 0.28),
         };
 
-        let file = render_file(
+        let (file, _) = render_file(
             &change,
             None,
             None,
