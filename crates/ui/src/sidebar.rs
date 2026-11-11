@@ -420,6 +420,8 @@ struct ThreadFlags {
     unsettled: bool,
     /// What wakes the thread later though nothing of it runs.
     wakes: tcode_protocol::ThreadWakes,
+    /// The host can fork the thread's conversation, now or once it can.
+    forks: bool,
 }
 
 #[derive(Clone)]
@@ -1091,6 +1093,9 @@ fn session_flags(sessions: &[SessionMeta], store: &WorkspaceStore) -> HashMap<St
                         .activity(&meta.id)
                         .map(|activity| activity.wakes.clone())
                         .unwrap_or_default(),
+                    forks: store.activity(&meta.id).is_some_and(|activity| {
+                        activity.fork != tcode_protocol::ForkAvailability::Unsupported
+                    }),
                 },
             )
         })
@@ -3819,7 +3824,7 @@ impl SessionsSidebar {
             auto_settle_enabled: meta.auto_settle_disabled_at.is_none(),
             is_worktree: meta.worktree.is_some(),
             show_unread: own_flags.unread && !own_flags.working,
-            menu_can_fork: meta.provider.caps().supports_fork,
+            menu_can_fork: own_flags.forks,
             title_generating: store.title_generating(&meta.id),
         }
     }
