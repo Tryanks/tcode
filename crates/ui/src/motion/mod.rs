@@ -35,10 +35,7 @@ pub(crate) use list_hover::{HoverHold, ListHover};
 pub(crate) use list_scroll::{ListScroll, ScrollTarget};
 pub(crate) use size_glide::{GlideAxes, GlideState, SizeGlide, size_key};
 pub(crate) mod bounce;
-#[cfg(any(
-    test,
-    all(preview_backend, any(target_os = "macos", target_os = "ios"))
-))]
+#[cfg(all(preview_backend, any(target_os = "macos", target_os = "ios")))]
 pub(crate) mod native_fade;
 pub(crate) mod reflow;
 pub(crate) use reflow::reflow;
