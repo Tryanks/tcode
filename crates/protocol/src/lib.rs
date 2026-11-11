@@ -419,6 +419,10 @@ pub use wire::{
 // BackgroundCommandsOnSteer patch.
 // SessionContentHits gains truncated: more messages matched than the limit
 // asked for. SearchSessionContent's limit is no longer capped at 50.
+// record_withheld gains row, the withheld record's log cursor, which a
+// history window names and a live session_event leaves out; OriginalTarget
+// gains record {session_id, row}, that record as JSON, read whole on the
+// original stream by whoever may read the thread's history.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

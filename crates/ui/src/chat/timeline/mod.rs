@@ -14,7 +14,7 @@ use crate::motion::list_rows::{Arrival, Glide, RowGlide};
 pub(super) use expansion::{
     AutoActivityExpansions, AutoActivityRecency, auto_activity_snapshot_keys,
 };
-pub(super) use render::{ActivityRow, FullOutput};
+pub(super) use render::{ActivityRow, FullOutput, WithheldLoad};
 pub(super) use residency::{
     PendingMarkdownBuild, tail_row_window, transcript_selection, viewport_row_window,
 };
@@ -134,6 +134,8 @@ pub(crate) struct TimelineView {
     pub(in crate::chat) tool_texts: tools::DerivedTexts,
     /// Whole tool outputs fetched for the open session, by item id.
     pub(in crate::chat) full_outputs: HashMap<String, FullOutput>,
+    /// Records withheld for their size being read whole, by row.
+    pub(in crate::chat) withheld_loads: HashMap<u64, WithheldLoad>,
     /// The output a Copy waits for, copied once it has loaded.
     pub(in crate::chat) copy_when_loaded: Option<String>,
     /// The timeline item the pointer is over: a message whose actions fade
@@ -268,6 +270,7 @@ impl TimelineView {
             inline_diffs: InlineDiffCache::new(),
             tool_texts: tools::DerivedTexts::default(),
             full_outputs: HashMap::new(),
+            withheld_loads: HashMap::new(),
             copy_when_loaded: None,
             located: None,
             located_unmark: None,
@@ -985,6 +988,7 @@ impl TimelineView {
             self.inline_diffs.clear();
             self.tool_texts.clear();
             self.full_outputs.clear();
+            self.withheld_loads.clear();
             self.highlighted_turn = None;
             self.located = None;
             self.located_unmark = None;

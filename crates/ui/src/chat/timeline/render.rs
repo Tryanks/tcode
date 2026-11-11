@@ -20,6 +20,16 @@ pub(in crate::chat) enum FullOutput {
     Failed(String),
 }
 
+/// A withheld record being read whole on request, or why that failed; once
+/// read it takes its placeholder's place in the store's log.
+pub(in crate::chat) enum WithheldLoad {
+    /// Dropping the task stops the read.
+    Loading {
+        _request: Task<()>,
+    },
+    Failed(String),
+}
+
 /// A timeline row as drawn: what its segment shows, and on the turn's last
 /// row the turn's trailer below it, the gap between the two its own.
 pub(in crate::chat) struct RenderedRow {
@@ -284,11 +294,12 @@ impl TimelineView {
                     column = column.child(self.compose_plan(entry, cwd, cx));
                 }
                 Segment::Withheld(entry) => {
-                    let EntryContent::Withheld { bytes } = entry.content else {
+                    let EntryContent::Withheld { bytes, row } = entry.content else {
                         unreachable!();
                     };
+                    let read = row.map(|row| self.withheld_read(row, entry.turn, cx));
                     column = column.child(components::dividers::record_withheld_divider(
-                        &entry.id, bytes, cx,
+                        &entry.id, bytes, read, cx,
                     ));
                 }
                 Segment::Unreadable(rows) => {
@@ -2035,6 +2046,64 @@ impl TimelineView {
                 on_load: load(),
             },
         })
+    }
+
+    /// The control of the record withheld from `row`, in `turn`.
+    fn withheld_read(
+        &mut self,
+        row: u64,
+        turn: usize,
+        cx: &mut Context<Self>,
+    ) -> components::dividers::WithheldRead {
+        use components::dividers::WithheldRead;
+        let load = || -> components::changed_files::ClickHandler {
+            Box::new(cx.listener(move |this, _, _, cx| this.load_withheld(row, turn, cx)))
+        };
+        match self.withheld_loads.get(&row) {
+            None => WithheldRead::Offered(load()),
+            Some(WithheldLoad::Loading { .. }) => {
+                WithheldRead::Loading(Box::new(cx.listener(move |this, _, _, cx| {
+                    this.withheld_loads.remove(&row);
+                    this.remeasure_turn(turn);
+                    cx.notify();
+                })))
+            }
+            Some(WithheldLoad::Failed(error)) => WithheldRead::Failed(error.clone(), load()),
+        }
+    }
+
+    fn load_withheld(&mut self, row: u64, turn: usize, cx: &mut Context<Self>) {
+        let Some(session_id) = self.session_key.clone() else {
+            return;
+        };
+        let read = self.workspace_store.update(cx, |store, cx| {
+            store.read_withheld_record(session_id.clone(), row, cx)
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let result = read.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.session_key.as_deref() != Some(session_id.as_str()) {
+                    return;
+                }
+                match result {
+                    Ok(record) => {
+                        this.withheld_loads.remove(&row);
+                        this.workspace_store.update(cx, |store, cx| {
+                            store.restore_withheld_record(&session_id, row, record, cx);
+                        });
+                    }
+                    Err(error) => {
+                        this.withheld_loads.insert(row, WithheldLoad::Failed(error));
+                    }
+                }
+                this.remeasure_turn(turn);
+                cx.notify();
+            });
+        });
+        self.withheld_loads
+            .insert(row, WithheldLoad::Loading { _request: task });
+        self.remeasure_turn(turn);
+        cx.notify();
     }
 
     fn load_full_output(&mut self, item_id: String, turn: usize, cx: &mut Context<Self>) {

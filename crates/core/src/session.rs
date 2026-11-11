@@ -217,13 +217,14 @@ impl StoredEvent {
     }
 
     /// What a connection whose line cannot carry this record, `bytes` long
-    /// on the wire, is sent in its place.
-    pub fn withheld(&self, bytes: u64) -> Self {
+    /// on the wire and in the log's `row` where the sender knows it, is sent
+    /// in its place.
+    pub fn withheld(&self, bytes: u64, row: Option<u64>) -> Self {
         StoredEvent {
             origin: self.origin,
             author: self.author.clone(),
             ts: self.ts,
-            event: AgentEvent::RecordWithheld { bytes },
+            event: AgentEvent::RecordWithheld { bytes, row },
             elided: None,
         }
     }
@@ -608,6 +609,7 @@ pub enum EntryContent {
     /// ([`AgentEvent::RecordWithheld`]).
     Withheld {
         bytes: u64,
+        row: Option<u64>,
     },
 }
 
@@ -1723,12 +1725,15 @@ impl Timeline {
                     turn,
                 }));
             }
-            AgentEvent::RecordWithheld { bytes } => {
+            AgentEvent::RecordWithheld { bytes, row } => {
                 let turn = self.ensure_turn();
                 let id = self.synthetic_id("withheld", ts);
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
-                    content: EntryContent::Withheld { bytes: *bytes },
+                    content: EntryContent::Withheld {
+                        bytes: *bytes,
+                        row: *row,
+                    },
                     ts,
                     finished_ts: None,
                     background: false,

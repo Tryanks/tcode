@@ -11380,7 +11380,8 @@ fn a_completion_drops_the_deltas_it_repeats_in_the_same_commit() {
 
 /// A thread opens with about half a megabyte of history however long its
 /// records are, a single record larger than that still arrives alone, and one
-/// larger than the client's line arrives as its size.
+/// larger than the client's line arrives as its size and the row to read it
+/// from.
 #[test]
 fn history_windows_are_byte_budgeted() {
     let cx = &mut TestAppContext::default();
@@ -11474,7 +11475,10 @@ fn history_windows_are_byte_budgeted() {
                 origin: None,
                 author: None,
                 ts: Some(199),
-                event: AgentEvent::RecordWithheld { bytes: huge_len },
+                event: AgentEvent::RecordWithheld {
+                    bytes: huge_len,
+                    row: Some(199),
+                },
                 elided: None,
             }
         );

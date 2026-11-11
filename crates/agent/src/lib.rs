@@ -2755,8 +2755,14 @@ pub enum AgentEvent {
     /// A record of `bytes` bytes, more than one reply to the client it was
     /// for can carry, kept on the host in a history reply. Never emitted by
     /// an adapter nor written; the host sends it in the record's place.
+    /// `row` is the record's log cursor, by which the client reads it whole
+    /// through an original (`OriginalTarget::Record`): a history window
+    /// names it, and a live event, whose cursor the sender does not know, is
+    /// the record at the end of the log the client holds.
     RecordWithheld {
         bytes: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        row: Option<u64>,
     },
     /// Structured plan / task list for the sidebar (Codex `turn/plan/updated`,
     /// Claude `TodoWrite`). Replaces the current turn's plan wholesale.

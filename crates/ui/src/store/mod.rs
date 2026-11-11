@@ -1920,7 +1920,7 @@ impl WorkspaceStore {
         &mut self,
         session_id: &str,
         topic: &Topic,
-        record: StoredEvent,
+        mut record: StoredEvent,
     ) -> Option<bool> {
         let baseline = self.baseline_topics.contains(topic);
         let thread = self.open_thread_mut(session_id)?;
@@ -1931,6 +1931,14 @@ impl WorkspaceStore {
             return None;
         }
         let held = thread.history.as_ref()?;
+        // A record withheld live does not say its row: it is the one that
+        // takes the held log's end.
+        if let agent::AgentEvent::RecordWithheld {
+            row: row @ None, ..
+        } = &mut record.event
+        {
+            *row = Some(held.end);
+        }
         let after = held.end + 1;
         self.host.remember_after(topic, after);
         self.apply_conversation_event(session_id, &record.event);

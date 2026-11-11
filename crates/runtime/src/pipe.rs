@@ -1849,6 +1849,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_root);
     }
 
+    /// The original of a record of a thread's log, which a window withholds
+    /// from a client whose line it is longer than, is that record as a
+    /// window sends records, read from the row the placeholder names.
+    #[test]
+    fn a_withheld_record_is_read_whole_from_its_row() {
+        use tcode_client::original::OriginalBackend as _;
+        let data_root =
+            std::env::temp_dir().join(format!("tcode-original-record-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(data_root.clone()).expect("open session store");
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::Codex,
+            data_root.join("workspace"),
+            None,
+        );
+        meta.id = "long".into();
+        store.upsert_meta(&meta).expect("write meta");
+        let warning = |message: String| agent::AgentEvent::Warning { message };
+        store
+            .append_event(&meta.id, 1, &warning("short".into()))
+            .expect("append the first record");
+        let long = warning("w".repeat(64 * 1024 * 3 + 5));
+        store
+            .append_event(&meta.id, 2, &long)
+            .expect("append the long record");
+        let host = spawn_host(store, HostServices::default()).expect("spawn host");
+        let source = smol::block_on(host.open(
+            tcode_protocol::Principal::Full,
+            tcode_protocol::OriginalTarget::Record {
+                session_id: meta.id.clone(),
+                row: 1,
+            },
+        ))
+        .expect("open the record");
+        let mut received = Vec::new();
+        loop {
+            let block = source
+                .blocks
+                .recv_blocking()
+                .expect("original stream")
+                .expect("original block");
+            if block.is_empty() {
+                break;
+            }
+            received.extend(block);
+        }
+        assert_eq!(source.metadata.len, received.len() as u64);
+        let record: tcode_core::session::StoredEvent =
+            serde_json::from_slice(&received).expect("a record");
+        assert_eq!(record.event, long);
+
+        drop(source);
+        host.link().shutdown_blocking().expect("stop host");
+        host.stopped.recv_blocking().expect("host thread stopped");
+        drop(host);
+        let _ = std::fs::remove_dir_all(data_root);
+    }
+
     /// Command output is rendered by the host at the width a subscriber asked
     /// for: a finished command is answered once per width, and a running one
     /// is pushed again, coalesced, while its output grows, until the

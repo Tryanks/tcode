@@ -32,7 +32,13 @@ impl AppState {
                 item_id,
                 image_index,
             } => Some(self.recorded_image(session_id, item_id.clone(), *image_index, true, cx)),
-            OriginalTarget::File { .. } => None,
+            OriginalTarget::File { .. } | OriginalTarget::Record { .. } => None,
+        };
+        let record = match &target {
+            OriginalTarget::Record { session_id, row } => {
+                Some(self.session_record(session_id, *row, cx))
+            }
+            _ => None,
         };
         let host = cx.clone();
         cx.spawn_background(async move {
@@ -74,6 +80,12 @@ impl AppState {
                         })
                         .await
                     }
+                    OriginalTarget::Record { .. } => {
+                        let record = record.unwrap().await?;
+                        host.unblock(move || serde_json::to_vec(&record).map_err(error))
+                            .await
+                            .map(Source::Record)?
+                    }
                 };
                 let checked = match &source {
                     Source::File { path, .. } => OriginalTarget::File { path: path.clone() },
@@ -99,6 +111,7 @@ impl AppState {
                                 image.data_base64.as_bytes(),
                                 &STANDARD,
                             )),
+                            Source::Record(json) => Box::new(json.as_slice()),
                         };
                         let tail = stream_blocks(read, &output)?;
                         if let Source::File {
@@ -215,6 +228,8 @@ enum Source {
         dimensions: Option<(u32, u32)>,
     },
     Item(ItemImage),
+    /// A record of the log, serialized as a client receives it.
+    Record(Vec<u8>),
 }
 
 struct ItemImage {
@@ -242,6 +257,11 @@ impl Source {
                 len: image.identity.1,
                 mime: Some(image.mime.clone()),
                 dimensions: image.dimensions,
+            },
+            Self::Record(json) => OriginalMetadata {
+                len: json.len() as u64,
+                mime: Some("application/json".into()),
+                dimensions: None,
             },
         }
     }

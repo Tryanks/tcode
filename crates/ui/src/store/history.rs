@@ -100,6 +100,22 @@ impl HeldHistory {
         self.rebuild_attribution();
     }
 
+    /// Put `record` where the one withheld from row `row` stands: whether
+    /// that placeholder is still held.
+    fn restore_withheld(&mut self, row: u64, record: StoredEvent) -> bool {
+        let Some(held) = self.records.iter_mut().find(|held| {
+            matches!(
+                held.event,
+                agent::AgentEvent::RecordWithheld { row: Some(at), .. } if at == row
+            )
+        }) else {
+            return false;
+        };
+        *held = record;
+        self.rebuild_attribution();
+        true
+    }
+
     fn rebuild_attribution(&mut self) {
         self.attribution = Attribution::default();
         for record in &self.records {
@@ -131,6 +147,59 @@ impl HeldHistory {
 }
 
 impl WorkspaceStore {
+    /// Read whole, through an original, the record withheld from row `row`
+    /// of `session_id`'s log for being longer than this connection's line.
+    /// Dropping the task stops the read.
+    pub(crate) fn read_withheld_record(
+        &self,
+        session_id: String,
+        row: u64,
+        cx: &mut App,
+    ) -> Task<Result<StoredEvent, String>> {
+        let host = self.host.clone();
+        cx.spawn(async move |cx| {
+            let mut transfer =
+                host.read_original(tcode_protocol::OriginalTarget::Record { session_id, row });
+            let mut json = Vec::new();
+            while let Some(block) = transfer.read().await.map_err(|error| error.message)? {
+                json.try_reserve(block.len())
+                    .map_err(|error| error.to_string())?;
+                json.extend_from_slice(&block);
+            }
+            cx.background_executor()
+                .spawn(async move {
+                    serde_json::from_slice::<StoredEvent>(&json).map_err(|error| error.to_string())
+                })
+                .await
+        })
+    }
+
+    /// Show `record`, read by [`Self::read_withheld_record`], where its
+    /// placeholder stands in `session_id`'s held log; nothing once a later
+    /// window has replaced what was held.
+    pub(crate) fn restore_withheld_record(
+        &mut self,
+        session_id: &str,
+        row: u64,
+        record: StoredEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(thread) = self.threads.get_mut(session_id) else {
+            return;
+        };
+        if !thread
+            .history
+            .as_mut()
+            .is_some_and(|held| held.restore_withheld(row, record))
+        {
+            return;
+        }
+        let mut timeline = thread.fold_held_records();
+        thread.settle_running_turn(&mut timeline);
+        thread.adopt_fold(timeline);
+        cx.notify();
+    }
+
     pub(crate) fn history_available_for(&self, session_id: Option<&str>) -> bool {
         self.thread(session_id)
             .and_then(|thread| thread.history.as_ref())
