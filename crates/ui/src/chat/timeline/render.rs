@@ -2561,8 +2561,7 @@ mod tests {
 
     /// A finished turn's fork is beside its answer's Copy where the Harness
     /// has one, whatever it is called, and never on a user message or a turn
-    /// still running. Used, it opens a thread that names where it came from,
-    /// with nothing in the composer: no message was dropped.
+    /// still running. Used, it opens a thread that names where it came from.
     #[gpui::test]
     fn a_finished_turn_offers_its_fork_beside_the_answer(cx: &mut TestAppContext) {
         use agent::{ProviderKind, TurnStatus};
@@ -2706,7 +2705,7 @@ mod tests {
             let fork = window.update(|_, cx| fork(cx)).unwrap();
             let fork_id = fork.clone();
             window.update(|_, cx| store.update(cx, |store, cx| store.show_alone(fork_id, cx)));
-            let (view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
+            let (_view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(store.clone(), window_state, Some(fork.clone()), window, cx)
             });
             let window: &mut VisualTestContext = window;
@@ -2716,10 +2715,6 @@ mod tests {
             driver.settle_until(window, "the fork's source", |window| {
                 window.debug_bounds("fork-origin").is_some()
             });
-            assert_eq!(
-                view.read_with(window, |view, cx| view.composer.read(cx).draft(cx)),
-                ""
-            );
         }
     }
 

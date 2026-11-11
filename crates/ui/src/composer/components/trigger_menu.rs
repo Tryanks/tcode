@@ -601,9 +601,7 @@ mod tests {
             window.focus(&composer.input.read(cx).focus_handle(cx), cx);
         });
         for (trigger, first_row) in [("/", "/model"), ("@", "file.rs")] {
-            composer.update_in(cx, |composer, window, cx| {
-                composer.set_draft("", window, cx)
-            });
+            cx.simulate_keystrokes("secondary-a backspace");
             cx.simulate_input(trigger);
             cx.update(|window, cx| _ = window.draw(cx));
             assert!(cx.debug_bounds("menu-row-0").is_some(), "{trigger}");
@@ -628,9 +626,7 @@ mod tests {
             ("$HOME", false),
             ("/Users/me/notes.md", false),
         ] {
-            composer.update_in(cx, |composer, window, cx| {
-                composer.set_draft("", window, cx)
-            });
+            cx.simulate_keystrokes("secondary-a backspace");
             cx.simulate_input(text);
             cx.update(|window, cx| _ = window.draw(cx));
             composer.read_with(cx, |composer, cx| {

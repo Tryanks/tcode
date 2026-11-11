@@ -7265,7 +7265,6 @@ pub(crate) mod tests {
                 .current_pane
                 .clone()
         });
-        let composer = pane.read_with(cx, |pane, cx| pane.chat().read(cx).composer());
         let link_a = a.read_with(cx, |store, _| store.connection_state());
         sent(&hosts[&key_a].host);
         let unchanged = |cx: &mut VisualTestContext| {
@@ -7278,10 +7277,6 @@ pub(crate) mod tests {
             assert_eq!(
                 pane.read_with(cx, |pane, _| pane.session_id().map(str::to_owned)),
                 Some("thread-1".into())
-            );
-            assert_eq!(
-                composer.read_with(cx, |composer, cx| composer.draft(cx)),
-                "half a thought"
             );
             a.read_with(cx, |store, cx| {
                 assert!(store.is_thread_open("thread-1"));
@@ -7314,6 +7309,15 @@ pub(crate) mod tests {
         assert!(cx.debug_bounds("host-pair-again-host-b").is_none());
         assert!(b.read_with(cx, |store, _| store.connection_state().is_connected()));
         unchanged(cx);
+        let card = cx.debug_bounds("composer-card").expect("A's composer");
+        cx.simulate_click(card.center(), gpui::Modifiers::default());
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+        assert_eq!(
+            turns_sent(&hosts[&key_a].host),
+            [("thread-1".to_owned(), "half a thought".to_owned())],
+            "the half-written message is still A's"
+        );
     }
 
     /// Leaving the app parks every host's link, and coming back reconnects
@@ -7636,23 +7640,45 @@ pub(crate) mod tests {
         })
     }
 
-    /// Give the keyboard to `pane`'s composer.
+    /// Give the keyboard to `pane`'s composer with a tap on it. Each pane of
+    /// a row has its composer at the same height, the one card the frame
+    /// names.
     fn type_into(pane: &Entity<ThreadPanel>, cx: &mut VisualTestContext) {
-        let composer = pane.read_with(cx, |pane, cx| pane.chat().read(cx).composer());
-        let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
-        cx.update(|window, cx| focus.focus(window, cx));
+        let bounds = pane.read_with(cx, |pane, _| pane.bounds());
+        let card = cx.debug_bounds("composer-card").expect("a composer");
+        cx.simulate_click(
+            gpui::point(bounds.center().x, card.center().y),
+            gpui::Modifiers::default(),
+        );
         draw(cx);
     }
 
     /// The turns `host` was asked to send, by thread.
-    fn turns_sent(host: &WorkspaceHost) -> Vec<(String, String)> {
-        sent(&host.host)
+    fn turns_sent(host: &MountedShell) -> Vec<(String, String)> {
+        sent(host)
             .into_iter()
             .filter_map(|payload| match payload {
                 ClientPayload::Command(Command::SendTurn {
                     session_id, text, ..
                 }) => Some((session_id, text)),
                 _ => None,
+            })
+            .collect()
+    }
+
+    /// The threads a line typed now and sent with Enter goes to through
+    /// `host`: none when no composer holds the keyboard.
+    fn typed_reaches(host: &MountedShell, cx: &mut VisualTestContext) -> Vec<String> {
+        const TYPED: &str = "typed line";
+        let _ = sent(host);
+        cx.simulate_input(TYPED);
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+        turns_sent(host)
+            .into_iter()
+            .map(|(thread, text)| {
+                assert_eq!(text, TYPED, "the line alone is sent");
+                thread
             })
             .collect()
     }
@@ -7710,11 +7736,11 @@ pub(crate) mod tests {
             draw(cx);
         }
         assert_eq!(
-            turns_sent(&hosts[&key_a]),
+            turns_sent(&hosts[&key_a].host),
             [("thread-1".to_owned(), "to a".to_owned())]
         );
         assert_eq!(
-            turns_sent(&hosts[&key_b]),
+            turns_sent(&hosts[&key_b].host),
             [("thread-1".to_owned(), "to b".to_owned())]
         );
     }
@@ -7833,7 +7859,6 @@ pub(crate) mod tests {
         type_into(&pane_a, cx);
         cx.simulate_input("half a thought");
         draw(cx);
-        let composer = chat_a.read_with(cx, |chat, _| chat.composer());
         let _ = sent(&hosts[&key_a].host);
         let a_unchanged = |cx: &mut VisualTestContext| {
             assert_eq!(
@@ -7844,10 +7869,6 @@ pub(crate) mod tests {
                 pane_a.read_with(cx, |pane, _| pane.chat()),
                 chat_a,
                 "the same conversation, scrolled where it was"
-            );
-            assert_eq!(
-                composer.read_with(cx, |composer, cx| composer.draft(cx)),
-                "half a thought"
             );
             assert!(a.read_with(cx, |store, cx| store.is_thread_open("thread-1")
                 && !store.chat_loading_for(Some("thread-1"), cx)));
@@ -7882,6 +7903,14 @@ pub(crate) mod tests {
             "B's pane has gone"
         );
         assert_eq!(store_of(&shell, cx), a);
+        type_into(&pane_a, cx);
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+        assert_eq!(
+            turns_sent(&hosts[&key_a].host),
+            [("thread-1".to_owned(), "half a thought".to_owned())],
+            "the half-written message is still A's"
+        );
     }
 
     /// Both hosts of [`a_thread_of_a_beside_b`] keep its two threads in a
@@ -9051,17 +9080,6 @@ pub(crate) mod tests {
         restore_index(&shell, &host, true, cx);
         restore_status(&shell, &host, cx);
         draw(cx);
-        cx.update(|window, cx| {
-            let composer = shell
-                .read(cx)
-                .column
-                .as_ref()
-                .unwrap()
-                .chat(cx)
-                .read(cx)
-                .composer();
-            assert!(!composer.read(cx).input_focus_handle(cx).is_focused(window));
-        });
         let subscriptions = sent(&host).into_iter().filter(|payload| matches!(payload,
             ClientPayload::Subscribe(subscription) if subscription.topic == Topic::SessionEvents { session_id: "thread-a".into() }
         )).count();
@@ -9109,23 +9127,16 @@ pub(crate) mod tests {
                 Some(&Destination::Thread)
             )
         });
-        let focus = shell.read_with(cx, |shell, cx| {
-            shell
-                .column
-                .as_ref()
-                .unwrap()
-                .chat(cx)
-                .read(cx)
-                .composer()
-                .read(cx)
-                .input_focus_handle(cx)
-        });
-        cx.update(|window, _| {
-            assert!(
-                !focus.is_focused(window),
-                "a cold restore must not open the keyboard after hydration"
-            )
-        });
+        assert_eq!(
+            typed_reaches(&host, cx),
+            Vec::<String>::new(),
+            "a cold restore must not open the keyboard after hydration"
+        );
+        let card = cx
+            .debug_bounds("composer-card")
+            .expect("the thread's composer");
+        cx.simulate_click(card.center(), gpui::Modifiers::default());
+        assert_eq!(typed_reaches(&host, cx), ["thread-a"], "a tap opens it");
     }
 
     #[gpui::test]
@@ -9435,62 +9446,67 @@ pub(crate) mod tests {
         cx: &mut TestAppContext,
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount(cx);
+        let (shell, host, cx) = mount_panes(cx);
         as_mobile(cx);
         resize(cx, 393.);
         let store = store_of(&shell, cx);
-        let composer = shell.read_with(cx, |shell, cx| {
-            shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
-        });
-        let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
+        let tap_composer = |cx: &mut VisualTestContext| {
+            crate::test_frames::draw_settled(cx);
+            let card = cx
+                .debug_bounds("composer-card")
+                .expect("the thread's composer");
+            cx.simulate_click(card.center(), gpui::Modifiers::default());
+            draw(cx);
+        };
+        // The host answers the thread shown, so its composer is drawn.
+        let show = |id: &str, cx: &mut VisualTestContext| {
+            store.update(cx, |store, cx| store.show_thread(id.into(), cx));
+            serve_thread(&host, id);
+            await_restore_update(&shell, cx, |store, cx| {
+                !store.chat_loading_for(Some(id), cx)
+            });
+            draw(cx);
+        };
+        let unraised = Vec::<String>::new();
         for width in [1024., 393.] {
             resize(cx, width);
             for id in ["thread-1", "thread-2"] {
-                cx.update(|window, cx| {
-                    if id == "thread-2" {
-                        focus.focus(window, cx);
-                    }
-                    store.update(cx, |store, cx| store.show_thread(id.into(), cx));
-                });
-                draw(cx);
-                cx.update(|window, _| assert!(!focus.is_focused(window)));
+                if id == "thread-2" {
+                    tap_composer(cx);
+                }
+                show(id, cx);
+                assert_eq!(typed_reaches(&host, cx), unraised, "showing {id}");
             }
             if shell.read_with(cx, |shell, cx| shell.compact(cx)) {
+                tap_composer(cx);
                 cx.update(|window, cx| {
-                    focus.focus(window, cx);
                     shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
                 });
             }
             draw(cx);
-            cx.update(|window, cx| {
-                assert!(!focus.is_focused(window));
-                store.update(cx, |store, cx| store.show_thread("thread-2".into(), cx));
-            });
-            draw(cx);
-            cx.update(|window, _| assert!(!focus.is_focused(window)));
+            show("thread-2", cx);
+            assert_eq!(typed_reaches(&host, cx), unraised, "back and in again");
             for destination in [
                 Destination::Panel,
                 Destination::Hosts,
                 Destination::Settings,
             ] {
-                cx.update(|window, cx| {
-                    focus.focus(window, cx);
-                    shell.update(cx, |shell, cx| shell.go(destination, cx));
-                });
+                tap_composer(cx);
+                shell.update(cx, |shell, cx| shell.go(destination, cx));
                 draw(cx);
-                cx.update(|window, cx| {
-                    assert!(!focus.is_focused(window));
-                    store.update(cx, |store, cx| store.show_thread("thread-2".into(), cx));
-                });
-                draw(cx);
-                cx.update(|window, _| assert!(!focus.is_focused(window)));
+                show("thread-2", cx);
+                assert_eq!(
+                    typed_reaches(&host, cx),
+                    unraised,
+                    "{destination:?} and back"
+                );
             }
         }
-        cx.update(|window, cx| focus.focus(window, cx));
+        tap_composer(cx);
         for width in [1024., 393.] {
             resize(cx, width);
             draw(cx);
-            cx.update(|window, _| assert!(focus.is_focused(window)));
+            assert_eq!(typed_reaches(&host, cx), ["thread-2"], "at {width}");
         }
     }
 
@@ -9549,20 +9565,11 @@ pub(crate) mod tests {
         });
         // The page is tapped once it has slid in.
         crate::test_frames::draw_settled(cx);
-        let composer = shell.read_with(cx, |shell, cx| {
-            shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
-        });
-        let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         let card = cx.debug_bounds("composer-card").unwrap();
         cx.simulate_click(card.center(), gpui::Modifiers::default());
         cx.simulate_keystrokes("draft");
         cx.simulate_keystrokes("left");
         draw(cx);
-        cx.update(|window, _| assert!(focus.is_focused(window)));
-        assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.draft(cx)),
-            "draft"
-        );
 
         // The other thread's provider reports a retry, a warning and an
         // error.
@@ -9586,40 +9593,29 @@ pub(crate) mod tests {
         driver.settle_until(cx, "the error's notice", |cx| {
             cx.debug_bounds("compact-toast").is_some()
         });
-        cx.update(|window, _| {
-            assert!(
-                focus.is_focused(window),
-                "background provider events stole composer focus"
-            );
-        });
-        assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.draft(cx)),
-            "draft"
-        );
         let toast = cx
             .debug_bounds("compact-toast")
             .expect("the notice remains visible");
         cx.simulate_click(toast.center(), gpui::Modifiers::default());
         draw(cx);
-        cx.update(|window, _| {
-            assert!(
-                !focus.is_focused(window),
-                "tapping the error opens its details"
-            )
-        });
+        // Tapping the error opens its details, which take what is typed.
+        cx.simulate_keystrokes("y");
         cx.update(|window, cx| window.close_dialog(cx));
         draw(cx);
-        cx.update(|window, _| {
-            assert!(
-                focus.is_focused(window),
-                "closing details returns to editing"
-            )
-        });
+        // Closing them returns to editing, the caret where it was.
         cx.simulate_keystrokes("x");
-        assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.draft(cx)),
-            "drafxt"
-        );
+        draw(cx);
+        let send = cx.debug_bounds("send-message").expect("the send button");
+        cx.simulate_click(send.center(), gpui::Modifiers::default());
+        loop {
+            if let agent::SessionCommand::SendTurn { text, .. } = driver.recv(cx, &provider.0) {
+                assert_eq!(
+                    text, "drafxt",
+                    "the draft outlived the other thread's notices"
+                );
+                break;
+            }
+        }
         driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -9667,11 +9663,10 @@ pub(crate) mod tests {
             !store.chat_loading_for(Some("thread-a"), cx)
         });
         crate::test_frames::draw_settled(cx);
-        let composer = shell.read_with(cx, |shell, cx| {
-            shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
-        });
-        let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
-        cx.update(|window, cx| focus.focus(window, cx));
+        let card = cx
+            .debug_bounds("composer-card")
+            .expect("composer on the thread page");
+        cx.simulate_click(card.center(), gpui::Modifiers::default());
         draw(cx);
         crate::test_frames::occlude(
             cx,
@@ -9683,17 +9678,8 @@ pub(crate) mod tests {
         draw(cx);
         crate::test_frames::occlude(cx, gpui::Edges::default());
         draw(cx);
-        cx.update(|window, _| {
-            assert!(
-                focus.is_focused(window),
-                "hardware input hides the software keyboard without ending editing"
-            )
-        });
+        // Hardware input hides the software keyboard without ending editing.
         cx.simulate_input("keyboard draft");
-        assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.draft(cx)),
-            "keyboard draft"
-        );
         let card = cx
             .debug_bounds("composer-card")
             .expect("composer on the thread page");
@@ -9702,24 +9688,18 @@ pub(crate) mod tests {
             gpui::Modifiers::default(),
         );
         draw(cx);
-        cx.update(|window, _| {
-            assert!(
-                !focus.is_focused(window),
-                "tap blank timeline dismisses editing"
-            )
-        });
+        // A tap on the blank timeline dismisses editing.
+        cx.simulate_input(" and more");
+        let _ = sent(&host);
         cx.simulate_click(card.center(), gpui::Modifiers::default());
         draw(cx);
-        cx.update(|window, _| assert!(focus.is_focused(window), "tap composer resumes editing"));
-    }
-
-    fn composer_of(
-        shell: &Entity<AppShell>,
-        cx: &VisualTestContext,
-    ) -> Entity<crate::composer::Composer> {
-        shell.read_with(cx, |shell, cx| {
-            shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
-        })
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+        assert_eq!(
+            turns_sent(&host),
+            [("thread-a".to_owned(), "keyboard draft".to_owned())],
+            "a tap on the composer resumes editing"
+        );
     }
 
     /// Select `session` with the host describing it: a native subagent's
@@ -9819,17 +9799,23 @@ pub(crate) mod tests {
             mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1200., "plan");
         restore_index(&shell, &host, true, cx);
         restore_status(&shell, &host, cx);
-        let composer = composer_of(&shell, cx);
         let show = |cx: &mut VisualTestContext| {
             shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
             crate::test_frames::draw_settled(cx);
         };
+        // A software keyboard waits for an explicit tap on the composer.
+        let tap_field = |cx: &mut VisualTestContext| {
+            let card = cx.debug_bounds("composer-card").expect("parent composer");
+            cx.simulate_click(
+                gpui::point(card.center().x, card.top() + px(24.)),
+                gpui::Modifiers::default(),
+            );
+            draw(cx);
+        };
         deliver_thread(&shell, &host, "thread-a", false, cx);
-        cx.update(|window, cx| {
-            composer.update(cx, |composer, cx| {
-                composer.set_draft("parent draft", window, cx);
-            })
-        });
+        crate::test_frames::draw_settled(cx);
+        tap_field(cx);
+        cx.simulate_input("parent draft");
         draw(cx);
         for width in [1200., 393.] {
             deliver_thread(&shell, &host, "thread-a", false, cx);
@@ -9885,22 +9871,13 @@ pub(crate) mod tests {
         }
         deliver_thread(&shell, &host, "thread-a", false, cx);
         resize(cx, 1200.);
-        assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.draft(cx)),
-            "parent draft"
-        );
-        // A software keyboard waits for an explicit tap on the composer.
-        let card = cx.debug_bounds("composer-card").expect("parent composer");
-        cx.simulate_click(
-            gpui::point(card.center().x, card.top() + px(24.)),
-            gpui::Modifiers::default(),
-        );
-        draw(cx);
-        cx.simulate_keystrokes("end x");
+        tap_field(cx);
+        cx.simulate_keystrokes("end x enter");
         draw(cx);
         assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.draft(cx)),
-            "parent draftx"
+            turns_sent(&host),
+            [("thread-a".to_owned(), "parent draftx".to_owned())],
+            "the lead's draft is intact"
         );
     }
 
@@ -9916,26 +9893,23 @@ pub(crate) mod tests {
             mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1200., "plan");
         restore_index(&shell, &host, true, cx);
         restore_status(&shell, &host, cx);
-        let composer = composer_of(&shell, cx);
         deliver_thread(&shell, &host, "thread-a", false, cx);
         crate::test_frames::draw_settled(cx);
-        let field = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         let card = cx.debug_bounds("composer-card").expect("the lead's card");
         cx.simulate_click(
             gpui::point(card.center().x, card.top() + px(16.)),
             gpui::Modifiers::default(),
         );
         draw(cx);
-        cx.update(|window, _| assert!(field.is_focused(window), "the lead's field types"));
+        assert_eq!(
+            typed_reaches(&host, cx),
+            ["thread-a"],
+            "the lead's field types"
+        );
 
         deliver_thread(&shell, &host, "child", true, cx);
         crate::test_frames::draw_settled(cx);
         sent(&host);
-        cx.update(|window, cx| {
-            let composer = composer.read(cx);
-            assert!(!composer.input_focus_handle(cx).is_focused(window));
-            assert!(composer.has_keyboard(window, cx));
-        });
         assert_eq!(
             keyboard_pane(&shell, cx),
             Some(0),
@@ -9952,12 +9926,10 @@ pub(crate) mod tests {
 
         deliver_thread(&shell, &host, "thread-a", false, cx);
         crate::test_frames::draw_settled(cx);
-        cx.update(|window, _| assert!(field.is_focused(window), "the field has it back"));
-        cx.simulate_keystrokes("z");
-        draw(cx);
         assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.draft(cx)),
-            "z"
+            typed_reaches(&host, cx),
+            ["thread-a"],
+            "the field has it back, with nothing typed on the subagent's thread"
         );
     }
 
@@ -10117,10 +10089,6 @@ pub(crate) mod tests {
             !store.chat_loading_for(Some(session), cx)
         });
         resize(cx, 1200.);
-        let composer = shell.read_with(cx, |shell, cx| {
-            shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
-        });
-        let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         let text = cx
             .debug_bounds("markdown-block-0")
             .expect("the answer's paragraph");
@@ -10138,20 +10106,26 @@ pub(crate) mod tests {
                 draw(cx);
                 cx.simulate_keystrokes("secondary-c");
                 draw(cx);
-                let copied = cx.read_from_clipboard().and_then(|item| item.text());
-                cx.update(|window, _| assert!(!focus.is_focused(window), "{copied:?}"));
-                copied
+                cx.read_from_clipboard().and_then(|item| item.text())
             };
 
         assert_eq!(
             select(at(1.), at(600.), cx).as_deref(),
             Some("Selectable answer alpha beta gamma")
         );
+        assert_eq!(typed_reaches(&host, cx), Vec::<String>::new(), "selecting");
 
         cx.simulate_mouse_down(at(30.), MouseButton::Left, none);
         cx.simulate_mouse_up(at(30.), MouseButton::Left, none);
         draw(cx);
-        cx.update(|window, _| assert!(!focus.is_focused(window)));
+        assert_eq!(typed_reaches(&host, cx), Vec::<String>::new(), "a press");
+        let card = cx.debug_bounds("composer-card").expect("the composer");
+        cx.simulate_click(card.center(), none);
+        assert_eq!(
+            typed_reaches(&host, cx),
+            [session],
+            "a press on the composer"
+        );
     }
 
     /// Text being selected holds still under the pointer while a reply
@@ -10329,12 +10303,8 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_click_in_the_thread_pane_focuses_the_composer_only_on_desktop(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount_panes(cx);
+        let (_shell, host, cx) = mount_panes(cx);
         resize(cx, 1200.);
-        let composer = shell.read_with(cx, |shell, cx| {
-            shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
-        });
-        let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         let timeline = gpui::point(px(700.), px(300.));
         for mobile in [false, true] {
             cx.update(|window, cx| {
@@ -10347,9 +10317,8 @@ pub(crate) mod tests {
             cx.simulate_mouse_down(timeline, MouseButton::Left, gpui::Modifiers::default());
             cx.simulate_mouse_up(timeline, MouseButton::Left, gpui::Modifiers::default());
             draw(cx);
-            cx.update(|window, _| {
-                assert_eq!(focus.is_focused(window), !mobile, "mobile: {mobile}");
-            });
+            let reached: &[&str] = if mobile { &[] } else { &["thread-1"] };
+            assert_eq!(typed_reaches(&host, cx), reached, "mobile: {mobile}");
         }
     }
 
@@ -10806,32 +10775,15 @@ pub(crate) mod tests {
         });
         crate::test_frames::draw_settled(cx);
         let store = store_of(&shell, cx);
-        let lead_typing = |cx: &mut VisualTestContext| {
-            cx.update(|window, cx| {
-                shell
-                    .read(cx)
-                    .column
-                    .as_ref()
-                    .expect("attached")
-                    .all_panes(cx)[0]
-                    .read(cx)
-                    .chat()
-                    .read(cx)
-                    .composer()
-                    .read(cx)
-                    .has_keyboard(window, cx)
-            })
-        };
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
         assert!(cx.debug_bounds("chat-side-header").is_some());
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
-        assert!(!lead_typing(cx), "the keyboard is with the agent");
         store.read_with(cx, |store, _| {
             assert!(store.is_thread_open("thread-1"));
             assert!(store.is_thread_open("mirror"));
         });
-        // The agent's composer is its settings row, which has no field: a
-        // key types nowhere.
+        // The keyboard is with the agent, whose composer is its settings
+        // row, which has no field: a key types nowhere.
         assert!(cx.debug_bounds("composer-subagent").is_some());
         sent(&host);
         cx.simulate_keystrokes("x enter");
@@ -10845,8 +10797,9 @@ pub(crate) mod tests {
         cx.simulate_keystrokes("escape");
         crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("chat-side-header").is_none());
-        assert!(
-            lead_typing(cx),
+        assert_eq!(
+            typed_reaches(&host, cx),
+            ["thread-1"],
             "the keyboard is back in the lead's composer"
         );
         store.read_with(cx, |store, _| assert!(!store.is_thread_open("mirror")));
@@ -10866,7 +10819,11 @@ pub(crate) mod tests {
                 cx.debug_bounds("chat-side-header").is_some(),
                 "press {press}"
             );
-            assert!(!lead_typing(cx), "press {press}");
+            assert_eq!(
+                typed_reaches(&host, cx),
+                Vec::<String>::new(),
+                "press {press}"
+            );
             store.read_with(cx, |store, _| assert!(store.is_thread_open("mirror")));
         }
     }
@@ -11200,16 +11157,7 @@ pub(crate) mod tests {
             crate::test_frames::draw_settled(cx);
             assert_eq!(keyboard_pane(&shell, cx), Some(1), "{command}");
         }
-        let composer = shell.read_with(cx, |shell, cx| {
-            shell.column.as_ref().expect("attached").all_panes(cx)[1]
-                .read(cx)
-                .chat()
-                .read(cx)
-                .composer()
-                .read(cx)
-                .input_focus_handle(cx)
-        });
-        cx.update(|window, _| assert!(composer.is_focused(window), "the caret is back"));
+        assert_eq!(typed_reaches(&host, cx), ["thread-2"], "the caret is back");
 
         choose_from_palette(&shell, &PaneLayout::Single.label(), cx);
         crate::test_frames::draw_settled(cx);
@@ -11241,20 +11189,13 @@ pub(crate) mod tests {
         let zoom = cx.debug_bounds("menu-item-3").expect("the zoom row");
         cx.simulate_click(zoom.center(), gpui::Modifiers::default());
         draw(cx);
-        let (zoomed, composer) = shell.read_with(cx, |shell, cx| {
-            let attachment = shell.column.as_ref().expect("attached");
-            let composer = attachment.all_panes(cx)[pane]
-                .read(cx)
-                .chat()
-                .read(cx)
-                .composer()
-                .read(cx)
-                .input_focus_handle(cx);
-            (attachment.zoom.is_zoomed(), composer)
+        let zoomed = shell.read_with(cx, |shell, _| {
+            shell.column.as_ref().expect("attached").zoom.is_zoomed()
         });
         assert!(zoomed, "the row ran");
         assert_eq!(keyboard_pane(&shell, cx), Some(pane));
-        cx.update(|window, _| assert!(composer.is_focused(window), "the caret is back"));
+        let thread = pane_threads(&shell, cx)[pane].clone().expect("a thread");
+        assert_eq!(typed_reaches(&host, cx), [thread], "the caret is back");
     }
 
     /// A thread's agents spread beside it newest first, stacked on the
@@ -11574,19 +11515,7 @@ pub(crate) mod tests {
             store.timeline_settled_for("thread-1")
         });
         crate::test_frames::draw_settled(cx);
-        cx.simulate_input("typed as it caught up");
-        draw(cx);
-        let drafts: Vec<_> = shell.read_with(cx, |shell, cx| {
-            shell
-                .column
-                .as_ref()
-                .expect("attached")
-                .all_panes(cx)
-                .iter()
-                .map(|pane| pane.read(cx).chat().read(cx).composer().read(cx).draft(cx))
-                .collect()
-        });
-        assert_eq!(drafts, ["", "typed as it caught up"]);
+        assert_eq!(typed_reaches(&host, cx), ["thread-1"]);
     }
 
     /// A click in a pane whose thread is still loading gives it the keyboard,
@@ -11635,19 +11564,7 @@ pub(crate) mod tests {
             !store.chat_loading_for(Some("thread-2"), cx)
         });
         crate::test_frames::draw_settled(cx);
-        cx.simulate_input("typed as it loaded");
-        draw(cx);
-        let drafts: Vec<_> = shell.read_with(cx, |shell, cx| {
-            shell
-                .column
-                .as_ref()
-                .expect("attached")
-                .all_panes(cx)
-                .iter()
-                .map(|pane| pane.read(cx).chat().read(cx).composer().read(cx).draft(cx))
-                .collect()
-        });
-        assert_eq!(drafts, ["", "typed as it loaded"]);
+        assert_eq!(typed_reaches(&host, cx), ["thread-2"]);
     }
 
     /// [`mount_panes`]' `thread-1` on the left and `thread-2`, answered by
@@ -12161,16 +12078,16 @@ pub(crate) mod tests {
             [Some("thread-2".into()), Some("thread-1".into())]
         );
         assert_eq!(keyboard_pane(&shell, cx), Some(1), "the keyboard stays");
-        let composer = shell.read_with(cx, |shell, cx| {
-            shell.column.as_ref().expect("attached").all_panes(cx)[0]
-                .read(cx)
-                .chat()
-                .read(cx)
-                .composer()
+        assert_eq!(typed_reaches(&host, cx), ["thread-1"], "on thread-1");
+        let left = shell.read_with(cx, |shell, cx| {
+            shell.column.as_ref().expect("attached").all_panes(cx)[0].clone()
         });
+        type_into(&left, cx);
+        cx.simulate_keystrokes("enter");
+        draw(cx);
         assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.draft(cx)),
-            "half a thought"
+            turns_sent(&host),
+            [("thread-2".to_owned(), "half a thought".to_owned())]
         );
         store_of(&shell, cx).read_with(cx, |store, _| {
             assert!(store.is_thread_open("thread-1"));
@@ -12564,29 +12481,6 @@ pub(crate) mod tests {
         })
     }
 
-    /// Whether the keyboard is in the composer of pane `pane`, in the
-    /// layout's order.
-    fn composer_has_keyboard(
-        shell: &Entity<AppShell>,
-        pane: usize,
-        cx: &mut VisualTestContext,
-    ) -> bool {
-        cx.update(|window, cx| {
-            shell
-                .read(cx)
-                .column
-                .as_ref()
-                .expect("attached")
-                .all_panes(cx)[pane]
-                .read(cx)
-                .chat()
-                .read(cx)
-                .composer()
-                .read(cx)
-                .has_keyboard(window, cx)
-        })
-    }
-
     /// One conversation on screen is simply current: its row stays lit
     /// wherever the keyboard goes, an agent beside it lights the same row,
     /// and a route without the conversation lights none.
@@ -12624,10 +12518,6 @@ pub(crate) mod tests {
             store.toggle_terminal_panel_for("thread-1".to_owned(), cx)
         });
         crate::test_frames::draw_settled(cx);
-        assert!(
-            !composer_has_keyboard(&shell, 0, cx),
-            "the terminal took the keyboard"
-        );
         assert_eq!(settled(cx), lit, "its terminal");
         store.update(cx, |store, cx| {
             store.toggle_terminal_panel_for("thread-1".to_owned(), cx)
@@ -12739,7 +12629,7 @@ pub(crate) mod tests {
         assert_eq!(selected(cx), [false, true]);
         cx.simulate_click(panes[0].center(), gpui::Modifiers::default());
         assert_eq!(selected(cx), [true, false]);
-        assert!(composer_has_keyboard(&shell, 0, cx));
+        assert_eq!(typed_reaches(&host, cx), ["thread-1"]);
 
         // A press on the right timeline's text: where a selection starts.
         let text = cx.debug_bounds("markdown-block-0").expect("the answer");
@@ -12747,8 +12637,7 @@ pub(crate) mod tests {
         cx.simulate_mouse_down(answer, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_up(answer, MouseButton::Left, gpui::Modifiers::default());
         assert_eq!(selected(cx), [false, true]);
-        assert!(!composer_has_keyboard(&shell, 0, cx));
-        assert!(!composer_has_keyboard(&shell, 1, cx));
+        assert_eq!(typed_reaches(&host, cx), Vec::<String>::new());
         cx.update(|window, cx| window.blur(cx));
         assert_eq!(selected(cx), [false, true]);
 
@@ -12799,14 +12688,14 @@ pub(crate) mod tests {
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("thread-2".into())]
         );
-        assert!(composer_has_keyboard(&shell, 0, cx));
+        assert_eq!(typed_reaches(&host, cx), ["thread-1"]);
 
         // The right pane pressed where the keyboard stays out of it.
         let toggle = cx
             .debug_bounds("toggle-sidebar")
             .expect("the right header's");
         press_only(toggle.center(), cx);
-        assert!(composer_has_keyboard(&shell, 0, cx));
+        assert_eq!(typed_reaches(&host, cx), ["thread-1"]);
 
         click("sidebar-thread-thread-3", cx);
         serve_thread(&host, "thread-3");
@@ -12830,14 +12719,13 @@ pub(crate) mod tests {
             mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1024., "plan");
         assert!(!cx.update(|window, _| window.is_window_active()));
         assert!(cx.debug_bounds("baseline-loading").is_some());
-        assert!(!composer_has_keyboard(&shell, 0, cx));
 
         restore_index(&shell, &host, true, cx);
         restore_status(&shell, &host, cx);
         restore_settings_and_events(&shell, &host, cx);
         draw(cx);
         assert!(!cx.update(|window, _| window.is_window_active()));
-        assert!(composer_has_keyboard(&shell, 0, cx));
+        assert_eq!(typed_reaches(&host, cx), ["thread-a"]);
     }
 
     /// Choosing a thread still loading gives its composer the keyboard the
@@ -12855,7 +12743,6 @@ pub(crate) mod tests {
         cx.simulate_click(row.center(), gpui::Modifiers::default());
         draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
-        assert!(!composer_has_keyboard(&shell, 0, cx), "not drawn yet");
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
 
         serve_thread(&host, "thread-2");
@@ -12863,7 +12750,7 @@ pub(crate) mod tests {
             !store.chat_loading_for(Some("thread-2"), cx)
         });
         draw(cx);
-        assert!(composer_has_keyboard(&shell, 0, cx));
+        assert_eq!(typed_reaches(&host, cx), ["thread-2"]);
     }
 
     /// A thread the workspace goes to by itself finds the keyboard in a lone
@@ -12881,7 +12768,7 @@ pub(crate) mod tests {
             !store.chat_loading_for(Some("thread-2"), cx)
         });
         draw(cx);
-        assert!(composer_has_keyboard(&shell, 0, cx), "nothing held it");
+        assert_eq!(typed_reaches(&host, cx), ["thread-2"], "nothing held it");
 
         // The palette's input holds it.
         let state = shell.read_with(cx, |shell, _| shell.window_state());
@@ -12920,24 +12807,22 @@ pub(crate) mod tests {
     #[gpui::test]
     fn closing_the_palette_or_a_dialog_returns_the_keyboard(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount_panes(cx);
+        let (shell, host, cx) = mount_panes(cx);
         let state = shell.read_with(cx, |shell, _| shell.window_state());
         state.update(cx, |state, cx| state.open_palette(cx));
         crate::test_frames::draw_settled(cx);
-        assert!(!composer_has_keyboard(&shell, 0, cx));
         state.update(cx, |state, cx| state.close_palette(cx));
         draw(cx);
-        assert!(composer_has_keyboard(&shell, 0, cx), "the palette left");
+        assert_eq!(typed_reaches(&host, cx), ["thread-1"], "the palette left");
 
         cx.update(|window, cx| {
             window.blur(cx);
             window.open_dialog(cx, |dialog, _, _| dialog);
         });
         draw(cx);
-        assert!(!composer_has_keyboard(&shell, 0, cx));
         cx.update(|window, cx| window.close_dialog(cx));
         draw(cx);
-        assert!(composer_has_keyboard(&shell, 0, cx), "the dialog closed");
+        assert_eq!(typed_reaches(&host, cx), ["thread-1"], "the dialog closed");
     }
 
     /// Among several panes each pane's header ends with its close button,
@@ -13049,7 +12934,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn choosing_an_agent_shown_beside_its_lead_selects_its_card(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount_lead_with_agent(cx);
+        let (shell, host, cx) = mount_lead_with_agent(cx);
         cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
         let chat = shell.read_with(cx, |shell, cx| shell.column.as_ref().unwrap().chat(cx));
@@ -13071,9 +12956,11 @@ pub(crate) mod tests {
         draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
-        cx.update(|window, cx| {
-            assert!(!chat.read(cx).composer().read(cx).has_keyboard(window, cx))
-        });
+        assert_eq!(
+            typed_reaches(&host, cx),
+            Vec::<String>::new(),
+            "the lead's composer let it go"
+        );
     }
 
     /// Choosing a project in the chooser closes it and shows the draft the
@@ -13249,18 +13136,12 @@ pub(crate) mod tests {
                 }
             });
 
-            let focus = shell.read_with(cx, |shell, cx| {
-                shell
-                    .column
-                    .as_ref()
-                    .unwrap()
-                    .chat(cx)
-                    .read(cx)
-                    .composer()
-                    .read(cx)
-                    .input_focus_handle(cx)
-            });
-            cx.update(|window, _| assert_eq!(focus.is_focused(window), !mobile));
+            let typed_into: &[&str] = if mobile { &[] } else { &["draft"] };
+            assert_eq!(
+                typed_reaches(&host, cx),
+                typed_into,
+                "the draft raises the keyboard only off a phone"
+            );
             if mobile {
                 let card = cx.debug_bounds("composer-card").expect("draft composer");
                 cx.simulate_click(
@@ -13268,7 +13149,11 @@ pub(crate) mod tests {
                     gpui::Modifiers::default(),
                 );
                 draw(cx);
-                cx.update(|window, _| assert!(focus.is_focused(window), "an explicit tap focuses"));
+                assert_eq!(
+                    typed_reaches(&host, cx),
+                    ["draft"],
+                    "an explicit tap focuses"
+                );
                 let rotation = if compact {
                     [1024., 393.]
                 } else {
@@ -13277,9 +13162,11 @@ pub(crate) mod tests {
                 for width in rotation {
                     cx.simulate_resize(size(px(width), px(852.)));
                     crate::test_frames::draw_settled(cx);
-                    cx.update(|window, _| {
-                        assert!(focus.is_focused(window), "rotation keeps editing focus")
-                    });
+                    assert_eq!(
+                        typed_reaches(&host, cx),
+                        ["draft"],
+                        "rotation keeps editing focus"
+                    );
                 }
             }
         }
@@ -14331,12 +14218,11 @@ pub(crate) mod tests {
         shell.read_with(cx, |shell, cx| shell.store(cx).expect("attached"))
     }
 
-    /// The model picker raises the keyboard only where it cannot cover the
-    /// list: a desktop window (even a narrow one) focuses the search as it
-    /// opens; a phone leaves it unfocused, with the picker still owning focus
-    /// so Escape closes it.
+    /// A desktop window, even a narrow one, gives the model picker's search
+    /// the keyboard as it opens; on a phone too the picker owns focus, so
+    /// Escape closes it.
     #[gpui::test]
-    fn model_picker_focuses_its_search_only_off_phone(cx: &mut TestAppContext) {
+    fn the_model_pickers_search_has_the_keyboard_on_a_desktop(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::test_client::init);
         let root = crate::store::tests::scratch_root("model-picker-focus");
@@ -14349,14 +14235,21 @@ pub(crate) mod tests {
         );
         meta.id = "first".into();
         meta.project_id = Some(project.id.clone());
+        disk.upsert_project(&project).unwrap();
+        disk.upsert_meta(&meta).unwrap();
+        disk.save_models(
+            agent::ProviderKind::Codex,
+            &[agent::ModelSpec {
+                id: "listed-model".into(),
+                display_name: "Listed model".into(),
+                is_default: true,
+                options: Vec::new(),
+            }],
+        )
+        .unwrap();
         let host =
             tcode_runtime::pipe::spawn_host(disk, tcode_runtime::pipe::HostServices::default())
                 .unwrap();
-        smol::block_on(host.update_state_for_test(move |state, _| {
-            state.projects = vec![project];
-            state.sessions = vec![meta].into();
-        }))
-        .unwrap();
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let (shell, _transport, cx) = mount(cx);
         cx.update(|window, cx| set_back_target(window.window_handle(), &shell, cx));
@@ -14378,10 +14271,6 @@ pub(crate) mod tests {
                     && !store.chat_loading_for(Some("first"), cx)
             })
         });
-        let search = shell.read_with(cx, |shell, cx| {
-            let chat = shell.column.as_ref().unwrap().chat(cx).read(cx);
-            chat.composer().read(cx).model_search_focus_handle(cx)
-        });
 
         for (mobile, width) in [(false, 1200.), (false, 393.), (true, 393.)] {
             if mobile {
@@ -14401,13 +14290,20 @@ pub(crate) mod tests {
                 compact,
                 "mobile={mobile} width={width}: a compact window opens a sheet"
             );
-            cx.update(|window, _| {
-                assert_eq!(
-                    search.is_focused(window),
-                    !mobile,
-                    "mobile={mobile} width={width}: the search raises the keyboard only off-phone"
+            if !mobile {
+                // The search has the keyboard: what is typed filters the list.
+                assert!(
+                    cx.debug_bounds("model-fav-0").is_some(),
+                    "the picker lists the model"
                 );
-            });
+                cx.simulate_input("zzz");
+                crate::test_frames::draw_settled(cx);
+                assert!(
+                    cx.debug_bounds("model-fav-0").is_none(),
+                    "width={width}: off a phone the search raises the keyboard"
+                );
+                cx.simulate_keystrokes("backspace backspace backspace");
+            }
             cx.simulate_keystrokes("escape");
             draw(cx);
             draw(cx);
@@ -14415,7 +14311,6 @@ pub(crate) mod tests {
                 cx.debug_bounds("touch-picker-sheet").is_none(),
                 "mobile={mobile} width={width}: Escape reaches the picker through its focus"
             );
-            cx.update(|window, _| assert!(!search.is_focused(window)));
         }
         driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
@@ -14429,28 +14324,21 @@ pub(crate) mod tests {
         let root = crate::store::tests::scratch_root("thread-shortcuts");
         let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
         let project = tcode_core::project::Project::from_root(root.join("project"));
-        let sessions: Vec<_> = [("third", 10), ("first", 30), ("second", 20)]
-            .into_iter()
-            .map(|(id, updated_at)| {
-                let mut meta = tcode_core::project::SessionMeta::new(
-                    agent::ProviderKind::Codex,
-                    project.root.clone(),
-                    None,
-                );
-                meta.id = id.into();
-                meta.project_id = Some(project.id.clone());
-                meta.updated_at = updated_at;
-                meta
-            })
-            .collect();
+        disk.upsert_project(&project).unwrap();
+        for (id, updated_at) in [("third", 10), ("first", 30), ("second", 20)] {
+            let mut meta = tcode_core::project::SessionMeta::new(
+                agent::ProviderKind::Codex,
+                project.root.clone(),
+                None,
+            );
+            meta.id = id.into();
+            meta.project_id = Some(project.id.clone());
+            meta.updated_at = updated_at;
+            disk.upsert_meta(&meta).unwrap();
+        }
         let host =
             tcode_runtime::pipe::spawn_host(disk, tcode_runtime::pipe::HostServices::default())
                 .unwrap();
-        smol::block_on(host.update_state_for_test(move |state, _| {
-            state.projects = vec![project];
-            state.sessions = sessions.into();
-        }))
-        .unwrap();
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let (shell, _transport, cx) = mount(cx);
         cx.update(|_, cx| crate::shortcut::init(cx));
@@ -14567,23 +14455,14 @@ pub(crate) mod tests {
         } else {
             "ctrl-z"
         };
-        let composer = shell.read_with(cx, |shell, cx| {
-            shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
-        });
-        let input = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
-        cx.update(|window, cx| input.focus(window, cx));
+        // Typing in the composer, the undo key is the field's.
+        let card = cx.debug_bounds("composer-card").expect("the composer");
+        cx.simulate_click(card.center(), gpui::Modifiers::default());
         draw(cx);
         cx.simulate_keystrokes("x");
         draw(cx);
-        assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.draft(cx)),
-            "x"
-        );
         cx.simulate_keystrokes(undo_key);
-        assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.draft(cx)),
-            ""
-        );
+        draw(cx);
         assert!(store.read_with(cx, |store, _| {
             store
                 .sidebar_sessions()
@@ -14673,20 +14552,16 @@ pub(crate) mod tests {
             assert_eq!(attachment.split.read(cx).sizes()[0], px(300.));
             assert_eq!(attachment.sidebar_width.get(), px(300.));
         });
-        let composer = shell.read_with(cx, |shell, cx| {
-            shell
-                .column
-                .as_ref()
-                .expect("attached")
-                .chat(cx)
-                .read(cx)
-                .composer()
-        });
-        cx.update(|window, cx| {
-            composer.update(cx, |composer, cx| {
-                composer.set_draft("half a thought", window, cx)
-            });
-        });
+        let tap_composer = |cx: &mut VisualTestContext| {
+            let card = cx.debug_bounds("composer-card").expect("the composer");
+            cx.simulate_click(
+                gpui::point(card.center().x, card.top() + px(24.)),
+                gpui::Modifiers::default(),
+            );
+            draw(cx);
+        };
+        tap_composer(cx);
+        cx.simulate_input("half a thought");
         draw(cx);
         let _ = sent(&host);
 
@@ -14707,9 +14582,6 @@ pub(crate) mod tests {
                 .map(|thread| thread.session_id)),
             Some("thread-1".into())
         );
-        composer.read_with(cx, |composer, cx| {
-            assert_eq!(composer.draft(cx), "half a thought");
-        });
         assert!(
             cx.debug_bounds("composer-settings-drawer").is_some(),
             "the composer followed the layout: a compact one carries the settings drawer"
@@ -14730,6 +14602,14 @@ pub(crate) mod tests {
                 "resizing must not detach or reconnect: {payload:?}"
             );
         }
+        tap_composer(cx);
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+        assert_eq!(
+            turns_sent(&host),
+            [("thread-1".to_owned(), "half a thought".to_owned())],
+            "the draft survives"
+        );
 
         resize(cx, 1024.);
         draw(cx);
@@ -15636,45 +15516,45 @@ pub(crate) mod tests {
     #[gpui::test]
     fn the_right_panel_gives_the_keyboard_back(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount_panes(cx);
+        let (shell, host, cx) = mount_panes(cx);
         cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
         resize(cx, 1600.);
-        let input = shell.read_with(cx, |shell, cx| {
-            shell
-                .column
-                .as_ref()
-                .unwrap()
-                .chat(cx)
-                .read(cx)
-                .composer()
-                .read(cx)
-                .input_focus_handle(cx)
-        });
+        let press_composer = |cx: &mut VisualTestContext| {
+            let composer = cx.debug_bounds("chat-composer").unwrap();
+            cx.simulate_click(
+                gpui::point(composer.left() + px(40.), composer.top() + px(24.)),
+                gpui::Modifiers::default(),
+            );
+            draw(cx);
+        };
         let open = |cx: &mut VisualTestContext| {
-            cx.update(|window, cx| input.focus(window, cx));
+            press_composer(cx);
             store.update(cx, |store, cx| {
                 store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
             });
             crate::test_frames::draw_settled(cx);
-            cx.update(|window, _| assert!(input.is_focused(window), "the keyboard stays"));
+            assert_eq!(typed_reaches(&host, cx), ["thread-1"], "the keyboard stays");
         };
         let press_panel = |cx: &mut VisualTestContext| {
             let panel = cx.debug_bounds("right-panel").unwrap();
             cx.simulate_click(panel.center(), gpui::Modifiers::default());
             draw(cx);
-            cx.update(|window, _| assert!(!input.is_focused(window), "the press takes it"));
+            assert_eq!(
+                typed_reaches(&host, cx),
+                Vec::<String>::new(),
+                "the press takes it"
+            );
         };
 
         open(cx);
         press_panel(cx);
-        let composer = cx.debug_bounds("chat-composer").unwrap();
-        cx.simulate_click(
-            gpui::point(composer.left() + px(40.), composer.top() + px(24.)),
-            gpui::Modifiers::default(),
+        press_composer(cx);
+        assert_eq!(
+            typed_reaches(&host, cx),
+            ["thread-1"],
+            "the press reaches the chat"
         );
-        draw(cx);
-        cx.update(|window, _| assert!(input.is_focused(window), "the press reaches the chat"));
         assert!(store.read_with(cx, |store, _| {
             store.panel_state_for(Some("thread-1")).right_panel_open
         }));
@@ -15688,7 +15568,11 @@ pub(crate) mod tests {
         let close = cx.debug_bounds("diff-close").unwrap();
         cx.simulate_click(close.center(), gpui::Modifiers::default());
         draw(cx);
-        cx.update(|window, _| assert!(input.is_focused(window), "closing returns to the composer"));
+        assert_eq!(
+            typed_reaches(&host, cx),
+            ["thread-1"],
+            "closing returns to the composer"
+        );
     }
 
     #[gpui::test]

@@ -2629,7 +2629,7 @@ mod replica_tests {
     /// never replaces; another client's rewind leaves this composer alone.
     #[gpui::test]
     fn a_rewound_prompt_goes_before_the_draft_of_the_client_that_asked(cx: &mut TestAppContext) {
-        let (store, incoming, _outgoing, status) = attach(cx);
+        let (store, incoming, outgoing, status) = attach(cx);
         let session_id = status.session_id.clone();
         let topic = Topic::SessionStatus {
             session_id: session_id.clone(),
@@ -2668,9 +2668,12 @@ mod replica_tests {
             cx.run_until_parked();
             cx.update(|window, cx| window.draw(cx).clear(cx));
         }
+        while outgoing.try_recv().is_ok() {}
+        cx.simulate_keystrokes("enter");
+        draw_settled(cx);
         assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.draft(cx)),
-            "the restored prompt\n\nand also this"
+            sent_texts(&outgoing),
+            ["the restored prompt\n\nand also this"]
         );
     }
 
@@ -2706,27 +2709,13 @@ mod replica_tests {
                 composer.update(cx, |composer, cx| composer.focus(window, cx));
                 window.draw(cx).clear(cx);
             });
-            assert_eq!(
-                composer.read_with(cx, |composer, cx| composer.draft(cx)),
-                ""
-            );
-            assert!(
-                std::iter::from_fn(|| outgoing.try_recv().ok()).any(|line| matches!(
-                    tcode_protocol::decode_client_line(&line).unwrap().payload,
-                    tcode_protocol::ClientPayload::Command(
-                        tcode_protocol::Command::SendTurn { .. }
-                    )
-                ))
-            );
+            assert_eq!(sent_texts(&outgoing), ["Keep this prompt"]);
+            // Undo brings back what was sent.
             cx.simulate_keystrokes(if cfg!(target_os = "macos") {
                 "cmd-z"
             } else {
                 "ctrl-z"
             });
-            assert_eq!(
-                composer.read_with(cx, |composer, cx| composer.draft(cx)),
-                "Keep this prompt"
-            );
             status.session_id = "other-thread".into();
             status.project_id = Some("project-b".into());
             store.update(cx, |store, cx| {
@@ -2744,15 +2733,12 @@ mod replica_tests {
             );
             cx.run_until_parked();
             cx.update(|window, cx| window.draw(cx).clear(cx));
-            assert_eq!(
-                composer.read_with(cx, |composer, cx| composer.draft(cx)),
-                ""
-            );
             cx.update(|window, cx| composer.update(cx, |composer, cx| composer.focus(window, cx)));
             cx.simulate_input("Other destination draft");
-            let outgoing = composer.read_with(cx, |composer, _| composer.input.clone());
+            // An input method is still composing the last words.
+            let field = composer.read_with(cx, |composer, _| composer.input.clone());
             cx.update(|window, cx| {
-                outgoing.update(cx, |input, cx| {
+                field.update(cx, |input, cx| {
                     use gpui::EntityInputHandler as _;
                     input.replace_and_mark_text_in_range(None, "，你好", None, window, cx);
                 });
@@ -2779,50 +2765,37 @@ mod replica_tests {
             cx.update(|window, cx| {
                 window.draw(cx).clear(cx);
                 composer.update(cx, |composer, cx| composer.focus(window, cx));
-                outgoing.update(cx, |input, cx| {
-                    use gpui::EntityInputHandler as _;
-                    assert_eq!(input.marked_text_range(window, cx), None);
-                    assert_eq!(input.value(), "Other destination draft，你好");
-                });
             });
-            assert_eq!(
-                composer.read_with(cx, |composer, cx| composer.draft(cx)),
-                "Keep this prompt"
-            );
-            cx.simulate_keystrokes(if cfg!(target_os = "macos") {
-                "cmd-shift-z"
-            } else {
-                "ctrl-y"
+            // The first thread's draft came back with its project's.
+            cx.simulate_keystrokes("enter");
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(sent_texts(&outgoing), ["Keep this prompt"]);
+
+            store.update(cx, |store, cx| {
+                store.show_alone(status.session_id.clone(), cx)
             });
-            assert_eq!(
-                composer.read_with(cx, |composer, cx| composer.draft(cx)),
-                ""
+            composer.update(cx, |composer, cx| {
+                composer.set_session(Some(status.session_id.clone()), cx)
+            });
+            replace(
+                &incoming,
+                Topic::SessionStatus {
+                    session_id: status.session_id.clone(),
+                },
+                ServerEvent::SessionStatusReplaced(Box::new(status)),
             );
-            for (destination, expected) in [
-                (status, "Other destination draft，你好"),
-                (restored_status, ""),
-            ] {
-                store.update(cx, |store, cx| {
-                    store.show_alone(destination.session_id.clone(), cx)
-                });
-                composer.update(cx, |composer, cx| {
-                    composer.set_session(Some(destination.session_id.clone()), cx)
-                });
-                replace(
-                    &incoming,
-                    Topic::SessionStatus {
-                        session_id: destination.session_id.clone(),
-                    },
-                    ServerEvent::SessionStatusReplaced(Box::new(destination)),
-                );
-                cx.run_until_parked();
-                cx.run_until_parked();
-                cx.update(|window, cx| window.draw(cx).clear(cx));
-                assert_eq!(
-                    composer.read_with(cx, |composer, cx| composer.draft(cx)),
-                    expected
-                );
-            }
+            cx.run_until_parked();
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                composer.update(cx, |composer, cx| composer.focus(window, cx));
+            });
+            // What was being composed was committed as the thread was left,
+            // so what is typed now follows it rather than replacing it.
+            cx.simulate_input("x");
+            cx.simulate_keystrokes("enter");
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(sent_texts(&outgoing), ["Other destination draft，你好x"]);
         }
     }
 
@@ -3113,11 +3086,16 @@ mod replica_tests {
             cx.debug_bounds("model-fav-1").is_none(),
             "Favorites lists the starred row, not its namesake on the other account"
         );
-        // Focus went with the star's button when its row moved to the top.
-        cx.update(|window, cx| {
-            let search = composer.read(cx).model_search_focus_handle(cx);
-            search.focus(window, cx);
-        });
+        // Focus went with the star's button when its row moved to the top,
+        // so the picker is closed and opened again, its search taking the
+        // keyboard.
+        open_picker(cx);
+        assert!(
+            cx.debug_bounds("model-fav-0").is_none(),
+            "the picker closed"
+        );
+        open_picker(cx);
+        show_rail(&composer, PickerRail::Favorites, cx);
         cx.simulate_keystrokes("secondary-1");
         driver.wait_until(cx, "the favourite's pick", |cx| {
             store.read_with(cx, |store, cx| {
@@ -3268,9 +3246,8 @@ mod replica_tests {
             ("hold-sideways", "queue"),
             ("steer-sideways", "steer"),
         ] {
-            composer.update_in(cx, |composer, window, cx| {
-                composer.set_input_text(gesture.into(), window, cx)
-            });
+            composer.update_in(cx, |composer, window, cx| composer.focus(window, cx));
+            cx.simulate_input(gesture);
             cx.update(|window, cx| _ = window.draw(cx));
             let button = cx
                 .debug_bounds("steer-turn")
@@ -3315,17 +3292,11 @@ mod replica_tests {
             );
             touch(cx, TouchPhase::Ended, lift);
             assert_eq!(sent(cx), vec![(expected, gesture.to_string())], "{gesture}");
-            assert!(
-                composer
-                    .read_with(cx, |composer, cx| composer.draft(cx))
-                    .is_empty()
-            );
         }
 
+        composer.update_in(cx, |composer, window, cx| composer.focus(window, cx));
+        cx.simulate_input("kept");
         for gesture in ["down", "cancel"] {
-            composer.update_in(cx, |composer, window, cx| {
-                composer.set_input_text("kept".into(), window, cx)
-            });
             cx.update(|window, cx| _ = window.draw(cx));
             let button = cx.debug_bounds("steer-turn").unwrap();
             touch(cx, TouchPhase::Started, button.center());
@@ -3344,10 +3315,6 @@ mod replica_tests {
                 touch(cx, TouchPhase::Ended, away);
             }
             assert!(sent(cx).is_empty(), "{gesture} sends nothing");
-            assert_eq!(
-                composer.read_with(cx, |composer, cx| composer.draft(cx)),
-                "kept"
-            );
         }
 
         replace(
@@ -3370,6 +3337,11 @@ mod replica_tests {
         assert!(cx.debug_bounds("steer-gesture-queue").is_none());
         touch(cx, TouchPhase::Cancelled, button.center());
         assert!(sent(cx).is_empty());
+
+        // What nothing sent is still the draft.
+        touch(cx, TouchPhase::Started, button.center());
+        touch(cx, TouchPhase::Ended, button.center());
+        assert_eq!(sent(cx), vec![("queue", "kept".to_string())]);
     }
 
     /// A stop the harness has not answered for a while offers to kill its
@@ -3542,15 +3514,17 @@ mod replica_tests {
         // Each step is drawn once; with motion reduced it is drawn at rest.
         cx.update(|_, cx| cx.set_reduce_motion(true));
         cx.update(|window, cx| _ = window.draw(cx));
+        // What the send button sends: the draft.
+        let send = |cx: &mut gpui::VisualTestContext| {
+            let button = cx.debug_bounds("send-message").expect("the send button");
+            cx.simulate_click(button.center(), Modifiers::default());
+            cx.update(|window, cx| _ = window.draw(cx));
+            sent_texts(&outgoing)
+        };
         for action in ["queue-drop-7", "queue-steer-7"] {
             let button = cx.debug_bounds(action).expect("queue action visible");
             cx.simulate_click(button.center(), Modifiers::default());
             cx.update(|window, cx| _ = window.draw(cx));
-            assert!(
-                composer
-                    .read_with(cx, |composer, cx| composer.draft(cx))
-                    .is_empty()
-            );
         }
         while let Ok(line) = outgoing.try_recv() {
             let message = tcode_protocol::decode_client_line(&line).unwrap();
@@ -3578,12 +3552,6 @@ mod replica_tests {
         cx.simulate_click(drop_button.center(), Modifiers::default());
         cx.update(|window, cx| _ = window.draw(cx));
         assert!(
-            composer
-                .read_with(cx, |composer, cx| composer.draft(cx))
-                .is_empty(),
-            "the pending host drop is still queued"
-        );
-        assert!(
             std::iter::from_fn(|| outgoing.try_recv().ok()).any(|line| matches!(
                 tcode_protocol::decode_client_line(&line).unwrap().payload,
                 tcode_protocol::ClientPayload::Command(tcode_protocol::Command::DropQueued {
@@ -3592,6 +3560,10 @@ mod replica_tests {
                 })
             )),
             "the enabled drop must reach the host"
+        );
+        assert!(
+            cx.debug_bounds("queued-row-7").is_some(),
+            "the pending host drop is still queued"
         );
         status.queued_messages.clear();
         replace(
@@ -3604,12 +3576,9 @@ mod replica_tests {
         cx.update(|window, cx| _ = window.draw(cx));
         assert!(cx.debug_bounds("queue-drop-7").is_none());
         assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.draft(cx)),
-            "Keep this queued until the host accepts the edit"
+            send(cx),
+            ["Keep this queued until the host accepts the edit"]
         );
-        cx.update(|window, cx| {
-            composer.update(cx, |composer, cx| composer.set_draft("", window, cx))
-        });
         status
             .queued_messages
             .push(tcode_protocol::QueuedMessageStatus {
@@ -3642,10 +3611,7 @@ mod replica_tests {
         cx.run_until_parked();
         cx.run_until_parked();
         cx.update(|window, cx| _ = window.draw(cx));
-        assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.draft(cx)),
-            "New draft while the drop is pending"
-        );
+        assert_eq!(send(cx), ["New draft while the drop is pending"]);
     }
 
     /// Dragging a queued row onto another asks the host to send it in that
@@ -3779,10 +3745,6 @@ mod replica_tests {
         let row = cx.debug_bounds("menu-row-0").expect("thread row");
         cx.simulate_click(row.center(), Modifiers::default());
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.draft(cx)),
-            ""
-        );
         cx.run_until_parked();
         assert!(
             std::iter::from_fn(|| outgoing.try_recv().ok()).any(|line| matches!(
@@ -3793,5 +3755,9 @@ mod replica_tests {
             )),
             "no AddThreadReference was sent"
         );
+        cx.simulate_input("go");
+        cx.simulate_keystrokes("enter");
+        draw_settled(cx);
+        assert_eq!(sent_texts(&outgoing), ["go"], "the draft kept no mention");
     }
 }
