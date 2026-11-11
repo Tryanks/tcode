@@ -1084,10 +1084,13 @@ impl AppState {
                     Ok(_) => answer.error = Some("not a git repository".into()),
                     Err(error) => answer.error = Some(error),
                 },
-                GitWhat::Branches => {
-                    answer.branches = Some(tcode_services::git::list_git_branches(&cwd));
-                    answer.current_branch = tcode_services::git::read_git_branch(&cwd);
-                }
+                GitWhat::Branches => match tcode_services::git::list_git_branches(&cwd) {
+                    Ok(branches) => {
+                        answer.branches = Some(branches);
+                        answer.current_branch = tcode_services::git::read_git_branch(&cwd);
+                    }
+                    Err(error) => answer.error = Some(error),
+                },
                 GitWhat::Diff => {
                     let diff = tcode_services::git::load_git_diff(
                         &cwd,

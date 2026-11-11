@@ -258,17 +258,28 @@ impl AppState {
     }
 
     /// Load the local branches for the active session's cwd in the background
-    /// (called when the checkout-row popover opens).
-    pub fn load_branches(&mut self, target_id: &str, cx: &mut HostCx) {
+    /// (called when the checkout-row popover opens). The task returned ends
+    /// with git's error when it could not list them.
+    pub fn load_branches(
+        &mut self,
+        target_id: &str,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<(), tcode_protocol::ProtocolError>> {
         let Some(active) = self.resident(target_id) else {
-            return;
+            return cx.spawn_background(async { Ok(()) });
         };
         let cwd = active.meta.cwd.clone();
         let session_id = active.meta.id.clone();
         let target_id = target_id.to_string();
         let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
-            let branches = host_cx.unblock(move || list_git_branches(&cwd)).await;
+        cx.spawn_background(async move {
+            let branches = host_cx
+                .unblock(move || list_git_branches(&cwd))
+                .await
+                .map_err(|message| tcode_protocol::ProtocolError {
+                    code: "git_failed".into(),
+                    message,
+                })?;
             host_cx.enqueue(move |state, _cx| {
                 if let Some(active) = state.resident_mut(&target_id)
                     && active.meta.id == session_id
@@ -276,7 +287,8 @@ impl AppState {
                     active.branches = branches;
                 }
             });
-        });
+            Ok(())
+        })
     }
 
     /// Check out `branch` in the active session's cwd, if the working tree is

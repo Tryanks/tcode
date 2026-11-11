@@ -1227,7 +1227,12 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             app.set_active_option(&session_id, &id, value, cx);
             app.release_policy_holds(&session_id, cx);
         }
-        Command::LoadBranches { session_id } => app.load_branches(&session_id, cx),
+        Command::LoadBranches { session_id } => {
+            let loaded = app.load_branches(&session_id, cx);
+            return CommandOutcome::Pending(
+                cx.spawn_background(async move { loaded.await.map(|()| CommandResponse::Unit) }),
+            );
+        }
         Command::CheckoutBranch { session_id, branch } => {
             app.checkout_branch(&session_id, branch, cx);
         }
