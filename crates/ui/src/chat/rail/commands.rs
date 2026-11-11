@@ -509,7 +509,8 @@ enum Glyph {
 
 /// A spinner while the command runs, a breathing dot while it runs in the
 /// background, as its call's window has, then a check, or a cross when it
-/// failed; one cross-fades into the next.
+/// failed, or a question mark when background work ended without saying
+/// how; one cross-fades into the next.
 fn mark(
     key: &SharedString,
     mark: Mark,
@@ -548,7 +549,8 @@ fn mark(
                 Mark::Failed(_) => (IconName::CircleX, theme.danger),
                 Mark::Interrupted => (IconName::CircleAlert, theme.warning),
                 Mark::Declined => (IconName::Ban, theme.muted_foreground),
-                Mark::Background => (IconName::CircleCheck, theme.muted_foreground),
+                // Ended with no outcome reported: how it went is unknown.
+                Mark::Background => (IconName::CircleQuestionMark, theme.muted_foreground),
             };
             crate::motion::status_icon(
                 SharedString::from(format!("{id}-icon")),
