@@ -2874,7 +2874,7 @@ impl Mapper {
             log::debug!("claude: ignoring malformed model_refusal_fallback");
             return Vec::new();
         };
-        self.observe_served_model(&json!({ "model": actual }))
+        self.observe_served_model(&json!({ "model": actual }), msg.get("original_model"))
     }
 
     fn accept_pending_steers(&mut self) -> Vec<AgentEvent> {
@@ -3314,7 +3314,7 @@ impl Mapper {
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 let message = &event["message"];
-                let mut events = self.observe_served_model(message);
+                let mut events = self.observe_served_model(message, None);
                 events.extend(self.observe_request_usage(
                     message.get("id").and_then(Value::as_str),
                     message.get("usage"),
@@ -3455,7 +3455,10 @@ impl Mapper {
         }
     }
 
-    fn observe_served_model(&mut self, message: &Value) -> Vec<AgentEvent> {
+    /// `message`'s model, when it is not the one Claude Code last reported;
+    /// `from` is the model Claude Code says it switched away from, where it
+    /// says one.
+    fn observe_served_model(&mut self, message: &Value, from: Option<&Value>) -> Vec<AgentEvent> {
         let Some(model) = message
             .get("model")
             .and_then(Value::as_str)
@@ -3466,9 +3469,10 @@ impl Mapper {
         if self.last_served_model.as_deref() == Some(model) {
             return Vec::new();
         }
-        self.last_served_model = Some(model.to_owned());
+        let last = self.last_served_model.replace(model.to_owned());
         vec![AgentEvent::ServedModel {
             model: model.to_owned(),
+            from: from.and_then(Value::as_str).map(str::to_owned).or(last),
             reason: None,
         }]
     }
@@ -3500,7 +3504,7 @@ impl Mapper {
         // Split assistant blocks retain the message_start model even after a
         // fallback boundary; observing an unchanged header would undo the switch.
         if model_changed {
-            out.extend(self.observe_served_model(message));
+            out.extend(self.observe_served_model(message, None));
         }
         out.extend(self.observe_stop_reason(message.get("stop_reason").and_then(Value::as_str)));
         let Some(content) = content else { return out };
@@ -3559,7 +3563,9 @@ impl Mapper {
                 Some("tool_use") => {
                     out.extend(self.on_tool_use(block));
                 }
-                Some("fallback") => out.extend(self.observe_served_model(&block["to"])),
+                Some("fallback") => {
+                    out.extend(self.observe_served_model(&block["to"], block["from"].get("model")))
+                }
                 _ => {}
             }
         }
@@ -5867,6 +5873,7 @@ mod tests {
                         notices,
                         [AgentEvent::ServedModel {
                             model: "claude-opus-4-8".into(),
+                            from: Some("claude-fable-5".into()),
                             reason: None
                         }]
                     );
@@ -5904,6 +5911,7 @@ mod tests {
             events,
             [AgentEvent::ServedModel {
                 model: "claude-opus-4-8".into(),
+                from: Some("claude-fable-5".into()),
                 reason: None,
             }]
         );

@@ -361,6 +361,7 @@ pub use wire::{
 // {questions}, each {question, options, answers}; fetch {url, prompt};
 // web_search {query, links}, each link {title, url}; load_tools {query,
 // tools}; skill {name}.
+// The served_model event gains from, the model the harness named before it.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

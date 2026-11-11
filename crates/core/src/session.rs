@@ -1199,7 +1199,11 @@ impl Timeline {
                 }
                 self.last_served_model = self.model.clone();
             }
-            AgentEvent::ServedModel { model, reason } => {
+            AgentEvent::ServedModel {
+                model,
+                from,
+                reason,
+            } => {
                 let turn = self.ensure_turn();
                 self.turns[turn].served_model = Some(model.clone());
                 // A `[1m]` launch id and the bare id the API reports back
@@ -1210,12 +1214,14 @@ impl Timeline {
                     .map(agent::claude::strip_context_window_suffix)
                     == Some(agent::claude::strip_context_window_suffix(model));
                 if !same_model {
-                    let from = self.last_served_model.clone();
                     let id = self.synthetic_id("model", ts);
                     self.entries.push(Arc::new(TimelineEntry {
                         id,
                         content: EntryContent::ModelChanged {
-                            from,
+                            // The record's own, not the fold's: a reader
+                            // folding a window of the log that starts after
+                            // the previous model was named draws it the same.
+                            from: from.clone(),
                             to: model.clone(),
                             reason: reason.clone(),
                         },
@@ -4117,19 +4123,25 @@ mod tests {
         for (requested, transitions, served, expected) in [
             (
                 "requested",
-                vec![("served", Some("capacity")), ("served", Some("capacity"))],
+                vec![
+                    ("served", Some("requested"), Some("capacity")),
+                    ("served", Some("requested"), Some("capacity")),
+                ],
                 "served",
                 vec![(Some("requested"), "served", Some("capacity"))],
             ),
             (
                 "claude-opus-5[1m]",
-                vec![("claude-opus-5", None)],
+                vec![("claude-opus-5", None, None)],
                 "claude-opus-5",
                 vec![],
             ),
             (
                 "claude-opus-5[1m]",
-                vec![("claude-opus-5", None), ("claude-opus-5[3m]", None)],
+                vec![
+                    ("claude-opus-5", None, None),
+                    ("claude-opus-5[3m]", Some("claude-opus-5"), None),
+                ],
                 "claude-opus-5[3m]",
                 vec![(Some("claude-opus-5"), "claude-opus-5[3m]", None)],
             ),
@@ -4142,11 +4154,12 @@ mod tests {
                 },
                 user_msg("user", "hello"),
             ]);
-            for (model, reason) in transitions {
+            for (model, from, reason) in transitions {
                 timeline.apply_at(
                     None,
                     &AgentEvent::ServedModel {
                         model: model.into(),
+                        from: from.map(str::to_string),
                         reason: reason.map(str::to_string),
                     },
                 );

@@ -1867,9 +1867,10 @@ impl Mapper {
                     if let Some(model) = &model {
                         self.context_window = self.context_windows.get(model).copied();
                         if self.served_model.as_deref() != Some(model.as_str()) {
-                            self.served_model = Some(model.clone());
+                            let from = self.served_model.replace(model.clone());
                             mapped.events.push(AgentEvent::ServedModel {
                                 model: model.clone(),
+                                from,
                                 reason: None,
                             });
                         }
