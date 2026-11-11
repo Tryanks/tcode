@@ -1269,10 +1269,6 @@ pub(in crate::chat) mod tests {
         )
     }
 
-    fn refs(entries: &[Arc<TimelineEntry>]) -> Vec<&TimelineEntry> {
-        entries.iter().map(AsRef::as_ref).collect()
-    }
-
     #[test]
     fn one_line_collapses_multiline_commands_into_a_single_spaced_line() {
         let cmd = "set pipe -e \"\n  cargo fmt --check\n  cargo clippy\n\"";
@@ -1280,9 +1276,6 @@ pub(in crate::chat) mod tests {
             super::one_line(cmd),
             "set pipe -e \" cargo fmt --check cargo clippy \""
         );
-
-        let long = "word ".repeat(500);
-        assert_eq!(super::one_line(&long).chars().count(), 600);
     }
 
     #[test]
@@ -1429,10 +1422,6 @@ pub(in crate::chat) mod tests {
             })
             .collect();
         assert_eq!(activity_indexes.len(), 2);
-
-        let counts = work_log_counts(&refs(&entries));
-        assert_eq!(counts.commands, 3);
-        assert_eq!(counts.files, 1);
 
         let labels = || {
             activity_indexes

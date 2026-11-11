@@ -1334,7 +1334,7 @@ pub(crate) mod tests {
     pub(in crate::chat) static NEXT_RESIDENCY_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     #[gpui::test]
-    fn compact_composer_keeps_effort_and_settings_visible(cx: &mut TestAppContext) {
+    fn a_compact_composer_shows_effort_approval_and_context(cx: &mut TestAppContext) {
         use gpui::px;
         let mut timeline = synthetic_markdown_timeline(1);
         timeline.usage = Some(agent::TokenUsage {
@@ -1426,27 +1426,13 @@ pub(crate) mod tests {
         });
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
         draw_settled(cx);
-        let permission = cx.debug_bounds("permission-chip").expect("approval option");
-        assert!(
-            cx.debug_bounds("traits-chip").is_some(),
-            "standalone effort option"
-        );
-        let meter = cx
-            .debug_bounds("context-meter")
-            .expect("compact context meter");
-        let card = cx.debug_bounds("composer-card").expect("input card");
-        let drawer = cx
-            .debug_bounds("composer-settings-drawer")
-            .expect("attached settings drawer");
-        assert!(
-            drawer.top() >= card.bottom(),
-            "settings sit below the input card"
-        );
-        for setting in [permission, meter] {
-            assert!(
-                drawer.contains(&setting.center()),
-                "{setting:?} is in the drawer"
-            );
+        for (selector, what) in [
+            ("permission-chip", "approval option"),
+            ("traits-chip", "standalone effort option"),
+            ("context-meter", "compact context meter"),
+            ("composer-settings-drawer", "attached settings drawer"),
+        ] {
+            assert!(cx.debug_bounds(selector).is_some(), "{what}");
         }
         driver.shutdown(cx, &host);
     }

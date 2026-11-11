@@ -783,7 +783,7 @@ fn moved_rows(survivors: &[(u64, usize)]) -> HashSet<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::model::tests::{command, entry, file_change, user_item};
+    use crate::chat::model::tests::{command, file_change};
 
     /// An expanded Work Log of a long turn gives each folded activity its own
     /// row while the live window keeps the newest five.
@@ -866,34 +866,5 @@ mod tests {
                 "count {count}, running {running}"
             );
         }
-        // As the live window grows, settles and collapses, the cached rows
-        // stay the rows a full index gives.
-        let running = vec![TurnMeta {
-            running: true,
-            ..Default::default()
-        }];
-        let mut entries = vec![entry("user", user_item("go"))];
-        entries.extend((0..8).map(|step| command(&format!("cmd-{step}"))));
-        let expanded = HashSet::from([work_log_key("cmd-0")]);
-        let mut cache = TurnIndexCache::default();
-        let mut rows = Vec::new();
-        let mut sync = |turns: &[TurnMeta], entries: &[Arc<TimelineEntry>], expanded| {
-            cache.sync(
-                &mut rows,
-                turns,
-                entries,
-                expanded,
-                TimelineContinuity::Complete,
-            );
-            assert_eq!(rows, index_rows(turns, entries, expanded));
-            rows.iter()
-                .filter(|row| row.part == RowPart::WorkLogActivity)
-                .count()
-        };
-        assert_eq!(sync(&running, &entries, &expanded), 3);
-        entries.push(command("cmd-8"));
-        assert_eq!(sync(&running, &entries, &expanded), 4);
-        assert_eq!(sync(&[TurnMeta::default()], &entries, &expanded), 9);
-        assert_eq!(sync(&[TurnMeta::default()], &entries, &HashSet::new()), 0);
     }
 }

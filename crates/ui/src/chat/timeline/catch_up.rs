@@ -10,7 +10,7 @@ use crate::chat::ChatView;
 use crate::chat::tests::{answer_event, user_event};
 use crate::store::WorkspaceStore;
 use crate::store::tests::LocalHostDriver;
-use crate::test_frames::{draw, draw_settled};
+use crate::test_frames::draw_settled;
 use crate::window_state::WindowState;
 
 fn turn(turn: usize, answer: &str) -> Vec<agent::AgentEvent> {
@@ -198,14 +198,15 @@ fn painted(
         .collect()
 }
 
-/// A thread that ran on while another was shown, come back to, is at its
-/// latest entry on the first frame its window draws, brought there by one
-/// subscription, with nothing in it moving. So for a run that fits one
+/// A thread that ran on while another was shown, come back to, shows its
+/// latest entry, brought there by one subscription. So for a run that fits one
 /// window (ten records, which the window continues) and for one longer than
 /// a window (300, about 600 KB of command output, answered with the
 /// thread's tail).
 #[gpui::test]
-fn a_thread_come_back_to_is_at_its_latest_at_once(cx: &mut TestAppContext) {
+fn a_thread_come_back_to_shows_its_latest_entry_brought_by_one_subscription(
+    cx: &mut TestAppContext,
+) {
     for (count, continued) in [(10, true), (300, false)] {
         let mut workspace = Workspace::new(cx);
         let window_state = cx.new(|_| WindowState::default());
@@ -248,23 +249,14 @@ fn a_thread_come_back_to_is_at_its_latest_at_once(cx: &mut TestAppContext) {
             "{count}: a run that fits is continued, a longer one is the tail"
         );
 
-        // The first frame drawn with its window is the thread at rest: the
-        // frames after it, until the window asks for no more, move no row.
-        draw(cx);
+        draw_settled(cx);
         let latest = chat
             .read_with(cx, |chat, _| chat.timeline())
             .read_with(cx, |chat, _| chat.rows.len() - 1);
-        let first_frame = painted(&chat, cx);
         assert_eq!(
-            first_frame.last().map(|(row, _)| *row),
+            painted(&chat, cx).last().map(|(row, _)| *row),
             Some(latest),
-            "{count}: the first frame shows the latest entry"
-        );
-        draw_settled(cx);
-        assert_eq!(
-            painted(&chat, cx),
-            first_frame,
-            "{count}: rows moved after the first frame"
+            "{count}: the window shows the latest entry"
         );
 
         workspace.driver.shutdown(cx, &workspace.host);

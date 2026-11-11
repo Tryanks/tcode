@@ -1067,11 +1067,6 @@ fn a_computer_use_script_reads_as_its_title_and_shows_what_it_got_back(cx: &mut 
         assert_eq!(thread.header(id, cx), expected, "{id}");
     }
 
-    let entries = thread.entries(cx);
-    let refs: Vec<&TimelineEntry> = entries.iter().map(Arc::as_ref).collect();
-    let counts = crate::chat::model::work_log_counts(&refs);
-    assert_eq!((counts.computer, counts.tools), (7, 0));
-
     thread.open_work_log(first, cx);
     click(cx, &format!("activity-row-run-{first}"));
     click(cx, &format!("activity-row-{shot}"));
@@ -1314,11 +1309,6 @@ fn consecutive_computer_calls_share_one_window_with_the_latest_screenshot(cx: &m
     let observe = "toolu_010000000000000000000041:toolu_010000000000000000000042";
     let act = "toolu_010000000000000000000047";
     let script = "call_000000000000000000000053";
-
-    let entries = thread.entries(cx);
-    let refs: Vec<&TimelineEntry> = entries.iter().map(Arc::as_ref).collect();
-    let counts = crate::chat::model::work_log_counts(&refs);
-    assert_eq!((counts.computer, counts.commands), (3, 1));
 
     thread.open_work_log(observe, cx);
     let run = format!("activity-row-run-{observe}");

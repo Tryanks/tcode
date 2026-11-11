@@ -1,6 +1,4 @@
-//! A pane switched to another thread draws it as a new scene: what the
-//! thread before left moving, and what the thread shown now did when it was
-//! last on screen, carry nothing into the frame that first draws it.
+//! A thread's log as its host serves it, for the tests of what a pane shows.
 
 use super::*;
 
@@ -66,33 +64,4 @@ pub(super) fn completed() -> agent::AgentEvent {
         status: agent::TurnStatus::Completed,
         usage: None,
     }
-}
-
-/// Whether `quad` lies within `bounds`.
-fn within(
-    quad: &gpui::Bounds<gpui::ScaledPixels>,
-    bounds: &gpui::Bounds<gpui::ScaledPixels>,
-) -> bool {
-    quad.origin.x >= bounds.origin.x
-        && quad.origin.y >= bounds.origin.y
-        && quad.origin.x + quad.size.width <= bounds.origin.x + bounds.size.width
-        && quad.origin.y + quad.size.height <= bounds.origin.y + bounds.size.height
-}
-
-/// How far in what `selector` names is drawn: the fullest colour painted
-/// within its bounds.
-pub(super) fn fill_of(selector: &'static str, cx: &mut VisualTestContext) -> Option<f32> {
-    let bounds = cx.debug_bounds(selector)?;
-    cx.update(|window, _| {
-        let bounds = bounds.scale(window.scale_factor());
-        Some(
-            window
-                .painted_quads()
-                .iter()
-                .filter(|quad| within(&quad.bounds, &bounds))
-                .filter_map(|quad| quad.background.as_solid())
-                .map(|colour| colour.a)
-                .fold(0., f32::max),
-        )
-    })
 }

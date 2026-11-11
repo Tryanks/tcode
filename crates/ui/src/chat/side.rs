@@ -1443,13 +1443,7 @@ fn side_grip(
         .ml(px(-GRIP_WIDTH / 2.))
         .flex()
         .items_center()
-        .child(
-            div()
-                .w_full()
-                .h(px(GRIP_LENGTH))
-                .rounded_full()
-                .bg(fill.0),
-        )
+        .child(div().w_full().h(px(GRIP_LENGTH)).rounded_full().bg(fill.0))
         .into_any_element()
 }
 
