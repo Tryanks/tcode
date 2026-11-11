@@ -2360,8 +2360,10 @@ fn file_changes(tool: &ToolState) -> Vec<FileChange> {
             _ => None,
         })
         .collect();
-    if changes.is_empty() && matches!(tool.kind, acp::ToolKind::Delete | acp::ToolKind::Move) {
-        // Deletes and renames carry no diff; the locations are all we get.
+    if changes.is_empty() {
+        // Deletes and renames carry no diff, and an edit none until it is
+        // applied (Cursor's arrives with its completion): the locations are
+        // the files it changes.
         changes = tool
             .locations
             .iter()
@@ -2369,7 +2371,8 @@ fn file_changes(tool: &ToolState) -> Vec<FileChange> {
                 path: location.path.to_string_lossy().into_owned(),
                 kind: match tool.kind {
                     acp::ToolKind::Delete => FileChangeKind::Delete,
-                    _ => FileChangeKind::Rename,
+                    acp::ToolKind::Move => FileChangeKind::Rename,
+                    _ => FileChangeKind::Modify,
                 },
                 diff: None,
             })
@@ -3244,9 +3247,12 @@ mod tests {
                 }]
             );
         }
+        // An edit's diff arrives once it is applied; until then it is the
+        // files its locations name.
         for (kind, operation) in [
             ("delete", FileChangeKind::Delete),
             ("move", FileChangeKind::Rename),
+            ("edit", FileChangeKind::Modify),
         ] {
             let events = state().apply_update(update(json!({
                 "sessionUpdate":"tool_call", "toolCallId":"file", "title":"Change file",
