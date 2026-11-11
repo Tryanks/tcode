@@ -119,6 +119,11 @@ impl Credentials {
             .collect();
     }
 
+    /// A variable of the launch environment gh runs with.
+    pub(super) fn environment(&self, key: &str) -> Option<&str> {
+        self.environment.get(key).map(String::as_str)
+    }
+
     /// The GitHub hosts besides github.com that settings, gh's logins or `GH_HOST` name.
     pub(super) fn known(&self) -> Vec<String> {
         let mut known: Vec<String> = self.hosts.read().unwrap().keys().cloned().collect();

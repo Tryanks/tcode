@@ -519,8 +519,9 @@ pub fn read_status(cwd: &Path) -> Result<GitStatus, String> {
         default_branch.as_deref(),
         has_origin_remote,
     );
-    status.github_repository = crate::github::repository::resolve(&checkout, &[])
-        .map(|repository| format!("{}/{}", repository.owner, repository.name));
+    status.github_repository =
+        crate::github::repository::resolve(&checkout, &[], |key| std::env::var(key).ok())
+            .map(|repository| format!("{}/{}", repository.owner, repository.name));
     Ok(status)
 }
 

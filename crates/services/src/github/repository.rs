@@ -120,10 +120,15 @@ fn remotes(checkout: &crate::forge::Checkout<'_>, known: &[String]) -> Vec<(Stri
     crate::forge::checkout::remotes(checkout, |value| remote(known, value))
 }
 
-/// The repository gh would pick for the checkout, among remotes on GitHub hosts and `known`.
-pub fn resolve(checkout: &crate::forge::Checkout<'_>, known: &[String]) -> Option<Repository> {
-    let default_host = std::env::var("GH_HOST").unwrap_or_else(|_| "github.com".into());
-    if let Ok(value) = std::env::var("GH_REPO")
+/// The repository gh would pick for the checkout, among remotes on GitHub hosts and `known`,
+/// with `GH_HOST` and `GH_REPO` read from `environment`, the one gh is launched with.
+pub fn resolve(
+    checkout: &crate::forge::Checkout<'_>,
+    known: &[String],
+    environment: impl Fn(&str) -> Option<String>,
+) -> Option<Repository> {
+    let default_host = environment("GH_HOST").unwrap_or_else(|| "github.com".into());
+    if let Some(value) = environment("GH_REPO")
         && let Some(repository) = selector(&value, &default_host)
     {
         return Some(repository);
