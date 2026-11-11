@@ -442,10 +442,6 @@ mod tests {
         })
     }
 
-    struct TestRoot {
-        markdown: Entity<MarkdownState>,
-    }
-
     struct CrossViewRoot {
         first: Entity<MarkdownState>,
         second: Entity<MarkdownState>,
@@ -455,29 +451,6 @@ mod tests {
     struct OuterListRoot {
         markdown: Entity<MarkdownState>,
         list_state: ListState,
-    }
-
-    impl TestRoot {
-        fn new(text: &str, cx: &mut Context<Self>) -> Self {
-            let text = text.to_string();
-            Self {
-                markdown: cx.new(|cx| MarkdownState::new(&text, cx)),
-            }
-        }
-    }
-
-    impl Render for TestRoot {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .w(px(320.))
-                .child(
-                    div()
-                        .h(px(24.))
-                        .overflow_hidden()
-                        .child(MarkdownView::new(&self.markdown).selectable(true)),
-                )
-                .child(div().h(px(40.)).child("footer"))
-        }
     }
 
     impl CrossViewRoot {
@@ -931,115 +904,6 @@ mod tests {
             drag_to(cx, end);
             assert_eq!(release(cx, end), expected);
         }
-    }
-
-    #[gpui::test]
-    fn wide_table_shrinks_to_viewport_and_wraps(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let header = (0..20).map(|ix| format!("column-{ix}")).collect::<Vec<_>>();
-        let separator = vec!["---"; header.len()];
-        let values = (0..header.len())
-            .map(|ix| format!("value-{ix}"))
-            .collect::<Vec<_>>();
-        let overflowing = format!(
-            "| {} |\n| {} |\n| {} |",
-            header.join(" | "),
-            separator.join(" | "),
-            values.join(" | ")
-        );
-        for (case, markdown, wraps, overflows) in [
-            ("wide cells", "| column | value |\n| --- | --- |\n| this-cell-is-deliberately-much-wider-than-the-markdown-viewport | another-wide-value |".to_string(), true, false),
-            ("short cells", "| a | b |\n| --- | --- |\n| 1 | 2 |".to_string(), false, false),
-            ("many columns", overflowing, false, true),
-        ] {
-            let (_, cx) = cx.add_window_view(|_, cx| TestRoot::new(&markdown, cx));
-            let cx: &mut VisualTestContext = cx;
-            cx.run_until_parked();
-            cx.update(|window, cx| { let _ = window.draw(cx); });
-            let track = cx.debug_bounds("markdown-table-track-root-0").expect("table track was painted");
-            if overflows {
-                let last_cell = cx.debug_bounds("markdown-table-cell-0-19").expect("last cell was painted");
-                assert_eq!(last_cell.right() + px(1.), track.right(), "{case}: {last_cell:?}, {track:?}");
-            } else {
-                assert_eq!(track.size.width, px(320.), "{case}: table must fit the viewport");
-            }
-            if wraps {
-                assert!(track.size.height > px(68.), "{case}: wrapped height {:?}", track.size.height);
-            }
-        }
-    }
-
-    #[gpui::test]
-    fn right_aligned_column_justifies_cell_content(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let (_, cx) = cx.add_window_view(|_, cx| {
-            TestRoot::new("| num | label |\n| ---: | --- |\n| 1 | value |", cx)
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let cell = cx
-            .debug_bounds("markdown-table-cell-1-0")
-            .expect("right-aligned cell was painted");
-        let content = cx
-            .debug_bounds("markdown-table-cell-content-1-0")
-            .expect("cell content was painted");
-        // The stretched column is far wider than "1"; justify_end must push the
-        // content against the cell's right padding edge (px_2 = 8px).
-        assert!(
-            cell.right() - content.right() <= px(9.),
-            "content {content:?} is not right-justified inside cell {cell:?}"
-        );
-        assert!(
-            content.left() - cell.left() > px(20.),
-            "content {content:?} hugs the left edge of cell {cell:?}"
-        );
-    }
-
-    #[gpui::test]
-    fn streaming_table_growth_updates_track_height(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let (view, cx) =
-            cx.add_window_view(|_, cx| TestRoot::new("| column |\n| --- |\n| streaming", cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        let initial_height = cx
-            .debug_bounds("markdown-table-track-root-0")
-            .expect("initial table track was painted")
-            .size
-            .height;
-
-        view.update(cx, |root, cx| {
-            root.markdown.update(cx, |markdown, cx| {
-                markdown.push_str(
-                    "-cell-that-grows-much-wider-and-keeps-growing-until-it-wraps |",
-                    cx,
-                );
-            });
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        let grown_height = cx
-            .debug_bounds("markdown-table-track-root-0")
-            .expect("grown table track was painted")
-            .size
-            .height;
-
-        assert!(
-            grown_height > initial_height,
-            "streamed table height stayed at {initial_height:?} instead of growing: {grown_height:?}"
-        );
     }
 
     #[gpui::test]

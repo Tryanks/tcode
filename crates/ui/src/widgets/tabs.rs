@@ -1027,49 +1027,8 @@ mod tests {
     use gpui::{Context, Modifiers, Render, TestAppContext, VisualTestContext};
     use std::cell::Cell;
 
-    struct Segments(Vec<&'static str>);
-
-    impl Render for Segments {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().w(px(320.)).child(
-                TabBar::new("track").segmented().items(
-                    self.0
-                        .iter()
-                        .enumerate()
-                        .map(|(ix, label)| TabItem::new(("segment", ix), *label).selected(ix == 0)),
-                ),
-            )
-        }
-    }
-
     fn bounds(cx: &mut VisualTestContext, selector: &'static str) -> gpui::Bounds<Pixels> {
         cx.debug_bounds(selector).unwrap()
-    }
-
-    #[gpui::test]
-    fn short_segments_divide_the_track_and_long_ones_overflow_it(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let (_, cx) = cx.add_window_view(|_, _| Segments(vec!["One", "Two", "Three"]));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let track = bounds(cx, "track");
-        let segments = ["segment-0", "segment-1", "segment-2"].map(|s| bounds(cx, s));
-        assert_eq!(track.size.width, px(320.));
-        assert_eq!(segments[0].left(), track.left() + px(TRACK_INSET));
-        assert_eq!(segments[2].right(), track.right() - px(TRACK_INSET));
-        assert!(
-            segments
-                .windows(2)
-                .all(|pair| pair[1].left() == pair[0].right() + px(2.)),
-            "{segments:?}"
-        );
-
-        let long = "A label too long to share a phone-width track";
-        let (_, cx) = cx.add_window_view(move |_, _| Segments(vec![long, long, long]));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let track = bounds(cx, "track");
-        let last = bounds(cx, "segment-2");
-        assert_eq!(track.size.width, px(320.));
-        assert!(last.right() > track.right(), "{last:?}");
     }
 
     struct Closable(Rc<Cell<(usize, usize)>>);

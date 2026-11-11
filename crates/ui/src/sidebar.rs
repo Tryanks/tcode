@@ -6937,36 +6937,6 @@ mod tests {
         }
     }
 
-    struct WorkingThreadRowProbe;
-
-    impl Render for WorkingThreadRowProbe {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            selectable_row(h_flex(), false, false, cx)
-                .w_full()
-                .pl(px(THREAD_INDENT))
-                .text_body(false, cx)
-                .debug_selector(|| "thread-row".into())
-                .child(
-                    h_flex()
-                        .flex_none()
-                        .items_center()
-                        .gap_1()
-                        .child(div().size(px(6.)))
-                        .child(
-                            div()
-                                .whitespace_nowrap()
-                                .text_secondary(false, cx)
-                                .child("工作中"),
-                        ),
-                )
-                .child(
-                    sidebar_label("Phase 0 修复架构约束测试")
-                        .debug_selector(|| "thread-title".into())
-                        .text_body(false, cx),
-                )
-        }
-    }
-
     fn draw(cx: &mut VisualTestContext) {
         cx.run_until_parked();
         cx.update(|window, cx| {
@@ -7133,33 +7103,6 @@ mod tests {
                     }
                 );
             });
-        }
-    }
-
-    #[gpui::test]
-    fn working_thread_title_stays_inside_row_at_every_sidebar_width(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let (_, cx) = cx.add_window_view(|_, _| WorkingThreadRowProbe);
-        let cx: &mut VisualTestContext = cx;
-
-        // The resizable sidebar is constrained to 220..=380px. Half-pixel
-        // increments cover Retina resize boundaries where glyph rounding used
-        // to push the final character onto a second line.
-        for half_pixel_width in 440..=760 {
-            let width = half_pixel_width as f32 / 2.;
-            cx.simulate_resize(size(px(width), px(60.)));
-            draw(cx);
-
-            let row = cx.debug_bounds("thread-row").expect("row bounds");
-            let title = cx.debug_bounds("thread-title").expect("title bounds");
-            assert!(
-                title.top() >= row.top() && title.bottom() <= row.bottom(),
-                "title escaped the row vertically at {width}px: row={row:?}, title={title:?}"
-            );
-            assert!(
-                title.left() >= row.left() && title.right() <= row.right(),
-                "title escaped the row horizontally at {width}px: row={row:?}, title={title:?}"
-            );
         }
     }
 

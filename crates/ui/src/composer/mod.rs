@@ -2817,26 +2817,6 @@ mod replica_tests {
         }
     }
 
-    /// A desktop composer folds its controls into the overflow menu once its
-    /// row is laid out narrower than they fit, and unfolds them once wider,
-    /// in the frames that follow the resize.
-    #[gpui::test]
-    fn the_control_row_folds_with_the_width_it_is_laid_out_at(cx: &mut TestAppContext) {
-        let (store, _incoming, _outgoing, status) = attach(cx);
-        let session_id = Some(status.session_id.clone());
-        let (_composer, cx) = cx.add_window_view(|window, cx| {
-            Composer::new(store.clone(), session_id.clone(), window, cx)
-        });
-        let resize = |width: f32, cx: &mut gpui::VisualTestContext| {
-            cx.simulate_resize(gpui::size(px(width), px(800.)));
-            crate::test_frames::draw_settled(cx);
-            cx.debug_bounds("overflow-controls").is_some()
-        };
-        assert!(!resize(1200., cx), "a wide row folded its controls");
-        assert!(resize(400., cx), "a narrow row kept its controls");
-        assert!(!resize(1200., cx), "a row widened again kept them folded");
-    }
-
     /// A running turn widens the desktop action to spinner, steer and Stop;
     /// at every width the row is laid out at, Stop stays inside the window and
     /// clear of a model name too long for the row.

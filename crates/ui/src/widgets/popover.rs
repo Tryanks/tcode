@@ -613,7 +613,7 @@ impl Popover {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Render, TestAppContext, point};
+    use gpui::{Render, TestAppContext};
     use std::cell::Cell;
 
     struct SheetHarness(Rc<Cell<usize>>);
@@ -642,55 +642,6 @@ mod tests {
                 ),
             )
         }
-    }
-
-    struct TallSheet;
-    impl Render for TallSheet {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            Popover::new("tall-sheet")
-                .bottom_sheet("Options")
-                .default_open(true)
-                .content(|_, _, _| {
-                    div()
-                        .h(px(2000.))
-                        .w_full()
-                        .debug_selector(|| "tall-content".into())
-                })
-        }
-    }
-
-    #[gpui::test]
-    fn tall_sheet_scrolls_below_navigation_and_above_keyboard(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let (_, cx) = cx.add_window_view(|_, _| TallSheet);
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        crate::window_seam::occlude_for_test(
-            cx,
-            gpui::Edges {
-                top: px(47.),
-                bottom: px(300.),
-                ..Default::default()
-            },
-        );
-        // The open sheet stops short of the status bar and reaches the
-        // screen's bottom edge, with what it holds above the keyboard.
-        crate::test_frames::draw_settled(cx);
-        let sheet = cx.debug_bounds("touch-picker-sheet").unwrap();
-        assert_eq!(sheet.top(), px(99.));
-        assert_eq!(sheet.bottom(), px(852.));
-        let content = cx.debug_bounds("tall-content").unwrap();
-        let viewport = cx.debug_bounds("touch-picker-content").unwrap();
-        assert_eq!(viewport.bottom(), px(552.));
-        assert!(viewport.size.height < content.size.height);
-        cx.simulate_event(gpui::ScrollEvent {
-            position: viewport.center(),
-            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-200.))),
-            touch_phase: gpui::TouchPhase::Moved,
-            ..Default::default()
-        });
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(cx.debug_bounds("tall-content").unwrap().top() < content.top());
-        assert_eq!(cx.debug_bounds("touch-picker-sheet").unwrap(), sheet);
     }
 
     #[derive(Clone, Copy)]

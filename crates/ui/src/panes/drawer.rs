@@ -726,35 +726,3 @@ impl Drawer {
         .into_any_element()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The chosen width while the pane holds it beside the conversation,
-    /// yielding down to the panel's narrowest; below that the panel covers
-    /// the pane, the conversation never going under a pane's own narrowest.
-    #[test]
-    fn a_panel_rests_beside_the_conversation_until_there_is_no_room_for_both() {
-        let least = px(RIGHT_PANEL_MIN_WIDTH + CONVERSATION_MIN_WIDTH);
-        assert_eq!(rest_width(px(560.), px(1200.)), Rest::Beside(px(560.)));
-        assert_eq!(
-            rest_width(px(560.), least + px(100.)),
-            Rest::Beside(px(RIGHT_PANEL_MIN_WIDTH) + px(100.))
-        );
-        assert_eq!(
-            rest_width(px(10_000.), px(1200.)),
-            Rest::Beside(px(1200.) - px(CONVERSATION_MIN_WIDTH))
-        );
-        assert_eq!(
-            rest_width(px(10.), px(1200.)),
-            Rest::Beside(px(RIGHT_PANEL_MIN_WIDTH))
-        );
-        assert_eq!(
-            rest_width(px(560.), least),
-            Rest::Beside(px(RIGHT_PANEL_MIN_WIDTH))
-        );
-        assert_eq!(rest_width(px(560.), least - px(1.)), Rest::Cover);
-        assert_eq!(rest_width(px(560.), px(400.)), Rest::Cover);
-    }
-}

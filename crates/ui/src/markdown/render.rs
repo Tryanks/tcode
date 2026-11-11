@@ -1727,7 +1727,7 @@ fn render_scroll_table(
                     let cell_content = cell_content.debug_selector(move || {
                         format!("markdown-table-cell-content-{row_ix}-{ix}")
                     });
-                    let rendered_cell = div()
+                    div()
                         .id(("table-cell", ix))
                         .flex_basis(px(width))
                         .flex_grow(width)
@@ -1745,11 +1745,7 @@ fn render_scroll_table(
                         .when(ix + 1 < row.children.len(), |this| {
                             this.border_r_1().border_color(cx.theme().border)
                         })
-                        .child(cell_content);
-                    #[cfg(test)]
-                    let rendered_cell = rendered_cell
-                        .debug_selector(move || format!("markdown-table-cell-{row_ix}-{ix}"));
-                    rendered_cell
+                        .child(cell_content)
                 }))
         })
         .collect::<Vec<_>>();
@@ -1761,11 +1757,6 @@ fn render_scroll_table(
         .rounded(crate::material::radius_card(cx))
         .overflow_hidden()
         .children(rows);
-    #[cfg(test)]
-    let track = {
-        let selector = format!("markdown-table-track-{}", options.path);
-        track.debug_selector(move || selector.clone())
-    };
     div()
         .id(options.path.clone())
         .w_full()

@@ -1037,7 +1037,7 @@ mod tests {
 
 #[cfg(all(preview_backend, target_os = "android"))]
 mod android;
-#[cfg(any(test, all(preview_backend, target_os = "android")))]
+#[cfg(all(preview_backend, target_os = "android"))]
 mod android_geometry;
 
 #[cfg(all(preview_backend, target_os = "ios"))]

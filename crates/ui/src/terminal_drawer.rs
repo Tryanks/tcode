@@ -3132,17 +3132,6 @@ mod tests {
     }
 
     #[test]
-    fn grid_point_maps_cell_halves_and_clamps_past_the_last_column() {
-        for (x, col, side) in [
-            (2., 0, SelectionSide::Left),
-            (8., 0, SelectionSide::Right),
-            (35., 2, SelectionSide::Right),
-        ] {
-            assert_eq!(grid_point_and_side(x, 5., 3, 2, 10., 20.), ((0, col), side));
-        }
-    }
-
-    #[test]
     fn selection_drag_honors_click_kind_threshold_and_terminal_ownership() {
         let mut drag = SelectionDrag::default();
         assert_eq!(

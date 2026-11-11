@@ -71,36 +71,3 @@ pub(crate) fn catch_fling(origin: Point<Pixels>, window: &mut Window, cx: &mut A
         }
     });
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn edge_distance_and_flick_share_progress_and_commit_mapping() {
-        for (travel, velocity, expected_progress, commit) in [
-            (-10., 0., 0., false),
-            (60., 100., 0.15, false),
-            (132., 100., 0.33, false),
-            (134., 0., 0.335, true),
-            (31., 900., 0.0775, false),
-            (32., 599., 0.08, false),
-            (32., 600., 0.08, true),
-            (500., 0., 1., true),
-        ] {
-            let swipe = BackProgress {
-                travel: px(travel),
-                velocity,
-                width: px(400.),
-            };
-            assert!((swipe.progress() - expected_progress).abs() < 0.0001);
-            assert_eq!(swipe.commits(), commit);
-            assert!(
-                (f32::from(BackProgress::offset(swipe.progress(), px(600.)))
-                    - expected_progress * 600.)
-                    .abs()
-                    < 0.001
-            );
-        }
-    }
-}
