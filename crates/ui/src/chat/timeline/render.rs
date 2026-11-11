@@ -38,6 +38,19 @@ pub(in crate::chat) struct ActivityRow {
 }
 
 impl TimelineView {
+    /// `model` by the name the host's model list gives it for this thread's
+    /// profile, or as the harness gave it where the list does not know it.
+    fn model_name(&self, model: &str, cx: &App) -> String {
+        self.session_id
+            .as_deref()
+            .and_then(|session_id| {
+                self.workspace_store
+                    .read(cx)
+                    .thread_model_name(session_id, model)
+            })
+            .unwrap_or_else(|| model.to_owned())
+    }
+
     /// Render one timeline row: the segment it spans (a message, an error, a
     /// Work Log run or a part of an expanded one) and, on the turn's last
     /// row, the turn's trailer.
@@ -101,16 +114,7 @@ impl TimelineView {
                     let EntryContent::ModelChanged { from, to, reason } = &entry.content else {
                         unreachable!();
                     };
-                    let name = |model: &str| {
-                        self.session_id
-                            .as_deref()
-                            .and_then(|session_id| {
-                                self.workspace_store
-                                    .read(cx)
-                                    .thread_model_name(session_id, model)
-                            })
-                            .unwrap_or_else(|| model.to_owned())
-                    };
+                    let name = |model: &str| self.model_name(model, cx);
                     column = column.child(components::dividers::model_change_divider(
                         &entry.id,
                         from.as_deref().map(name).as_deref(),
@@ -549,7 +553,7 @@ impl TimelineView {
                 .chat_requested_model_for(self.session_id.as_deref(), cx);
             let served_model =
                 divergent_served_model(turn.served_model.as_deref(), requested_model.as_deref())
-                    .map(str::to_owned);
+                    .map(|served| self.model_name(served, cx));
             // After Stop the turn says it is stopping until it ends, however
             // long its harness takes to take the stop.
             let stopping = self
@@ -614,7 +618,7 @@ impl TimelineView {
                         components::indicator::finished_turn_time(
                             finished_at,
                             &turn,
-                            requested_model.as_deref(),
+                            served_model.as_deref(),
                             actions,
                             window,
                             cx,

@@ -313,11 +313,13 @@ fn turn_time_footer(
         )
 }
 
-/// [`turn_time_footer`] for `turn`, timed from `timestamp` when it has one.
+/// [`turn_time_footer`] for `turn`, timed from `timestamp` when it has one;
+/// `served_model` names the model that served it where that is not the one
+/// asked for.
 pub(crate) fn finished_turn_time(
     timestamp: Option<u64>,
     turn: &TurnMeta,
-    requested_model: Option<&str>,
+    served_model: Option<&str>,
     actions: Option<AnyElement>,
     window: &Window,
     cx: &App,
@@ -326,8 +328,7 @@ pub(crate) fn finished_turn_time(
         timestamp.map(format_local_time),
         turn.timing,
         turn.cost_usd,
-        turn.served_model.as_deref(),
-        requested_model,
+        served_model,
     );
     turn_time_footer(
         SharedString::from(format!("turn-time-{}", timestamp.unwrap_or_default())),
