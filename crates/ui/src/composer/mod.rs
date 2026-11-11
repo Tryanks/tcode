@@ -3234,7 +3234,6 @@ mod replica_tests {
         };
         let sent =
             |cx: &mut gpui::VisualTestContext| {
-                cx.executor().advance_clock(Duration::from_millis(50));
                 cx.run_until_parked();
                 let mut sent = Vec::new();
                 while let Ok(line) = outgoing.try_recv() {

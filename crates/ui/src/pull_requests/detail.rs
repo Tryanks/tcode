@@ -2534,19 +2534,6 @@ mod tests {
             .unwrap();
     }
 
-    /// Lets reads land and what they started play out, as frames do in the app.
-    fn settle(cx: &mut VisualTestContext) {
-        for _ in 0..3 {
-            cx.run_until_parked();
-            cx.update(|window, cx| _ = window.draw(cx));
-        }
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        cx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-            _ = window.draw(cx);
-        });
-    }
-
     /// Now by the test's clock, in unix seconds.
     fn now(cx: &mut VisualTestContext) -> u64 {
         cx.update(|_, cx| crate::time::now_secs(cx))
@@ -2620,7 +2607,7 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         cx.run_until_parked();
         store.update(cx, |store, cx| store.show_alone("session".into(), cx));
         view.update(cx, |view, cx| {
@@ -2629,7 +2616,7 @@ mod tests {
         });
         cx.replace_root_view(|_, _| PhonePage(view.clone()));
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         let touch = |cx: &mut VisualTestContext, phase, position| {
             cx.simulate_event(gpui::TouchEvent {
                 id: gpui::TouchId(1),
@@ -2638,7 +2625,7 @@ mod tests {
                 predicted_position: None,
                 force: None,
             });
-            settle(cx);
+            crate::test_frames::draw_settled(cx);
         };
         let more = cx.debug_bounds("phone-action-1").unwrap().center();
         touch(cx, gpui::TouchPhase::Started, more);
@@ -2691,7 +2678,7 @@ mod tests {
                 cx,
             )
         });
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         Mounted {
             view,
             requests,
@@ -2760,6 +2747,9 @@ mod tests {
             _pump,
             cx,
         } = mount(cx);
+        // A read in flight shows a spinner, which rests only with motion
+        // reduced.
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         let later = now(cx) + 3600;
         let mut reread = None;
         for (id, read) in reads(&requests) {
@@ -2774,7 +2764,7 @@ mod tests {
                 read => answer_other(&incoming, id, read, later),
             }
         }
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         for (id, read) in reads(&requests) {
             assert_eq!(read, PullRequestRead::Files { cursor: None });
             reread = Some(id);
@@ -2792,16 +2782,7 @@ mod tests {
                     .scroll_to_file(file, cx);
                 cx.notify();
             });
-            // The jump glides; the display draws every frame of it.
-            let frame = std::time::Duration::from_millis(16);
-            for _ in 0..=crate::edge_back::SETTLE.as_millis() / frame.as_millis() {
-                cx.executor().advance_clock(frame);
-                cx.update(|window, cx| {
-                    window.simulate_next_frame(cx);
-                    _ = window.draw(cx);
-                });
-            }
-            settle(cx);
+            crate::test_frames::draw_settled(cx);
         };
         scroll_to(cx, 95);
         let page_two = reads(&requests);
@@ -2823,7 +2804,7 @@ mod tests {
                 .scroll_by(px(7.));
             cx.notify();
         });
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         let before_append = view.read_with(cx, |view, _| {
             view.page()
                 .unwrap()
@@ -2840,7 +2821,7 @@ mod tests {
             PullRequestReadResponse::Files(files(100..150, None)),
             later,
         );
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         let after_append = view.read_with(cx, |view, _| {
             view.page()
                 .unwrap()
@@ -2867,7 +2848,7 @@ mod tests {
             PullRequestReadResponse::Files(files(0..100, Some("2"))),
             later,
         );
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         view.update(cx, |view, _| {
             let page = view.page().unwrap();
             let held = page.files.data.as_ref().unwrap();
@@ -2921,7 +2902,7 @@ mod tests {
             }
         }
         view.update(cx, |view, cx| view.select_tab(Tab::Conversation, cx));
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         view.update(cx, |view, cx| {
             view.page()
                 .unwrap()
@@ -2930,7 +2911,7 @@ mod tests {
                 .scroll_by(px(1500.));
             cx.notify();
         });
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         let top = |cx: &mut VisualTestContext| {
             view.read_with(cx, |view, _| {
                 view.page()
@@ -2947,7 +2928,7 @@ mod tests {
             .find(|(_, read)| *read == PullRequestRead::Conversation)
             .expect("an expired conversation is read again");
         answer(&incoming, reread.0, with_comments(41), later);
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         let after = top(cx);
         assert_eq!(
             (after.item_ix, after.offset_in_item),
@@ -3013,9 +2994,9 @@ mod tests {
                 };
                 answer(&incoming, id, response, later);
             }
-            settle(cx);
+            crate::test_frames::draw_settled(cx);
             view.update(cx, |view, cx| view.select_tab(Tab::Conversation, cx));
-            settle(cx);
+            crate::test_frames::draw_settled(cx);
             assert!(cx.debug_bounds("pr-meta-reviewers").is_some());
             assert_eq!(
                 cx.debug_bounds("pr-meta-labels").is_some(),
@@ -3086,9 +3067,9 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         cx.run_until_parked();
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         let label =
             |cx: &mut VisualTestContext| view.read_with(cx, |view, cx| view.files_label(cx));
         assert_eq!(label(cx), "Files");
@@ -3104,7 +3085,7 @@ mod tests {
             PullRequestReadResponse::Files(files(0..3, None)),
             later,
         );
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             label(cx),
             "Files 150",
@@ -3135,7 +3116,7 @@ mod tests {
                 read => answer_other(&incoming, id, read, later),
             }
         }
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         crate::settings::assert_follows_language_switch(cx, "pull_requests.files.filter", |cx| {
             view.read_with(cx, |view, cx| {
                 let (filter, _) = view.file_filter.as_ref().expect("the file column");

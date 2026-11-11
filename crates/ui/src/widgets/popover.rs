@@ -737,10 +737,7 @@ mod tests {
                     0,
                     "dismissed popup must retain its release guard"
                 );
-                cx.run_until_parked();
-                cx.executor()
-                    .advance_clock(std::time::Duration::from_millis(200));
-                cx.update(|window, cx| window.draw(cx).clear(cx));
+                crate::test_frames::draw_settled(cx);
                 cx.simulate_click(position, Default::default());
                 assert_eq!(clicks.get(), 1);
                 assert_eq!(releases.get(), 1);
@@ -771,10 +768,7 @@ mod tests {
         assert!(cx.debug_bounds("touch-picker-sheet").is_some());
 
         cx.simulate_keystrokes("escape");
-        cx.run_until_parked();
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(200));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("touch-picker-sheet").is_none());
 
         let position = cx.debug_bounds("outside-target").unwrap().center();

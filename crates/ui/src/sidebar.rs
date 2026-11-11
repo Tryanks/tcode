@@ -6912,14 +6912,6 @@ mod tests {
         });
     }
 
-    /// Draws the frame after whatever a change set moving has come to rest.
-    fn draw_settled(cx: &mut VisualTestContext) {
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-        draw(cx);
-    }
-
     fn session(id: &str, parent_id: Option<&str>) -> SessionMeta {
         let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/project"), None);
         meta.id = id.to_string();
@@ -7525,7 +7517,7 @@ mod tests {
         );
         send(cx, 3, TouchPhase::Started, b.center());
         send(cx, 3, TouchPhase::Ended, b.center());
-        draw_settled(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             store.read_with(cx, |store, _| store.open_threads()),
             ["menu-10"]
@@ -7637,7 +7629,7 @@ mod tests {
         );
         // The list the new layout brings folds its rows in; the reader
         // presses a header once it is there.
-        draw_settled(cx);
+        crate::test_frames::draw_settled(cx);
         let headers = cx.debug_bounds("compact-group-header").is_some();
         if quick_chat {
             assert!(store.read_with(cx, |store, _| {
@@ -7662,7 +7654,7 @@ mod tests {
                             .any(|project| store.is_project_collapsed(&project.id))
                     }) == collapsed
                 });
-                draw_settled(cx);
+                crate::test_frames::draw_settled(cx);
                 let visible = ["compact-row-thread-0", "compact-row-thread-1"]
                     .into_iter()
                     .filter(|selector| cx.debug_bounds(selector).is_some())
@@ -7939,7 +7931,7 @@ mod tests {
         draw(cx);
         let more = cx.debug_bounds("show-more-project").unwrap();
         cx.simulate_click(more.center(), gpui::Modifiers::default());
-        draw_settled(cx);
+        crate::test_frames::draw_settled(cx);
 
         let far_row = |sidebar: &SessionsSidebar| {
             sidebar
@@ -8570,7 +8562,7 @@ mod tests {
         let click = |cx: &mut VisualTestContext, selector: &'static str| {
             let bounds = cx.debug_bounds(selector).unwrap();
             cx.simulate_click(bounds.center(), gpui::Modifiers::default());
-            draw_settled(cx);
+            crate::test_frames::draw_settled(cx);
         };
         for compact in [false, true] {
             store.update(cx, |store, cx| store.show_thread("mixed-a".into(), cx));
@@ -8583,7 +8575,7 @@ mod tests {
                 sidebar.compact_model_dirty = true;
                 cx.notify();
             });
-            draw_settled(cx);
+            crate::test_frames::draw_settled(cx);
             let shelves = sidebar.update(cx, |sidebar, cx| {
                 if compact {
                     sidebar
@@ -8690,7 +8682,7 @@ mod tests {
             store.update(cx, |store, cx| {
                 store.show_thread("many-settled-1".into(), cx);
             });
-            draw_settled(cx);
+            crate::test_frames::draw_settled(cx);
             verify(cx, expected(shown, false, true));
 
             send(
@@ -8702,7 +8694,7 @@ mod tests {
             );
             cx.run_until_parked();
             cx.run_until_parked();
-            draw_settled(cx);
+            crate::test_frames::draw_settled(cx);
             assert_eq!(
                 sidebar.update(cx, |sidebar, cx| sidebar.navigation_ids(cx)),
                 lead(false)

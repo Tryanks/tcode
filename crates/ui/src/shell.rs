@@ -9643,8 +9643,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-a"), cx)
         });
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         let composer = shell.read_with(cx, |shell, cx| {
             shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
         });
@@ -9800,8 +9799,7 @@ pub(crate) mod tests {
         let composer = composer_of(&shell, cx);
         let show = |cx: &mut VisualTestContext| {
             shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
-            cx.executor().advance_clock(Duration::from_millis(250));
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
         };
         deliver_thread(&shell, &host, "thread-a", false, cx);
         cx.update(|window, cx| {
@@ -9897,8 +9895,7 @@ pub(crate) mod tests {
         restore_status(&shell, &host, cx);
         let composer = composer_of(&shell, cx);
         deliver_thread(&shell, &host, "thread-a", false, cx);
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         let field = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         let card = cx.debug_bounds("composer-card").expect("the lead's card");
         cx.simulate_click(
@@ -9909,8 +9906,7 @@ pub(crate) mod tests {
         cx.update(|window, _| assert!(field.is_focused(window), "the lead's field types"));
 
         deliver_thread(&shell, &host, "child", true, cx);
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         sent(&host);
         cx.update(|window, cx| {
             let composer = composer.read(cx);
@@ -9932,8 +9928,7 @@ pub(crate) mod tests {
         );
 
         deliver_thread(&shell, &host, "thread-a", false, cx);
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         cx.update(|window, _| assert!(field.is_focused(window), "the field has it back"));
         cx.simulate_keystrokes("z");
         draw(cx);
@@ -10009,8 +10004,7 @@ pub(crate) mod tests {
         assert!(store_of(&shell, cx).read_with(cx, |store, _| {
             store.panel_state_for(Some("thread-a")).terminal_open
         }));
-        cx.executor().advance_clock(Duration::from_secs(1));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         cx.update(|window, cx| {
             assert!(
                 window.focused(cx).is_none(),
@@ -10597,8 +10591,7 @@ pub(crate) mod tests {
         serve_thread(host, id);
         await_restore_update(shell, cx, |store, cx| !store.chat_loading_for(Some(id), cx));
         // The pane glides in before the pointer reaches it.
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
     }
 
     /// Press on the threads list's `row` and carry it to `to`, drawing as the
@@ -10615,8 +10608,7 @@ pub(crate) mod tests {
             draw(cx);
         }
         // The drop's placeholder settles where the pointer rests.
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
     }
 
     /// Where the column's only pane was painted.
@@ -10758,8 +10750,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             store.thread_meta("mirror").is_some() && !store.chat_loading_for(Some("thread-1"), cx)
         });
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
         let log = cx
             .debug_bounds("worklog-header-0-spawn-1")
@@ -10767,16 +10758,7 @@ pub(crate) mod tests {
         cx.simulate_mouse_move(log.center(), None, gpui::Modifiers::default());
         draw(cx);
         cx.simulate_click(log.center(), gpui::Modifiers::default());
-        // The reader presses each part once it has folded in: the subagent
-        // runs, so the window never rests; frames over the fold stand in.
-        let settle = |cx: &mut VisualTestContext| {
-            for _ in 0..16 {
-                cx.executor().advance_clock(Duration::from_millis(16));
-                cx.update(|window, cx| window.simulate_next_frame(cx));
-                draw(cx);
-            }
-        };
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         let window = cx
             .debug_bounds("activity-row-spawn-1")
             .expect("the subagent's window");
@@ -11017,7 +10999,6 @@ pub(crate) mod tests {
         cx.simulate_mouse_move(control.center(), None, gpui::Modifiers::default());
         draw(cx);
         cx.simulate_click(control.center(), gpui::Modifiers::default());
-        draw(cx);
         crate::test_frames::draw_settled(cx);
     }
 
@@ -11175,12 +11156,8 @@ pub(crate) mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, host, cx) = mount_panes(cx);
-        let settle = |cx: &mut VisualTestContext| {
-            cx.executor().advance_clock(crate::edge_back::SETTLE);
-            draw(cx);
-        };
         choose_from_palette(&shell, &PaneLayout::Columns.label(), cx);
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
         assert!(cx.debug_bounds("waiting-pane").is_some());
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
@@ -11197,7 +11174,7 @@ pub(crate) mod tests {
         );
         for command in [crate::tr!("panes.zoom"), crate::tr!("panes.unzoom")] {
             choose_from_palette(&shell, &command, cx);
-            settle(cx);
+            crate::test_frames::draw_settled(cx);
             assert_eq!(keyboard_pane(&shell, cx), Some(1), "{command}");
         }
         let composer = shell.read_with(cx, |shell, cx| {
@@ -11212,7 +11189,7 @@ pub(crate) mod tests {
         cx.update(|window, _| assert!(composer.is_focused(window), "the caret is back"));
 
         choose_from_palette(&shell, &PaneLayout::Single.label(), cx);
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         store_of(&shell, cx).read_with(cx, |store, _| {
             assert!(store.is_thread_open("thread-2"));
@@ -11221,7 +11198,7 @@ pub(crate) mod tests {
 
         cx.simulate_keystrokes("secondary-alt-2");
         draw(cx);
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into()), None]);
     }
 
@@ -11286,8 +11263,7 @@ pub(crate) mod tests {
         draw(cx);
 
         choose_from_palette(&shell, &PaneLayout::SpreadAgents.label(), cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [
@@ -11307,14 +11283,10 @@ pub(crate) mod tests {
         let (shell, _host, cx) = mount_panes(cx);
         cx.update(|_, cx| cx.set_reduce_motion(true));
         cx.simulate_keystrokes("secondary-d");
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         cx.simulate_keystrokes("secondary-shift-enter");
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         for key in ["tab", "shift-tab"] {
             for press in 0..30 {
                 cx.simulate_keystrokes(key);
@@ -11324,9 +11296,7 @@ pub(crate) mod tests {
         }
 
         cx.simulate_keystrokes("secondary-shift-enter");
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("zoomed-pane").is_none());
         assert_eq!(
             keyboard_pane(&shell, cx),
@@ -11360,8 +11330,7 @@ pub(crate) mod tests {
         assert!(cx.debug_bounds("waiting-pane").is_some());
         answer_draft(&shell, &host, "draft-1", cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("waiting-pane").is_none());
         assert_eq!(
             pane_threads(&shell, cx),
@@ -11428,8 +11397,7 @@ pub(crate) mod tests {
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         assert!(cx.debug_bounds("waiting-pane").is_some());
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
 
         cx.simulate_keystrokes("secondary-2");
         draw(cx);
@@ -11458,15 +11426,12 @@ pub(crate) mod tests {
         draw(cx);
         let split = |cx: &mut VisualTestContext| {
             cx.simulate_keystrokes("secondary-d");
-            draw(cx);
-            cx.executor().advance_clock(crate::edge_back::SETTLE);
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
             assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
             assert_eq!(keyboard_pane(&shell, cx), Some(1));
         };
         let closed = |cx: &mut VisualTestContext, how: &str| {
-            cx.executor().advance_clock(crate::edge_back::SETTLE);
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
             assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())], "{how}");
         };
 
@@ -11497,6 +11462,7 @@ pub(crate) mod tests {
     fn closing_other_panes_leaves_the_focused_one(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
         cx.simulate_keystrokes("secondary-shift-d");
         draw(cx);
@@ -11963,6 +11929,7 @@ pub(crate) mod tests {
     fn a_width_dragged_in_one_drawer_is_every_drawers(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
         side_by_side(&shell, || serve_thread(&host, "thread-2"), cx);
         resize(cx, 2600.);
@@ -12200,9 +12167,7 @@ pub(crate) mod tests {
 
         let mac = cx.update(|_, cx| cx.platform_info().is_mac());
         cx.simulate_keystrokes(if mac { "cmd-ctrl-left" } else { "alt-left" });
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-2".into()), Some("thread-1".into())]
@@ -12248,9 +12213,7 @@ pub(crate) mod tests {
         });
 
         cx.simulate_keystrokes("secondary-alt-2 secondary-d");
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
         cx.update(|window, _| assert!(terminal.is_focused(window)));
     }
@@ -12267,16 +12230,13 @@ pub(crate) mod tests {
         cx.simulate_keystrokes("secondary-d");
         draw(cx);
         answer_draft(&shell, &host, "draft-1", cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("draft-1".into())]
         );
         cx.simulate_keystrokes("secondary-shift-w");
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
 
         resize(cx, SIDEBAR_WIDTH + 2. * PANE_MIN_WIDTH - 10.);
@@ -12288,9 +12248,7 @@ pub(crate) mod tests {
         assert!(cx.debug_bounds("pane-drop-indicator").is_some());
         let edge = gpui::point(pane.right() - px(20.), pane.center().y);
         cx.simulate_mouse_move(edge, Some(MouseButton::Left), gpui::Modifiers::default());
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("pane-drop-indicator").is_none());
         cx.simulate_mouse_up(edge, MouseButton::Left, gpui::Modifiers::default());
         draw(cx);
@@ -12325,8 +12283,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, _| !store.is_thread_open("thread-1"));
         draw(cx);
         // It glides shut first.
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         store_of(&shell, cx).read_with(cx, |store, _| {
@@ -12965,6 +12922,7 @@ pub(crate) mod tests {
     fn a_panes_close_button_closes_its_own_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         assert!(cx.debug_bounds("pane-close").is_none(), "a lone pane");
 
         // Stacked; the new pane waits for its draft.
@@ -13764,8 +13722,7 @@ pub(crate) mod tests {
                 as_mobile(cx);
             }
             resize(cx, width);
-            cx.executor().advance_clock(Duration::from_millis(250));
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
             let start = cx
                 .debug_bounds(selector)
                 .unwrap_or_else(|| panic!("missing {selector}"))
@@ -14267,9 +14224,7 @@ pub(crate) mod tests {
         resize(cx, 393.);
         cx.update(|window, cx| set_back_target(window.window_handle(), &shell, cx));
         shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
-        draw(cx);
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.cx.update(can_swipe_back));
         let depth = shell.read_with(cx, |shell, cx| shell.nav.read(cx).depth());
         cx.update(|window, cx| {
@@ -14283,9 +14238,7 @@ pub(crate) mod tests {
         draw(cx);
         assert!(!cx.cx.update(can_swipe_back));
         assert!(cx.cx.update(handle_back));
-        draw(cx);
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(!cx.update(|window, cx| crate::overlay::dialog_open(window, cx)));
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.nav.read(cx).depth(), depth)
@@ -14302,9 +14255,7 @@ pub(crate) mod tests {
         as_mobile(cx);
         resize(cx, 393.);
         shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
-        draw(cx);
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         let before = shell.read_with(cx, |shell, cx| {
             shell.window_state.read(cx).history().to_vec()
         });
@@ -14414,8 +14365,7 @@ pub(crate) mod tests {
             resize(cx, width);
             shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
             // Let the compact push animation settle so the picker is in place.
-            cx.executor().advance_clock(Duration::from_millis(400));
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
             let picker = cx.debug_bounds("model-picker").expect("model picker");
             cx.simulate_click(picker.center(), gpui::Modifiers::default());
             draw(cx);
@@ -15611,6 +15561,7 @@ pub(crate) mod tests {
     fn the_right_panel_keeps_the_width_the_user_dragged_it_to(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_thread_with(cx, Vec::new());
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
         resize(cx, 1600.);
         store.update(cx, |store, cx| {
@@ -16046,29 +15997,27 @@ pub(crate) mod tests {
         let (shell, host, cx) = mount(cx);
         open_working_tree_panel(&shell, &host, cx);
         let reads = held_git_diff_reads(&host, cx);
-        answer_git_diff(&host, reads[0], &created_files(&[("long.rs", 300)]));
+        answer_git_diff(&host, reads[0], &created_files(&[("long.rs", 100)]));
         held_git_diff_reads(&host, cx);
 
         let body = cx
             .debug_bounds("diff-body")
             .expect("the diff body laid out");
-        // A wheel turn at a time, each eased out and drawn, as a reader scrolls.
+        // The reader scrolls into the file, a wheel turn at a time.
         for _ in 0..12 {
             cx.simulate_event(gpui::ScrollEvent {
                 position: body.center(),
                 delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-100.))),
                 ..Default::default()
             });
-            for _ in 0..5 {
-                cx.executor().advance_clock(Duration::from_millis(100));
-                draw(cx);
-            }
+            draw(cx);
         }
+        crate::test_frames::draw_settled(cx);
         // Debug selectors are looked up by `&'static str`.
         let selector =
             |line: u32| -> &'static str { format!("diff-line-new-long.rs-{line}").leak() };
         let top_line = |cx: &mut VisualTestContext| {
-            (1..=300).find_map(|line| {
+            (1..=100).find_map(|line| {
                 cx.debug_bounds(selector(line))
                     .filter(|bounds| bounds.top() >= body.top())
                     .map(|bounds| (line, bounds.top()))
@@ -16082,7 +16031,7 @@ pub(crate) mod tests {
         answer_git_diff(
             &host,
             reads[0],
-            &created_files(&[("added.rs", 20), ("long.rs", 300)]),
+            &created_files(&[("added.rs", 20), ("long.rs", 100)]),
         );
         held_git_diff_reads(&host, cx);
         assert!(
