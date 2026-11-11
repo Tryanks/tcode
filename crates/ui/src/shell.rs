@@ -9654,6 +9654,7 @@ pub(crate) mod tests {
                 default_value: None,
                 role: agent::OptionRole::Effort,
                 apply: Default::default(),
+                minimum: None,
                 recommended: None,
                 permissive: None,
             });

@@ -863,12 +863,16 @@ fn a_call_whose_work_goes_on_in_the_background_says_so_until_it_ends(cx: &mut Te
         subagent(ended, "in_progress"),
         backgrounded(ended),
         subagent(ended, "completed"),
+        // The entry the wait below is for: once it is there, everything
+        // above it has arrived, the ended agent's completion included.
+        serde_json::json!({ "type": "item_completed", "id": "said",
+            "content": { "kind": "assistant_message", "text": "Started." } }),
     ]
     .into_iter()
     .map(|event| serde_json::from_value(event).unwrap())
     .collect();
     let (mut thread, cx) = StoredThread::open(cx, &log, 1_024.);
-    thread.provider("Start them.", live, ended, cx);
+    thread.provider("Start them.", live, "said", cx);
     let verb = |id: &str, cx: &mut VisualTestContext| thread.header(id, cx).verb;
     assert_eq!(verb(waited, cx).as_deref(), Some("Running subagent"));
     for id in [agent, command] {
