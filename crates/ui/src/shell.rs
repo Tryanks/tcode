@@ -8131,6 +8131,7 @@ pub(crate) mod tests {
                         })
                         .collect(),
                     unreadable: Vec::new(),
+                    truncated: false,
                 },
             ))
         };
