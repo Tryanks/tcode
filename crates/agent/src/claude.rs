@@ -309,7 +309,12 @@ fn inherit_settings(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// Start (or resume) a Claude Code session.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    let version = claude_version(opts.binary_path.as_deref(), &opts.launch_env).await;
+    let version = claude_version(
+        opts.binary_path.as_deref(),
+        &opts.launch_env,
+        &opts.processes,
+    )
+    .await;
     let native_rewind = version.is_some_and(|version| version >= NATIVE_REWIND_MIN_VERSION);
     let rewind_preview = version.is_some_and(|version| version >= REWIND_PREVIEW_MIN_VERSION);
     let fork_anchor = match &opts.fork {
@@ -5172,13 +5177,17 @@ fn resolve_claude_effort(spec: Option<&ModelSpec>, raw: Option<&str>) -> Option<
 }
 
 /// Run `claude --version` and parse the semver triple; `None` on any failure.
-async fn claude_version(binary: Option<&Path>, launch_env: &LaunchEnv) -> Option<(u32, u32, u32)> {
+async fn claude_version(
+    binary: Option<&Path>,
+    launch_env: &LaunchEnv,
+    processes: &crate::SessionProcesses,
+) -> Option<(u32, u32, u32)> {
     // Resolve through the PATH search (PATHEXT-aware: on Windows the CLI only
     // exists as `claude.cmd`), falling back to the bare name so the failure is
     // reported by the OS exactly as before.
     let bin = crate::resolve_binary(binary, "claude")
         .unwrap_or_else(|_| std::path::PathBuf::from("claude"));
-    crate::process::probe_version(&bin, launch_env, ProviderKind::ClaudeCode).await
+    crate::process::probe_version(&bin, launch_env, ProviderKind::ClaudeCode, processes).await
 }
 
 /// List Claude's models: the manifest catalog (refreshed per `refresh`),
@@ -5192,7 +5201,12 @@ pub async fn list_models(
         crate::claude_manifest::refresh(refresh.cache_dir.as_deref(), refresh.network)
     })
     .await;
-    let version = claude_version(binary_path.as_deref(), &launch_env).await;
+    let version = claude_version(
+        binary_path.as_deref(),
+        &launch_env,
+        &crate::SessionProcesses::default(),
+    )
+    .await;
     Ok(crate::claude_manifest::current().models_for_version(version))
 }
 
