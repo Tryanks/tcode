@@ -32,13 +32,23 @@ use crate::{
         ALPN_GROUP, GroupLine, GroupMachine, GroupRecord, GroupRejection, GroupState,
         JoiningDevice, JoiningMachine, MAX_GROUP_LINE, Membership, Roster,
     },
-    identity::{DeviceGrant, DeviceRecord, HostIdentity, SpaceRecord, existing_device, now_unix},
+    identity::{
+        DEVICE_FILE, DeviceGrant, DeviceRecord, HostIdentity, SpaceRecord, existing_device,
+        now_unix,
+    },
     lan,
     manifest::{Manifest, ManifestLoader, ManifestSource, live},
     mux::HostMux,
     runtime::block_on,
     wire::{self, ClientLine, DeviceClaim, HelloRejection, HostLine, LineReader, PairRejection},
 };
+
+/// The device sharing this data directory, if it has one; a `device.json`
+/// that cannot be read is an error naming it.
+fn local_device(data_dir: &std::path::Path) -> io::Result<Option<(EndpointId, DeviceClaim)>> {
+    existing_device(data_dir)
+        .map_err(|error| io::Error::new(error.kind(), format!("{DEVICE_FILE}: {error}")))
+}
 
 pub const INVITATION_LIFETIME: Duration = Duration::from_secs(5 * 60);
 /// Wrong secrets an invitation survives; a cheap defence in depth behind
@@ -1437,7 +1447,13 @@ impl Shared {
     /// group's machines change, full devices reconnect to learn them; and the
     /// other members hear of any change to the group.
     fn commit(&self, state: &mut State, previous: HostIdentity) -> io::Result<()> {
-        let local = existing_device(&self.data_dir).map(|(id, _)| id.to_string());
+        let local = match local_device(&self.data_dir) {
+            Ok(device) => device.map(|(id, _)| id.to_string()),
+            Err(error) => {
+                state.identity = previous;
+                return Err(error);
+            }
+        };
         let accept = self.allow_pairing && state.identity.pairing_enabled;
         let removed = state.identity.apply_group(accept, local.as_deref());
         self.revise(&mut state.identity);
@@ -1481,8 +1497,13 @@ impl Shared {
         let Some(roster) = roster else {
             return;
         };
-        if existing_device(&self.data_dir).is_none() {
-            return;
+        match local_device(&self.data_dir) {
+            Ok(Some(_)) => {}
+            Ok(None) => return,
+            Err(error) => {
+                log::error!("could not save the group's machines: {error}");
+                return;
+            }
         }
         let local = self.endpoint.id().to_string();
         if let Err(error) = crate::hosts::update_hosts(&self.data_dir, |hosts| {
@@ -1734,6 +1755,7 @@ impl Shared {
                         "this machine is already in a group",
                     ));
                 }
+                let local = local_device(&self.data_dir)?;
                 let mut group = GroupState::new(new_secret(), group_name(name)?);
                 group.set_machine(
                     self.this_machine(&state.identity, &addr),
@@ -1744,7 +1766,7 @@ impl Shared {
                     state: group,
                     declined: Vec::new(),
                 });
-                self.bring_devices(&mut state.identity);
+                self.bring_devices(&mut state.identity, local);
             }
             GroupAction::RemoveMachine(id) => {
                 if id == by {
@@ -1797,7 +1819,7 @@ impl Shared {
 
     /// Bring every full-access device and the device sharing this data
     /// directory into the group just created.
-    fn bring_devices(&self, identity: &mut HostIdentity) {
+    fn bring_devices(&self, identity: &mut HostIdentity, local: Option<(EndpointId, DeviceClaim)>) {
         let full: Vec<String> = identity
             .devices
             .iter()
@@ -1807,7 +1829,7 @@ impl Shared {
         for id in full {
             self.introduce(identity, &id);
         }
-        if let Some((id, claim)) = existing_device(&self.data_dir)
+        if let Some((id, claim)) = local
             && let Some(group) = &mut identity.group
         {
             let (name, platform) = claim.normalized();
@@ -1868,7 +1890,7 @@ impl Shared {
                     platform: device.platform.clone(),
                 })
                 .collect();
-            if let Some((device_id, claim)) = existing_device(&self.data_dir) {
+            if let Some((device_id, claim)) = local_device(&self.data_dir)? {
                 let (name, platform) = claim.normalized();
                 brought.push(JoiningDevice {
                     id: device_id.to_string(),

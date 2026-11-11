@@ -396,30 +396,45 @@ impl DeviceIdentity {
 }
 
 /// The device of `device.json` in `data_dir`, if this data directory has
-/// one: on a desktop, the window's identity beside the machine's.
-pub fn existing_device(data_dir: &Path) -> Option<(EndpointId, crate::wire::DeviceClaim)> {
-    let bytes = fs::read(data_dir.join(DEVICE_FILE)).ok()?;
-    let file: DeviceFile = serde_json::from_slice(&bytes).ok()?;
-    let id = parse_secret_key(&file.secret_key).ok()?.public();
-    Some((
+/// one: on a desktop, the window's identity beside the machine's. A file
+/// that exists and cannot be read is an error, not no device.
+pub fn existing_device(
+    data_dir: &Path,
+) -> io::Result<Option<(EndpointId, crate::wire::DeviceClaim)>> {
+    let Some(bytes) = read_if_present(&data_dir.join(DEVICE_FILE))? else {
+        return Ok(None);
+    };
+    let file: DeviceFile = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    let id = parse_secret_key(&file.secret_key)?.public();
+    Ok(Some((
         id,
         crate::wire::DeviceClaim {
             name: file.details.name.unwrap_or_else(|| "Tcode".into()),
             platform: file.details.platform,
         },
-    ))
+    )))
 }
 
 /// The machine id of `traverse.json` in `data_dir`, if this data directory
-/// hosts a machine.
-pub fn existing_machine_id(data_dir: &Path) -> Option<EndpointId> {
-    let bytes = fs::read(data_dir.join(HOST_FILE)).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    Some(
-        parse_secret_key(value["secret_key"].as_str()?)
-            .ok()?
-            .public(),
-    )
+/// hosts a machine. A file that exists and cannot be read is an error, not
+/// no machine.
+pub fn existing_machine_id(data_dir: &Path) -> io::Result<Option<EndpointId>> {
+    let Some(bytes) = read_if_present(&data_dir.join(HOST_FILE))? else {
+        return Ok(None);
+    };
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    let secret_key = value["secret_key"]
+        .as_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no secret key"))?;
+    Ok(Some(parse_secret_key(secret_key)?.public()))
+}
+
+fn read_if_present(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn now_unix() -> u64 {

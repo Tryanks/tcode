@@ -1944,8 +1944,8 @@ mod tests {
             fn device_name(&self) -> String {
                 "Safari".into()
             }
-            fn device_id(&self) -> String {
-                "browser".into()
+            fn device_id(&self) -> Result<String, tcode_client::host::FileFailure> {
+                Ok("browser".into())
             }
             fn device_platform(&self) -> Option<String> {
                 None
@@ -2055,8 +2055,8 @@ mod tests {
             fn device_name(&self) -> String {
                 "phone".into()
             }
-            fn device_id(&self) -> String {
-                "phone".into()
+            fn device_id(&self) -> Result<String, tcode_client::host::FileFailure> {
+                Ok("phone".into())
             }
             fn device_platform(&self) -> Option<String> {
                 None

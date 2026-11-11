@@ -1117,7 +1117,18 @@ fn learn_addresses(host: &mut PairedHost, connection: &Connection) -> bool {
 
 /// Save the group's machines as a machine of the group told this device.
 fn persist_roster(device: &DeviceIdentity, from: &str, roster: Option<&crate::group::Roster>) {
-    let local = crate::identity::existing_machine_id(device.data_dir()).map(|id| id.to_string());
+    // Without this data directory's own machine, the roster would save it
+    // as a machine of its own group.
+    let local = match crate::identity::existing_machine_id(device.data_dir()) {
+        Ok(id) => id.map(|id| id.to_string()),
+        Err(error) => {
+            log::error!(
+                "could not save the group's machines: {}: {error}",
+                crate::identity::HOST_FILE
+            );
+            return;
+        }
+    };
     let result = crate::hosts::update_hosts(device.data_dir(), |hosts| {
         crate::hosts::apply_roster(hosts, from, roster, local.as_deref());
     });

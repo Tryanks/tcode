@@ -1,5 +1,5 @@
 use tcode_client::host::{
-    ClientHost, ClientPreferences, FileFailure, HostFuture, PickedFile, Transport,
+    ClientHost, ClientPreferences, DeviceIdentity, FileFailure, HostFuture, PickedFile, Transport,
     persistent_device_id,
 };
 use tcode_client::pairing::PairedHost;
@@ -124,21 +124,24 @@ fn browser_platform(user_agent: &str) -> Option<&'static str> {
     }
 }
 
+/// Shared with the password login page, which stores the same key so a
+/// browser that logs in again keeps its one record on the host.
+fn device_id() -> String {
+    let stored = storage().and_then(|storage| storage.get_item("tcode.device_id").ok().flatten());
+    persistent_device_id(stored, |id| {
+        if let Some(storage) = storage() {
+            let _ = storage.set_item("tcode.device_id", id);
+        }
+    })
+}
+
 impl ClientHost for WebHost {
     fn device_name(&self) -> String {
         browser_family(&user_agent()).to_owned()
     }
 
-    /// Shared with the password login page, which stores the same key so a
-    /// browser that logs in again keeps its one record on the host.
-    fn device_id(&self) -> String {
-        let stored =
-            storage().and_then(|storage| storage.get_item("tcode.device_id").ok().flatten());
-        persistent_device_id(stored, |id| {
-            if let Some(storage) = storage() {
-                let _ = storage.set_item("tcode.device_id", id);
-            }
-        })
+    fn device_id(&self) -> Result<String, FileFailure> {
+        Ok(device_id())
     }
 
     fn device_platform(&self) -> Option<String> {
@@ -215,7 +218,11 @@ impl ClientHost for WebHost {
     fn connect(&self, host: &PairedHost) -> Transport {
         crate::transport::connect(
             token_for(&host.host_id).unwrap_or_default(),
-            self.device_identity(),
+            DeviceIdentity {
+                id: device_id(),
+                name: self.device_name(),
+                platform: self.device_platform(),
+            },
         )
     }
 

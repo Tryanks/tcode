@@ -870,7 +870,12 @@ impl AppShell {
             DevicePreferences::install(client.clone(), cx);
             // The window lists no saved machines while they cannot be read.
             // Said once the window holds its overlays.
-            if let Err(error) = client.load_hosts() {
+            // Nor can the machine this data directory hosts be told from the
+            // saved ones while its own file cannot be read.
+            for error in [client.load_hosts().err(), client.local_machine_id().err()]
+                .into_iter()
+                .flatten()
+            {
                 let message =
                     crate::tr!("errors.file_unreadable", error = error.to_string()).into_owned();
                 cx.defer_in(window, move |_, window, cx| {
@@ -1258,7 +1263,9 @@ impl AppShell {
         let saved = client.load_hosts().unwrap_or_default();
         let preference = DevicePreferences::workspace(cx);
         let last_host_id = client.last_host_id();
-        let local_machine_id = client.local_machine_id();
+        // Unreadable, it was reported on opening; the group's roster is not
+        // saved meanwhile, so no saved machine is this one.
+        let local_machine_id = client.local_machine_id().ok().flatten();
         crate::workspace::members(&crate::workspace::Device {
             saved: &saved,
             preference: preference.as_ref(),
@@ -6716,8 +6723,8 @@ pub(crate) mod tests {
             "returning phone".into()
         }
 
-        fn device_id(&self) -> String {
-            "returning-phone".into()
+        fn device_id(&self) -> Result<String, tcode_client::host::FileFailure> {
+            Ok("returning-phone".into())
         }
 
         fn device_platform(&self) -> Option<String> {
@@ -6915,8 +6922,8 @@ pub(crate) mod tests {
             "tablet".into()
         }
 
-        fn device_id(&self) -> String {
-            "tablet".into()
+        fn device_id(&self) -> Result<String, tcode_client::host::FileFailure> {
+            Ok("tablet".into())
         }
 
         fn device_platform(&self) -> Option<String> {
@@ -13891,8 +13898,8 @@ pub(crate) mod tests {
             fn device_name(&self) -> String {
                 "desk".into()
             }
-            fn device_id(&self) -> String {
-                "desk".into()
+            fn device_id(&self) -> Result<String, tcode_client::host::FileFailure> {
+                Ok("desk".into())
             }
             fn device_platform(&self) -> Option<String> {
                 None

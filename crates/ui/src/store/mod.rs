@@ -3696,7 +3696,12 @@ impl WorkspaceStore {
             return Some(crate::tr!("chat.from_orchestrator").into_owned());
         }
         let author = attribution.authors.get(entry_id)?;
-        let own_id = self.client_host.as_ref().map(|host| host.device_id());
+        // A device whose id cannot be read reaches no other machine, so no
+        // message there is its own.
+        let own_id = self
+            .client_host
+            .as_ref()
+            .and_then(|host| host.device_id().ok());
         // The host attributes only space members' messages. An unattributed
         // one is the owner's, which is someone else only from inside a space.
         let other = author.as_ref().map_or(!self.scope.is_full(), |author| {
@@ -4817,8 +4822,8 @@ pub(crate) mod tests {
             fn device_name(&self) -> String {
                 "member".into()
             }
-            fn device_id(&self) -> String {
-                "member-device".into()
+            fn device_id(&self) -> Result<String, tcode_client::host::FileFailure> {
+                Ok("member-device".into())
             }
             fn device_platform(&self) -> Option<String> {
                 None
