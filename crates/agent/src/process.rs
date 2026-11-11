@@ -505,15 +505,17 @@ pub async fn tree_output(command: std::process::Command) -> std::io::Result<std:
 /// [`tree_output`] for a command a session runs before its harness: the
 /// session's stop kills it as it kills the harness.
 pub(crate) async fn held_output(
-    mut command: std::process::Command,
+    command: std::process::Command,
     processes: &SessionProcesses,
 ) -> std::io::Result<std::process::Output> {
     use smol::io::AsyncReadExt as _;
     #[cfg(unix)]
-    {
+    let command = {
         use std::os::unix::process::CommandExt as _;
+        let mut command = command;
         command.process_group(0);
-    }
+        command
+    };
     // Set on the `smol` command: spawning it gives the child this process's own
     // stdio wherever its own setters were not called, whatever the `std`
     // command it came from says.
