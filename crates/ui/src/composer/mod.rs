@@ -265,6 +265,25 @@ pub struct Composer {
 impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
+    /// Whether a send has something to send: the draft's text, or the
+    /// words a dictation under way is still to write, which a send stops
+    /// it for and goes out with once the recognizer's last result is in.
+    fn can_send(&self, cx: &App) -> bool {
+        #[cfg(feature = "voice")]
+        let dictating = self.dictating(cx);
+        #[cfg(not(feature = "voice"))]
+        let dictating = false;
+        self.interactive(cx) && (self.draft_has_text || dictating)
+    }
+
+    /// Whether a send waits for a dictation's last result before it goes.
+    fn send_awaits_dictation(&self) -> bool {
+        #[cfg(feature = "voice")]
+        return self.voice.pending_submit.is_some();
+        #[cfg(not(feature = "voice"))]
+        false
+    }
+
     fn interactive(&self, cx: &App) -> bool {
         !self.subagent(cx)
             && !matches!(self.workspace_store.read(cx).connection_state(),
@@ -1022,7 +1041,8 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let interactive = self.interactive(cx);
-        let has_text = interactive && self.draft_has_text;
+        let has_text = self.can_send(cx);
+        let awaiting = self.send_awaits_dictation();
         let composer_state = self.composer_state(cx);
         let stopping = (turn_running || composer_state.preparing_turn) && !has_text;
         let stop_pending = composer_state.stopping;
@@ -1078,7 +1098,11 @@ impl Composer {
                                 .disabled(!interactive || stop_pending)
                                 .child(div().size(px(13.)).rounded(px(2.)).bg(cx.theme().danger))
                         } else {
-                            button.primary().disabled(!has_text).icon(IconName::ArrowUp)
+                            button
+                                .primary()
+                                .disabled(!has_text)
+                                .loading(awaiting)
+                                .icon(IconName::ArrowUp)
                         }
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -1253,7 +1277,8 @@ impl Composer {
             return self.render_compact_primary_action(turn_running, window, cx);
         }
         let composer_state = self.composer_state(cx);
-        let has_text = self.interactive(cx) && self.draft_has_text;
+        let has_text = self.can_send(cx);
+        let awaiting = self.send_awaits_dictation();
         let parts: &[DesktopAction] = if turn_running {
             // Providers with native mid-turn steering keep a send button
             // active beside Stop while a turn runs.
@@ -1306,6 +1331,7 @@ impl Composer {
                             .aria_label(crate::tr!("composer.steer_tooltip"))
                             .tooltip(queue_hint)
                             .disabled(!has_text)
+                            .loading(awaiting)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 let input = this.input.clone();
                                 this.submit(&input, false, window, cx);
@@ -1326,6 +1352,7 @@ impl Composer {
                         .icon(IconName::ArrowUp)
                         .aria_label(crate::tr!("composer.send"))
                         .disabled(!has_text)
+                        .loading(awaiting)
                         .on_click(cx.listener(|this, _, window, cx| {
                             let input = this.input.clone();
                             this.submit(&input, false, window, cx);

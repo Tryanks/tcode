@@ -1,13 +1,11 @@
 use gpui::{App, Context, EventEmitter, Task};
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{cell::RefCell, rc::Rc};
 use tcode_client::speech::{Dictation, SpeechEvent, SpeechRecognizer, SpeechSession};
 pub(super) use tcode_client::speech::{DictationEvent, SpeechStatus};
 
 struct Session {
     platform: Rc<RefCell<Box<dyn SpeechSession>>>,
-    id: u64,
     _events: Task<()>,
-    _timeout: Option<Task<()>>,
 }
 
 pub(super) struct SpeechState {
@@ -123,9 +121,7 @@ impl SpeechState {
         });
         self.session = Some(Session {
             platform,
-            id,
             _events: events,
-            _timeout: None,
         });
         cx.emit(DictationEvent::Started);
         cx.notify();
@@ -135,16 +131,11 @@ impl SpeechState {
         if !self.dictation.stop() {
             return;
         }
-        if let Some(session) = &mut self.session {
+        // The final transcript is the recognizer's: the session ends when
+        // the platform says it finished or failed, and the user can stop
+        // waiting for it ([`Self::cancel`]).
+        if let Some(session) = &self.session {
             session.platform.borrow_mut().finish();
-            let id = session.id;
-            let timeout = cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(Duration::from_secs(3)).await;
-                _ = this.update(cx, |this, cx| {
-                    this.on_events(id, [SpeechEvent::Finished], cx)
-                });
-            });
-            self.session.as_mut().unwrap()._timeout = Some(timeout);
         }
         cx.notify();
     }
