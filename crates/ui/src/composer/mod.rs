@@ -98,7 +98,7 @@ use crate::workspace_walk::filter_entries;
 use tcode_core::attachments::{mime_from_path, text_with_file_paths, validate_attachment};
 use tcode_core::provider_models::{FastLevel, FastMode};
 use tcode_core::ui::WorkspaceMode;
-use tcode_protocol::PathEntry;
+use tcode_protocol::WorkspaceListing;
 
 /// Context-meter colors, shared with provider usage bars.
 use crate::usage::{METER_BLUE, METER_RED};
@@ -231,7 +231,7 @@ pub struct Composer {
     /// Cached workspace listing for the active session cwd (for `@`-mentions),
     /// loaded lazily in the background the first time a mention trigger opens.
     /// The `@` menu's listing of a cwd, or why the host could not give it.
-    workspace: Option<(PathBuf, Result<Vec<PathEntry>, String>)>,
+    workspace: Option<(PathBuf, Result<WorkspaceListing, String>)>,
     workspace_loading: bool,
     /// Pending image attachments for the active session, validated + persisted to
     /// disk. Cleared on send and whenever the active session changes.

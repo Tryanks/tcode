@@ -1129,6 +1129,8 @@ composer:
   goal_clear: "Clear goal"
   no_files: "No matching files or folders."
   files_failed: "Couldn't list the files: %{reason}"
+  files_truncated: "Only the first %{count} files and folders are listed."
+  files_unreadable: "%{count} folders could not be read: %{reason}"
   searching: "Searching…"
   cmd_model_desc: "Open the model picker"
   group_builtin: "Built-in"

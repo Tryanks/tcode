@@ -47,7 +47,7 @@ use tcode_core::ui::{
 use tcode_protocol::{
     AcpMarketplaceItem, ArchivedSessions, EventEnvelope, ExternalHistory, ExternalImportState,
     ExternalImportStatus, ExternalThread, ForkAvailability, GitActionRequest, GitStatusStatus,
-    ImportFailure, IndexSnapshot, IndexSummary, MergeWorktreeFailure, PathEntry, ProtocolError,
+    ImportFailure, IndexSnapshot, IndexSummary, MergeWorktreeFailure, ProtocolError,
     ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueryResponse,
     QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
     RuntimeNotification as RuntimeEvent, RuntimeOperationId, RuntimeToast, ServerEvent,

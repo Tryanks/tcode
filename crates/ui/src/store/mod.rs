@@ -24,9 +24,9 @@ use tcode_protocol::{AcpMarketplaceItem, RuntimeNotification as RuntimeEvent};
 use tcode_protocol::{
     ArchivedSessions, Command, CommandResponse, DiskUsageState, EventEnvelope,
     ExternalImportStatus, ExternalThread, GitDiffResult, GitDiffScope, GitStatusStatus,
-    IndexSummary, PathEntry, ProtocolError, ProviderVersionStatus, ProvidersStatus, Query,
-    QueryResponse, Scope, ScopedProviderChoice, ServerEvent, SessionContentHits, SessionPlan,
-    SessionStatus, StorageMigration, Subscription, Topic,
+    IndexSummary, ProtocolError, ProviderVersionStatus, ProvidersStatus, Query, QueryResponse,
+    Scope, ScopedProviderChoice, ServerEvent, SessionContentHits, SessionPlan, SessionStatus,
+    StorageMigration, Subscription, Topic,
 };
 #[cfg(target_family = "wasm")]
 use web_time::Instant;
@@ -3907,14 +3907,14 @@ impl WorkspaceStore {
 
     pub fn list_workspace_for(
         &self,
-        session_id: Option<&str>,
+        session_id: &str,
         cx: &mut App,
-    ) -> Task<Result<Vec<PathEntry>, String>> {
-        let session_id = session_id.unwrap_or_default().to_owned();
+    ) -> Task<Result<tcode_protocol::WorkspaceListing, String>> {
+        let session_id = session_id.to_owned();
         let host = self.host.clone();
         cx.spawn(
             async move |_| match host.query(Query::ListActiveWorkspace { session_id }).await {
-                Ok(QueryResponse::ActiveWorkspace(entries)) => Ok(entries),
+                Ok(QueryResponse::ActiveWorkspace(listing)) => Ok(listing),
                 Ok(other) => Err(format!("unexpected active-workspace response: {other:?}")),
                 Err(error) => Err(error.message),
             },

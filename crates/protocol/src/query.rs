@@ -244,7 +244,7 @@ pub enum QueryResponse {
         end: u64,
         truncated: bool,
     },
-    ActiveWorkspace(Vec<PathEntry>),
+    ActiveWorkspace(WorkspaceListing),
     IconImages {
         directory: PathBuf,
         parent: Option<PathBuf>,
@@ -351,6 +351,16 @@ pub struct IconImageEntry {
     pub path: PathBuf,
     pub name: String,
     pub is_dir: bool,
+}
+
+/// A thread's working directory as the `@` menu lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceListing {
+    pub entries: Vec<PathEntry>,
+    /// The listing stopped at its entry limit; there is more than `entries`.
+    pub truncated: bool,
+    /// A folder the listing could not read, and why, one per entry.
+    pub unreadable: Vec<String>,
 }
 
 /// One listable workspace entry (relative to the workspace root).

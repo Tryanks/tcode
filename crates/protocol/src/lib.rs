@@ -63,6 +63,7 @@ pub use query::{
     STORED_OUTPUT_ROWS, SessionContentHits, SessionSearchHit, SourceTool, SpaceAction, SpaceAgents,
     SpaceApproval, SpaceInfo, SpacePolicy, TraverseLookupState, TraverseLookupStatus,
     TraverseManifestState, TraverseManifestStatus, TraverseRelayStatus, TraverseSourceStatus,
+    WorkspaceListing,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
@@ -380,6 +381,10 @@ pub use wire::{
 // scopes, source_install, unmanaged} instead of a bool; it gains home_path.
 // The file_change item gains output, what the harness gave back for the
 // change: its tool's result, or why it failed.
+// QueryResponse::ActiveWorkspace carries a WorkspaceListing {entries,
+// truncated, unreadable}; ListActiveWorkspace lists a thread that is not
+// running too, and answers unknown_session or git's or the file system's error
+// where it was an empty list.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

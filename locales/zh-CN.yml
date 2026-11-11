@@ -1122,6 +1122,8 @@ composer:
   goal_clear: "清除目标"
   no_files: "没有匹配的文件或文件夹。"
   files_failed: "无法列出文件：%{reason}"
+  files_truncated: "只列出了前 %{count} 个文件和文件夹。"
+  files_unreadable: "%{count} 个文件夹无法读取：%{reason}"
   searching: "搜索中…"
   cmd_model_desc: "打开模型选择器"
   group_builtin: "内置"

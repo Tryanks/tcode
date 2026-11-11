@@ -1129,6 +1129,8 @@ composer:
   goal_clear: "目標をクリア"
   no_files: "一致するファイルやフォルダーはありません。"
   files_failed: "ファイルを一覧表示できませんでした: %{reason}"
+  files_truncated: "最初の %{count} 件のファイルとフォルダーのみを表示しています。"
+  files_unreadable: "%{count} 個のフォルダーを読み取れませんでした: %{reason}"
   searching: "検索中…"
   cmd_model_desc: "モデル選択を開く"
   group_builtin: "組み込み"

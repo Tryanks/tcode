@@ -1314,13 +1314,7 @@ fn dispatch_query(
             ))
         }),
         Query::Ping => cx.spawn_background(async { Ok(QueryResponse::Pong) }),
-        Query::ListActiveWorkspace { session_id } => {
-            let cwd = app
-                .resident(&session_id)
-                .map(|active| active.meta.cwd.clone());
-            let task = app.list_workspace_at(cwd, cx);
-            cx.spawn_background(async move { Ok(QueryResponse::ActiveWorkspace(task.await)) })
-        }
+        Query::ListActiveWorkspace { session_id } => app.list_workspace(&session_id, cx),
         Query::ScanExternalHistory => {
             let task = app.scan_external_history(cx);
             cx.spawn_background(async move { Ok(QueryResponse::ExternalHistory(task.await)) })
@@ -2349,13 +2343,6 @@ mod tests {
             })
             .expect_err("missing project root must be refused");
         assert_eq!(rejected.code, "invalid_project_root");
-        assert_eq!(
-            smol::block_on(link.query(Query::ListActiveWorkspace {
-                session_id: "missing".into()
-            }))
-            .expect("query inactive workspace over pipe"),
-            QueryResponse::ActiveWorkspace(Vec::new())
-        );
 
         link.shutdown_blocking()
             .expect("drain quit barrier and stop host");

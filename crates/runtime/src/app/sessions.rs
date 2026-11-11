@@ -946,13 +946,30 @@ impl AppState {
         });
     }
 
-    /// List one replicated session cwd on the background executor.
-    pub fn list_workspace_at(
+    /// List a thread's working directory on the background executor, whether
+    /// or not the thread is running.
+    pub(crate) fn list_workspace(
         &self,
-        cwd: Option<PathBuf>,
-        executor: &HostCx,
-    ) -> HostTask<Vec<PathEntry>> {
-        executor.unblock(move || cwd.map(|cwd| list_workspace(&cwd)).unwrap_or_default())
+        session_id: &str,
+        cx: &HostCx,
+    ) -> HostTask<Result<QueryResponse, ProtocolError>> {
+        let Some(cwd) = self.current_meta(session_id).map(|meta| meta.cwd.clone()) else {
+            let session_id = session_id.to_owned();
+            return cx.spawn_background(async move {
+                Err(ProtocolError {
+                    code: "unknown_session".into(),
+                    message: format!("unknown session {session_id}"),
+                })
+            });
+        };
+        cx.unblock(move || {
+            list_workspace(&cwd)
+                .map(QueryResponse::ActiveWorkspace)
+                .map_err(|message| ProtocolError {
+                    code: "workspace_unreadable".into(),
+                    message,
+                })
+        })
     }
 
     /// Reload sessions written by the external-history importer and expand its

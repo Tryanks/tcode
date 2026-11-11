@@ -48,14 +48,15 @@ impl Composer {
         let Some(cwd) = self.composer_state(cx).active_cwd.clone() else {
             return;
         };
+        let Some(session_id) = self.session_id.clone() else {
+            return;
+        };
         if self.workspace_loading || self.workspace.as_ref().is_some_and(|(c, _)| *c == cwd) {
             return;
         }
         self.workspace_loading = true;
         let store = self.workspace_store.clone();
-        let walked = store.update(cx, |store, cx| {
-            store.list_workspace_for(self.session_id.as_deref(), cx)
-        });
+        let walked = store.update(cx, |store, cx| store.list_workspace_for(&session_id, cx));
         cx.spawn(async move |this, cx| {
             let walked = walked.await;
             let _ = this.update(cx, |this, cx| {
@@ -80,8 +81,8 @@ impl Composer {
                         &[][..],
                         crate::tr!("composer.files_failed", reason = reason).into_owned(),
                     ),
-                    Some(Ok(entries)) => (
-                        entries.as_slice(),
+                    Some(Ok(listing)) => (
+                        listing.entries.as_slice(),
                         crate::tr!("composer.no_files").into_owned(),
                     ),
                     None => (&[][..], crate::tr!("composer.no_files").into_owned()),
@@ -302,7 +303,32 @@ impl Composer {
             empty_text,
             loading,
             highlight,
+            note: self.workspace_note(),
         })
+    }
+
+    /// What the `@` menu says about its listing beyond the rows: that it
+    /// stopped at its limit, or which folders it could not read.
+    fn workspace_note(&self) -> Option<String> {
+        if self.active_trigger.as_ref()?.kind != TriggerKind::Path {
+            return None;
+        }
+        let Some((_, Ok(listing))) = self.workspace.as_ref() else {
+            return None;
+        };
+        let truncated = listing.truncated.then(|| {
+            crate::tr!("composer.files_truncated", count = listing.entries.len()).into_owned()
+        });
+        let unreadable = listing.unreadable.first().map(|reason| {
+            crate::tr!(
+                "composer.files_unreadable",
+                count = listing.unreadable.len(),
+                reason = reason
+            )
+            .into_owned()
+        });
+        let note: Vec<String> = truncated.into_iter().chain(unreadable).collect();
+        (!note.is_empty()).then(|| note.join("\n"))
     }
 
     /// The floating `@`/`/`/`$` menu, rendered in-flow just above the composer
@@ -317,6 +343,7 @@ impl Composer {
             empty_text,
             loading,
             highlight,
+            note,
         } = menu.clone();
 
         let compact = self.compact;
@@ -415,6 +442,9 @@ impl Composer {
             .aria_label(crate::tr!("composer.trigger_results"))
             .w_full()
             .child(list)
+            .when_some(note, |menu, note| {
+                menu.child(div().px_3().pb_1p5().text_caption(cx).child(note))
+            })
             .into_any_element()
     }
 }
@@ -495,6 +525,7 @@ pub(in super::super) struct TriggerMenu {
     empty_text: String,
     loading: bool,
     highlight: usize,
+    note: Option<String>,
 }
 
 #[cfg(test)]
@@ -559,8 +590,14 @@ mod tests {
                 .composer_state_for(store.read(cx).sole_thread().as_deref(), cx)
                 .active_cwd
                 .unwrap();
-            composer.workspace =
-                Some((cwd, Ok(vec![PathEntry::from_rel("file.rs".into(), false)])));
+            composer.workspace = Some((
+                cwd,
+                Ok(WorkspaceListing {
+                    entries: vec![tcode_protocol::PathEntry::from_rel("file.rs".into(), false)],
+                    truncated: false,
+                    unreadable: Vec::new(),
+                }),
+            ));
             window.focus(&composer.input.read(cx).focus_handle(cx), cx);
         });
         for (trigger, first_row) in [("/", "/model"), ("@", "file.rs")] {
@@ -649,9 +686,18 @@ mod tests {
                 .active_cwd
                 .unwrap();
             let entries = (0..3)
-                .map(|index| PathEntry::from_rel(format!("file-{index:02}.rs"), false))
+                .map(|index| {
+                    tcode_protocol::PathEntry::from_rel(format!("file-{index:02}.rs"), false)
+                })
                 .collect();
-            composer.workspace = Some((cwd, Ok(entries)));
+            composer.workspace = Some((
+                cwd,
+                Ok(WorkspaceListing {
+                    entries,
+                    truncated: false,
+                    unreadable: Vec::new(),
+                }),
+            ));
             window.focus(&composer.input.read(cx).focus_handle(cx), cx);
         });
         cx.simulate_input("@");
