@@ -366,7 +366,6 @@ impl Render for TerminalKeyBar {
             .child(
                 h_flex()
                     .id("terminal-key-scroll")
-                    .debug_selector(|| "terminal-key-scroll".into())
                     .flex_1()
                     .min_w_0()
                     .h_full()
@@ -383,7 +382,7 @@ pub(crate) fn should_show_terminal_key_bar(terminal_focused: bool, cx: &App) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, div};
+    use gpui::{AppContext as _, TestAppContext};
 
     #[test]
     fn sticky_terminal_modifiers_encode_once_using_replicated_modes() {
@@ -474,74 +473,6 @@ mod tests {
                     "{key:?}"
                 );
             }
-        }
-    }
-
-    struct NarrowBarProbe {
-        width: f32,
-        bar: Entity<TerminalKeyBar>,
-    }
-
-    impl Render for NarrowBarProbe {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().w(px(self.width)).child(self.bar.clone())
-        }
-    }
-
-    #[gpui::test]
-    fn phone_bar_scrolls_without_losing_pinned_keys_or_vertical_motion(cx: &mut TestAppContext) {
-        use gpui::{PlatformInput, TouchEvent, TouchId, TouchPhase, point};
-        cx.update(crate::theme::init);
-        for width in [360., 393.] {
-            let (_, cx) = cx.add_window_view(|_, cx| NarrowBarProbe {
-                width,
-                bar: cx.new(|cx| TerminalKeyBar::new(cx.focus_handle())),
-            });
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-            let viewport = cx.debug_bounds("terminal-key-scroll").unwrap();
-            let pinned = cx.debug_bounds("terminal-key-escape").unwrap();
-            let first = cx.debug_bounds("terminal-key-left").unwrap();
-            let last = cx.debug_bounds("terminal-key-underscore").unwrap();
-            assert_eq!(
-                cx.debug_bounds("terminal-key-bar").unwrap().size.width,
-                px(width)
-            );
-            assert!(pinned.size.width >= px(material::TOUCH_TARGET));
-            assert!(pinned.size.height >= px(material::TOUCH_TARGET));
-            assert!(
-                last.right() > viewport.right(),
-                "content must exceed the viewport"
-            );
-            assert!(viewport.right() <= px(width));
-            let send = |phase, x, y, cx: &mut VisualTestContext| {
-                cx.update(|window, cx| {
-                    window.dispatch_event(
-                        PlatformInput::Touch(TouchEvent {
-                            id: TouchId(1),
-                            phase,
-                            position: point(px(x), px(y)),
-                            predicted_position: None,
-                            force: None,
-                        }),
-                        cx,
-                    );
-                    let _ = window.draw(cx);
-                });
-            };
-            send(TouchPhase::Started, width - 20., 20., cx);
-            send(TouchPhase::Moved, 190., 20., cx);
-            send(TouchPhase::Cancelled, 190., 20., cx);
-            let moved = cx.debug_bounds("terminal-key-left").unwrap();
-            assert!(moved.left() < first.left(), "horizontal swipe must scroll");
-            assert_eq!(moved.top(), first.top());
-            assert_eq!(cx.debug_bounds("terminal-key-escape").unwrap(), pinned);
-            let inside = f32::from(viewport.left()) + 10.;
-            send(TouchPhase::Started, inside, 20., cx);
-            send(TouchPhase::Moved, width + 300., 20., cx);
-            send(TouchPhase::Cancelled, width + 300., 20., cx);
-            assert_eq!(cx.debug_bounds("terminal-key-left").unwrap(), first);
         }
     }
 

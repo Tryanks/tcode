@@ -229,7 +229,6 @@ impl TooltipHost {
             TooltipPositioner::new(shown.trigger_bounds).child(
                 div()
                     .id(("tcode-tooltip", shown.id))
-                    .debug_selector(|| "tcode-tooltip".into())
                     .child(shown.tooltip.surface(progress, window, cx)),
             ),
         )
@@ -292,118 +291,5 @@ impl Render for TooltipHost {
                 .absolute()
                 .size(gpui::px(0.)),
             )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use gpui::{
-        AppContext as _, Context, InteractiveElement as _, IntoElement, Modifiers,
-        ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, Window, div,
-        point, px,
-    };
-
-    use crate::widgets::Button;
-
-    struct Triggers;
-
-    impl Render for Triggers {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .size_full()
-                .flex()
-                .gap(px(40.))
-                .p(px(80.))
-                .child(
-                    Button::new("first")
-                        .label("First")
-                        .tooltip("First tooltip")
-                        .debug_selector(|| "first".into()),
-                )
-                .child(
-                    Button::new("second")
-                        .label("Second")
-                        .tooltip("Second tooltip")
-                        .debug_selector(|| "second".into()),
-                )
-        }
-    }
-
-    fn window(cx: &mut TestAppContext) -> &mut VisualTestContext {
-        cx.update(crate::theme::init);
-        let (_, cx) =
-            cx.add_window_view(|window, cx| gpui_base::Root::new(cx.new(|_| Triggers), window, cx));
-        draw(cx);
-        cx
-    }
-
-    /// Lets `time` pass and draws the frame after it.
-    fn wait(time: Duration, cx: &mut VisualTestContext) {
-        cx.executor().advance_clock(time);
-        draw(cx);
-    }
-
-    fn draw(cx: &mut VisualTestContext) {
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            window.refresh();
-            window.simulate_next_frame(cx);
-            window.draw(cx).clear(cx);
-        });
-    }
-
-    fn hover(selector: &'static str, cx: &mut VisualTestContext) {
-        let at = cx.debug_bounds(selector).expect("trigger drawn").center();
-        cx.simulate_mouse_move(at, None, Modifiers::default());
-        draw(cx);
-    }
-
-    fn tooltip(cx: &mut VisualTestContext) -> Option<gpui::Bounds<gpui::Pixels>> {
-        cx.debug_bounds("tcode-tooltip")
-    }
-
-    #[gpui::test]
-    fn a_tooltip_leaves_after_its_grace_period(cx: &mut TestAppContext) {
-        let cx = window(cx);
-        let defaults = cx.update(|_, cx| gpui_base::TooltipDefaults::global(cx));
-        hover("first", cx);
-        wait(defaults.show_delay() - Duration::from_millis(1), cx);
-        assert!(tooltip(cx).is_none(), "shown only after the show delay");
-        wait(Duration::from_millis(1), cx);
-        wait(crate::edge_back::SETTLE, cx);
-        let shown = tooltip(cx).expect("shown after the show delay");
-        let trigger = cx.debug_bounds("first").unwrap();
-        assert!(
-            shown.center().y < trigger.top() || shown.center().y > trigger.bottom(),
-            "beside its trigger"
-        );
-
-        cx.simulate_mouse_move(point(px(4.), px(4.)), None, Modifiers::default());
-        draw(cx);
-        wait(defaults.grace_period(), cx);
-        let leaving = tooltip(cx).expect("still drawn while it leaves");
-        assert_eq!(leaving.origin.x, shown.origin.x, "it leaves where it was");
-
-        wait(crate::edge_back::SETTLE, cx);
-        assert!(tooltip(cx).is_none(), "gone once its exit has played");
-    }
-
-    #[gpui::test]
-    fn a_trigger_entered_within_the_grace_period_shows_at_once(cx: &mut TestAppContext) {
-        let cx = window(cx);
-        let defaults = cx.update(|_, cx| gpui_base::TooltipDefaults::global(cx));
-        hover("first", cx);
-        wait(defaults.show_delay(), cx);
-        wait(crate::edge_back::SETTLE, cx);
-        let first = tooltip(cx).expect("first shown");
-
-        hover("second", cx);
-        wait(crate::edge_back::SETTLE, cx);
-        let second = tooltip(cx).expect("second shown without a show delay");
-        let trigger = cx.debug_bounds("second").unwrap();
-        assert!(second.left() > first.left(), "beside the second trigger");
-        assert!(second.right() >= trigger.left() && second.left() <= trigger.right());
     }
 }

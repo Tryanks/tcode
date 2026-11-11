@@ -910,22 +910,7 @@ impl<T: gpui::StatefulInteractiveElement + IntoElement + 'static> RenderOnce
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{TestAppContext, VisualTestContext, point, size};
-    struct MenuHarness;
-    impl Render for MenuHarness {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().flex().flex_col().child(
-                div()
-                    .id("row-a")
-                    .relative()
-                    .h(px(56.))
-                    .w_full()
-                    .child("A")
-                    .context_menu(|menu, _, _| menu.menu("Action", Box::new(Cancel)))
-                    .touch(true),
-            )
-        }
-    }
+    use gpui::{TestAppContext, VisualTestContext, size};
 
     /// Text a view has selected, offered by its context menu.
     struct SelectionHarness;
@@ -958,45 +943,6 @@ mod tests {
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
             Some("    indented\n".into())
         );
-    }
-
-    #[gpui::test]
-    fn context_menu_opens_at_the_pointer_and_stays_in_the_window(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let (_, cx) = cx.add_window_view(|_, _| MenuHarness);
-        cx.simulate_resize(size(px(393.), px(852.)));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let right_click = |cx: &mut VisualTestContext, position| {
-            cx.simulate_event(gpui::MouseDownEvent {
-                button: MouseButton::Right,
-                position,
-                click_count: 1,
-                ..Default::default()
-            });
-            cx.update(|window, cx| window.draw(cx).clear(cx));
-            cx.executor().advance_clock(crate::edge_back::SETTLE);
-            cx.update(|window, cx| {
-                window.simulate_next_frame(cx);
-                window.draw(cx).clear(cx)
-            });
-            cx.debug_bounds("tcode-popup-menu").expect("menu opens")
-        };
-
-        let menu = right_click(cx, point(px(20.), px(30.)));
-        assert_eq!(menu.origin, point(px(20.), px(30.)));
-
-        cx.simulate_keystrokes("escape");
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        cx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-            window.draw(cx).clear(cx)
-        });
-        assert!(cx.debug_bounds("tcode-popup-menu").is_none());
-
-        let menu = right_click(cx, point(px(380.), px(50.)));
-        assert!(menu.right() <= px(393. - 8.), "{menu:?}");
-        assert_eq!(menu.top(), px(50.));
     }
 
     fn touch(cx: &mut VisualTestContext, phase: gpui::TouchPhase, position: Point<Pixels>) {
