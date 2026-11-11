@@ -36,6 +36,7 @@ use crate::widgets::input::{
 };
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::widgets::spinner::Spinner;
+use crate::widgets::whole::whole;
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -1759,11 +1760,16 @@ impl Composer {
                 cx,
             )
             .map(|shown| {
-                shown.fold_across(div().flex_none().child(self.render_send_or_stop(
-                    turn_running,
-                    window,
-                    cx,
-                )))
+                // Narrower than the row's actions themselves, they keep to
+                // its end and are cut from their start, so Stop, the last of
+                // them, is what stays.
+                shown.fold_across(
+                    h_flex()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .justify_end()
+                        .child(self.render_send_or_stop(turn_running, window, cx)),
+                )
             });
         let mut reflow_scope = None;
         let control_row = if self.compact {
@@ -1900,6 +1906,8 @@ impl Composer {
             } else {
                 (Some(meter), None)
             };
+            // What the row has no room for even with the model's name cut
+            // down goes from the end, each part whole.
             let row = control_row_base
                 .child(
                     h_flex()
@@ -1908,19 +1916,19 @@ impl Composer {
                         .overflow_hidden()
                         .items_center()
                         .children(attach_menu.map(|shown| {
-                            shown.fold_across(
+                            whole(shown.fold_across(
                                 div().flex_none().pr_1().child(self.render_attach_menu(cx)),
-                            )
+                            ))
                         }))
-                        .children(model_picker)
-                        .children(traits)
-                        .children(divider)
-                        .children(meter_inside)
-                        .children(permission)
-                        .children(overflow)
+                        .children(model_picker.map(whole))
+                        .children(traits.map(whole))
+                        .children(divider.map(whole))
+                        .children(meter_inside.map(whole))
+                        .children(permission.map(whole))
+                        .children(overflow.map(whole))
                         .child(div().flex_1())
-                        .children(mic.map(|mic| reflow.part("mic", gapped(mic))))
-                        .children(meter_end),
+                        .children(mic.map(|mic| whole(reflow.part("mic", gapped(mic)))))
+                        .children(meter_end.map(whole)),
                 )
                 .children(primary);
             reflow_scope = Some(reflow);

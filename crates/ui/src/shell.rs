@@ -14328,6 +14328,13 @@ pub(crate) mod tests {
             shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
             // Let the compact push animation settle so the picker is in place.
             crate::test_frames::draw_settled(cx);
+            if !mobile && width < 900. {
+                // At a phone's width the sidebar leaves the thread's row no
+                // room for the picker; it is folded away to reach it.
+                let toggle = cx.debug_bounds("toggle-sidebar").expect("sidebar toggle");
+                cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+                crate::test_frames::draw_settled(cx);
+            }
             let picker = cx.debug_bounds("model-picker").expect("model picker");
             cx.simulate_click(picker.center(), gpui::Modifiers::default());
             draw(cx);
