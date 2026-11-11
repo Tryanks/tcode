@@ -1,13 +1,15 @@
-# Defences met so far
+# What the audits met
 
-Cases from the first audit: the provider lifecycle (`crates/agent`,
-`crates/runtime/src/app`), PR #1051. Paths are as they were at `0eebc05cf` and
-may have moved. Each case is evidence, not a rule; the definition, the grounds
-and the rewrite rules are in [SKILL.md](SKILL.md).
+Cases from five rounds: the provider lifecycle (PR #1051), every crate
+outside the UI (#1054), the UI (#1058), what needed a contract changed
+(#1060), and the tests (#1062, #1063). Paths are as they were then and may
+have moved. Each case is evidence, not a rule; the definitions and the
+grounds are in [SKILL.md](SKILL.md), the order of work in
+[AUDIT.md](AUDIT.md).
 
-The maintainer's words are quoted from the session of 2026-11-10, translated
-from Chinese. They decided entries then and are the likeliest to decide
-entries in other areas.
+The maintainer's words are quoted from the sessions of 2026-11-10 and
+2026-11-11, translated from Chinese. They decided entries then and are the
+likeliest to decide entries in other areas.
 
 ## By what the defence does
 

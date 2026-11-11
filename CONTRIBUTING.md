@@ -307,8 +307,8 @@ sake.
    with care, or passes, or has peers of the same shape, is not an answer.
    Delete it, and with it every function, seam, fixture or dependency whose
    only reason to exist was that test. The
-   [`test-audit` skill](.agents/skills/test-audit/SKILL.md) has the patterns
-   and the retention bar.
+   [`slot-audit` skill](.agents/skills/slot-audit/SKILL.md) says what a test
+   proves and what goes on sight.
 3. **Only then treat the code as broken.** When the contract is real and the
    code no longer meets it, fix the code at the behaviour's owner and keep the
    test. A test is rewritten only to move it to the owning boundary or to
@@ -397,8 +397,8 @@ coverage was redundant and where any remaining contract is still covered. A
 bug fix needs no test of its own; one is added only where the fix shows a
 decision Tcode makes had none, and it fails without the fix. Test
 counts and deleted line counts are not quality targets. When a test's value is
-in doubt, or when auditing or pruning tests, follow the
-[`test-audit` skill](.agents/skills/test-audit/SKILL.md); for a test that
+in doubt, or when auditing an area, follow the
+[`slot-audit` skill](.agents/skills/slot-audit/SKILL.md); for a test that
 fails or sits in the area of a change, follow
 [When a test fails, or is met on the way](#when-a-test-fails-or-is-met-on-the-way).
 
