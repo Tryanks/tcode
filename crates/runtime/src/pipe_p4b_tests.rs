@@ -36,7 +36,8 @@ pub(crate) fn observed_events(link: &HostLink) -> async_channel::Receiver<EventE
     received
 }
 
-/// [`fixture`], on a host that keeps `clock`.
+/// A host that keeps `clock`, with a draft thread in a project.
+#[cfg(unix)]
 pub(super) fn fixture_on(
     clock: crate::clock::HostClock,
 ) -> (SpawnedHost, HostMux, HostLink, String) {
