@@ -2,6 +2,7 @@ mod capture;
 mod input;
 mod map;
 mod overlay;
+mod uia;
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -29,7 +30,7 @@ use super::{
 };
 use crate::outline::{Frame, UiNode, canonical_role, is_text_sparse};
 
-use self::map::{
+use self::uia::{
     PatternSupport, actions_for_patterns, frame_from_uia_rect, role_for_control_type,
     root_kind_for_control_type,
 };
