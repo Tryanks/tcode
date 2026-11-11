@@ -4,9 +4,8 @@
 //! stream.
 use std::{
     io::{self, Read as _, Write as _},
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     path::PathBuf,
-    time::{Duration, Instant},
 };
 
 use futures_lite::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -312,26 +311,20 @@ fn a_connect_before_hello_is_refused_and_tunnels_per_connection_are_bounded() {
     assert_eq!(error.to_string(), "too many tunnels");
     drop(tunnels);
     drop(held.join().unwrap());
-    // The slots are released with the tunnels.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // The slots come back once the machine has seen those tunnels end, which
+    // no stream orders before the next open: until then it refuses that open
+    // as it does any over the bound, and the device asks again.
+    let service = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = service.local_addr().unwrap().port();
+    let accepted = std::thread::spawn(move || service.accept().map(drop));
     let reopened = loop {
-        let service = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = service.local_addr().unwrap().port();
-        let accept = std::thread::spawn(move || service.accept().map(|_| ()));
         match open(&device, "127.0.0.1", port) {
-            Ok(tunnel) => {
-                accept.join().unwrap().unwrap();
-                break tunnel;
-            }
-            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-                let _ = TcpStream::connect(("127.0.0.1", port));
-                let _ = accept.join();
-                assert!(Instant::now() < deadline, "tunnel slots were not released");
-                std::thread::sleep(Duration::from_millis(50));
-            }
+            Ok(tunnel) => break tunnel,
+            Err(error) if error.to_string() == "too many tunnels" => {}
             Err(error) => panic!("{error}"),
         }
     };
+    accepted.join().unwrap().unwrap();
     drop(reopened);
 }
 

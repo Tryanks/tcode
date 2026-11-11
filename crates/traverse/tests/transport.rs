@@ -1416,8 +1416,9 @@ fn originals_preserve_control_progress_bytes_and_cancelled_admission() {
 }
 
 /// Opens `target` once the host admits it. A read gives its slot back when the
-/// host sees the client stop the stream, which can trail the client reading
-/// the end or cancelling.
+/// host sees the client stop the stream or acknowledge its end, which no
+/// stream orders before the next request: until then the host answers that
+/// request busy, and the device asks again.
 async fn admitted_original(
     link: &tcode_client::HostLink,
     target: &tcode_protocol::OriginalTarget,
@@ -1426,7 +1427,7 @@ async fn admitted_original(
         let mut next = link.read_original(target.clone());
         match next.metadata().await {
             Ok(_) => break next,
-            Err(error) if error.code == "busy" => tokio::task::yield_now().await,
+            Err(error) if error.code == "busy" => {}
             Err(error) => panic!("original: {error:?}"),
         }
     }
