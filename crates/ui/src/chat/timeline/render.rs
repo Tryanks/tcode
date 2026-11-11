@@ -959,9 +959,10 @@ impl TimelineView {
                     .map(|blocked| components::rewind::blocked_reason(blocked, &target.harness)),
                 in_progress: target.in_progress,
             });
-        let rewind = rewind_menu
-            .as_ref()
-            .map(|menu| self.compose_rewind(menu, cx));
+        let rewind = rewind_menu.map(|menu| {
+            let action = self.compose_rewind(&menu, cx);
+            (menu, action)
+        });
         let markdown = self.md_states.get(entry_id).map(|md| md.state.clone());
         let copy_key = format!("user:{entry_id}");
         let copied = self.copied.is(&copy_key);
@@ -1020,7 +1021,6 @@ impl TimelineView {
                 copied,
                 markdown,
                 rewind,
-                rewind_menu,
                 hover: self.hover.clone(),
                 motion: self.motion.clone(),
             },

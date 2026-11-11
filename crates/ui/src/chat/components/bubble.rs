@@ -52,9 +52,9 @@ pub(crate) struct BubbleData<'a> {
     pub(crate) compact: bool,
     pub(crate) copied: bool,
     pub(crate) markdown: Option<Entity<MarkdownState>>,
-    pub(crate) rewind: Option<AnyElement>,
-    /// The rewind the context menu offers, when the harness has one.
-    pub(crate) rewind_menu: Option<RewindMenu>,
+    /// The rewind the harness offers: what the context menu offers, and
+    /// the action beside Copy.
+    pub(crate) rewind: Option<(RewindMenu, AnyElement)>,
     /// The timeline's hover, which reveals the message's actions.
     pub(crate) hover: crate::motion::ListHover,
     /// The chat's motion, which keeps the rewind's fold and the pictures'
@@ -163,12 +163,12 @@ pub(crate) fn user_bubble(
         copied,
         markdown,
         rewind,
-        rewind_menu,
         hover,
         motion,
     } = data;
+    let (offered, mut rewind) = rewind.unzip();
     let BubbleHandlers { copy, images } = handlers;
-    let menu_items = bubble_menu_items(Arc::from(visible), rewind_menu.clone());
+    let menu_items = bubble_menu_items(Arc::from(visible), offered.clone());
     let prose = cx.theme().tokens.typography.md;
     let spacing = &cx.theme().tokens.spacing;
     let text_style = window.text_style();
@@ -202,8 +202,6 @@ pub(crate) fn user_bubble(
     // The rewind comes into the row beside Copy once the harness offers it,
     // and goes as it was, inert, when it stops.
     let rewind_id = SharedString::from(format!("rewind-fold-{entry_id}"));
-    let offered = rewind_menu.clone().filter(|_| rewind.is_some());
-    let mut rewind = rewind;
     let actions = crate::motion::Sampled::new({
         let motion = motion.clone();
         move |window, cx| {
