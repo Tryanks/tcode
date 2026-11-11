@@ -34,9 +34,9 @@ fn a_history_directory_the_scan_cannot_read_is_reported() {
     std::fs::create_dir_all(&locked).unwrap();
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
     let roots = super::ExternalRoots {
-        claude_projects: Some(root.join("projects")),
+        claude_projects: vec![(None, root.join("projects"))],
         claude_desktop_meta: None,
-        codex_session_roots: vec![root.join("codex/sessions")],
+        codex_session_roots: vec![(None, root.join("codex/sessions"))],
     };
     let history = super::scan_recent_dirs(&roots, &[]);
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -149,9 +149,12 @@ fn a_rollout_codex_compressed_is_listed_and_imports_as_it_was_written() {
     )
     .unwrap();
     let roots = super::ExternalRoots {
-        claude_projects: None,
+        claude_projects: Vec::new(),
         claude_desktop_meta: None,
-        codex_session_roots: vec![home.join("sessions"), home.join("archived_sessions")],
+        codex_session_roots: vec![
+            (None, home.join("sessions")),
+            (None, home.join("archived_sessions")),
+        ],
     };
     let listed = |roots: &super::ExternalRoots| {
         let history = super::scan_recent_dirs(roots, &[]);
@@ -284,9 +287,9 @@ fn a_reverted_codex_thread_shows_the_history_it_kept_and_what_followed() {
 
     let history = super::scan_recent_dirs(
         &super::ExternalRoots {
-            claude_projects: None,
+            claude_projects: Vec::new(),
             claude_desktop_meta: None,
-            codex_session_roots: vec![home.join("sessions"), archived],
+            codex_session_roots: vec![(None, home.join("sessions")), (None, archived)],
         },
         &[],
     );

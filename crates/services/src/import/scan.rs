@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -27,12 +27,14 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Ext
         .unwrap_or_default();
     let mut found = Vec::<(PathBuf, ExternalThread)>::new();
 
-    let claude_files = roots
-        .claude_projects
-        .as_deref()
-        .map(|root| claude_session_files(root, &mut unreadable))
-        .unwrap_or_default();
-    for path in claude_files {
+    let mut claude_files = Vec::new();
+    for (profile, root) in &roots.claude_projects {
+        for path in claude_session_files(root, &mut unreadable) {
+            claude_files.push((profile.clone(), path));
+        }
+    }
+    let mut claude_ids = HashSet::new();
+    for (profile_id, path) in claude_files {
         let file = match File::open(&path) {
             Ok(file) => file,
             Err(error) => {
@@ -82,6 +84,10 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Ext
         let Some((cwd, id, entrypoint, head_ts)) = head else {
             continue;
         };
+        // A session copied into a second profile's directory is listed once.
+        if !claude_ids.insert(id.clone()) {
+            continue;
+        }
         // `entrypoint` is the CLAUDE_CODE_ENTRYPOINT the session ran under:
         // T3 Code sets "t3-code"; the Agent SDKs set "sdk-ts", "sdk-py" and
         // "sdk-cli" for any application built on them.
@@ -106,6 +112,7 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Ext
                 last_active_ms: joined
                     .and_then(|meta| meta.last_active_ms)
                     .unwrap_or_else(|| file_modified_ms(&path).max(head_ts.unwrap_or(0))),
+                profile_id,
             },
         ));
     }
@@ -114,7 +121,7 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Ext
     // and Codex reads the one whose name is newest
     // (`find_thread_path_by_id_from_filenames`, `rollout/src/list.rs`).
     let mut codex = HashMap::<String, ((String, String), PathBuf, ExternalThread)>::new();
-    for root in &roots.codex_session_roots {
+    for (profile_id, root) in &roots.codex_session_roots {
         let files = collect_files(root, &super::codex::is_read_rollout, &mut unreadable);
         for path in files {
             let line = match super::codex::open_rollout(&path)
@@ -158,6 +165,7 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Ext
                 title_hint: None,
                 last_active_ms: file_modified_ms(&path)
                     .max(value.get("timestamp").and_then(timestamp_ms).unwrap_or(0)),
+                profile_id: profile_id.clone(),
             };
             if codex
                 .get(&thread.external_id)

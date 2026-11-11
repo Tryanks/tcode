@@ -618,6 +618,7 @@ fn claude_thread(dir: &Path, id: &str, text: &str) -> ExternalThread {
         external_id: format!("claude:{id}"),
         title_hint: None,
         last_active_ms: 1_767_322_800_000,
+        profile_id: None,
     }
 }
 
@@ -779,9 +780,13 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
     };
     assert!(!before.worktree_shared.contains("archived-owner"));
     let history = root.join("history");
+    // A thread found in an account's config directory resumes on that account.
     let threads = vec![
         claude_thread(&history, "thread-a", "first imported conversation"),
-        claude_thread(&history, "thread-b", "second imported conversation"),
+        ExternalThread {
+            profile_id: Some("work".into()),
+            ..claude_thread(&history, "thread-b", "second imported conversation")
+        },
     ];
 
     let events = observed_events(&watcher);
@@ -839,6 +844,7 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
 
     // Scan in arrival order: the finalized index must precede `Finished`.
     let mut imported_ids = std::collections::HashSet::new();
+    let mut profiles = std::collections::BTreeMap::new();
     loop {
         let envelope = super::tests::next_event(&events, |_| true);
         match &envelope.event {
@@ -846,6 +852,7 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
                 if meta.project_id.as_deref() == Some(project_id.as_str()) =>
             {
                 imported_ids.insert(meta.id.clone());
+                profiles.insert(meta.imported_from.clone(), meta.profile_id.clone());
             }
             ServerEvent::ExternalImportStatusReplaced {
                 status: Some(status),
@@ -867,6 +874,14 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
             _ => {}
         }
     }
+    assert_eq!(
+        profiles,
+        [
+            (Some("claude:thread-a".to_owned()), None),
+            (Some("claude:thread-b".to_owned()), Some("work".to_owned())),
+        ]
+        .into()
+    );
     let QueryResponse::ArchivedSessions(after) =
         smol::block_on(watcher.query(Query::ArchivedSessions)).unwrap()
     else {

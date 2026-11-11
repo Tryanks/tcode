@@ -16,34 +16,47 @@ use crate::store::{Mutation, SessionStore};
 use tcode_core::project::{Project, SessionMeta};
 pub use tcode_protocol::{ExternalHistory, ExternalThread, RecentDir, SourceTool};
 
-/// Where each tool keeps its history; `None` or empty where there is none
-/// to scan, as for a host with no home directory.
+/// Where each tool keeps its history, and the Tcode profile whose CLI keeps
+/// it there (`None` for a harness's built-in profile); empty where there is
+/// none to scan, as for a host with no home directory.
 #[derive(Debug, Clone)]
 pub struct ExternalRoots {
-    pub claude_projects: Option<PathBuf>,
+    pub claude_projects: Vec<(Option<String>, PathBuf)>,
     pub claude_desktop_meta: Option<PathBuf>,
-    pub codex_session_roots: Vec<PathBuf>,
+    pub codex_session_roots: Vec<(Option<String>, PathBuf)>,
 }
 
 impl ExternalRoots {
-    pub fn detect() -> Self {
-        let home = dirs::home_dir();
-        let codex_home = std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .or_else(|| home.as_ref().map(|home| home.join(".codex")));
+    /// The history in each Claude Code config directory and Codex home a
+    /// profile's CLI runs with: `projects/` in the one, `sessions/` and
+    /// `archived_sessions/` in the other. A directory two profiles share is
+    /// scanned once, for the first.
+    pub fn in_config_dirs(
+        claude: Vec<(Option<String>, PathBuf)>,
+        codex: Vec<(Option<String>, PathBuf)>,
+    ) -> Self {
+        fn once(dirs: Vec<(Option<String>, PathBuf)>) -> Vec<(Option<String>, PathBuf)> {
+            let mut seen = HashSet::new();
+            dirs.into_iter()
+                .filter(|(_, dir)| seen.insert(dir.clone()))
+                .collect()
+        }
         Self {
-            claude_projects: home.as_ref().map(|home| home.join(".claude/projects")),
-            claude_desktop_meta: home
-                .as_ref()
+            claude_projects: once(claude)
+                .into_iter()
+                .map(|(profile, dir)| (profile, dir.join("projects")))
+                .collect(),
+            claude_desktop_meta: dirs::home_dir()
                 .map(|home| home.join("Library/Application Support/Claude/claude-code-sessions")),
-            codex_session_roots: codex_home
-                .map(|codex_home| {
-                    vec![
-                        codex_home.join("sessions"),
-                        codex_home.join("archived_sessions"),
+            codex_session_roots: once(codex)
+                .into_iter()
+                .flat_map(|(profile, home)| {
+                    [
+                        (profile.clone(), home.join("sessions")),
+                        (profile, home.join("archived_sessions")),
                     ]
                 })
-                .unwrap_or_default(),
+                .collect(),
         }
     }
 }
@@ -173,6 +186,7 @@ pub fn import_thread(
     meta.created_at = converted.created_ms / 1000;
     meta.updated_at = converted.updated_ms / 1000;
     meta.imported_from = Some(converted.external_id.clone());
+    meta.profile_id = thread.profile_id.clone();
     meta.resume_cursor = Some(cursor.clone());
 
     let mut events = vec![(

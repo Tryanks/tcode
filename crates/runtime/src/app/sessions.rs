@@ -719,9 +719,13 @@ impl AppState {
             .map(|project| project.root.clone())
             .collect();
         let sessions = self.sessions.clone();
+        let roots = ExternalRoots::in_config_dirs(
+            history_dirs(&self.settings, ProviderKind::ClaudeCode),
+            history_dirs(&self.settings, ProviderKind::Codex),
+        );
         executor.unblock(move || {
             let known = existing_external_ids(&sessions);
-            let mut history = scan_recent_dirs(&ExternalRoots::detect(), &exclude);
+            let mut history = scan_recent_dirs(&roots, &exclude);
             for dir in &mut history.dirs {
                 dir.threads
                     .retain(|thread| !known.contains(&thread.external_id));
@@ -2605,3 +2609,27 @@ pub(super) fn directory_within(root: &Path, dir: &Path) -> Option<bool> {
 #[cfg(test)]
 #[path = "sessions_tests.rs"]
 mod tests;
+
+/// The config directory each `kind` profile's CLI keeps its history in, as
+/// its own variables, its Harness's, or this process's environment name it,
+/// with the profile's id (`None` for the built-in one).
+pub(super) fn history_dirs(
+    settings: &Settings,
+    kind: ProviderKind,
+) -> Vec<(Option<String>, PathBuf)> {
+    settings
+        .profiles_for_kind(kind)
+        .into_iter()
+        .filter_map(|profile| {
+            let env = super::providers::launch_env_for_profile(
+                settings,
+                &profile.id,
+                Default::default(),
+                Default::default(),
+            );
+            let dir = agent::harness::config_dir(kind, &env)?;
+            let id = (profile.id != Settings::builtin_profile_id(kind)).then_some(profile.id);
+            Some((id, dir))
+        })
+        .collect()
+}

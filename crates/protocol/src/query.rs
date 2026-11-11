@@ -411,6 +411,10 @@ pub struct ExternalThread {
     pub external_id: String,
     pub title_hint: Option<String>,
     pub last_active_ms: u64,
+    /// The profile whose CLI keeps the thread, which resumes it; `None` for
+    /// the harness's built-in profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
 }
 
 /// What a scan of external agents' histories found, and what it could not

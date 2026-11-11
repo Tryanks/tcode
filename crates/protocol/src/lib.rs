@@ -354,6 +354,7 @@ pub use wire::{
 // SessionStatus gains goal_control and manual_compaction.
 // ProviderSnapshot gains supported_from, the oldest release Tcode supports,
 // present when the probed CLI is older.
+// ExternalThread gains profile_id, the profile whose CLI keeps the thread.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]
