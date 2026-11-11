@@ -556,10 +556,9 @@ impl Drawer {
             }
         }
 
-        // The state keeps the panel's size for a drag to start from. A panel
-        // new to the group has its size but not yet the conversation's; a
-        // room that changes is held at that size this frame, and the state
-        // takes it once the frame has laid both out.
+        // The state keeps the panel's size for a drag to start from: a room
+        // that changes is held at that size this frame, and the state takes
+        // it once the frame has laid it out.
         let moved = drawn && self.laid_out.replace(room) != Some(room);
         if !drawn {
             self.laid_out = None;

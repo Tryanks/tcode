@@ -68,10 +68,10 @@ impl Panel {
 /// it pins each sized panel's `size_range` to the glide's size for the
 /// frame instead, the one constraint the panel lets its caller set that
 /// overrides the state's size, and lets the panels that take the rest go
-/// down to nothing. On the frame it lands it pins the targets, and then
-/// writes each shown sized panel's target into the state (gpui-base latches
-/// a panel's first measured size, which for a panel that grew out of
-/// nothing is nothing), so the next frame, unpinned, draws the same layout.
+/// down to nothing. On the frame a change lands, the glide's last or, when
+/// it does not glide, the change's own, it pins the targets and has the
+/// group measure every panel afresh from that layout, so the next frame,
+/// unpinned, draws the same layout, and a drag starts from it.
 ///
 /// Only a change of which panels are shown glides; a size that changes
 /// while they stay the same (a window resize, a drag) is followed at once,
@@ -210,6 +210,7 @@ impl ResizeGlide {
             .iter()
             .all(|slot| !slot.shown || slot.drawn.get().is_some());
         let drawn_before = self.slots.iter().any(|slot| slot.shown);
+        let was_gliding = self.glide.is_some();
         if changed && animate && measured && drawn_before {
             self.begin(panels);
         } else if !animate {
@@ -229,6 +230,9 @@ impl ResizeGlide {
         let drawn = self.slots.iter().map(|slot| slot.drawn.clone()).collect();
 
         let Some(glide) = &mut self.glide else {
+            if changed || was_gliding {
+                lay_out_afresh(state, cx);
+            }
             settle(state, panels, false, window, cx);
             return ResizeFrame {
                 axis,
@@ -286,6 +290,7 @@ impl ResizeGlide {
             })
             .collect();
         if landed {
+            lay_out_afresh(state, cx);
             settle(state, panels, true, window, cx);
             self.glide = None;
         }
@@ -449,10 +454,23 @@ fn along(size: Size<Pixels>, axis: Axis) -> Pixels {
     }
 }
 
+/// Have the group measure every panel's size from this frame's layout, as
+/// it does on its first frame: for a frame that lands a change of which
+/// panels show, before the group is built.
+///
+/// gpui-base takes a panel's size into the state only from the panel's
+/// first measured bounds, and a panel joining the group leaves the others'
+/// sizes as they were; a drag then starts from those sizes rather than
+/// from the bounds. A panel that joined at its full size would leave its
+/// neighbour's size from before it was there, and the first drag would
+/// move the edge by that difference.
+fn lay_out_afresh(state: &Entity<ResizableState>, cx: &mut App) {
+    state.update(cx, |state, _| state.clear());
+}
+
 /// Bring the group's state into line with `panels` after this frame's
 /// prepaint, which records the ranges this frame gives them: every kept panel
-/// not shown at nothing, and, when a glide `landed`, every shown sized panel
-/// at its size.
+/// not shown at nothing. A glide that `landed` draws the next frame, unpinned.
 fn settle(
     state: &Entity<ResizableState>,
     panels: &[Panel],
@@ -464,16 +482,10 @@ fn settle(
     let writes: Vec<(usize, Pixels)> = panels
         .iter()
         .enumerate()
-        .filter_map(|(ix, panel)| match (panel.size, panel.shown) {
-            (Some(size), true) if landed => Some((ix, size)),
-            (_, false) if panel.kept => Some((ix, px(0.))),
-            _ => None,
+        .filter(|(ix, panel)| {
+            panel.kept && !panel.shown && sizes.get(*ix).is_some_and(|held| held.abs() > px(0.5))
         })
-        .filter(|(ix, size)| {
-            sizes
-                .get(*ix)
-                .is_some_and(|held| (*held - *size).abs() > px(0.5))
-        })
+        .map(|(ix, _)| (ix, px(0.)))
         .collect();
     if writes.is_empty() && !landed {
         return;

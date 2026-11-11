@@ -386,8 +386,6 @@ pub struct TerminalDrawer {
     /// The split last shown, which a closing pane is drawn from and lies
     /// along.
     last_split: Option<tcode_protocol::TerminalSplitStatus>,
-    /// Whether the body was last drawn split.
-    split_shown: bool,
     /// The body's size when last laid out, which a new split halves.
     body_size: Rc<std::cell::Cell<gpui::Size<Pixels>>>,
     row_layout_cache: RefCell<HashMap<u64, TerminalGridCache>>,
@@ -504,7 +502,6 @@ impl TerminalDrawer {
             split_glide: split_glide(&scene),
             scene,
             last_split: None,
-            split_shown: false,
             body_size: Rc::default(),
             row_layout_cache: RefCell::new(HashMap::new()),
             cell_width: TERMINAL_CELL_WIDTH,
@@ -2116,12 +2113,6 @@ impl Render for TerminalDrawer {
         self.split_glide.turn(axis);
         let axis_ix = usize::from(axis == gpui::Axis::Vertical);
         let reduced = cx.reduce_motion();
-        if reduced && self.split_shown != active_split.is_some() {
-            // Nothing glides it there: the group lays its panes out afresh,
-            // splitting the body evenly.
-            self.split_states[axis_ix] = cx.new(|_| gpui_base::ResizableState::default());
-        }
-        self.split_shown = active_split.is_some();
         let state = self.split_states[axis_ix].clone();
         let body_size = self.body_size.get();
         let extent = match axis {
