@@ -3176,6 +3176,24 @@ pub enum ToolFamily {
     },
     /// A skill the harness launched or loaded.
     Skill { name: String },
+    /// A pause the model asked for, of the length it asked.
+    Wait { duration_ms: u64 },
+    /// A picture the harness generated. The call's images are the picture.
+    ImageGeneration {
+        /// The prompt the picture was generated from, as the harness
+        /// rewrote it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+    },
+    /// The harness's automatic reviewer's verdict on an action the model
+    /// took. The call's output is its rationale.
+    Review {
+        /// The action reviewed.
+        action: String,
+        /// The risk it rated the action, when it rated one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        risk: Option<String>,
+    },
 }
 
 impl ToolFamily {
@@ -3188,6 +3206,9 @@ impl ToolFamily {
             Self::Fetch { url, .. } => Some(url),
             Self::WebSearch { query, .. } | Self::LoadTools { query, .. } => Some(query),
             Self::Skill { name } => Some(name),
+            Self::Wait { .. } => None,
+            Self::ImageGeneration { prompt } => prompt.as_deref(),
+            Self::Review { action, .. } => Some(action),
         }
     }
 }

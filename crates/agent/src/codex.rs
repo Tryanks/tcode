@@ -1925,6 +1925,13 @@ impl Actor {
         if let Some(risk) = review.get("riskLevel").filter(|risk| !risk.is_null()) {
             input["risk"] = risk.clone();
         }
+        let family = ToolFamily::Review {
+            action: summary,
+            risk: review
+                .get("riskLevel")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        };
         let item_status = match status {
             "inProgress" => ItemStatus::InProgress,
             "approved" => ItemStatus::Completed,
@@ -1940,7 +1947,7 @@ impl Actor {
                 input,
                 output: (!rationale.is_empty()).then(|| rationale.to_owned()),
                 status: item_status,
-                family: None,
+                family: Some(Box::new(family)),
             },
         };
         self.events
@@ -4176,7 +4183,10 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             input: json!({ "duration_ms": item.get("durationMs").cloned().unwrap_or(Value::Null) }),
             output: None,
             status: map_status(item.get("status").and_then(Value::as_str)),
-            family: None,
+            family: item
+                .get("durationMs")
+                .and_then(Value::as_u64)
+                .map(|duration_ms| Box::new(ToolFamily::Wait { duration_ms })),
         },
         "imageGeneration" => image_generation(item),
         _ => ItemContent::Other {
@@ -4248,7 +4258,9 @@ pub fn image_generation(item: &Value) -> ItemContent {
         input: Value::Object(input),
         output: failure.map(Value::to_string),
         status,
-        family: None,
+        family: Some(Box::new(ToolFamily::ImageGeneration {
+            prompt: text("revisedPrompt").map(str::to_owned),
+        })),
     }
 }
 
@@ -7138,9 +7150,9 @@ mod tests {
     }
 
     /// A sleep and an image generation, as Codex sent them, arrive as the
-    /// calls a rollout records them as: the sleep finished once it
-    /// completes, the picture an image the call holds, kept where Codex
-    /// saved it.
+    /// calls a rollout records them as, of the families they are: the sleep
+    /// finished once it completes, the picture an image the call holds,
+    /// kept where Codex saved it.
     #[test]
     fn sleeps_and_image_generations_arrive_as_their_calls() {
         let sleep = json!({"type":"sleep","id":"call_000000000000000000000003","durationMs":20000});
@@ -7150,7 +7162,9 @@ mod tests {
             input: json!({"duration_ms": 20000}),
             output: None,
             status,
-            family: None,
+            family: Some(Box::new(ToolFamily::Wait {
+                duration_ms: 20_000,
+            })),
         };
         assert_eq!(
             lifecycle_item("item/started", &sleep).unwrap().content,
@@ -7177,7 +7191,12 @@ mod tests {
             }),
             output: None,
             status: ItemStatus::Completed,
-            family: None,
+            family: Some(Box::new(ToolFamily::ImageGeneration {
+                prompt: Some(
+                    "Edit the reference image: keep the subject, make the background transparent."
+                        .into(),
+                ),
+            })),
         };
         assert_eq!(
             lifecycle_item("item/completed", &generation)

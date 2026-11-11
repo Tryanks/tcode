@@ -369,7 +369,8 @@ pub use wire::{
 // {scope, pattern, path, glob, hits}, each hit {path, line, text}; question
 // {questions}, each {question, options, answers}; fetch {url, prompt};
 // web_search {query, links}, each link {title, url}; load_tools {query,
-// tools}; skill {name}.
+// tools}; skill {name}; wait {duration_ms}; image_generation {prompt};
+// review {action, risk}.
 // The served_model event gains from, the model the harness named before it.
 // RuntimeError gains title_attachment_unreadable {path, error}.
 // PullRequestFile's additions and deletions may be absent: a binary or
