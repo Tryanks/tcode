@@ -3036,6 +3036,7 @@ mod tests {
             instructions: None,
             processes: processes.clone(),
             clock: Default::default(),
+            worktrees: Vec::new(),
         };
         let start = smol::spawn(crate::start_session(ProviderKind::Acp, opts));
         asked.accept().unwrap();

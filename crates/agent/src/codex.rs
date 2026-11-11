@@ -7968,6 +7968,7 @@ mod tests {
                     instructions: None,
                     processes: Default::default(),
                     clock: Default::default(),
+                    worktrees: Vec::new(),
                 };
                 let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
                     .await
@@ -8058,6 +8059,7 @@ mod tests {
                     instructions: None,
                     processes: Default::default(),
                     clock: Default::default(),
+                    worktrees: Vec::new(),
                 };
                 let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
                     .await

@@ -431,6 +431,7 @@ async fn run_probe(
         instructions: None,
         processes: Default::default(),
         clock: Default::default(),
+        worktrees: Vec::new(),
     };
     let handle = match start_session(provider, opts).await {
         Ok(handle) => handle,

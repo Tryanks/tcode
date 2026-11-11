@@ -446,6 +446,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
 
     let session_config = SessionConfig {
         cwd: opts.cwd.clone(),
+        worktrees: opts.worktrees.clone(),
         claude_dir: config_dir(&opts.launch_env),
         launch,
         resumed: opts.resume.is_some(),
@@ -821,6 +822,8 @@ struct PendingSettings {
 struct SessionConfig {
     /// The directory the process was started in.
     cwd: PathBuf,
+    /// [`SessionOptions::worktrees`].
+    worktrees: Vec<PathBuf>,
     claude_dir: Option<PathBuf>,
     launch: ClaudeLaunchOptions,
     /// The transcript already holds history this process did not write.
@@ -910,6 +913,7 @@ async fn actor_loop(
     mapper.applied_settings = config.launch.clone();
     mapper.launch_cwd = Some(config.cwd.clone());
     mapper.cwd = Some(config.cwd.clone());
+    mapper.worktrees = config.worktrees.clone();
     let claude_dir = config.claude_dir.clone();
     // Before any user message, so no worktree is made without the host.
     let initialize = mapper.initialize_request();
@@ -2038,6 +2042,12 @@ pub(crate) struct Mapper {
     /// in now, as far as Claude has said. `None` in fixtures that start nowhere.
     launch_cwd: Option<PathBuf>,
     cwd: Option<PathBuf>,
+    /// The worktrees Tcode made for this thread: those it had when the
+    /// process started and each the host has given since.
+    worktrees: Vec<PathBuf>,
+    /// Where the session worked before `EnterWorktree` took it into a
+    /// worktree, which `ExitWorktree` returns it to.
+    before_worktree: Option<PathBuf>,
     outgoing: Vec<Value>,
     request_usage: Value,
     latest_usage: TokenUsage,
@@ -2111,6 +2121,8 @@ impl Mapper {
             subagent_worktrees: HashMap::new(),
             launch_cwd: None,
             cwd: None,
+            worktrees: Vec::new(),
+            before_worktree: None,
             outgoing: Vec::new(),
             request_usage: json!({}),
             latest_usage: TokenUsage::default(),
@@ -2486,6 +2498,7 @@ impl Mapper {
         };
         let response = match (&request, answer) {
             (WorktreeRequest::Create { cwd, name }, WorktreeAnswer::Ready { path, .. }) => {
+                self.worktrees.push(path.clone());
                 if let Some(agent_id) = name.strip_prefix(SUBAGENT_WORKTREE_PREFIX) {
                     self.subagent_worktrees
                         .insert(agent_id.to_owned(), (cwd.clone(), path.clone()));
@@ -2512,8 +2525,7 @@ impl Mapper {
 
     /// The session works in `to` from now on, as Claude reported it: a move, unless
     /// that is where it works already.
-    fn move_session(&mut self, to: &str) -> Option<AgentEvent> {
-        let to = PathBuf::from(to);
+    fn move_session(&mut self, to: PathBuf) -> Option<AgentEvent> {
         let from = self.cwd.as_ref()?;
         if same_directory(from, &to) {
             return None;
@@ -2760,13 +2772,20 @@ impl Mapper {
             }
             self.applied_permission_mode = mode.to_owned();
         }
-        // A resumed session goes on where it last worked, which Claude restores
-        // itself: a worktree it had entered rather than the directory it was
-        // started in.
+        // A resumed session goes on in the worktree it had entered, which
+        // Claude restores itself (2.1.322) wherever it was started. Any other
+        // directory here is where the Bash tool's shell last cd'd to, which
+        // Claude carries from turn to turn and does not restore on resume:
+        // that is not the session moving.
         let moved = msg
             .get("cwd")
             .and_then(Value::as_str)
-            .and_then(|cwd| self.move_session(cwd));
+            .filter(|cwd| {
+                self.worktrees
+                    .iter()
+                    .any(|worktree| same_directory(worktree, Path::new(cwd)))
+            })
+            .and_then(|cwd| self.move_session(PathBuf::from(cwd)));
         if self.session_id.is_some() {
             let mut events = vec![self.permission_options()];
             events.extend(moved);
@@ -3636,17 +3655,31 @@ impl Mapper {
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            // Where the session works after it entered or left a worktree.
+            // Where the session works after it entered or left a worktree:
+            // the worktree, and on leaving it the directory it worked in
+            // before, which `restoredCwd` names only as the shell's last cd.
+            let result_path = |key: &str| {
+                msg.pointer(&format!("/tool_use_result/{key}"))
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from)
+            };
             let moved_to = match &item {
                 ToolItem::Tool { name, .. } if !is_error => match name.as_str() {
-                    "EnterWorktree" => msg.pointer("/tool_use_result/worktreePath"),
-                    "ExitWorktree" => msg.pointer("/tool_use_result/restoredCwd"),
+                    "EnterWorktree" => {
+                        let to = result_path("worktreePath");
+                        if to.is_some() {
+                            self.before_worktree = self.cwd.clone();
+                        }
+                        to
+                    }
+                    "ExitWorktree" => self
+                        .before_worktree
+                        .take()
+                        .or_else(|| result_path("restoredCwd")),
                     _ => None,
                 },
                 _ => None,
-            }
-            .and_then(Value::as_str)
-            .map(str::to_owned);
+            };
             let output =
                 ToolOutput::from_content(block.get("content").unwrap_or(&Value::Null)).text;
             let status = if is_error {
@@ -3739,7 +3772,7 @@ impl Mapper {
                     parent_item_id: None,
                 });
             }
-            out.extend(moved_to.and_then(|to| self.move_session(&to)));
+            out.extend(moved_to.and_then(|to| self.move_session(to)));
         }
         out
     }
@@ -5485,11 +5518,13 @@ mod tests {
         );
     }
 
-    /// The session's directory follows Claude: into the worktree `EnterWorktree`
-    /// made, back to the one `ExitWorktree` restored (in the spelling Tcode
-    /// started it with, though Claude reports it resolved), and, on resume, to
-    /// the worktree `system/init` says Claude restored. A subagent's own
-    /// `EnterWorktree` moves only that subagent.
+    /// The session's directory follows Claude in and out of worktrees: into
+    /// the worktree `EnterWorktree` made, back to where it worked before when
+    /// `ExitWorktree` leaves it (in the spelling Tcode started it with), and,
+    /// on resume, to a worktree of the thread's that `system/init` says Claude
+    /// restored. A directory the shell merely cd'd to, which `system/init`
+    /// reports too, is not a move. A subagent's own `EnterWorktree` moves only
+    /// that subagent.
     #[cfg(unix)]
     #[test]
     fn the_session_directory_follows_claude_in_and_out_of_worktrees() {
@@ -5505,6 +5540,7 @@ mod tests {
             let mut mapper = Mapper::new();
             mapper.launch_cwd = Some(link.clone());
             mapper.cwd = Some(link.clone());
+            mapper.worktrees = vec![worktree.clone()];
             let events = mapper.on_message(json!({"type":"system","subtype":"init","cwd":cwd,"session_id":"native","permissionMode":"default"}));
             (mapper, events)
         };
@@ -5524,6 +5560,8 @@ mod tests {
 
         let (mut mapper, events) = started(&resolved);
         assert_eq!(moved(&events), []);
+        let shell = mapper.on_message(json!({"type":"system","subtype":"init","cwd":resolved.join("src"),"session_id":"native","permissionMode":"default"}));
+        assert_eq!(moved(&shell), []);
         let tool = |id: &str, name: &str, result: Value| {
             [
                 json!({"type":"assistant","message":{"id":format!("msg-{id}"),"role":"assistant","content":[{"type":"tool_use","id":id,"name":name,"input":{}}]},"parent_tool_use_id":null,"session_id":"native"}),

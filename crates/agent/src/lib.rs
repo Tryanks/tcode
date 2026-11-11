@@ -1218,6 +1218,9 @@ pub struct SessionOptions {
     /// stop them whatever the session is waiting on.
     #[cfg(feature = "process")]
     pub processes: SessionProcesses,
+    /// The worktrees Tcode made for the thread, which a resumed session may
+    /// report it works in.
+    pub worktrees: Vec<PathBuf>,
     /// The host's time, which the session's waits on its harness read.
     #[cfg(feature = "process")]
     pub clock: Clock,

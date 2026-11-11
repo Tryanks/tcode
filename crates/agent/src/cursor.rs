@@ -100,6 +100,7 @@ pub async fn list_models(
         instructions: None,
         processes: Default::default(),
         clock: Default::default(),
+        worktrees: Vec::new(),
     };
     let cursor = Cursor::new(&opts);
     acp_session::query(

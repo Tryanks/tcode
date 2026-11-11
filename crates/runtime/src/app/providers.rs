@@ -1989,6 +1989,13 @@ pub(super) fn session_options(
             launch: agent.launch.clone(),
         }),
         instructions: None,
+        worktrees: meta
+            .worktree
+            .as_ref()
+            .map(|_| meta.cwd.clone())
+            .into_iter()
+            .chain(meta.other_worktrees.iter().map(|owned| owned.path.clone()))
+            .collect(),
         processes: Default::default(),
         clock: Default::default(),
     })
