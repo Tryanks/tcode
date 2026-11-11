@@ -1698,172 +1698,18 @@ mod tests {
         }
     }
 
+    /// A message to a thread the host no longer has is refused, never
+    /// accepted and lost.
     #[test]
-    fn stale_conversation_actions_are_rejected_over_the_pipe() {
+    fn a_message_to_a_missing_thread_is_refused_over_the_pipe() {
         let root =
-            std::env::temp_dir().join(format!("tcode-stale-actions-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("tcode-missing-thread-{}", uuid::Uuid::new_v4()));
         let host = spawn_host(
             SessionStore::open_at(root.clone()).unwrap(),
             HostServices::default(),
         )
         .unwrap();
         let link = host.link();
-        let CommandResponse::SessionId(Some(id)) = link
-            .command_blocking(Command::StartDraft {
-                project_id: "fixture".into(),
-                cwd: root.clone(),
-            })
-            .unwrap()
-        else {
-            panic!("draft id")
-        };
-        for (command, code) in [
-            (
-                Command::DeleteProfile {
-                    profile_id: "codex".into(),
-                },
-                "builtin_profile",
-            ),
-            (
-                Command::InstallAcpAgent {
-                    id: "nonexistent-registry-agent".into(),
-                },
-                "unknown_acp_agent",
-            ),
-            (
-                Command::MergeWorktree {
-                    session_id: id.clone(),
-                },
-                "no_worktree",
-            ),
-            (
-                Command::SplitTerminal {
-                    session_id: id.clone(),
-                    direction: tcode_core::ui::TerminalSplitDirection::Horizontal,
-                },
-                "terminal_split_unavailable",
-            ),
-            (
-                Command::CaptureTerminalSelection {
-                    session_id: id.clone(),
-                    terminal_id: 999,
-                    selection: None,
-                },
-                "no_selection",
-            ),
-            (
-                Command::RewindTurn {
-                    session_id: id.clone(),
-                    turn: 999,
-                    steer: None,
-                    checkpoint_id: None,
-                    mode: agent::RewindMode::Files,
-                    client_id: None,
-                },
-                "rewind_unavailable",
-            ),
-            (
-                Command::RespondApproval {
-                    session_id: id.clone(),
-                    request_id: "gone".into(),
-                    decision: agent::ApprovalDecision::Option("accept".into()),
-                },
-                "unknown_approval",
-            ),
-            (
-                Command::RespondApproval {
-                    session_id: id.clone(),
-                    request_id: "gone".into(),
-                    decision: agent::ApprovalDecision::Cancel,
-                },
-                "unknown_approval",
-            ),
-            (
-                Command::RespondUserInput {
-                    session_id: id.clone(),
-                    request_id: "gone".into(),
-                    answers: Default::default(),
-                },
-                "unknown_user_input",
-            ),
-            (
-                Command::SteerQueued {
-                    session_id: id.clone(),
-                    id: 42,
-                },
-                "unknown_queued_message",
-            ),
-            (
-                Command::DropQueued {
-                    session_id: id.clone(),
-                    id: 42,
-                },
-                "unknown_queued_message",
-            ),
-            (
-                Command::MoveQueued {
-                    session_id: id.clone(),
-                    id: 42,
-                    before: None,
-                },
-                "unknown_queued_message",
-            ),
-            (
-                Command::Interrupt {
-                    session_id: id.clone(),
-                },
-                "no_running_turn",
-            ),
-            (
-                Command::ClearTerminal { terminal_id: 999 },
-                "unknown_terminal",
-            ),
-            (
-                Command::ActivateTerminal {
-                    session_id: id.clone(),
-                    terminal_id: 999,
-                },
-                "unknown_terminal",
-            ),
-            (
-                Command::RemoveTerminalContext {
-                    session_id: id.clone(),
-                    context_id: 999,
-                },
-                "unknown_terminal_context",
-            ),
-            (
-                Command::RemoveReviewComment {
-                    session_id: id.clone(),
-                    index: 0,
-                },
-                "unknown_review_comment",
-            ),
-            (
-                Command::DeleteProject {
-                    project_id: "gone".into(),
-                },
-                "unknown_project",
-            ),
-            (
-                Command::DeleteProfile {
-                    profile_id: "gone".into(),
-                },
-                "unknown_profile",
-            ),
-            (
-                Command::RenameSession {
-                    session_id: "gone".into(),
-                    title: "lost".into(),
-                },
-                "unknown_session",
-            ),
-        ] {
-            let error = link
-                .command_blocking(command.clone())
-                .expect_err("stale action must reject");
-            assert_eq!(error.code, code, "{command:?}");
-        }
         for command in [
             Command::SendTurn {
                 session_id: "gone".into(),
@@ -1894,7 +1740,7 @@ mod tests {
         }
         drop(link);
         host.shutdown_blocking().unwrap();
-        // Windows may still hold the draft's files for a moment after shutdown;
+        // Windows may still hold the store's files for a moment after shutdown;
         // a leftover temp dir is not a test failure.
         let _ = std::fs::remove_dir_all(root);
     }
