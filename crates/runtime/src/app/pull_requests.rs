@@ -22,6 +22,9 @@ pub(super) struct PullRequestRuntime {
     pub(super) workers: Vec<HostTask<()>>,
     /// Stacks with a write submitted and not yet answered.
     pub(super) stack_writes: HashSet<super::pull_request_stacks::StackKey>,
+    /// Each running rebase's stop: dropping it stops the rebase.
+    pub(super) rebase_stops:
+        HashMap<super::pull_request_stacks::StackKey, smol::channel::Sender<()>>,
     /// Counts the review submissions that have landed, so a conversation read clears an
     /// unanswered one only when it began after it.
     submissions: u64,
@@ -39,6 +42,7 @@ impl PullRequestRuntime {
             merge_commands: HashSet::new(),
             workers: Vec::new(),
             stack_writes: HashSet::new(),
+            rebase_stops: HashMap::new(),
             submissions: 0,
         }
     }
@@ -895,6 +899,8 @@ impl AppState {
     }
     pub(super) fn stop_pull_request_workers(&mut self) {
         self.pull_requests.workers.clear();
+        // A rebase's Git runs on a thread of its own, which dropping its worker leaves running.
+        self.pull_requests.rebase_stops.clear();
         self.stop_pull_request_watch_worker();
     }
     pub(crate) fn start_pull_request_workers(&mut self, cx: &mut HostCx) {

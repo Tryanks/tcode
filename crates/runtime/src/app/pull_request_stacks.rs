@@ -407,8 +407,12 @@ impl AppState {
             cx,
         );
         let (progress, steps) = smol::channel::unbounded();
+        let (running, stop) = smol::channel::bounded(1);
+        self.pull_requests
+            .rebase_stops
+            .insert(stack.clone(), running);
         let run = cx.unblock(move || {
-            plan.run(|index, step| {
+            plan.run(&stop, |index, step| {
                 let _ = progress.send_blocking((index, step));
             })
         });
@@ -421,12 +425,21 @@ impl AppState {
             let outcome = run.await;
             host.enqueue(move |state, cx| {
                 state.pull_requests.stack_writes.remove(&stack);
+                state.pull_requests.rebase_stops.remove(&stack);
                 state.end_stack_rebase(&stack, cx);
                 state.sync_stack_layers(&stack, &numbers, cx);
                 state.report_stack(&stack, key.number, numbers, outcome, false, cx);
             });
         });
         self.pull_requests.workers.push(task);
+    }
+
+    /// Stops the stack's running rebase on the layer it is on: the Git command running is
+    /// killed, and the rebase ends as it does when a layer fails.
+    pub(crate) fn stop_stack_rebase(&mut self, key: &PullRequestKey, stack: u64) {
+        self.pull_requests
+            .rebase_stops
+            .remove(&stack_key(key, stack));
     }
 
     fn step_stack_rebase(

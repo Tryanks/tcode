@@ -6,12 +6,12 @@
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
 };
 use tcode_core::pull_request::{StackRebaseFailure, StackRebaseGitStep, StackRebaseStep};
 
-/// Each Git command of a rebase ends by this.
-const GIT_TIMEOUT: Duration = Duration::from_secs(120);
+/// What stops a rebase: it ends once every sender of its channel is dropped, killing the Git
+/// command running then and starting no other.
+pub type Stop = smol::channel::Receiver<()>;
 
 /// One unmerged layer, bottom first, with the head that was reviewed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +40,8 @@ impl Identity {
 /// The host's Git name and email, as a new repository on it would commit with.
 pub fn identity() -> Option<Identity> {
     let dir = std::env::temp_dir();
-    let read = |key: &str| match git(&dir, &[], &["config", "--get", key]) {
+    let (_running, stop) = smol::channel::bounded(1);
+    let read = |key: &str| match git(&dir, &[], &["config", "--get", key], &stop) {
         Run::Exited {
             ok: true, stdout, ..
         } => Some(stdout.trim().to_owned()).filter(|value| !value.is_empty()),
@@ -55,11 +56,14 @@ enum Run {
         stdout: String,
         stderr: String,
     },
-    TimedOut,
+    Stopped,
     Failed(String),
 }
 
-fn git(dir: &Path, env: &[(String, String)], args: &[&str]) -> Run {
+fn git(dir: &Path, env: &[(String, String)], args: &[&str], stop: &Stop) -> Run {
+    if stop.is_closed() {
+        return Run::Stopped;
+    }
     let mut command = crate::process::async_command("git");
     command
         .args(args)
@@ -72,7 +76,7 @@ fn git(dir: &Path, env: &[(String, String)], args: &[&str]) -> Run {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // A command still running at the timeout is killed with its future.
+        // A command still running when the rebase is stopped is killed with its future.
         .kill_on_drop(true);
     let child = match command.spawn() {
         Ok(child) => child,
@@ -90,8 +94,8 @@ fn git(dir: &Path, env: &[(String, String)], args: &[&str]) -> Run {
             }
         },
         async {
-            smol::Timer::after(GIT_TIMEOUT).await;
-            Run::TimedOut
+            let _ = stop.recv().await;
+            Run::Stopped
         },
     ))
 }
@@ -108,7 +112,8 @@ impl Drop for Scratch {
 /// Rebases `layers` of the stack on `base` at `remote`, telling `progress` each layer's step,
 /// and answers every layer's final step. It stops at the first layer that fails: the scratch
 /// rebase is aborted, that layer's branch is left as it was, the layers below it stay pushed
-/// and those above it are not started. `token` rides only in this run's Git environment.
+/// and those above it are not started; `stop` stops it the same way at the layer it is on.
+/// `token` rides only in this run's Git environment.
 /// `identity` is the one the plan found before the user confirmed, passed in rather than left
 /// to the scratch clone's Git, so a host without a name or email refuses the rebase before
 /// anything is pushed instead of failing at the first layer's commit.
@@ -118,6 +123,7 @@ pub fn cascade(
     identity: &Identity,
     base: &str,
     layers: &[RebaseLayer],
+    stop: &Stop,
     mut progress: impl FnMut(usize, StackRebaseStep),
 ) -> Vec<StackRebaseStep> {
     let mut steps = vec![StackRebaseStep::Waiting; layers.len()];
@@ -137,15 +143,13 @@ pub fn cascade(
             set(steps, above, StackRebaseStep::NotStarted);
         }
     };
-    let git_failure = |step: StackRebaseGitStep, run: Run| StackRebaseFailure::Git {
-        step,
-        message: match run {
-            Run::Exited { stderr, .. } => {
-                stderr.trim().lines().last().unwrap_or_default().to_owned()
-            }
-            Run::TimedOut => "timed out".to_owned(),
-            Run::Failed(message) => message,
+    let git_failure = |step: StackRebaseGitStep, run: Run| match run {
+        Run::Stopped => StackRebaseFailure::Stopped,
+        Run::Exited { stderr, .. } => StackRebaseFailure::Git {
+            step,
+            message: stderr.trim().lines().last().unwrap_or_default().to_owned(),
         },
+        Run::Failed(message) => StackRebaseFailure::Git { step, message },
     };
     let scratch = Scratch(std::env::temp_dir().join(format!(
         "tcode-stack-rebase-{}-{}",
@@ -182,7 +186,7 @@ pub fn cascade(
         env.push((format!("GIT_CONFIG_KEY_{index}"), key));
         env.push((format!("GIT_CONFIG_VALUE_{index}"), value));
     }
-    let run = |args: &[&str]| git(&scratch.0, &env, args);
+    let run = |args: &[&str]| git(&scratch.0, &env, args, stop);
     let ok = |run: &Run| matches!(run, Run::Exited { ok: true, .. });
     let output = |run: Run| match run {
         Run::Exited { stdout, .. } => stdout.trim().to_owned(),
@@ -311,7 +315,7 @@ pub fn cascade(
                     );
                     return steps;
                 }
-                Run::TimedOut => {
+                Run::Stopped => {
                     fail(
                         &mut steps,
                         &mut set,

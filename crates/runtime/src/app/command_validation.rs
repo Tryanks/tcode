@@ -290,6 +290,7 @@ impl AppState {
                 | Command::WatchPullRequest { .. }
                 | Command::SetPullRequestWatchesPaused { .. }
                 | Command::RunPullRequestAction { .. }
+                | Command::StopStackRebase { .. }
                 | Command::EditPullRequestReviewDraft { .. }
                 | Command::SetControlGrant { .. }
                 | Command::RespondControlGrant { .. }

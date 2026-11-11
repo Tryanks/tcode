@@ -153,6 +153,7 @@ impl Remote {
     }
 
     fn rebase(&self, layers: &[RebaseLayer]) -> Vec<StackRebaseStep> {
+        let (_running, stop) = smol::channel::bounded(1);
         stack_rebase::cascade(
             self.path.to_str().unwrap(),
             // An extra header keyed to a filesystem remote is never sent.
@@ -160,6 +161,7 @@ impl Remote {
             &Identity::new("Host", "host@example.test"),
             "main",
             layers,
+            &stop,
             |_, _| {},
         )
     }

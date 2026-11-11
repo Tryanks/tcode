@@ -340,6 +340,7 @@ pub use wire::{
 // Command gains cancel_acp_install; RuntimeToast acp_install_started carries
 // id, and RuntimeToast gains acp_install_cancelled.
 // Command gains cancel_title_generation.
+// Command gains stop_stack_rebase; StackRebaseFailure gains stopped.
 // ProvidersStatus gains secrets_unreadable.
 // The agent event stream gains unreadable_record {line}: a row of a thread's
 // log the host cannot read is sent as it is stored instead of left out.

@@ -146,6 +146,12 @@ pub enum Command {
         key: tcode_core::pull_request::PullRequestKey,
         action: crate::PullRequestAction,
     },
+    /// Stop the running rebase of the native stack `stack` that `key` is a layer of.
+    StopStackRebase {
+        session_id: String,
+        key: tcode_core::pull_request::PullRequestKey,
+        stack: u64,
+    },
     EditPullRequestReviewDraft {
         session_id: String,
         key: tcode_core::pull_request::PullRequestKey,
@@ -752,6 +758,7 @@ impl Command {
             | Self::SetPullRequestFilesViewed { session_id, .. }
             | Self::RefreshPullRequest { session_id, .. }
             | Self::RunPullRequestAction { session_id, .. }
+            | Self::StopStackRebase { session_id, .. }
             | Self::EditPullRequestReviewDraft { session_id, .. }
             | Self::RunGitAction { session_id, .. }
             | Self::SetActiveAcpAgent { session_id, .. }

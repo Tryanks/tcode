@@ -652,6 +652,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                 cx,
             ));
         }
+        Command::StopStackRebase { key, stack, .. } => app.stop_stack_rebase(&key, stack),
         Command::RunPullRequestAction {
             session_id,
             key,

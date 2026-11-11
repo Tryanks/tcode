@@ -373,6 +373,7 @@ impl AppState {
                 | Command::SetPullRequestFilesViewed { session_id, .. }
                 | Command::RefreshPullRequest { session_id, .. }
                 | Command::RunPullRequestAction { session_id, .. }
+                | Command::StopStackRebase { session_id, .. }
                 | Command::EditPullRequestReviewDraft { session_id, .. }
                 | Command::WatchPullRequest { session_id, .. }
                 | Command::SetPullRequestWatchesPaused { session_id, .. } => {

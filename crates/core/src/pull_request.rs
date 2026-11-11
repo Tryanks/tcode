@@ -1062,8 +1062,11 @@ pub enum StackRebaseFailure {
     Conflict,
     /// The branch is no longer at the head that was reviewed, so the lease kept it.
     LeaseRefused,
-    /// The push got no answer in time, so it may have landed.
+    /// The push was stopped before Git answered, so it may have landed.
     PushUnconfirmed,
+    /// The user stopped the rebase on this layer, before its push; its branch was left as
+    /// it was.
+    Stopped,
     Git {
         step: StackRebaseGitStep,
         message: String,
