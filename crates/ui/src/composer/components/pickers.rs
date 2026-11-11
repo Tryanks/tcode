@@ -568,7 +568,7 @@ impl Composer {
                             div()
                                 .flex_none()
                                 .text_secondary(false, cx)
-                                .child(crate::tr!("permission.pending"))
+                                .child(crate::widgets::fade_text(crate::tr!("permission.pending")))
                                 .into_any_element()
                         },
                     ))
@@ -645,7 +645,7 @@ impl Composer {
                         .text_body(true, cx)
                         .text_color(cx.theme().muted_foreground)
                         .child(icon)
-                        .child(label)
+                        .child(crate::widgets::fade_text(label))
                         .on_click(move |_, window, cx| {
                             popover.update(cx, |state, cx| state.dismiss(window, cx));
                             composer.update(cx, |composer, cx| pick(composer, window, cx));
@@ -1244,7 +1244,12 @@ fn render_model_row(
                         .gap_1p5()
                         .items_center()
                         .text_body(compact, cx)
-                        .child(div().child(name))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(crate::widgets::fade_text(name)),
+                        )
                         .when(is_current, |this| {
                             this.child(Icon::new(IconName::Check).text_color(cx.theme().primary))
                         }),
@@ -1264,7 +1269,7 @@ fn render_model_row(
                             .items_center()
                             .text_secondary(compact, cx)
                             .child(glyph)
-                            .child(label),
+                            .child(crate::widgets::fade_text(label)),
                     )
                 }),
         )
@@ -1550,9 +1555,16 @@ fn render_permission_pane(
                             .items_center()
                             .flex_wrap()
                             .text_body(compact, cx)
-                            .child(div().child(option.label.clone()))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .child(crate::widgets::fade_text(option.label.clone())),
+                            )
                             .when(option.recommended, |row| {
-                                row.child(caption(crate::tr!("permission.recommended").into()))
+                                row.child(div().text_secondary(compact, cx).child(
+                                    crate::widgets::fade_text(crate::tr!("permission.recommended")),
+                                ))
                             })
                             .when(effective, |row| {
                                 row.child(Icon::new(IconName::Check).text_color(primary))
@@ -1564,7 +1576,9 @@ fn render_permission_pane(
                                 move |cx| {
                                     div()
                                         .text_secondary(compact, cx)
-                                        .child(crate::tr!("permission.pending"))
+                                        .child(crate::widgets::fade_text(crate::tr!(
+                                            "permission.pending"
+                                        )))
                                         .into_any_element()
                                 },
                             )),
@@ -1694,7 +1708,7 @@ fn render_effort_slider(
         move |label, _, _| {
             div()
                 .text_color(accent)
-                .child(label.clone())
+                .child(crate::widgets::fade_text(label.clone()))
                 .into_any_element()
         },
     );
@@ -1711,7 +1725,7 @@ fn render_effort_slider(
                     .child(
                         div()
                             .text_color(cx.theme().muted_foreground)
-                            .child(crate::tr!("composer.effort")),
+                            .child(crate::widgets::fade_text(crate::tr!("composer.effort"))),
                     )
                     .child(level_label),
             )
@@ -1754,7 +1768,7 @@ fn render_traits_pane(
             .pt_2()
             .pb_1()
             .text_caption(cx)
-            .child(label.to_string())
+            .child(crate::widgets::fade_text(label.to_string()))
             .into_any_element()
     };
 
@@ -1826,7 +1840,13 @@ fn render_traits_pane(
                         .items_center()
                         .cursor_pointer()
                         .text_body(compact, cx)
-                        .child(div().flex_1().min_w_0().child(text))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(crate::widgets::fade_text(text)),
+                        )
                         .when(is_selected, |this| {
                             this.child(Icon::new(IconName::Check).text_color(primary))
                         })
@@ -1880,7 +1900,13 @@ fn render_traits_pane(
                         .items_center()
                         .cursor_pointer()
                         .text_body(compact, cx)
-                        .child(div().flex_1().min_w_0().child(text))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(crate::widgets::fade_text(text)),
+                        )
                         .when(is_selected, |this| {
                             this.child(Icon::new(IconName::Check).text_color(primary))
                         })
@@ -2011,7 +2037,7 @@ fn render_overflow_pane(
             .text_body(compact, cx)
             .text_color(muted)
             .child(icon)
-            .child(label)
+            .child(crate::widgets::fade_text(label))
             .into_any_element()
     };
 
@@ -2092,7 +2118,9 @@ fn render_context_meter_pane(
                     .child(
                         div()
                             .text_caption(cx)
-                            .child(crate::tr!("composer.context_window_title")),
+                            .child(crate::widgets::fade_text(crate::tr!(
+                                "composer.context_window_title"
+                            ))),
                     )
                     .when_some(edit_window, |title, (store, session_id)| {
                         let popover = cx.entity();
@@ -2179,7 +2207,9 @@ fn render_context_meter_pane(
                     .items_center()
                     .gap_3()
                     .text_secondary(compact, cx)
-                    .child(crate::tr!("composer.total_processed"))
+                    .child(crate::widgets::fade_text(crate::tr!(
+                        "composer.total_processed"
+                    )))
                     .child(context_meter::format_tokens(Some(total))),
             ),
         );
@@ -2223,8 +2253,8 @@ fn render_context_meter_pane(
                 .items_center()
                 .gap_3()
                 .text_caption(cx)
-                .child(crate::tr!("usage.title"))
-                .child(trailing),
+                .child(crate::widgets::fade_text(crate::tr!("usage.title")))
+                .child(crate::widgets::fade_text(trailing)),
         );
         // The raw provider error is Settings-only; at 256px this pane just
         // says the latest number is missing, above whatever was last fetched.
@@ -2272,11 +2302,9 @@ fn render_context_meter_pane(
                             .items_center()
                             .gap_2()
                             .text_secondary(compact, cx)
-                            .child(
-                                div()
-                                    .text_color(muted)
-                                    .child(crate::usage::window_label(window_usage)),
-                            )
+                            .child(div().text_color(muted).child(crate::widgets::fade_text(
+                                crate::usage::window_label(window_usage),
+                            )))
                             .child(
                                 div()
                                     .font_family(cx.theme().mono_font_family.clone())
@@ -2366,10 +2394,7 @@ fn glided_label(
         };
         let glide = motion.glide_state("glide");
         let text = motion.cross_fade_part("text", label, CHANGE, window, cx, |label, _, _| {
-            div()
-                .whitespace_nowrap()
-                .child(label.clone())
-                .into_any_element()
+            crate::widgets::fade_text(label.clone()).into_any_element()
         });
         crate::motion::SizeGlide::new(&glide, text)
             .axes(crate::motion::GlideAxes::Width)

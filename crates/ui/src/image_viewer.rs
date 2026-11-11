@@ -796,15 +796,17 @@ impl Render for ImageViewer {
                 .map(|panel| match &transfer.value {
                     OriginalState::Loading { received, total } => panel
                         .child(
-                            div().text_secondary(false, cx).child(match total {
-                                Some(total) => crate::tr!(
-                                    "image_viewer.progress",
-                                    received = received.to_string(),
-                                    total = total.to_string()
-                                )
-                                .into_owned(),
-                                None => crate::tr!("image_viewer.connecting").into_owned(),
-                            }),
+                            div()
+                                .text_secondary(false, cx)
+                                .child(crate::widgets::fade_text(match total {
+                                    Some(total) => crate::tr!(
+                                        "image_viewer.progress",
+                                        received = received.to_string(),
+                                        total = total.to_string()
+                                    )
+                                    .into_owned(),
+                                    None => crate::tr!("image_viewer.connecting").into_owned(),
+                                })),
                         )
                         .child(
                             Button::new("image-viewer-cancel")

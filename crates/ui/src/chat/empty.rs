@@ -150,7 +150,9 @@ impl ChatView {
                 )
                 .when_some(*last_activity, |row, last_activity| {
                     row.child(div().flex_none().text_secondary(false, cx).child(
-                        crate::time::humanize_ago(now_secs(cx).saturating_sub(last_activity)),
+                        crate::widgets::fade_text(crate::time::humanize_ago(
+                            now_secs(cx).saturating_sub(last_activity),
+                        )),
                     ))
                 })
                 .into_any_element()
@@ -337,7 +339,7 @@ impl ChatView {
             .text_secondary(false, cx)
             .text_color(muted)
             .debug_selector(|| "new-thread-host".into())
-            .child(host)
+            .child(crate::widgets::fade_text(host))
             .when(quick, |meta| {
                 meta.child("·").child(
                     crate::material::accessible_clickable(
@@ -348,7 +350,7 @@ impl ChatView {
                             .border_color(muted.opacity(0.7))
                             .text_color(cx.theme().foreground.opacity(0.8))
                             .debug_selector(|| "new-thread-kind".into())
-                            .child(crate::tr!("sidebar.quick_chat")),
+                            .child(crate::widgets::fade_text(crate::tr!("sidebar.quick_chat"))),
                         "new-thread-kind",
                         Role::Button,
                         picker_label.clone(),
@@ -442,7 +444,9 @@ impl ChatView {
                         .child(crate::widgets::fade_text(meta.title.clone())),
                 )
                 .child(div().flex_none().text_secondary(false, cx).child(
-                    crate::time::humanize_ago(now.saturating_sub(meta.updated_at)),
+                    crate::widgets::fade_text(crate::time::humanize_ago(
+                        now.saturating_sub(meta.updated_at),
+                    )),
                 ))
                 .into_any_element()
             });
@@ -465,7 +469,9 @@ impl ChatView {
                                 .px(crate::material::selectable_row_inset(false))
                                 .pb_1()
                                 .text_caption(cx)
-                                .child(crate::tr!("chat.continue_recent")),
+                                .child(crate::widgets::fade_text(crate::tr!(
+                                    "chat.continue_recent"
+                                ))),
                         )
                         .children(rows),
                 )

@@ -137,7 +137,9 @@ fn reply_field(cx: &App) -> gpui::Div {
         .bg(cx.theme().background)
         .text_body(false, cx)
         .text_color(cx.theme().muted_foreground)
-        .child(crate::tr!("pull_requests.compose.reply_row"))
+        .child(crate::widgets::fade_text(crate::tr!(
+            "pull_requests.compose.reply_row"
+        )))
 }
 
 /// A comment's body and its editor cross-fade as one replaces the other, each in its own
@@ -736,14 +738,14 @@ impl PullRequestView {
                 div()
                     .font_medium()
                     .text_color(cx.theme().foreground)
-                    .child(login),
+                    .child(crate::widgets::fade_text(login)),
             )
             .children(action)
             .child(
                 div()
                     .id(SharedString::from(format!("pr-ago-{}", comment.id)))
                     .text_color(muted)
-                    .children(ago_rfc3339(&comment.created_at, cx))
+                    .children(ago_rfc3339(&comment.created_at, cx).map(crate::widgets::fade_text))
                     .with_tooltip(move |_, _| {
                         let local = chrono::DateTime::parse_from_rfc3339(&created)
                             .map(|time| {
@@ -756,7 +758,9 @@ impl PullRequestView {
                     }),
             )
             .when(comment.edited_at.is_some(), |head| {
-                head.child(div().child(crate::tr!("pull_requests.conversation.edited")))
+                head.child(div().child(crate::widgets::fade_text(crate::tr!(
+                    "pull_requests.conversation.edited"
+                ))))
             })
             .child(div().flex_1())
             .children(add_reaction)
@@ -929,7 +933,7 @@ impl PullRequestView {
                                 gpui::Toggled::False
                             })
                             .text_token(&cx.theme().tokens.typography.md)
-                            .child(reaction_emoji(content))
+                            .child(crate::widgets::fade_text(reaction_emoji(content)))
                             .on_click(move |_, window, cx| {
                                 view.update(cx, |view, cx| {
                                     view.react(id.clone(), content, !reacted, window, cx)
@@ -1032,7 +1036,7 @@ impl PullRequestView {
         } else {
             gpui::Toggled::False
         })
-        .child(reaction_emoji(reaction.content))
+        .child(crate::widgets::fade_text(reaction_emoji(reaction.content)))
         .child({
             let id = SharedString::from(format!(
                 "pr-reaction-count-{}-{:?}",
@@ -1156,21 +1160,21 @@ impl PullRequestView {
                 .items_center()
                 .text_color(color)
                 .child(Icon::new(icon))
-                .child(crate::tr!(label))
+                .child(crate::widgets::fade_text(crate::tr!(label)))
                 .into_any_element()
         });
         let action = verdict.or_else(|| {
             Some(
                 div()
                     .text_color(muted)
-                    .child(crate::tr!(
+                    .child(crate::widgets::fade_text(crate::tr!(
                         if description {
                             "pull_requests.conversation.opened"
                         } else {
                             "pull_requests.conversation.commented"
                         },
                         pr = self.noun(cx).pr
-                    ))
+                    )))
                     .into_any_element(),
             )
         });
@@ -1339,7 +1343,9 @@ impl PullRequestView {
                         })),
                 )
             })
-            .when(inline, |head| head.children(lines.clone()))
+            .when(inline, |head| {
+                head.children(lines.clone().map(crate::widgets::fade_text))
+            })
             .child(chip(
                 "pull_requests.conversation.outdated",
                 thread.outdated,
@@ -1350,7 +1356,7 @@ impl PullRequestView {
                 thread.resolved,
                 cx,
             ))
-            .child(
+            .child(crate::widgets::fade_text(
                 crate::tr!(
                     if count == 1 {
                         "pull_requests.conversation.comment_count_one"
@@ -1360,7 +1366,7 @@ impl PullRequestView {
                     count = count.to_string()
                 )
                 .into_owned(),
-            )
+            ))
             .child(div().flex_1())
             .when(inline, |head| {
                 let id = id.clone();
@@ -1915,7 +1921,7 @@ impl PullRequestView {
                     .items_center()
                     .text_secondary(self.compact(cx), cx)
                     .child(Icon::new(icon))
-                    .child(label)
+                    .child(crate::widgets::fade_text(label))
                     .into_any_element()
             }
         };
@@ -2269,7 +2275,7 @@ pub(super) fn avatar_image(
                 .text_size(px(size * 0.5))
                 .font_medium()
                 .text_color(cx.theme().muted_foreground)
-                .child(initial),
+                .child(crate::widgets::fade_text(initial)),
         );
     let image = source.map(|source| {
         let id = SharedString::from(format!("pr-avatar-{login}-{size}"));

@@ -548,7 +548,7 @@ fn swiped_surface(
                             Icon::new(icon).transform(Transformation::scale(size(scale, scale))),
                         )
                     })
-                    .child(label)
+                    .child(crate::widgets::fade_text(label))
                     .into_any_element()
             },
         );

@@ -216,7 +216,7 @@ fn carried_thread(
                 div()
                     .text_secondary(true, cx)
                     .text_color(cx.theme().primary)
-                    .children(action.map(DragAction::label))
+                    .children(action.map(DragAction::label).map(crate::widgets::fade_text))
                     .into_any_element()
             },
         );
@@ -267,7 +267,7 @@ fn carried_thread(
                 .font_medium()
                 .text_color(cx.theme().primary)
                 .child(Icon::new(action.icon()))
-                .child(action.label())
+                .child(crate::widgets::fade_text(action.label()))
                 .into_any_element()
         },
     );
@@ -1065,7 +1065,7 @@ impl SessionsSidebar {
                 .border_color(cx.theme().primary)
                 .text_caption(cx)
                 .text_color(color)
-                .child(label),
+                .child(crate::widgets::fade_text(label)),
         );
         div()
             .w_full()
@@ -1238,7 +1238,9 @@ impl SessionsSidebar {
                     .pt(cx.theme().tokens.spacing.sm)
                     .text_token(&cx.theme().tokens.typography.xl)
                     .font_semibold()
-                    .child(crate::tr!("sidebar.arrange_title")),
+                    .child(crate::widgets::fade_text(crate::tr!(
+                        "sidebar.arrange_title"
+                    ))),
             )
             .child(
                 div()
@@ -1372,7 +1374,10 @@ impl SessionsSidebar {
                     cx.notify();
                 }))
                 .child(collapse_chevron(self.arrange_settled_fold, cx).text_color(color))
-                .child(crate::tr!("sidebar.settled_count", count = count));
+                .child(crate::widgets::fade_text(crate::tr!(
+                    "sidebar.settled_count",
+                    count = count
+                )));
                 self.drop_zone(div().w_full().child(header), DropZone::Settled, scope, cx)
                     .into_any_element()
             }

@@ -237,12 +237,12 @@ impl Render for CommitDialog {
             .items_center()
             .text_secondary(false, cx)
             .child(Icon::empty().path("icons/git-branch.svg"))
-            .child(crate::tr!("git.commit.branch"))
+            .child(crate::widgets::fade_text(crate::tr!("git.commit.branch")))
             .child(
                 div()
                     .font_family(cx.theme().mono_font_family.clone())
                     .text_color(cx.theme().foreground)
-                    .child(branch_label),
+                    .child(crate::widgets::fade_text(branch_label)),
             );
 
         let mut body = v_flex().w_full().gap_3().child(branch_row);
@@ -262,7 +262,9 @@ impl Render for CommitDialog {
                                 .text_title(cx)
                                 .text_color(cx.theme().warning)
                                 .child(Icon::new(IconName::TriangleAlert))
-                                .child(crate::tr!("git.commit.default_warning_title")),
+                                .child(crate::widgets::fade_text(crate::tr!(
+                                    "git.commit.default_warning_title"
+                                ))),
                         )
                         .child(
                             div()
@@ -288,10 +290,14 @@ impl Render for CommitDialog {
                 .w_full()
                 .justify_between()
                 .items_center()
-                .child(div().text_caption(cx).child(crate::tr!(
-                    "git.commit.files_count",
-                    count = self.files.len()
-                )));
+                .child(
+                    div()
+                        .text_caption(cx)
+                        .child(crate::widgets::fade_text(crate::tr!(
+                            "git.commit.files_count",
+                            count = self.files.len()
+                        ))),
+                );
         let file_list = if let Some(error) = &self.status_error {
             crate::material::empty_row(error.clone(), cx).into_any_element()
         } else if self.files.is_empty() {
@@ -344,7 +350,9 @@ impl Render for CommitDialog {
             .child(
                 div()
                     .text_caption(cx)
-                    .child(crate::tr!("git.commit.message_label")),
+                    .child(crate::widgets::fade_text(crate::tr!(
+                        "git.commit.message_label"
+                    ))),
             )
             .child(
                 Button::new("commit-regenerate")

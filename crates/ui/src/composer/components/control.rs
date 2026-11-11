@@ -105,12 +105,9 @@ impl Composer {
                     .w_full()
                     .gap_2()
                     .items_start()
-                    .child(
-                        div()
-                            .text_caption(cx)
-                            .line_height(title_line)
-                            .child(crate::tr!("control.request.caption")),
-                    )
+                    .child(div().text_caption(cx).line_height(title_line).child(
+                        crate::widgets::fade_text(crate::tr!("control.request.caption")),
+                    ))
                     .child(div().flex_1().min_w_0().text_title(cx).child(wants))
                     .when(count > 1, |row| {
                         row.child(

@@ -336,7 +336,10 @@ pub(super) fn body(
                         .px_1()
                         .pt_1()
                         .text_secondary(false, cx)
-                        .child(crate::tr!("rail.commands_more", count = count)),
+                        .child(crate::widgets::fade_text(crate::tr!(
+                            "rail.commands_more",
+                            count = count
+                        ))),
                 ),
         )
     });
@@ -397,25 +400,35 @@ fn row(
         Mark::Failed(Some(code)) => Some(
             div()
                 .text_color(danger)
-                .child(crate::tr!("tools.exit_code", code = code))
+                .child(crate::widgets::fade_text(crate::tr!(
+                    "tools.exit_code",
+                    code = code
+                )))
                 .into_any_element(),
         ),
         Mark::Passed(Some(code)) => Some(
             div()
                 .text_color(muted)
-                .child(crate::tr!("tools.exit_code", code = code))
+                .child(crate::widgets::fade_text(crate::tr!(
+                    "tools.exit_code",
+                    code = code
+                )))
                 .into_any_element(),
         ),
         Mark::Interrupted => Some(
             div()
                 .text_color(warning)
-                .child(crate::tr!("tools.status.interrupted"))
+                .child(crate::widgets::fade_text(crate::tr!(
+                    "tools.status.interrupted"
+                )))
                 .into_any_element(),
         ),
         Mark::Declined => Some(
             div()
                 .text_color(muted)
-                .child(crate::tr!("tools.status.declined"))
+                .child(crate::widgets::fade_text(crate::tr!(
+                    "tools.status.declined"
+                )))
                 .into_any_element(),
         ),
         Mark::Passed(None) | Mark::Failed(None) => None,

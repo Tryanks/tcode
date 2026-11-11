@@ -139,7 +139,7 @@ pub(crate) fn rewind_in_progress(key: &str, cx: &App) -> AnyElement {
         .text_token(&cx.theme().tokens.typography.xs)
         .text_color(muted)
         .child(crate::widgets::Spinner::new().xsmall().color(muted))
-        .child(crate::tr!("rewind.in_progress").into_owned())
+        .child(crate::widgets::fade_text(crate::tr!("rewind.in_progress")))
         .into_any_element()
 }
 

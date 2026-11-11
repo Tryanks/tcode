@@ -957,7 +957,7 @@ impl PullRequestView {
                                 16.,
                                 cx,
                             ))
-                            .child(author.login.clone()),
+                            .child(crate::widgets::fade_text(author.login.clone())),
                     ),
                 );
             }
@@ -993,7 +993,11 @@ impl PullRequestView {
                     ]
                     .into_iter()
                     .find_map(|(at, key)| Some((ago_rfc3339(at.as_deref()?, cx)?, key)))
-                    .map(|(ago, key)| synced.fade(crate::tr!(key, ago = ago).into_owned())),
+                    .map(|(ago, key)| {
+                        synced.fade(crate::widgets::fade_text(
+                            crate::tr!(key, ago = ago).into_owned(),
+                        ))
+                    }),
                 );
         }
         let mut chips = h_flex()
@@ -1034,7 +1038,7 @@ impl PullRequestView {
                     |label, _, _| {
                         div()
                             .whitespace_nowrap()
-                            .child(label.clone())
+                            .child(crate::widgets::fade_text(label.clone()))
                             .into_any_element()
                     },
                 ))
@@ -1285,7 +1289,7 @@ impl PullRequestView {
                         .items_center()
                         .text_secondary(compact, cx)
                         .child(Icon::new(IconName::Unlink))
-                        .child(crate::tr!(condition.value)),
+                        .child(crate::widgets::fade_text(crate::tr!(condition.value))),
                 )
             }))
             .into_any_element()
@@ -2045,7 +2049,7 @@ impl PullRequestView {
                     .child(
                         div()
                             .text_color(cx.theme().danger)
-                            .child(format!("−{deletions}")),
+                            .child(crate::widgets::fade_text(format!("−{deletions}"))),
                     ),
             )
         });

@@ -603,9 +603,11 @@ impl SettingsPage {
                                 .overflow_hidden()
                                 .child(crate::widgets::fade_text(project.name.clone())),
                         )
-                        .children(
-                            summary.map(|summary| div().text_secondary(true, cx).child(summary)),
-                        )
+                        .children(summary.map(|summary| {
+                            div()
+                                .text_secondary(true, cx)
+                                .child(crate::widgets::fade_text(summary))
+                        }))
                         .child(
                             Icon::new(IconName::ChevronRight)
                                 .text_color(cx.theme().muted_foreground),
@@ -688,8 +690,16 @@ impl SettingsPage {
                                 project,
                                 16.,
                             ))
-                            .child(div().flex_1().child(project.name.clone()))
-                            .child(div().text_secondary(false, cx).child(summary.clone()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(crate::widgets::fade_text(project.name.clone())),
+                            )
+                            .child(
+                                div()
+                                    .text_secondary(false, cx)
+                                    .child(crate::widgets::fade_text(summary.clone())),
+                            )
                             .child(
                                 Button::new(SharedString::from(format!("edit-rules-{id}")))
                                     .ghost()
@@ -1067,7 +1077,7 @@ fn rule_list<T: Clone + 'static>(
                 .relative()
                 .child(crate::material::row_hover(gpui::px(0.), cx))
                 .text_body(true, cx)
-                .child(div().flex_1().child(label))
+                .child(div().flex_1().child(crate::widgets::fade_text(label)))
                 .when(mark > 0., |row| {
                     row.child(
                         Icon::new(IconName::Check)
@@ -1112,7 +1122,7 @@ fn rule_dropdown<T: Clone + 'static>(
                         .items_center()
                         .justify_between()
                         .gap_2()
-                        .child(trigger_label)
+                        .child(crate::widgets::fade_text(trigger_label))
                         .child(
                             Icon::new(IconName::ChevronDown)
                                 .text_color(cx.theme().muted_foreground),
@@ -1146,7 +1156,7 @@ fn rule_dropdown<T: Clone + 'static>(
                         .w_full()
                         .text_body(false, cx)
                         .cursor_pointer()
-                        .child(div().flex_1().child(label))
+                        .child(div().flex_1().child(crate::widgets::fade_text(label)))
                         .when(checked, |item| item.child(Icon::new(IconName::Check)))
                         .on_click(move |_, window, cx| {
                             editor.update(cx, |editor, cx| {

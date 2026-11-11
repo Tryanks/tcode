@@ -505,7 +505,7 @@ fn header_row(
                 cx,
             )
         } else {
-            text.into_any_element()
+            crate::widgets::fade_text(text).into_any_element()
         }
     });
     h_flex()
@@ -607,7 +607,9 @@ fn header_row(
                         .flex_none()
                         .text_meta_mono(false, cx)
                         .debug_selector(move || format!("tool-elapsed-{key}"))
-                        .child(super::super::model::format_elapsed(elapsed)),
+                        .child(crate::widgets::fade_text(
+                            super::super::model::format_elapsed(elapsed),
+                        )),
                 )
             },
         )
@@ -635,7 +637,7 @@ fn chip_element(key: &str, chip: Chip, cx: &App) -> AnyElement {
     let content: AnyElement = match chip {
         Chip::Count(text) => div()
             .text_meta_mono(false, cx)
-            .child(text)
+            .child(crate::widgets::fade_text(text))
             .into_any_element(),
         Chip::Lines { added, deleted } => h_flex()
             .gap_2()

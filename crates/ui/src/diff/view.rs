@@ -1213,7 +1213,7 @@ impl DiffPanel {
                     .items_center()
                     .text_body(compact, cx)
                     .font_medium()
-                    .child(label)
+                    .child(crate::widgets::fade_text(label))
                     .child(Icon::new(IconName::ChevronDown).text_color(muted)),
             );
 
@@ -1237,7 +1237,7 @@ impl DiffPanel {
                                 compact,
                                 cx,
                             )
-                            .child(div().flex_1().child(label))
+                            .child(div().flex_1().child(crate::widgets::fade_text(label)))
                             .when(selected_scope == Some(scope), |row| {
                                 row.child(Icon::new(IconName::Check))
                             })
@@ -1323,7 +1323,7 @@ impl DiffPanel {
                                 .pt_2()
                                 .pb_1()
                                 .text_caption(cx)
-                                .child(crate::tr!("diff.turns")),
+                                .child(crate::widgets::fade_text(crate::tr!("diff.turns"))),
                         )
                         .children(turn_rows)
                 });

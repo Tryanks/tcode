@@ -2508,7 +2508,10 @@ impl SessionsSidebar {
         .text_secondary(compact, cx)
         .cursor_pointer()
         .child(Icon::new(IconName::Plus))
-        .child(crate::tr!("sidebar.show_more_settled", count = count))
+        .child(crate::widgets::fade_text(crate::tr!(
+            "sidebar.show_more_settled",
+            count = count
+        )))
         .on_click(cx.listener(move |this, _, _, cx| {
             *this.settled_limits.entry(shelf.clone()).or_insert(10) += 25;
             this.compact_model_dirty = true;
@@ -2582,7 +2585,7 @@ impl SessionsSidebar {
             cx.notify();
         }))
         .child(collapse_chevron(turned, cx).text_color(color))
-        .child(crate::tr!("sidebar.settled"))
+        .child(crate::widgets::fade_text(crate::tr!("sidebar.settled")))
         .child(count.to_string())
         .into_any_element()
     }
@@ -3546,7 +3549,7 @@ impl SessionsSidebar {
                         div()
                             .flex_1()
                             .text_color(cx.theme().danger)
-                            .child(delete_label.clone())
+                            .child(crate::widgets::fade_text(delete_label.clone()))
                     })
                 })
                 .when(local, |menu| {
@@ -4569,7 +4572,7 @@ impl SessionsSidebar {
                     menu.menu_element(Box::new(ThreadDelete(id.clone())), |_, cx| {
                         div()
                             .text_color(cx.theme().danger)
-                            .child(crate::tr!("sidebar.ctx_delete"))
+                            .child(crate::widgets::fade_text(crate::tr!("sidebar.ctx_delete")))
                     })
                 })
                 .when_some(share.as_ref(), |menu, share| {
@@ -4750,7 +4753,7 @@ impl SessionsSidebar {
                     .whitespace_nowrap()
                     .text_secondary(false, cx)
                     .opacity(1. - hover)
-                    .child(ago),
+                    .child(crate::widgets::fade_text(ago)),
             )
             .when(action_on_hover, |slot| {
                 slot.child(
@@ -4971,7 +4974,7 @@ impl SessionsSidebar {
                     .update(cx, |state, cx| state.open_settings(cx));
             }))
             .child(Icon::new(IconName::Settings).text_color(cx.theme().muted_foreground))
-            .child(crate::tr!("settings.title")),
+            .child(crate::widgets::fade_text(crate::tr!("settings.title"))),
         )
     }
 }
@@ -5619,11 +5622,9 @@ impl SessionsSidebar {
                         .flex_1()
                         .min_w_0()
                         .gap(cx.theme().tokens.spacing.xs)
-                        .child(
-                            div()
-                                .text_body(true, cx)
-                                .child(crate::tr!("chat.waiting_connection")),
-                        )
+                        .child(div().text_body(true, cx).child(crate::widgets::fade_text(
+                            crate::tr!("chat.waiting_connection"),
+                        )))
                         .child(
                             div()
                                 .text_secondary(true, cx)
@@ -5868,10 +5869,14 @@ impl SessionsSidebar {
                 bar("compact-layout-bar", Bar::Section, true, cx)
                     .items_center()
                     .justify_between()
-                    .child(div().text_secondary(true, cx).child(match layout {
-                        SidebarLayout::Flat => crate::tr!("sidebar.recent"),
-                        SidebarLayout::Grouped => crate::tr!("sidebar.by_project"),
-                    }))
+                    .child(
+                        div()
+                            .text_secondary(true, cx)
+                            .child(crate::widgets::fade_text(match layout {
+                                SidebarLayout::Flat => crate::tr!("sidebar.recent"),
+                                SidebarLayout::Grouped => crate::tr!("sidebar.by_project"),
+                            })),
+                    )
                     .child(
                         div()
                             .debug_selector(|| "compact-layout-toggle".into())
@@ -6066,7 +6071,7 @@ impl SessionsSidebar {
                         div()
                             .whitespace_nowrap()
                             .text_color(*color)
-                            .child(label.clone()),
+                            .child(crate::widgets::fade_text(label.clone())),
                     )
                     .child("·")
                     .into_any_element()
@@ -6230,7 +6235,11 @@ impl SessionsSidebar {
                                 crate::pull_requests::badge(&meta.pull_requests, cx),
                                 |line, badge| line.child(badge).child("·"),
                             )
-                            .child(div().flex_none().child(cached.relative_time.clone())),
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .child(crate::widgets::fade_text(cached.relative_time.clone())),
+                            ),
                     ),
             );
         self.thread_context_menu(row, meta, state, working, true, cx)
