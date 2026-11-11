@@ -6,7 +6,6 @@ chat:
   waiting_connection: "Waiting for connection…"
   retry_delivery: "Retry"
   discard_delivery: "Discard"
-  history_record_too_large: A history record is larger than one reply to this device can carry.
   relayed: "Relayed from %{from} to %{to}"
   moved: "Moved here from %{from}; %{to} continues in a new session"
   session_moved: "Moved from %{from} to %{to}; the same session continues there"
@@ -48,6 +47,7 @@ chat:
   settings_kept: "This message still uses the old settings; the new ones apply once background tasks finish"
   unreadable_record_one: "1 record this version of Tcode no longer reads"
   unreadable_records: "%{count} records this version of Tcode no longer reads"
+  record_withheld: "A record of %{size} is too large to send to this device; it shows in full on the host machine"
   working: "Working"
   turn_ai: "Model thinking & response %{duration}"
   turn_tools: "Tool calls %{duration}"

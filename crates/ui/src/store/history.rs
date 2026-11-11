@@ -393,11 +393,3 @@ impl WorkspaceStore {
         cx.notify();
     }
 }
-
-pub(super) fn history_error_message(error: tcode_protocol::ProtocolError) -> String {
-    if error.code == "history_record_too_large" {
-        crate::tr!("chat.history_record_too_large").into_owned()
-    } else {
-        error.message
-    }
-}

@@ -10599,9 +10599,7 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
                 from,
                 end,
                 truncated,
-            } = state.event_records["large"]
-                .history_page(before, 200, None)
-                .unwrap()
+            } = state.event_records["large"].history_page(before, 200, None)
             else {
                 panic!("page")
             };
@@ -10725,9 +10723,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
             end,
             records: page,
             truncated,
-        } = state.event_records["streamed"]
-            .history_page(from, 200, None)
-            .unwrap()
+        } = state.event_records["streamed"].history_page(from, 200, None)
         else {
             panic!("page")
         };
@@ -11536,9 +11532,7 @@ fn superseded_turn_changes_cross_without_diffs() {
             .event_records
             .insert("changes".into(), session_log(records.clone()));
         let QueryResponse::SessionHistoryPage { records: sent, .. } =
-            state.event_records["changes"]
-                .history_page(4, 200, None)
-                .unwrap()
+            state.event_records["changes"].history_page(4, 200, None)
         else {
             panic!("page")
         };
@@ -11959,7 +11953,8 @@ fn a_completion_drops_the_deltas_it_repeats_in_the_same_commit() {
 }
 
 /// A thread opens with about half a megabyte of history however long its
-/// records are, and a single record larger than that still arrives alone.
+/// records are, a single record larger than that still arrives alone, and one
+/// larger than the client's line arrives as its size.
 #[test]
 fn history_windows_are_byte_budgeted() {
     let cx = &mut TestAppContext::default();
@@ -12012,28 +12007,52 @@ fn history_windows_are_byte_budgeted() {
         huge[199].event = AgentEvent::Warning {
             message: "w".repeat(2 * tcode_protocol::SESSION_WINDOW_BYTES),
         };
-        state.event_records.insert("wide".into(), session_log(huge));
+        state
+            .event_records
+            .insert("wide".into(), session_log(huge.clone()));
         let QueryResponse::SessionHistoryPage {
             from,
             records: sent,
             ..
-        } = state.event_records["wide"]
-            .history_page(200, 200, Some(tcode_protocol::MAX_LINE_BYTES))
-            .unwrap()
+        } = state.event_records["wide"].history_page(
+            200,
+            200,
+            Some(tcode_protocol::MAX_LINE_BYTES),
+        )
         else {
             panic!("page")
         };
         assert_eq!((from, sent.len()), (199, 1));
 
-        // A record whose reply is longer than the connection's line is refused
-        // by name; the client says so.
+        // A record whose reply is longer than the connection's line is sent
+        // as its size, and the records around it as they are.
+        let huge_len = serde_json::to_vec(&state.event_records["wide"].records()[199])
+            .unwrap()
+            .len() as u64;
+        let QueryResponse::SessionHistoryPage {
+            from,
+            records: sent,
+            ..
+        } = state.event_records["wide"].history_page(
+            200,
+            200,
+            Some(2 * tcode_protocol::SESSION_WINDOW_BYTES),
+        )
+        else {
+            panic!("page")
+        };
+        assert!(sent.len() > 40, "the rest of the page is sent");
         assert_eq!(
-            state.event_records["wide"]
-                .history_page(200, 1, Some(2 * tcode_protocol::SESSION_WINDOW_BYTES))
-                .unwrap_err()
-                .code,
-            "history_record_too_large"
+            sent.last().unwrap(),
+            &StoredEvent {
+                origin: None,
+                author: None,
+                ts: Some(199),
+                event: AgentEvent::RecordWithheld { bytes: huge_len },
+                elided: None,
+            }
         );
+        assert_eq!(sent[..sent.len() - 1], huge[from as usize..199]);
     });
 }
 
@@ -12604,7 +12623,7 @@ fn an_unindexed_cold_thread_opens_through_hydration() {
         &through_pipe(&state, cx, 2, history_page("legacy", window.end)),
         2,
     );
-    assert_eq!(page, whole.history_page(window.end, 200, None).unwrap());
+    assert_eq!(page, whole.history_page(window.end, 200, None));
     assert!(store.turn_index("legacy").unwrap().is_none());
 }
 

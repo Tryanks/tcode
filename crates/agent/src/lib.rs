@@ -2617,6 +2617,12 @@ pub enum AgentEvent {
     UnreadableRecord {
         line: String,
     },
+    /// A record of `bytes` bytes, more than one reply to the client it was
+    /// for can carry, kept on the host in a history reply. Never emitted by
+    /// an adapter nor written; the host sends it in the record's place.
+    RecordWithheld {
+        bytes: u64,
+    },
     /// Structured plan / task list for the sidebar (Codex `turn/plan/updated`,
     /// Claude `TodoWrite`). Replaces the current turn's plan wholesale.
     PlanUpdated {

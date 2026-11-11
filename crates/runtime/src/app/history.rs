@@ -257,22 +257,24 @@ struct Window {
 
 /// Choose the contiguous cursors a reply covers and the records it sends for
 /// them. Starting from the `backwards` end of `requested`, records are taken
-/// while the reply fits [`SESSION_WINDOW_BYTES`], and always at least one: a
-/// first record whose reply is longer than `line_limit`, the longest line the
-/// receiving connection carries, is refused by name instead, since a network
-/// connection closes on a longer line. An in-process connection has no limit.
-/// Consecutive deltas of one item are merged into one, which folds the same
-/// because nothing between them moves the turn.
+/// while the reply fits [`SESSION_WINDOW_BYTES`], and always at least one. A
+/// record whose reply alone is longer than `line_limit`, the longest line the
+/// receiving connection carries, is sent as [`AgentEvent::RecordWithheld`]
+/// with its size, since a network connection closes on a longer line; it
+/// stays on the host, and an in-process connection, which has no limit, gets
+/// it whole. Consecutive deltas of one item are merged into one, which folds
+/// the same because nothing between them moves the turn.
 fn wire_window(
     records: &[StoredEvent],
     requested: Range<usize>,
     backwards: bool,
     overhead: usize,
     line_limit: Option<usize>,
-) -> Result<Window, tcode_protocol::ProtocolError> {
+) -> Window {
     let budget = SESSION_WINDOW_BYTES.saturating_sub(overhead);
     let mut used = 0;
     let mut count = 0;
+    let mut withheld = std::collections::HashMap::new();
     for offset in 0..requested.len() {
         let index = if backwards {
             requested.end - 1 - offset
@@ -280,19 +282,11 @@ fn wire_window(
             requested.start + offset
         };
         // Separator; also leaves room for an empty array.
-        let size = wire_len(&wire_record(&records[index])) + 1;
-        if count == 0
-            && let Some(line_limit) = line_limit
-            && overhead + size > line_limit
-        {
-            return Err(tcode_protocol::ProtocolError {
-                code: "history_record_too_large".into(),
-                message: format!(
-                    "A history record takes {} bytes to send, more than the {line_limit} bytes \
-                     one reply to this device can carry.",
-                    overhead + size
-                ),
-            });
+        let mut size = wire_len(&wire_record(&records[index])) + 1;
+        if line_limit.is_some_and(|line_limit| overhead + size > line_limit) {
+            let placeholder = withheld_record(&records[index], size as u64 - 1);
+            size = wire_len(&placeholder) + 1;
+            withheld.insert(index, placeholder);
         }
         if count > 0 && used + size > budget {
             break;
@@ -307,6 +301,10 @@ fn wire_window(
     };
     let mut merged: Vec<StoredEvent> = Vec::with_capacity(range.len());
     for index in range.clone() {
+        if let Some(placeholder) = withheld.remove(&index) {
+            merged.push(placeholder);
+            continue;
+        }
         let record = &records[index];
         if let AgentEvent::Delta {
             item_id,
@@ -343,10 +341,22 @@ fn wire_window(
         }
         merged.push(wire_record(record).into_owned());
     }
-    Ok(Window {
+    Window {
         range,
         records: merged,
-    })
+    }
+}
+
+/// What a client too far away to carry `record` (`bytes` long) is sent in
+/// its place.
+fn withheld_record(record: &StoredEvent, bytes: u64) -> StoredEvent {
+    StoredEvent {
+        origin: record.origin,
+        author: record.author.clone(),
+        ts: record.ts,
+        event: AgentEvent::RecordWithheld { bytes },
+        elided: None,
+    }
 }
 
 /// What a window is cut from: the records of the rows before `end` of a log,
@@ -435,30 +445,26 @@ impl LogView<'_> {
         let from = after
             .unwrap_or_else(|| self.turn_aligned_start(total.saturating_sub(BASELINE_RECORDS)));
         let first = self.index(from);
-        match wire_window(
+        let window = wire_window(
             self.records,
             first..self.records.len(),
             after.is_none(),
             wire_overhead(&empty),
             line_limit,
-        ) {
-            Ok(window) => {
-                let start = self.start(window.range.start, first, from);
-                let end = if window.range.end == self.records.len() {
-                    self.covered_end
-                } else {
-                    self.rows[window.range.end]
-                };
-                ServerEvent::SessionSnapshot {
-                    from: start,
-                    end,
-                    truncated: start > from || end < total,
-                    records: window.records,
-                    total,
-                    total_turns: self.turns,
-                }
-            }
-            Err(error) => ServerEvent::SessionHistoryError(error),
+        );
+        let start = self.start(window.range.start, first, from);
+        let end = if window.range.end == self.records.len() {
+            self.covered_end
+        } else {
+            self.rows[window.range.end]
+        };
+        ServerEvent::SessionSnapshot {
+            from: start,
+            end,
+            truncated: start > from || end < total,
+            records: window.records,
+            total,
+            total_turns: self.turns,
         }
     }
 
@@ -467,12 +473,7 @@ impl LogView<'_> {
         self.turn_aligned_start(end.saturating_sub(count))
     }
 
-    fn history_page(
-        &self,
-        before: u64,
-        limit: u32,
-        line_limit: Option<usize>,
-    ) -> Result<QueryResponse, tcode_protocol::ProtocolError> {
+    fn history_page(&self, before: u64, limit: u32, line_limit: Option<usize>) -> QueryResponse {
         let end = before.min(self.end);
         let start = self.page_start(end, limit);
         let requested = self.index(start)..self.index(end);
@@ -491,13 +492,13 @@ impl LogView<'_> {
             true,
             wire_overhead(&empty),
             line_limit,
-        )?;
-        Ok(QueryResponse::SessionHistoryPage {
+        );
+        QueryResponse::SessionHistoryPage {
             from: self.start(window.range.start, requested.start, start),
             end,
             truncated: self.from > start || window.range.len() < requested.len(),
             records: window.records,
-        })
+        }
     }
 }
 
@@ -651,7 +652,7 @@ impl SessionLog {
         before: u64,
         limit: u32,
         line_limit: Option<usize>,
-    ) -> Result<QueryResponse, tcode_protocol::ProtocolError> {
+    ) -> QueryResponse {
         self.view().history_page(before, limit, line_limit)
     }
 
@@ -1305,7 +1306,7 @@ impl AppState {
         let resident = self.event_records.contains_key(session_id);
         let (answer, task) = self.query_session_log(
             session_id,
-            move |log| log.history_page(before, limit, line_limit),
+            move |log| Ok(log.history_page(before, limit, line_limit)),
             cx,
         );
         if resident {
@@ -1316,7 +1317,7 @@ impl AppState {
             move |read| Tail::read_cut(read, None, Some((before, limit))),
             move |_, _, tail, _| {
                 if let Some(tail) = tail.filter(|tail| before <= tail.end) {
-                    answer.complete(tail.view().history_page(before, limit, line_limit));
+                    answer.complete(Ok(tail.view().history_page(before, limit, line_limit)));
                 }
             },
             cx,

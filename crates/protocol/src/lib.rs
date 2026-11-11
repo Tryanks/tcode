@@ -344,6 +344,9 @@ pub use wire::{
 // proposed_plan, model_fallback_detected and turn_blocked, and
 // approval_resolved's decision no longer reads approve, approve_for_session
 // or deny: rows of them are unreadable_record.
+// The agent event stream gains record_withheld {bytes}: a history window or
+// page sends it for a record longer than the client's line, where the whole
+// reply was the history_record_too_large error.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

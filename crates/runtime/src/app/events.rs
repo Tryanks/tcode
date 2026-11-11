@@ -482,6 +482,7 @@ impl AppState {
             | AgentEvent::GoalUpdated { .. }
             | AgentEvent::ControlAction(_)
             | AgentEvent::UnreadableRecord { .. }
+            | AgentEvent::RecordWithheld { .. }
             | AgentEvent::ProviderStartFailed { .. } => {}
         }
 

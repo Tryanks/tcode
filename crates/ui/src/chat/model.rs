@@ -47,6 +47,8 @@ pub(crate) enum Segment<'a> {
     Error(&'a TimelineEntry),
     /// Consecutive rows of the log this build cannot read.
     Unreadable(Vec<&'a TimelineEntry>),
+    /// A record too large to send here, kept on the host.
+    Withheld(&'a TimelineEntry),
 }
 
 #[derive(Debug)]
@@ -282,6 +284,9 @@ pub(crate) fn segment_entries<'a>(
             }
             EntryContent::Error { .. } | EntryContent::ProviderStartError { .. } => {
                 single(&mut segments, &mut ranges, Segment::Error(entry));
+            }
+            EntryContent::Withheld { .. } => {
+                single(&mut segments, &mut ranges, Segment::Withheld(entry));
             }
             EntryContent::Unreadable { .. } => {
                 flush_activities(

@@ -1773,7 +1773,7 @@ impl WorkspaceStore {
                 }
                 (Topic::SessionEvents { session_id }, ServerEvent::SessionHistoryError(error)) => {
                     if let Some(thread) = self.open_thread_mut(session_id) {
-                        thread.history_error = Some(history::history_error_message(error.clone()));
+                        thread.history_error = Some(error.message.clone());
                         thread.catching_up = false;
                     }
                 }

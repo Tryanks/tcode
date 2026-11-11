@@ -6,7 +6,6 @@ chat:
   waiting_connection: "等待连接…"
   retry_delivery: "重试"
   discard_delivery: "丢弃"
-  history_record_too_large: 一条历史记录超过了发往此设备的单个应答能承载的大小。
   relayed: "已从 %{from} 接力至 %{to}"
   moved: "已从 %{from} 移入此目录，%{to} 以新会话继续"
   session_moved: "已从 %{from} 移至 %{to}，原会话在那里继续"
@@ -48,6 +47,7 @@ chat:
   settings_kept: "这一条仍用旧设置，后台任务结束后换用新设置"
   unreadable_record_one: "1 条此版本 Tcode 不再认识的记录"
   unreadable_records: "%{count} 条此版本 Tcode 不再认识的记录"
+  record_withheld: "一条 %{size} 的记录太大，无法发送到此设备；在主机本机上可以完整查看"
   working: "工作中"
   turn_ai: "模型思考与回答 %{duration}"
   turn_tools: "工具调用 %{duration}"

@@ -592,6 +592,11 @@ pub enum EntryContent {
     Unreadable {
         line: String,
     },
+    /// A record too large to send to this client, kept on the host
+    /// ([`AgentEvent::RecordWithheld`]).
+    Withheld {
+        bytes: u64,
+    },
 }
 
 /// What a rewind did, as its divider shows it.
@@ -1710,6 +1715,18 @@ impl Timeline {
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
                     content: EntryContent::Unreadable { line: line.clone() },
+                    ts,
+                    finished_ts: None,
+                    background: false,
+                    turn,
+                }));
+            }
+            AgentEvent::RecordWithheld { bytes } => {
+                let turn = self.ensure_turn();
+                let id = self.synthetic_id("withheld", ts);
+                self.entries.push(Arc::new(TimelineEntry {
+                    id,
+                    content: EntryContent::Withheld { bytes: *bytes },
                     ts,
                     finished_ts: None,
                     background: false,

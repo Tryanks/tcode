@@ -269,6 +269,14 @@ impl TimelineView {
                 Segment::Plan(entry) => {
                     column = column.child(self.compose_plan(entry, cwd, cx));
                 }
+                Segment::Withheld(entry) => {
+                    let EntryContent::Withheld { bytes } = entry.content else {
+                        unreachable!();
+                    };
+                    column = column.child(components::dividers::record_withheld_divider(
+                        &entry.id, bytes, cx,
+                    ));
+                }
                 Segment::Unreadable(rows) => {
                     let label = if rows.len() == 1 {
                         crate::tr!("chat.unreadable_record_one")

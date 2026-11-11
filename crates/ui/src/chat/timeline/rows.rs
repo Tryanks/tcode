@@ -553,6 +553,7 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
         }
         EntryContent::RewindFailed { failure, .. } => failure.reason.hash(hash),
         EntryContent::Unreadable { line } => line.len().hash(hash),
+        EntryContent::Withheld { bytes } => bytes.hash(hash),
         EntryContent::Item(ItemContent::ImageRead { path, .. }) => path.hash(hash),
         EntryContent::Item(ItemContent::WebSearch { query }) => query.len().hash(hash),
         EntryContent::Item(ItemContent::Other {
