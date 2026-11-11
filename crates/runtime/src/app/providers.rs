@@ -784,14 +784,16 @@ impl AppState {
 
     /// Delete a user profile: remove its card, its secrets, and detach any
     /// sessions still pointing at it (they fall back to the built-in profile).
-    /// Built-in ids are ignored.
-    pub fn delete_profile(&mut self, id: &str, cx: &mut HostCx) {
+    /// Built-in ids are ignored. The task returned ends once the config
+    /// directory Tcode made for it is gone, or its removal failed and was
+    /// reported.
+    pub fn delete_profile(&mut self, id: &str, cx: &mut HostCx) -> HostTask<()> {
         if Settings::is_builtin_profile_id(id) || self.settings_change_refused(cx) {
-            return;
+            return cx.spawn_background(async {});
         }
         let mut settings = self.settings.clone();
         let Some(profile) = settings.profiles.remove(id) else {
-            return;
+            return cx.spawn_background(async {});
         };
         // A later profile of the same name gets this id and owns none of its stars.
         settings.favorite_models.retain(|favorite| {
@@ -808,20 +810,20 @@ impl AppState {
         // Only the directory Tcode made; a home the user chose is theirs.
         let home = self.store.root().join("profile-homes").join(id);
         if profile.settings.home_path.as_ref() != Some(&home) {
-            return;
+            return cx.spawn_background(async {});
         }
         let removed = cx.unblock(move || match std::fs::remove_dir_all(&home) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
             _ => Ok(()),
         });
         let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
+        cx.spawn_background(async move {
             if let Err(error) = removed.await {
                 host_cx.enqueue(move |state, cx| {
                     state.report_error(RuntimeError::ProfileConfig { error }, cx);
                 });
             }
-        });
+        })
     }
 
     /// The snapshots as clients see them: a Claude account profile whose CLI

@@ -727,7 +727,13 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                 cx.spawn_background(async move { task.await.map(CommandResponse::ProfileId) }),
             );
         }
-        Command::DeleteProfile { profile_id } => app.delete_profile(&profile_id, cx),
+        Command::DeleteProfile { profile_id } => {
+            let removed = app.delete_profile(&profile_id, cx);
+            return CommandOutcome::Pending(cx.spawn_background(async move {
+                removed.await;
+                Ok(CommandResponse::Unit)
+            }));
+        }
         Command::StartProviderLogin { profile_id } => app.start_provider_login(&profile_id, cx),
         Command::SubmitProviderLoginCode { profile_id, code } => {
             app.submit_provider_login_code(&profile_id, &code)

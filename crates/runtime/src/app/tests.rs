@@ -2512,6 +2512,52 @@ fn an_unreadable_settings_file_is_never_written_over() {
 
 /// A deleted profile's id comes back with the next profile of that name, which
 /// owns none of its stars; other accounts' stars and bare ids stay.
+/// A directory already in `profile-homes` — the config directory of an
+/// account whose profile the settings no longer hold — is that account's: a
+/// new profile of the same name gets a directory of its own, and deleting the
+/// new profile leaves the old directory as it was.
+#[test]
+fn a_new_profile_never_takes_over_a_directory_left_in_profile_homes() {
+    let store = TestStore::new("tcode-profile-home-left");
+    let left = store.root().join("profile-homes").join("work");
+    let account = r#"{"oauthAccount":{"emailAddress":"work@example.com"}}"#;
+    std::fs::create_dir_all(left.join("projects/-repo")).unwrap();
+    std::fs::write(left.join(".claude.json"), account).unwrap();
+    std::fs::write(left.join("projects/-repo/session.jsonl"), "{}").unwrap();
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+
+    state.dispatch_command(
+        cx,
+        1,
+        Command::CreateThirdPartyProfile {
+            provider: ProviderKind::ClaudeCode,
+            name: "Work".into(),
+            base_url: "https://proxy.test".into(),
+            model: None,
+            api_key: "sk-test".into(),
+            inherit_config: false,
+        },
+    );
+    cx.run_until(|state| !state.settings.profiles.is_empty());
+    let (id, home) = state.read(|state| {
+        let (id, profile) = state.settings.profiles.iter().next().unwrap();
+        (id.clone(), profile.settings.home_path.clone().unwrap())
+    });
+    assert_ne!(home, left);
+    assert_eq!(home, store.root().join("profile-homes").join(&id));
+    assert!(home.join(".claude.json").is_file());
+
+    state.dispatch_command(cx, 2, Command::DeleteProfile { profile_id: id });
+    answered(cx, 2);
+    assert!(!home.exists());
+    assert_eq!(
+        std::fs::read_to_string(left.join(".claude.json")).unwrap(),
+        account
+    );
+    assert!(left.join("projects/-repo/session.jsonl").is_file());
+}
+
 #[test]
 fn deleting_a_profile_takes_its_stars_with_it() {
     let cx = &mut TestAppContext::default();
@@ -2533,7 +2579,7 @@ fn deleting_a_profile_takes_its_stars_with_it() {
             .favorite_models
             .push(FavoriteModel::Id("older".into()));
 
-        state.delete_profile("second-account", cx);
+        state.delete_profile("second-account", cx).detach();
 
         assert_eq!(
             state.settings.favorite_models,
