@@ -3203,6 +3203,8 @@ mod tests {
     /// and says where to continue when the file goes on (v2.2.7's
     /// `toModelContent`, `packages/core/src/tool/plugin/read.ts`; content
     /// invented). A directory's page is a listing of its entries.
+    // The fixture's paths are as the harness prints them on a POSIX machine.
+    #[cfg(unix)]
     #[test]
     fn a_read_is_the_lines_it_read_from_where_it_began() {
         let page = "Read file src/lib.rs, lines 40-41\n40: fn main() {\n41: }\n[Output truncated. Continue reading with offset: 42]";
@@ -3242,6 +3244,8 @@ mod tests {
     /// as `  Line N: text`; glob lists the absolute path of each file
     /// (v2.2.7's `toModelContent` in `grep.ts` and `glob.ts`; content
     /// invented).
+    // The fixture's paths are as the harness prints them on a POSIX machine.
+    #[cfg(unix)]
     #[test]
     fn a_search_is_what_it_found() {
         let grep = "Found 2 matches\n/work/src/a.rs:\n  Line 3: fn new() {}\n  Line 9: fn new_at(x: u8) {}\n\n(Results are truncated: showing first 2 results. Consider using a more specific path or pattern.)";

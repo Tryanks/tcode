@@ -2600,6 +2600,8 @@ mod tests {
     /// a context line `path-N- text`, and its limits in a `[…]` notice after
     /// a blank line; ls lists the names in its directory (1.5.2's
     /// `dist/core/tools/grep.js` and `ls.js`; content invented).
+    // The fixture's paths are as the harness prints them on a POSIX machine.
+    #[cfg(unix)]
     #[test]
     fn a_search_is_what_it_found_under_where_it_looked() {
         let (family, _) = tool_family(

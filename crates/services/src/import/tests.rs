@@ -56,7 +56,7 @@ fn a_history_directory_the_scan_cannot_read_is_reported() {
 #[test]
 fn a_codex_rollout_without_its_session_meta_is_reported() {
     let home = std::env::temp_dir().join(format!("tcode-codex-{}", uuid::Uuid::new_v4()));
-    let day = home.join("sessions/2026/01/02");
+    let day = home.join("sessions").join("2026").join("01").join("02");
     std::fs::create_dir_all(&day).unwrap();
     let rollout =
         day.join("rollout-2026-01-02T03-04-05-00000000-0000-4000-8000-000000000041.jsonl");
@@ -198,11 +198,13 @@ const CODEX_ROLLOUT: &str = r#"{"timestamp":"2026-01-02T03:04:05.000Z","type":"s
 #[test]
 fn a_rollout_codex_compressed_is_listed_and_imports_as_it_was_written() {
     let home = std::env::temp_dir().join(format!("tcode-codex-{}", uuid::Uuid::new_v4()));
-    let day = home.join("sessions/2026/01/02");
+    let day = home.join("sessions").join("2026").join("01").join("02");
     std::fs::create_dir_all(&day).unwrap();
     let cwd = home.join("project");
     std::fs::create_dir_all(&cwd).unwrap();
-    let rollout = CODEX_ROLLOUT.replace("/work/example", cwd.to_str().unwrap());
+    // The directory as a JSON string holds it, without the quotes.
+    let in_json = serde_json::to_string(cwd.to_str().unwrap()).unwrap();
+    let rollout = CODEX_ROLLOUT.replace("/work/example", in_json.trim_matches('"'));
     let name = "rollout-2026-01-02T03-04-05-00000000-0000-4000-8000-000000000001.jsonl";
     let compressed = day.join(format!("{name}.zst"));
     std::fs::write(
@@ -260,8 +262,8 @@ fn a_reverted_codex_thread_shows_the_history_it_kept_and_what_followed() {
     let thread = "00000000-0000-7000-8000-000000000031";
     let meta = |ordinal: u64, time: &str, base: &str| {
         format!(
-            r#"{{"timestamp":"{time}","ordinal":{ordinal},"type":"session_meta","payload":{{"id":"{thread}","timestamp":"{time}","cwd":"{}","originator":"codex_cli_rs","cli_version":"0.167.0","history_mode":"paginated"{base}}}}}"#,
-            cwd.display()
+            r#"{{"timestamp":"{time}","ordinal":{ordinal},"type":"session_meta","payload":{{"id":"{thread}","timestamp":"{time}","cwd":{},"originator":"codex_cli_rs","cli_version":"0.167.0","history_mode":"paginated"{base}}}}}"#,
+            serde_json::to_string(cwd.to_str().unwrap()).unwrap()
         )
     };
     let message = |ordinal: u64, time: &str, role: &str, kind: &str, text: &str| {
@@ -318,7 +320,7 @@ fn a_reverted_codex_thread_shows_the_history_it_kept_and_what_followed() {
         r#","history_base":{{"thread_id":"{thread}","end_ordinal_exclusive":3,"end_byte_offset":{}}}"#,
         kept.len()
     );
-    let day = home.join("sessions/2026/01/03");
+    let day = home.join("sessions").join("2026").join("01").join("03");
     std::fs::create_dir_all(&day).unwrap();
     let reverted = day.join(format!(
         "rollout-2026-01-03T04-05-06-{thread}_00000000-0000-7000-8000-000000000032.jsonl"
