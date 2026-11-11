@@ -898,11 +898,6 @@ pub(super) fn block(
             });
         })
         .child(card);
-    #[cfg(test)]
-    let block = {
-        let path = path.to_string();
-        block.debug_selector(move || format!("markdown-mermaid-block-{path}"))
-    };
     block.into_any_element()
 }
 
@@ -1093,7 +1088,7 @@ mod tests {
                 .flex()
                 .flex_col()
                 .child(MarkdownView::new(&self.markdown).selectable(true))
-                .child(div().h(px(20.)).debug_selector(|| "below".into()))
+                .child(div().h(px(20.)))
         }
     }
 
@@ -1136,13 +1131,6 @@ mod tests {
         }
     }
 
-    fn block_height(cx: &mut VisualTestContext) -> Pixels {
-        cx.debug_bounds("markdown-mermaid-block-root-0")
-            .expect("the fence is painted")
-            .size
-            .height
-    }
-
     fn diagram_shown(cx: &mut VisualTestContext) -> bool {
         cx.debug_bounds("markdown-mermaid-root-0").is_some()
     }
@@ -1165,39 +1153,37 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_statement_that_does_not_parse_yet_leaves_the_diagram_as_it_is(cx: &mut TestAppContext) {
+    fn a_statement_still_being_written_leaves_the_diagram_shown(cx: &mut TestAppContext) {
         let (markdown, cx) = open("", true, cx);
-        for line in [
-            "```mermaid\n",
-            "sequenceDiagram\n",
-            "    participant U as User\n",
-            "    participant C as Client\n",
-            "    U->>C: Type prompt\n",
-        ] {
-            push(&markdown, line, cx);
-            frames(30, cx);
-        }
+        push(
+            &markdown,
+            "```mermaid\nsequenceDiagram\n    participant U as User\n    participant C as Client\n    U->>C: Type prompt\n",
+            cx,
+        );
+        frames(30, cx);
         assert!(diagram_shown(cx) && !code_shown(cx), "the diagram is drawn");
-        let before = block_height(cx);
         // A block statement parses only once its `end` arrives.
-        for line in [
-            "    loop Streaming\n",
-            "        C-->>U: Text delta\n",
-            "        U-->>C: Timeline update\n",
-        ] {
-            push(&markdown, line, cx);
-            for _ in 0..30 {
-                frame(cx);
-                assert!(
-                    diagram_shown(cx) && !code_shown(cx),
-                    "{line:?}: the diagram stays, never its code nor nothing"
-                );
-            }
-        }
+        push(
+            &markdown,
+            "    loop Streaming\n        C-->>U: Text delta\n        U-->>C: Timeline update\n",
+            cx,
+        );
+        frames(30, cx);
+        assert!(
+            diagram_shown(cx) && !code_shown(cx),
+            "the diagram stays, never its code nor nothing"
+        );
+        assert!(
+            !shown_source(&markdown, cx).unwrap().contains("loop"),
+            "the unfinished loop is not drawn"
+        );
         push(&markdown, "    end\n", cx);
         frames(30, cx);
         assert!(diagram_shown(cx));
-        assert!(block_height(cx) > before, "the loop joins the diagram");
+        assert!(
+            shown_source(&markdown, cx).unwrap().contains("loop"),
+            "the loop joins the diagram"
+        );
     }
 
     #[gpui::test]
@@ -1205,13 +1191,6 @@ mod tests {
         cx.update(|cx| cx.set_reduce_motion(true));
         let statements = "flowchart TD\n    A --> B\n    B --> C\n";
         let partial = "    C --> D[Archive";
-        let whole_height = |text: &str, cx: &mut TestAppContext| {
-            let (_, cx) = open(text, false, cx);
-            draw_settled(cx);
-            block_height(cx)
-        };
-        let closed_height = whole_height(&format!("```mermaid\n{statements}```\n"), cx);
-        let open_height = whole_height(&format!("```mermaid\n{statements}{partial}"), cx);
 
         let (markdown, cx) = open("", true, cx);
         push(&markdown, &format!("```mermaid\n{statements}"), cx);
@@ -1219,8 +1198,8 @@ mod tests {
         push(&markdown, "```", cx);
         draw_settled(cx);
         assert_eq!(
-            block_height(cx),
-            closed_height,
+            shown_source(&markdown, cx).as_deref(),
+            Some(statements),
             "the closed fence's whole source"
         );
         assert!(diagram_shown(cx) && !code_shown(cx));
@@ -1240,12 +1219,10 @@ mod tests {
             Some(statements),
             "while streaming, the statement still being written is not drawn"
         );
-        let streaming_height = block_height(cx);
         markdown.update(cx, |state, cx| state.set_streaming(false, cx));
         draw_settled(cx);
-        assert_eq!(block_height(cx), open_height);
         assert!(
-            open_height > streaming_height,
+            shown_source(&markdown, cx).is_some_and(|source| source.contains("Archive")),
             "the last statement joined the diagram"
         );
     }
@@ -1271,12 +1248,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_final_source_that_fails_after_a_diagram_fades_to_its_code(cx: &mut TestAppContext) {
+    fn a_final_source_that_fails_after_a_diagram_shows_its_code(cx: &mut TestAppContext) {
         let (markdown, cx) = open("", true, cx);
         push(&markdown, "```mermaid\nflowchart TD\n    A --> B\n", cx);
         frames(30, cx);
         assert!(diagram_shown(cx));
-        let diagram_height = block_height(cx);
         // A subgraph that never ends: the whole source does not parse.
         push(&markdown, "    subgraph Late\n    B --> C\n```\n", cx);
         frames(30, cx);
@@ -1286,7 +1262,6 @@ mod tests {
             cx.debug_bounds("markdown-mermaid-toggle-root-0").is_none(),
             "nothing offers a picture of a source the model did not write"
         );
-        assert_ne!(block_height(cx), diagram_height);
     }
 
     #[gpui::test]

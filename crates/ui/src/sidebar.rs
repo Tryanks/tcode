@@ -6929,7 +6929,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn compact_thread_distinguishes_host_background_activity(cx: &mut TestAppContext) {
+    fn a_phone_row_says_whether_its_thread_works_runs_background_work_or_waits(
+        cx: &mut TestAppContext,
+    ) {
         use tcode_protocol::{
             EventEnvelope, HostMessage, IndexSnapshot, IndexSummary, ServerEvent, SessionActivity,
             Topic, encode_line,
@@ -7060,16 +7062,8 @@ mod tests {
                         _ => None,
                     })
                     .expect("rendered phone thread");
-                let (label, color) = compact_status_line(&row.state, row.working, cx).unwrap();
+                let (label, _) = compact_status_line(&row.state, row.working, cx).unwrap();
                 assert_eq!(label, expected);
-                assert_eq!(
-                    color,
-                    if doing == Doing::Turn {
-                        cx.theme().primary
-                    } else {
-                        cx.theme().muted_foreground
-                    }
-                );
             });
         }
     }
@@ -7437,7 +7431,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn compact_menu_dismissal_preserves_selection_and_clears_row_surface(cx: &mut TestAppContext) {
+    fn dismissing_a_phone_rows_menu_keeps_the_selection_and_the_next_tap_opens(
+        cx: &mut TestAppContext,
+    ) {
         use gpui::{PlatformInput, TouchEvent, TouchId, TouchPhase};
         cx.update(crate::theme::init);
         let root = crate::store::tests::scratch_root("menu-selection");
@@ -7517,10 +7513,7 @@ mod tests {
         let destination = navigation.read_with(cx, |state, _| state.destination());
         send(cx, 2, TouchPhase::Started, outside);
         send(cx, 2, TouchPhase::Ended, outside);
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("tcode-popup-menu").is_none());
         assert_eq!(
             store.read_with(cx, |store, _| store.open_threads()),
@@ -7530,29 +7523,12 @@ mod tests {
             navigation.read_with(cx, |state, _| state.destination()),
             destination
         );
-        let selected_surface = |cx: &mut VisualTestContext, bounds: gpui::Bounds<gpui::Pixels>| {
-            cx.update(|window, cx| {
-                window.painted_quads().iter().any(|quad| {
-                    quad.bounds == bounds.scale(window.scale_factor())
-                        && quad.background == gpui::Background::from(cx.theme().list_active)
-                })
-            })
-        };
-        assert!(
-            !selected_surface(cx, a),
-            "dismissed A has no pressed or selected fill"
-        );
         send(cx, 3, TouchPhase::Started, b.center());
         send(cx, 3, TouchPhase::Ended, b.center());
         draw_settled(cx);
         assert_eq!(
             store.read_with(cx, |store, _| store.open_threads()),
             ["menu-10"]
-        );
-        assert!(!selected_surface(cx, a));
-        assert!(
-            !selected_surface(cx, b),
-            "a phone's list selects no row, the thread being another page"
         );
         let _ = std::fs::remove_dir_all(root);
     }

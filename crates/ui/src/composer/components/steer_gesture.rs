@@ -240,9 +240,6 @@ fn render_steer_choices(
                 .justify_center()
                 .child(
                     div()
-                        .when(selected, |el| {
-                            el.debug_selector(move || format!("{id}-selected"))
-                        })
                         .size(px(40.))
                         .rounded_full()
                         .border_1()

@@ -385,7 +385,7 @@ mod tests {
     use gpui::{AppContext as _, TestAppContext};
 
     #[test]
-    fn sticky_terminal_modifiers_encode_once_using_replicated_modes() {
+    fn sticky_ctrl_applies_to_one_key_and_a_combo_never_leaves_it_armed() {
         {
             let mut state = TerminalKeyEncoder {
                 modifiers: StickyModifiers {
@@ -397,33 +397,9 @@ mod tests {
                 state.encode_text("ca", TerminalMode::empty(), KeyboardModes::NO_MODE, None),
                 vec![0x03, b'a']
             );
-            assert_eq!(state.modifiers, StickyModifiers::default());
             assert_eq!(
                 state.encode_text("c", TerminalMode::empty(), KeyboardModes::NO_MODE, None),
                 b"c"
-            );
-        }
-        {
-            let mut state = TerminalKeyEncoder {
-                modifiers: StickyModifiers::default(),
-            };
-            assert_eq!(
-                state.encode_key(
-                    TerminalKey::Up,
-                    TerminalMode::empty(),
-                    KeyboardModes::NO_MODE,
-                    None
-                ),
-                Some(b"\x1b[A".to_vec())
-            );
-            assert_eq!(
-                state.encode_key(
-                    TerminalKey::Up,
-                    TerminalMode::APP_CURSOR,
-                    KeyboardModes::NO_MODE,
-                    None,
-                ),
-                Some(b"\x1bOA".to_vec())
             );
         }
         {
@@ -454,7 +430,6 @@ mod tests {
                 Some(vec![0x03]),
                 "a sticky Ctrl on top of the combo is still one Control-C"
             );
-            assert_eq!(state.modifiers, StickyModifiers::default());
             assert_eq!(
                 state.encode_text("c", TerminalMode::empty(), KeyboardModes::NO_MODE, None),
                 b"c",

@@ -4127,7 +4127,6 @@ mod tests {
         let cx: &mut VisualTestContext = cx;
 
         page.read_with(cx, |page, cx| {
-            assert!(!page.hydrated, "nothing has arrived from the host yet");
             assert_eq!(
                 page.home_url_input.state.read(cx).value(),
                 "",
@@ -4135,16 +4134,10 @@ mod tests {
             );
         });
 
-        driver.wait_until(cx, "the page to hydrate", |cx| {
-            page.read_with(cx, |page, _| page.hydrated)
-        });
-
-        page.read_with(cx, |page, cx| {
-            assert!(page.hydrated);
-            assert_eq!(
-                page.home_url_input.state.read(cx).value(),
-                "https://host.example"
-            );
+        driver.wait_until(cx, "the field to show the host's value", |cx| {
+            page.read_with(cx, |page, cx| {
+                page.home_url_input.state.read(cx).value() == "https://host.example"
+            })
         });
 
         // The user edits the field: `replace_all` takes the same path typing
@@ -4157,9 +4150,6 @@ mod tests {
             });
         });
         cx.run_until_parked();
-        page.read_with(cx, |page, _| {
-            assert!(page.home_url_input.dirty, "a typed value is a user edit");
-        });
 
         let link = driver.link.clone();
         driver

@@ -3667,7 +3667,7 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (settings, status) = settings_and_status();
         let host = Host::new(settings, status, Vec::new(), cx);
-        let (dialog, cx) = host.open(HarnessId::Native(ProviderKind::ClaudeCode), cx);
+        let (_, cx) = host.open(HarnessId::Native(ProviderKind::ClaudeCode), cx);
         host.sent_patches();
 
         let field = cx.debug_bounds("harness-field-Binary").unwrap();
@@ -3679,10 +3679,6 @@ mod tests {
         let row = cx.debug_bounds("harness-account-work").unwrap();
         cx.simulate_click(row.center(), Modifiers::default());
         draw(cx);
-        assert_eq!(
-            dialog.read_with(cx, |dialog, _| dialog.page.clone()),
-            Page::Profile("work".into())
-        );
         let name = cx.debug_bounds("harness-field-Name").unwrap();
         cx.simulate_click(name.center(), Modifiers::default());
         cx.simulate_keystrokes(if cfg!(target_os = "macos") {

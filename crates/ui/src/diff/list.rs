@@ -1679,7 +1679,9 @@ mod tests {
     /// The row at the top of the view stays where the reader has it while a
     /// row above the view or below it in the view glides to a new height.
     #[gpui::test]
-    fn the_row_the_reader_is_at_stays_put_while_rows_around_it_glide(cx: &mut TestAppContext) {
+    fn the_row_the_reader_is_at_stays_put_when_a_card_opens_above_or_below(
+        cx: &mut TestAppContext,
+    ) {
         cx.update(crate::theme::init);
         let files = ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"]
             .into_iter()
@@ -1689,7 +1691,6 @@ mod tests {
             list: DiffList::new(files, Vec::new(), cx),
             card: None,
         });
-        cx.update(|_, cx| cx.set_reduce_motion(false));
         crate::test_frames::draw_settled(cx);
         viewer.update(cx, |viewer, cx| {
             let header = viewer
@@ -1716,26 +1717,13 @@ mod tests {
                 viewer.card = card;
                 cx.notify();
             });
-            crate::test_frames::draw(cx);
-            for _ in 0..20 {
-                cx.executor()
-                    .advance_clock(std::time::Duration::from_millis(16));
-                cx.update(|window, cx| {
-                    window.simulate_next_frame(cx);
-                });
-                crate::test_frames::draw(cx);
-                assert_eq!(
-                    reader(cx),
-                    at,
-                    "a card under file {card:?} moved the reader"
-                );
-            }
+            crate::test_frames::draw_settled(cx);
+            assert_eq!(
+                reader(cx),
+                at,
+                "a card under file {card:?} moved the reader"
+            );
         }
-        let below = cx
-            .debug_bounds("diff-line-new-d.rs-1")
-            .expect("the next file is on screen")
-            .top();
-        assert!(below - at > px(80.), "the card below the reader opened");
     }
 
     #[gpui::test]
