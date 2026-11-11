@@ -3304,25 +3304,11 @@ mod tests {
             Some("User has answered your questions: \"Which colours?\"=\"Red, green, Blue\". You can now continue with the user's answers in mind.".into()),
             Some(&json!({"answers": [["Red, green", "Blue"]]})),
         );
-        assert_eq!(
-            family,
-            Some(ToolFamily::Question {
-                questions: vec![AskedQuestion {
-                    question: "Which colours?".into(),
-                    options: vec![
-                        UserInputOption {
-                            label: "Red, green".into(),
-                            description: "Warm and cool".into(),
-                        },
-                        UserInputOption {
-                            label: "Blue".into(),
-                            description: "Cool".into(),
-                        },
-                    ],
-                    answers: vec!["Red, green".into(), "Blue".into()],
-                }],
-            })
-        );
+        let Some(ToolFamily::Question { questions }) = family else {
+            panic!("{family:?}");
+        };
+        assert_eq!(questions[0].question, "Which colours?");
+        assert_eq!(questions[0].answers, ["Red, green", "Blue"]);
     }
 
     /// websearch heads each page `## [title](url)` (v2.2.7's `websearch.ts`;

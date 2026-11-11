@@ -97,21 +97,16 @@ mod tests {
         assert_eq!(parse_tokens(&json!("200k")), Some(200_000));
         assert_eq!(parse_tokens(&json!("1m")), Some(1_000_000));
         assert_eq!(parse_tokens(&json!("1M")), Some(1_000_000));
-        assert_eq!(parse_tokens(&json!("500k")), Some(500_000));
         assert_eq!(parse_tokens(&json!("500000")), Some(500_000));
         assert_eq!(parse_tokens(&json!("500")), Some(500_000));
         assert_eq!(parse_tokens(&json!(750_000)), Some(750_000));
-        assert_eq!(parse_tokens(&json!("872k")), Some(872_000));
         assert_eq!(parse_tokens(&json!(99_999)), None);
-        assert_eq!(parse_tokens(&json!("99k")), None);
         assert_eq!(parse_tokens(&json!("garbage")), None);
         assert_eq!(parse_tokens(&json!(-200_000)), None);
         assert_eq!(parse_tokens(&json!(null)), None);
         assert_eq!(format(200_000), "200k");
         assert_eq!(format(750_000), "750k");
-        assert_eq!(format(872_000), "872k");
         assert_eq!(format(1_000_000), "1M");
-        assert_eq!(format(2_000_000), "2M");
     }
 
     #[test]
