@@ -1506,8 +1506,16 @@ fn render_code_block(
     let lines = code_lines(code, span.clone(), options, view, cx);
     let radius = crate::material::radius_card(cx);
     // The whole fence, not the painted span: a long block is split across
-    // list items and the menu copies the code a reader sees as one block.
-    let whole_code = prepared.text.clone();
+    // list items and the menu copies the code a reader sees as one block,
+    // with the line endings it was written with, less the fence's last.
+    let source = &code.code;
+    let whole_code: SharedString = source
+        .strip_suffix('\n')
+        .map_or(source.as_ref(), |code| {
+            code.strip_suffix('\r').unwrap_or(code)
+        })
+        .to_string()
+        .into();
     let context_view = view.clone();
     let is_math = super::math::is_math(code.lang.as_deref());
     // One button per fence, on the item that paints its first line.
@@ -1523,11 +1531,7 @@ fn render_code_block(
             move |_, _, cx| {
                 cx.stop_propagation();
                 view.update(cx, |state, cx| {
-                    state.copy_code(
-                        path.clone(),
-                        code.strip_suffix('\n').unwrap_or(&code).to_string(),
-                        cx,
-                    )
+                    state.copy_code(path.clone(), code.to_string(), cx)
                 });
             },
             cx,
@@ -1552,12 +1556,7 @@ fn render_code_block(
             block.on_mouse_down(MouseButton::Right, move |_, _, cx| {
                 context_view.update(cx, |state, cx| {
                     state.set_pending_context(
-                        Some(PendingContextTarget::CodeBlock(
-                            whole_code
-                                .strip_suffix('\n')
-                                .unwrap_or(&whole_code)
-                                .to_string(),
-                        )),
+                        Some(PendingContextTarget::CodeBlock(whole_code.to_string())),
                         cx,
                     )
                 });
