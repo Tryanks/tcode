@@ -2071,6 +2071,7 @@ pull_requests:
   badge_single: "プルリクエスト #%{number}、%{state}"
   badge_stack: "%{count} 件のプルリクエストのスタック、%{state}"
   badge_several: "関連付けられた %{count} 件のプルリクエスト、%{state}"
+  linked_count: "関連 PR %{count} 件"
   more: "ほか %{count} 件"
   stack_short: "スタック · %{count}"
   chain_short: "チェーン · %{count}"

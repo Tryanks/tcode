@@ -2071,6 +2071,7 @@ pull_requests:
   badge_single: "Pull request #%{number}, %{state}"
   badge_stack: "Stack of %{count} pull requests, %{state}"
   badge_several: "%{count} linked pull requests, %{state}"
+  linked_count: "%{count} linked PRs"
   more: "and %{count} more"
   stack_short: "Stack · %{count}"
   chain_short: "Chain · %{count}"

@@ -236,11 +236,31 @@ pub fn badge(links: &[ThreadPullRequestLink], cx: &App) -> Option<AnyElement> {
         .into_any_element(),
     )
 }
-/// Every visible linked pull request's number in link order, each in its own state's glyph and
-/// color: the thread's header and the phone's row show them all, where the sidebar's rows can
-/// afford only [`badge`]. A number linked or unlinked widens in or narrows away.
+/// The visible linked pull requests as the thread's chip names them: up to two by number in
+/// link order, each in its own state's glyph and color, a number linked or unlinked widening
+/// in or narrowing away; more than two as their count. The chip opens the list either way, so
+/// a longer row of numbers would only take the room.
 pub fn numbers(links: &[ThreadPullRequestLink], cx: &App) -> Option<AnyElement> {
     let label = badge_label(links, cx)?;
+    let visible = links.iter().filter(|link| link.visible()).count();
+    if visible > 2 {
+        return Some(
+            h_flex()
+                .id("pull-request-numbers")
+                .debug_selector(|| "pull-request-count".into())
+                .aria_label(label)
+                .flex_none()
+                .items_center()
+                .gap(cx.theme().tokens.spacing.xxs)
+                .text_token(&cx.theme().tokens.typography.xs)
+                .child(Icon::new(IconName::GitPullRequest))
+                .child(
+                    crate::tr!("pull_requests.linked_count", count = visible.to_string())
+                        .into_owned(),
+                )
+                .into_any_element(),
+        );
+    }
     let spacing = &cx.theme().tokens.spacing;
     let (gap, inner) = (spacing.xs, spacing.xxs);
     let typography = cx.theme().tokens.typography.xs;

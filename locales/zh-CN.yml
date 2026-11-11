@@ -2064,6 +2064,7 @@ pull_requests:
   badge_single: "拉取请求 #%{number}，%{state}"
   badge_stack: "%{count} 个拉取请求组成的堆叠，%{state}"
   badge_several: "%{count} 个已关联的拉取请求，%{state}"
+  linked_count: "%{count} 个关联 PR"
   more: "还有 %{count} 个"
   stack_short: "堆叠 · %{count}"
   chain_short: "链 · %{count}"

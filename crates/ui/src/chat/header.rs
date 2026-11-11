@@ -754,8 +754,9 @@ impl ChatView {
         self.pull_requests.read(cx).detail()
     }
 
-    /// The phone's entry to the linked pull requests: one chip naming every
-    /// number, which opens them in a bottom sheet.
+    /// The entry to the linked pull requests: one chip naming up to two of
+    /// them and counting more, which opens the list (a bottom sheet on a
+    /// phone).
     fn render_pull_request_pill(
         &self,
         links: &[tcode_core::pull_request::ThreadPullRequestLink],
