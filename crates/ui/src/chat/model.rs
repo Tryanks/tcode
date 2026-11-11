@@ -1086,14 +1086,6 @@ pub(in crate::chat) mod tests {
         )
     }
 
-    pub(in crate::chat) fn at_turn(
-        mut entry: Arc<TimelineEntry>,
-        turn: usize,
-    ) -> Arc<TimelineEntry> {
-        Arc::make_mut(&mut entry).turn = turn;
-        entry
-    }
-
     #[test]
     fn segmentation_preserves_message_order_and_groups_adjacent_activities() {
         let entries = [

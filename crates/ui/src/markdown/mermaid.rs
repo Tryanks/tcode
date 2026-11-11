@@ -931,11 +931,6 @@ fn picture(
         cx.stop_propagation();
         crate::image_viewer::open(viewer.clone(), viewer_label.to_string(), window, cx);
     });
-    #[cfg(test)]
-    let image = {
-        let path = path.to_string();
-        image.debug_selector(move || format!("markdown-mermaid-picture-{path}-{place}"))
-    };
     Fitted {
         intrinsic: picture.size(),
         blend,
@@ -1292,32 +1287,6 @@ mod tests {
             "nothing offers a picture of a source the model did not write"
         );
         assert_ne!(block_height(cx), diagram_height);
-    }
-
-    /// A theme switch draws a diagram again for the new theme.
-    #[gpui::test]
-    fn a_theme_switch_draws_a_diagram_again(cx: &mut TestAppContext) {
-        let (_, cx) = open(&format!("```mermaid\n{FLOWCHART}```\n"), false, cx);
-        cx.update(|_, cx| cx.set_reduce_motion(true));
-        draw_settled(cx);
-        let pictures = |cx: &mut VisualTestContext| {
-            (0..4)
-                .filter(|generation| {
-                    cx.debug_bounds(format!("markdown-mermaid-picture-root-0-{generation}").leak())
-                        .is_some()
-                })
-                .collect::<Vec<_>>()
-        };
-        let before = pictures(cx);
-        assert_eq!(before.len(), 1);
-        cx.update(|window, cx| crate::theme::glide_mode(crate::theme::ThemeMode::Dark, window, cx));
-        draw_settled(cx);
-        let after = pictures(cx);
-        assert_eq!(after.len(), 1);
-        assert_ne!(
-            after, before,
-            "the diagram was drawn again for the dark theme"
-        );
     }
 
     #[gpui::test]

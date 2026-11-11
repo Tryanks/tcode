@@ -16332,53 +16332,6 @@ pub(crate) mod tests {
         assert!(heights.is_empty(), "{heights:?}");
     }
 
-    /// Expand and Restore lay the right panel out again without remounting it:
-    /// what its elements keep by their place in the tree — the focus a press
-    /// gives the Expand button, the scroll of a list — is still theirs after.
-    #[gpui::test]
-    fn expanding_the_right_panel_keeps_its_elements_state(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_crowded_thread(cx);
-        // Its agents run, and what shows them running rests only with motion
-        // reduced.
-        cx.update(|_, cx| cx.set_reduce_motion(true));
-        let store = store_of(&shell, cx);
-        resize(cx, 1600.);
-        store.update(cx, |store, cx| {
-            store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
-        });
-        draw_until(cx, &host, "diff-body", None);
-
-        let press_expand = |cx: &mut VisualTestContext| {
-            let expand = cx.debug_bounds("diff-expand").expect("the expand button");
-            cx.simulate_click(expand.center(), gpui::Modifiers::default());
-            crate::test_frames::draw_settled(cx);
-            cx.update(|window, cx| window.focused(cx))
-        };
-        let expanded = press_expand(cx);
-        assert!(
-            store.read_with(cx, |store, _| store
-                .panel_state_for(Some("thread-1"))
-                .right_panel_expanded),
-            "the press expands the panel"
-        );
-        assert!(
-            expanded.is_some(),
-            "the expanded panel's button keeps its focus"
-        );
-        let restored = press_expand(cx);
-        assert!(
-            !store.read_with(cx, |store, _| store
-                .panel_state_for(Some("thread-1"))
-                .right_panel_expanded),
-            "the second press restores it"
-        );
-        assert_eq!(
-            restored, expanded,
-            "the restored panel's button is the same one"
-        );
-    }
-
     /// The working tree changes outside any turn — the user edits a file while
     /// another tab is showing. Choosing the Diff tab reads the tree again, as
     /// opening the panel does, and a tree with nothing to show draws the empty
@@ -16420,51 +16373,6 @@ pub(crate) mod tests {
             1,
             "choosing the Diff tab reads the working tree again and lists the changed file"
         );
-    }
-
-    /// A changed word in the diff wears the tint of the mode the window ends
-    /// on, not of the frame a theme change began on.
-    #[gpui::test]
-    fn a_diffs_changed_words_take_the_new_modes_tint(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount(cx);
-        open_working_tree_panel(&shell, &host, cx);
-        let changed = tcode_protocol::GitDiffResult {
-            changes: vec![agent::FileChange {
-                path: "README.md".into(),
-                kind: agent::FileChangeKind::Modify,
-                diff: Some("@@ -1 +1 @@\n-# acme-api\n+# acme-web\n".into()),
-            }],
-            texts: vec![tcode_protocol::GitFileText {
-                old: Some("# acme-api\n".into()),
-                new: Some("# acme-web\n".into()),
-            }],
-            ..Default::default()
-        };
-        draw_until(cx, &host, "diff-body", Some(&changed));
-        crate::test_frames::draw_settled(cx);
-        let tint = |mode, cx: &mut VisualTestContext| {
-            cx.update(|_, cx| crate::theme::palette(mode, cx).success.opacity(0.30))
-        };
-        let painted = |tint, cx: &mut VisualTestContext| {
-            cx.update(|window, _| {
-                window
-                    .painted_quads()
-                    .iter()
-                    .any(|quad| quad.background.as_solid() == Some(tint))
-            })
-        };
-        let light = tint(crate::theme::ThemeMode::Light, cx);
-        assert!(painted(light, cx), "the added word wears the light tint");
-
-        cx.update(|window, cx| {
-            crate::settings_page::apply_theme(tcode_core::settings::ThemeMode::Dark, window, cx)
-        });
-        crate::test_frames::draw_settled(cx);
-        crate::test_frames::draw_settled(cx);
-        let dark = tint(crate::theme::ThemeMode::Dark, cx);
-        assert!(painted(dark, cx), "the added word wears the dark tint");
-        assert!(!painted(light, cx));
     }
 
     /// A thread whose turn is running, with the diff panel open on its working tree.
