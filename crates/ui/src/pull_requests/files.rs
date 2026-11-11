@@ -885,7 +885,10 @@ impl PullRequestView {
             let tooltip = if unknown || host_marks.is_none() {
                 crate::tr!("pull_requests.files.viewed_unknown")
             } else if host_marks == Some(true) {
-                crate::tr!("pull_requests.files.viewed_owner_anonymous")
+                crate::tr!(
+                    "pull_requests.files.viewed_owner_anonymous",
+                    host_name = self.host_name(cx)
+                )
             } else {
                 crate::tr!(
                     "pull_requests.files.viewed_owner_tcode_tooltip",
