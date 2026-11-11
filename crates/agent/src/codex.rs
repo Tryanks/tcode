@@ -759,6 +759,7 @@ enum ElicitFieldKind {
 }
 
 struct Actor {
+    clock: crate::Clock,
     child: ProcessTree<Child>,
     stderr_tail: StderrTail,
     stdin: BufWriter<ChildStdin>,
@@ -886,6 +887,7 @@ async fn run_actor(
     };
 
     let mut actor = Actor {
+        clock: opts.clock.clone(),
         child,
         stderr_tail,
         stdin,
@@ -980,6 +982,10 @@ impl SessionActor for Actor {
 
     fn events(&self) -> &Sender<AgentEvent> {
         &self.events
+    }
+
+    fn clock(&self) -> &crate::Clock {
+        &self.clock
     }
 
     fn command_failure_reason(&self) -> &'static str {
@@ -5267,6 +5273,7 @@ mod tests {
         let (event_tx, event_rx) = smol::channel::unbounded();
         (
             Actor {
+                clock: crate::Clock::default(),
                 child: ProcessTree::new(child),
                 stderr_tail: StderrTail::default(),
                 stdin,
@@ -7886,6 +7893,7 @@ mod tests {
                     acp: None,
                     instructions: None,
                     processes: Default::default(),
+                    clock: Default::default(),
                 };
                 let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
                     .await
@@ -7975,6 +7983,7 @@ mod tests {
                     acp: None,
                     instructions: None,
                     processes: Default::default(),
+                    clock: Default::default(),
                 };
                 let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
                     .await

@@ -24,6 +24,8 @@ pub(crate) trait SessionActor {
 
     fn transport(&self) -> &Receiver<Self::TransportItem>;
     fn events(&self) -> &Sender<AgentEvent>;
+    /// The clock [`Self::wake_at`] is read on.
+    fn clock(&self) -> &crate::Clock;
     fn command_failure_reason(&self) -> &'static str;
 
     async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String>;
@@ -49,16 +51,14 @@ pub(crate) async fn run<A: SessionActor>(mut actor: A, commands: &Receiver<Sessi
     }
 
     let reason = loop {
-        let deadline = actor.wake_at();
+        let timer = actor.wake_at().map(|at| actor.clock().timer_at(at));
         let input = future::race(
             async { Input::Command(commands.recv().await) },
             future::race(
                 async { Input::Transport(actor.transport().recv().await) },
                 async {
-                    match deadline {
-                        Some(at) => {
-                            smol::Timer::at(at).await;
-                        }
+                    match timer {
+                        Some(timer) => timer.await,
                         None => std::future::pending::<()>().await,
                     }
                     Input::Wake

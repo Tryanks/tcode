@@ -953,6 +953,7 @@ impl AppState {
             let mut options =
                 session_options(&title_meta, &settings, launch_env, McpServers::default());
             options.processes = processes;
+            options.clock = agent::Clock::new(host_cx.clock().clone());
             let title = generate_ai_title(
                 provider_launcher,
                 title_meta.provider,

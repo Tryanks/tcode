@@ -158,6 +158,7 @@ async fn run_actor(
     );
     mapper.served_model = model_id.clone();
     let mut actor = OpenCodeActor {
+        clock: opts.clock.clone(),
         server,
         http: setup.http,
         transport,
@@ -560,6 +561,7 @@ fn title_case(value: &str) -> String {
 }
 
 struct OpenCodeActor {
+    clock: crate::Clock,
     server: Server,
     http: Http,
     transport: Receiver<Transport>,
@@ -597,6 +599,10 @@ impl SessionActor for OpenCodeActor {
 
     fn events(&self) -> &Sender<AgentEvent> {
         &self.events
+    }
+
+    fn clock(&self) -> &crate::Clock {
+        &self.clock
     }
 
     fn command_failure_reason(&self) -> &'static str {

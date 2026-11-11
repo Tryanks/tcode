@@ -3006,6 +3006,7 @@ mod tests {
             }),
             instructions: None,
             processes: processes.clone(),
+            clock: Default::default(),
         };
         let start = smol::spawn(crate::start_session(ProviderKind::Acp, opts));
         asked.accept().unwrap();

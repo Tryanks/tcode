@@ -39,6 +39,7 @@ fn options() -> SessionOptions {
         acp: None,
         instructions: None,
         processes: Default::default(),
+        clock: Default::default(),
     }
 }
 

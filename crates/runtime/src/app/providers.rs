@@ -1988,6 +1988,7 @@ pub(super) fn session_options(
         }),
         instructions: None,
         processes: Default::default(),
+        clock: Default::default(),
     }
 }
 

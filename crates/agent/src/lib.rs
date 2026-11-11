@@ -20,6 +20,10 @@ mod claude_goal;
 mod claude_manifest;
 #[cfg(feature = "process")]
 mod claude_plugins;
+#[cfg(feature = "process")]
+mod clock;
+#[cfg(feature = "process")]
+pub use clock::{Clock, Timekeeper};
 mod plugin_command;
 #[cfg(feature = "process")]
 mod source_plugins;
@@ -1214,6 +1218,9 @@ pub struct SessionOptions {
     /// stop them whatever the session is waiting on.
     #[cfg(feature = "process")]
     pub processes: SessionProcesses,
+    /// The host's time, which the session's waits on its harness read.
+    #[cfg(feature = "process")]
+    pub clock: Clock,
 }
 
 /// The per-provider environment configured in Settings → Harnesses, applied to

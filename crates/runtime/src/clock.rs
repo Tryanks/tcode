@@ -72,6 +72,17 @@ impl HostClock {
     }
 }
 
+/// What a provider session waits on is the host's time.
+impl agent::Timekeeper for HostClock {
+    fn now(&self) -> Instant {
+        HostClock::now(self)
+    }
+
+    fn timer_at(&self, at: Instant) -> HostTimer {
+        HostClock::timer_at(self, at)
+    }
+}
+
 /// A clock that moves only when it is advanced, for a host a test drives.
 #[cfg(any(test, feature = "test-support"))]
 pub struct ManualClock {

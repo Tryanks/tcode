@@ -95,6 +95,7 @@ pub async fn list_models(
         acp: None,
         instructions: None,
         processes: Default::default(),
+        clock: Default::default(),
     };
     let cursor = Cursor::new(&opts);
     acp_session::query(
