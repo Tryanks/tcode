@@ -2087,7 +2087,7 @@ impl Actor {
             })
             .collect();
         self.background_terminal_read = (!tasks.is_empty())
-            .then(|| std::time::Instant::now() + BACKGROUND_TERMINAL_READ_INTERVAL);
+            .then(|| self.clock.now() + BACKGROUND_TERMINAL_READ_INTERVAL);
         if tasks == self.background_terminals {
             return;
         }
@@ -2779,7 +2779,7 @@ impl Actor {
             }
             "turn/completed" => {
                 self.background_terminal_read =
-                    Some(std::time::Instant::now() + BACKGROUND_TERMINAL_TURN_END_READ);
+                    Some(self.clock.now() + BACKGROUND_TERMINAL_TURN_END_READ);
                 let turn = params.get("turn").unwrap_or(&Value::Null);
                 let id = turn
                     .get("id")
