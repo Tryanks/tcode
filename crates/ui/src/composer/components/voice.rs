@@ -177,6 +177,7 @@ impl Composer {
                 .ghost()
                 .chip()
                 .disabled(!available)
+                .aria_label(tooltip.clone())
                 .tooltip(tooltip)
                 .child(mark)
                 .on_click(cx.listener(|this, _, _, cx| {
