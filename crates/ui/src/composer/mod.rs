@@ -830,10 +830,19 @@ impl Composer {
         if terminal_contexts.is_empty()
             && let Some(later) = parse_later(&text, Local::now())
         {
-            let Ok((fire_at_unix_secs, message)) = later else {
-                window
-                    .push_notification(Notification::error(crate::tr!("composer.later_usage")), cx);
-                return;
+            let (fire_at_unix_secs, message) = match later {
+                Ok(later) => later,
+                Err(error) => {
+                    let text = match error {
+                        LaterError::SkippedTime { hour, minute } => crate::tr!(
+                            "composer.later_skipped_time",
+                            time = format!("{hour}:{minute:02}")
+                        ),
+                        _ => crate::tr!("composer.later_usage"),
+                    };
+                    window.push_notification(Notification::error(text), cx);
+                    return;
+                }
             };
             let attachment_paths = self
                 .pending_images

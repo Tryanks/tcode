@@ -1062,6 +1062,7 @@ composer:
   queue_hint: "Enter to queue · %{shortcut} to steer"
   cmd_later_desc: "Schedule a message: /later 5:10 … or /later 5min …"
   later_usage: "Usage: /later <5:10 | 5min> <message>"
+  later_skipped_time: "%{time} doesn't exist here: daylight saving time skips it. Choose another time."
   send_now: "Send now"
   steer_queued: "Steer into the running turn"
   steer_unsupported_tooltip: "%{agent} can't be steered — this message will be sent when the turn ends"

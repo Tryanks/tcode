@@ -2,7 +2,7 @@ use agent::{
     FileChangeKind, ModelSpec, OptionDescriptor, ProviderCommand, ProviderCommandKind, TokenUsage,
     UserInputQuestion,
 };
-use chrono::{DateTime, Local, NaiveDate, TimeZone as _};
+use chrono::{DateTime, Local, LocalResult, NaiveTime, TimeZone as _};
 use tcode_core::ui::ConversationDestination;
 
 use crate::context_meter;
@@ -65,6 +65,12 @@ pub(super) enum LaterError {
     MissingTime,
     MissingMessage,
     InvalidTime,
+    /// The next time the local clock would read this hour and minute falls in
+    /// the hour a daylight-saving change skips.
+    SkippedTime {
+        hour: u32,
+        minute: u32,
+    },
 }
 
 /// Parse a scheduled-message command against an injectable local clock. A
@@ -91,13 +97,7 @@ pub(super) fn parse_later(
     }
 
     let fire_at = if let Some((hour, minute)) = parse_wall_clock(time_spec) {
-        let today = local_occurrence(now.date_naive(), hour, minute);
-        let candidate = today.filter(|candidate| *candidate > now).or_else(|| {
-            now.date_naive()
-                .succ_opt()
-                .and_then(|date| local_occurrence(date, hour, minute))
-        });
-        candidate.ok_or(LaterError::InvalidTime)
+        next_wall_clock(now, hour, minute)
     } else {
         parse_relative(time_spec)
             .and_then(|duration| now.checked_add_signed(duration))
@@ -125,10 +125,34 @@ pub(super) fn parse_wall_clock(spec: &str) -> Option<(u32, u32)> {
     (hour < 24 && minute < 60).then_some((hour, minute))
 }
 
-pub(super) fn local_occurrence(date: NaiveDate, hour: u32, minute: u32) -> Option<DateTime<Local>> {
-    Local
-        .from_local_datetime(&date.and_hms_opt(hour, minute, 0)?)
-        .earliest()
+/// The next moment after `now` the local clock reads `hour:minute`: today's
+/// if it is still ahead, else tomorrow's, and the first of the two a clock set
+/// back reads. One the clocks skip is not moved to another time.
+fn next_wall_clock(
+    now: DateTime<Local>,
+    hour: u32,
+    minute: u32,
+) -> Result<DateTime<Local>, LaterError> {
+    let time = NaiveTime::from_hms_opt(hour, minute, 0).ok_or(LaterError::InvalidTime)?;
+    let today = now.date_naive();
+    for date in [Some(today), today.succ_opt()].into_iter().flatten() {
+        let wall_clock = date.and_time(time);
+        match Local.from_local_datetime(&wall_clock) {
+            LocalResult::Single(at) if at > now => return Ok(at),
+            // chrono 0.4.45's system time zone lists the smaller offset first,
+            // the later instant, though `Ambiguous` documents (earliest, latest).
+            LocalResult::Ambiguous(first, second) => {
+                if let Some(at) = [first, second].into_iter().filter(|at| *at > now).min() {
+                    return Ok(at);
+                }
+            }
+            LocalResult::None if wall_clock > now.naive_local() => {
+                return Err(LaterError::SkippedTime { hour, minute });
+            }
+            _ => {}
+        }
+    }
+    Err(LaterError::InvalidTime)
 }
 
 pub(super) fn parse_relative(spec: &str) -> Option<chrono::Duration> {

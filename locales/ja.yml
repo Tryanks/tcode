@@ -1062,6 +1062,7 @@ composer:
   queue_hint: "Enter でキューに追加 · %{shortcut} で追加指示"
   cmd_later_desc: "メッセージを予約送信：/later 5:10 … または /later 5min …"
   later_usage: "使い方：/later <5:10 | 5min> <メッセージ>"
+  later_skipped_time: "%{time} はこの地域の時刻にありません（夏時間の切り替えで飛ばされます）。別の時刻を指定してください。"
   send_now: "今すぐ送信"
   steer_queued: "実行中のターンに追加指示として送信"
   steer_unsupported_tooltip: "%{agent} は追加指示に対応していません。このメッセージはターンの終了後に送信されます"
