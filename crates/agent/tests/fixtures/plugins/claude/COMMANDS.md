@@ -159,7 +159,6 @@ Only the runs whose output is kept here are listed; the numbering is the probe's
 | 19 | `10-details` | `plugin details alpha` | `/tmp/tcode-probe/proj` | iso | 0 | `details.txt` | (empty) |
 | 21 | `11-disable` | `plugin disable alpha --json` | `/tmp/tcode-probe/proj` | iso | 0 | `disable.json` | (empty) |
 | 23 | `12-enable` | `plugin enable alpha --json` | `/tmp/tcode-probe/proj` | iso | 0 | `enable.json` | (empty) |
-| 24 | `13-disable-user-scope` | `plugin disable alpha --scope user --json` | `/tmp/tcode-probe/proj` | iso | 0 | `disable-scope-user.json` | (empty) |
 | 32 | `16-update` | `plugin update alpha --json` | `/tmp/tcode-probe/proj` | iso | 0 | `update.json` | (empty) |
 | 35 | `17-uninstall-beta-project` | `plugin uninstall beta --scope project --json` | `/tmp/tcode-probe/proj` | iso | 0 | `uninstall.json` | (empty) |
 | 36 | `18-install-gamma-challenge` | `plugin install gamma@tcode-probe --json` | `/tmp/tcode-probe/proj` | iso | 1 | `install-command-source-challenge.txt` | (not kept) |
@@ -610,42 +609,3 @@ Options:
   -h, --help  Display help for command
 [exit 0]
 ```
-
-
-## Two accounts, one project (`accounts/`)
-
-- CLI: `2.1.318 (Claude Code)`. Date 2026-11-07, macOS. Recorded under
-  `~/Library/Caches/tcode-plugins-probe/rec` with the clean base env above plus
-  `HOME=<rec>`, `CLAUDE_CONFIG_DIR=<rec>/X` or `<rec>/Y`, and
-  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. No session was started.
-- Marketplace `tcode-probe` with `alpha` (1.0.0, skill `greet`) and `beta`
-  (0.1.0), added to both accounts as a directory; project `<rec>/proj` is a
-  fresh `git init`.
-- Setup: X `plugin install alpha@tcode-probe --scope user --json`,
-  X `plugin install beta@tcode-probe --scope project --json` (from the
-  project); Y `plugin install alpha@tcode-probe --scope user --json`,
-  Y `plugin disable alpha@tcode-probe --scope user --json`.
-- Recorded, for each account: `plugin list --json --available` from `<rec>`
-  (`*-list-outside.json`) and from the project (`*-list-project.json`),
-  `plugin marketplace list --json` (`*-marketplace-list.json`), and X's
-  `plugin details alpha@tcode-probe` (`details-alpha.txt`).
-- Edits: `available` keeps the `tcode-probe` entries and one
-  `anthropic-plugin-directory` entry of the ~2 MB the CLI lists; the project
-  path is `@PROJECT@`, the accounts' directory `@HOMES@` and the probe
-  directory `@PROBE@`.
-
-What the recordings show: `projectPath`/`projectEnabled` describe the
-listing's directory; Y, which never installed `beta`, lists nothing for it
-from the project although the project's `.claude/settings.json` enables it.
-
-Observed in the same probe, not kept as files: an account without the
-project-enabled plugin installed lists nothing for it; a headless session
-(`-p` against a dead local `ANTHROPIC_BASE_URL`, so no model call) started
-there by that account neither loads it nor reports a plugin error, and
-installs nothing; `plugin install <id> --scope project` from that account
-fails with `Plugin "<name>" not found in marketplace "<mkt>"` until the
-account adds the marketplace, then succeeds and the session loads it. A
-plugin whose source is the marketplace's own directory is loaded by an
-account that has the marketplace even before it installs it. An account
-whose user `settings.json` enables a plugin it never installed lists nothing
-for it (`plugin list --json`, with or without `--available` in `installed`).

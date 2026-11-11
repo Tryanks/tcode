@@ -27,11 +27,6 @@ Line numbers refer to the build's `3351.index.js` (the ACP server) after
 parameters, paths and texts are illustrative: Cursor's catalog comes from its
 backend.
 
-- `status_signed_in.json` — the `status` command's signed-in report
-  (`8657.index.js`, `status:"authenticated"`, `userInfo`).
-- `cursor-agent` — a stand-in that answers `--version` and `status` from
-  these fixtures.
-
 `source_derived.json`, by key:
 
 - `list_available_models` — `cursor/list_available_models` (1457-1458,
