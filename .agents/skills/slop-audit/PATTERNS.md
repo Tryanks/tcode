@@ -336,6 +336,20 @@ From the round that worked through what was carried forward:
   done or void and 151 still there. The carried-forward list is counted
   against the code before anything is said about what remains.
 
+- **It read the code and said how the app behaves.** "Enter during
+  dictation already stops and sends" was true and beside the point: the send
+  button stayed dark, so the maintainer never tried it, and a phone has no
+  Enter. "A regression from round four" was a guess said as a cause; the
+  lane found an older commit. What is read is reported as read.
+- **It called a non-blocking question unanswerable.** Codex asks without
+  waiting and drops the question when the turn ends; the original app does
+  the same. A harness's own design is looked up before it is called a
+  defect.
+- **It kept a round open.** New items were sent to running lanes for a day
+  while the maintainer could not restart the app the conversation ran in.
+  A round has an end stated at its start: the last merge. What is found
+  after that is listed.
+
 ## Families beyond the defence
 
 Named by the maintainer, not yet inventoried:
@@ -485,6 +499,17 @@ motion the maintainer chose out of three prototypes:
 > with a test? It cannot be there to make sure the animation is the one I
 > chose and not one of two that do not exist. — the maintainer
 
+On Stop while a harness is still starting:
+
+> The interrupt is fine. It can wait until the harness has really started.
+> We must not kill the process. — the maintainer, and then: it only needs
+> to say it is stopping.
+
+On a thread that followed a shell's `cd`:
+
+> The model went there to look something up and did not come back, that is
+> all. Why would the conversation move? — the maintainer
+
 On whether the audit may build as well as delete:
 
 > Building is not a problem in my eyes. Everything that benefits this
@@ -515,5 +540,11 @@ Not defences; fixed or reported as their own entries.
   resume cursor and no relay. Open; older than the audit.
 - Codex's `wake()` returns early when the background-terminal list is due and
   may swallow a manual "Retry now". Open, unverified.
+- A Claude Code `system/init` whose `cwd` differed moved the thread, so a
+  shell `cd` left behind moved it. The thread follows a worktree entered or
+  left, nothing else.
+- A fabricated `Finished` three seconds after a dictation stopped cut off
+  the end of long speech and sent without it. Removed; the wait is cancelled
+  by the user.
 - The runtime test driver `run_until_parked` does not process an input the
   way `pipe.rs::host_loop` does. Open.

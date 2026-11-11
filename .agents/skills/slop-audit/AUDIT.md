@@ -138,7 +138,18 @@ question the maintainer asks out of curiosity is a question.
 - A window that is fully covered does not redraw. Bring the instance's own
   window to the front.
 - A thread opened to try a conversation uses the cheapest model at its
-  lowest effort, chosen before the first prompt.
+  lowest effort, chosen before the first prompt, and the title model is set
+  to the same before it. A model the maintainer named that is not in the
+  list is reported with the list, not replaced.
+- The isolation is from the running Tcode and its data. A harness run the
+  maintainer authorised uses that harness's own home as it is; what it
+  leaves there is not cleaned up and not a finding.
+- A probe of Stop or cancel stretches the moment it needs with a wrapper set
+  as the harness executable in the throwaway profile, and samples processes
+  while it presses, so that "gone" has evidence.
+- An accessibility press is not a click: without a press action of its own a
+  control is pressed at the place it last was. A press that lands elsewhere
+  is a finding about the control, and says nothing about a real click.
 - What a walk-through did not see is not thereby absent, and synthetic
   input can mislead. When a finding is about feel, start the same build for
   the maintainer and ask what they see.
