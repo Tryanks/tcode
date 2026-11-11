@@ -71,9 +71,13 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             let Some((index, call)) = pending.remove(id) else {
                                 continue;
                             };
-                            if let Some(ConvertedEntry::Item { item, .. }) = entries.get_mut(index)
+                            if let Some(ConvertedEntry::Item {
+                                item, finished_ts, ..
+                            }) = entries.get_mut(index)
                             {
                                 item.content = call.finish(block, value.get("toolUseResult"));
+                                // The call ran until the row of its result.
+                                *finished_ts = Some(ts);
                             }
                         }
                     }
