@@ -15,8 +15,8 @@ use serde_json::{Value, json};
 use smol::channel::Receiver;
 
 use super::{
-    describe_rpc_error, enrich_startup_error, initialize, send_json, settle_child_exit,
-    spawn_server, stop_child,
+    EXITED_BEFORE_ANSWERING, describe_rpc_error, enrich_startup_error, exit_status_once_gone,
+    initialize, send_json, spawn_server, stop_child,
 };
 use crate::process::{ChildOutput, ProcessTree, StderrTail};
 use crate::{
@@ -26,7 +26,6 @@ use crate::{
 };
 
 /// Reading a remote plugin takes the server about two seconds.
-const LIST_TIMEOUT: Duration = Duration::from_secs(120);
 /// `plugin/read` requests answered concurrently by one server.
 const DETAILS_CONCURRENCY: usize = 4;
 /// Marketplaces Codex itself ships or syncs from OpenAI.
@@ -45,7 +44,7 @@ const SQLITE_RACE: &str = "failed to initialize sqlite state runtime";
 const SQLITE_RACE_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 pub(crate) async fn list(context: &PluginContext) -> Result<PluginListing, AgentError> {
-    with_server(context, Some(LIST_TIMEOUT), async |server| {
+    with_server(context, async |server| {
         read_listing(server, &context.cwd).await
     })
     .await
@@ -55,7 +54,7 @@ pub(crate) async fn run(
     context: &PluginContext,
     op: &PluginOp,
 ) -> Result<PluginOpOutcome, AgentError> {
-    with_server(context, None, async |server| {
+    with_server(context, async |server| {
         let offered = if matches!(op, PluginOp::Install { .. }) {
             let listed = server
                 .request("plugin/list", json!({ "cwds": [context.cwd] }))
@@ -73,29 +72,17 @@ pub(crate) async fn run(
 
 async fn with_server<T>(
     context: &PluginContext,
-    bound: Option<Duration>,
     work: impl AsyncFnOnce(&mut Server) -> Result<T, AgentError>,
 ) -> Result<T, AgentError> {
-    let session = async {
-        let mut server = Server::start(context).await?;
-        let result = work(&mut server).await;
-        server.close(result)
-    };
-    // Dropping the session drops the server, which kills it: a listing, which
-    // no one can stop, at its bound; a change when the user cancels it.
-    let Some(bound) = bound else {
-        return session.await;
-    };
-    smol::future::or(async { Some(session.await) }, async {
-        smol::Timer::after(bound).await;
-        None
-    })
-    .await
-    .unwrap_or_else(|| Err(AgentError::Provider("`codex app-server` timed out".into())))
+    // Dropping this drops the server, which kills it: when the user stops a
+    // listing or cancels a change.
+    let mut server = Server::start(context).await?;
+    let result = work(&mut server).await;
+    server.close(result).await
 }
 
 struct Server {
-    child: ProcessTree<Child>,
+    child: Option<ProcessTree<Child>>,
     stdin: Option<BufWriter<ChildStdin>>,
     lines: Receiver<ChildOutput>,
     stderr_tail: StderrTail,
@@ -118,7 +105,7 @@ impl Server {
         let (child, stdin, lines, stderr_tail) =
             spawn_server(context.binary_path.as_deref(), &[], &context.launch_env)?;
         let mut server = Self {
-            child,
+            child: Some(child),
             stdin: Some(stdin),
             lines,
             stderr_tail,
@@ -127,7 +114,7 @@ impl Server {
         let stdin = server.stdin.as_mut().expect("the server has not stopped");
         match initialize(stdin, &server.lines).await {
             Ok(()) => Ok(server),
-            Err(error) => server.close(Err(error)),
+            Err(error) => server.close(Err(error)).await,
         }
     }
 
@@ -161,7 +148,7 @@ impl Server {
             let line = match self.lines.recv().await {
                 Ok(ChildOutput::Line(line)) => line,
                 Ok(ChildOutput::Eof) | Err(_) => {
-                    return Err(AgentError::Protocol("codex exited before answering".into()));
+                    return Err(AgentError::Protocol(EXITED_BEFORE_ANSWERING.into()));
                 }
                 Ok(ChildOutput::Error(error)) => return Err(AgentError::Protocol(error)),
             };
@@ -193,12 +180,16 @@ impl Server {
 
     /// A broken connection is explained by the process: its exit status and
     /// stderr. Native errors pass through.
-    fn close<T>(mut self, result: Result<T, AgentError>) -> Result<T, AgentError> {
+    async fn close<T>(mut self, result: Result<T, AgentError>) -> Result<T, AgentError> {
         match result {
             Err(error @ (AgentError::Protocol(_) | AgentError::Io(_))) => {
-                let status = settle_child_exit(&mut self.child);
-                // The stderr tail joins its reader, so the child must be gone.
-                self.stop();
+                let mut status = None;
+                if let (Some(child), Some(stdin)) = (self.child.take(), self.stdin.take()) {
+                    let (mut child, exit) = exit_status_once_gone(child, &error).await;
+                    status = exit;
+                    // The stderr tail joins its reader, so the child must be gone.
+                    stop_child(&mut child, stdin);
+                }
                 Err(enrich_startup_error(error, status, &mut self.stderr_tail))
             }
             other => other,
@@ -206,8 +197,8 @@ impl Server {
     }
 
     fn stop(&mut self) {
-        if let Some(stdin) = self.stdin.take() {
-            stop_child(&mut self.child, stdin);
+        if let (Some(mut child), Some(stdin)) = (self.child.take(), self.stdin.take()) {
+            stop_child(&mut child, stdin);
         }
     }
 }

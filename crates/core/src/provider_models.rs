@@ -280,6 +280,7 @@ mod tests {
                     approval: None,
                 }],
                 default_value: None,
+                minimum: None,
             },
         ];
         let settings = ProviderSettings {
@@ -422,6 +423,7 @@ mod tests {
                     },
                 ],
                 default_value: Some("default".into()),
+                minimum: None,
             }],
             ..spec("gpt-6-astra", "GPT-6 Astra")
         };
@@ -461,6 +463,7 @@ mod tests {
                     approval: None,
                 }],
                 default_value: None,
+                minimum: None,
             }],
             ..spec("fable", "Fable")
         };

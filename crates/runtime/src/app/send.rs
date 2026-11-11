@@ -1,5 +1,6 @@
 use super::active_session::{QueuedMessageKind, native_skill_invocation};
 use super::*;
+use tcode_protocol::TurnDue;
 
 impl AppState {
     /// Submit a user turn. Starts the provider lazily if needed.
@@ -27,10 +28,13 @@ impl AppState {
         target_id: &str,
         text: String,
         attachment_paths: Vec<PathBuf>,
-        fire_at_unix_secs: u64,
+        due: TurnDue,
         cx: &mut HostCx,
     ) {
-        let not_before = UNIX_EPOCH + Duration::from_secs(fire_at_unix_secs);
+        let not_before = match due {
+            TurnDue::AfterSecs(secs) => cx.clock().wall() + Duration::from_secs(secs),
+            TurnDue::AtUnixSecs(secs) => UNIX_EPOCH + Duration::from_secs(secs),
+        };
         let Some((text, attachments)) =
             self.assemble_user_message(target_id, text, attachment_paths, cx)
         else {
@@ -590,6 +594,17 @@ impl AppState {
         cx: &mut HostCx,
     ) -> Result<bool, ()> {
         self.refresh_policy_holds(target_id);
+        // A stop pressed while the provider was getting ready ends once it is.
+        if let Some(active) = self.resident_mut(target_id).filter(|active| {
+            active.interrupt_requested
+                && !active.turn_in_flight
+                && active.delivery_in_flight.is_none()
+                && active.settings_apply_in_flight.is_none()
+                && matches!(active.runtime, Runtime::Live(_))
+        }) {
+            active.interrupt_requested = false;
+            active.interrupt_requested_at = None;
+        }
         let Some(active) = self.resident(target_id) else {
             return Ok(false);
         };
@@ -969,22 +984,44 @@ impl AppState {
         }
     }
 
+    /// Stop the thread's turn. Before the next turn reaches the provider there
+    /// is none to interrupt: with `hand_back` the messages waiting for it are
+    /// taken out of the queue and answered back, for the composer of the
+    /// person who pressed Stop; without, they stay queued.
     pub fn interrupt(
         &mut self,
         target_id: &str,
+        hand_back: bool,
         cx: &mut HostCx,
-    ) -> Result<(), tcode_protocol::ProtocolError> {
+    ) -> Result<Vec<tcode_protocol::UnsentMessage>, tcode_protocol::ProtocolError> {
         self.pause_pull_request_watches(target_id, cx);
-        // Before the next turn starts there is no turn to interrupt: a provider
-        // still starting, or still to answer a live settings change, is stopped,
-        // and the message waits in the queue.
+        // A provider still starting, or still to answer a live settings change,
+        // is not stopped: it may already hold the conversation, and a harness
+        // killed for it loses what it has loaded. The messages it would have
+        // taken go back to the composer, and the thread reads as stopping until
+        // the provider is ready, which ends the stop (`dispatch_next_queued`);
+        // one that never gets there is ended by Force quit.
+        let now = cx.clock().unix_millis();
         if let Some(active) = self
             .resident_mut(target_id)
             .filter(|active| active.preparing_turn() && active.delivery_in_flight.is_none())
         {
-            active.shutdown_to_idle();
+            let unsent = if hand_back {
+                active.take_unsent()
+            } else {
+                Vec::new()
+            };
+            let unsent = unsent
+                .into_iter()
+                .map(|message| tcode_protocol::UnsentMessage {
+                    text: message.text,
+                    attachments: message.attachments,
+                })
+                .collect();
+            active.interrupt_requested = true;
+            active.interrupt_requested_at.get_or_insert(now);
             self.evaluate_thread_settlement(target_id, cx);
-            return Ok(());
+            return Ok(unsent);
         }
         // An idle provider never answers an interrupt, which would leave the thread
         // stopping, and background work takes no interrupt: Claude Code acknowledges it
@@ -994,11 +1031,15 @@ impl AppState {
                 || active.delivery_in_flight.is_some()
                 || active.timeline.turn_running
         }) else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let Runtime::Live(commands) = &active.runtime else {
             return Err(provider_command_error("The provider is no longer running."));
         };
+        // A turn the provider was given but its harness has not begun is
+        // interrupted all the same: each adapter holds the interrupt until its
+        // harness can take it (Codex until turn/started; Claude Code and pi
+        // read it from stdin after the message, in order, once they are up).
         commands
             .try_send(SessionCommand::Interrupt)
             .map_err(provider_command_error)?;
@@ -1010,7 +1051,7 @@ impl AppState {
         }
         self.cancel_computer_use_feedback(target_id);
         self.cancel_previews_of(target_id);
-        Ok(())
+        Ok(Vec::new())
     }
 
     /// Kill the thread's provider process, for a harness that stops answering:

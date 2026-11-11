@@ -46,6 +46,8 @@ pub struct AcpPanel {
     custom_name: Entity<InputState>,
     custom_command: Entity<InputState>,
     custom_args: Entity<InputState>,
+    /// Why the custom agent's arguments could not be split, when they could not.
+    custom_args_error: Option<String>,
     /// Measured rows stay valid while the filtered agents keep their ids. The
     /// registry is small enough to measure whole, so the scrollbar and the
     /// touch edge bounce see its full extent.
@@ -69,32 +71,31 @@ impl AcpPanel {
             observe_store_topics(&store, &[TopicKind::Providers], cx),
             cx.observe(&search, |_, _, cx| cx.notify()),
         ];
-        let panel = Self {
+        Self {
             store,
             view: PanelView::Home,
             search,
             custom_name: input(&crate::tr!("providers.acp.name_placeholder"), window, cx),
             custom_command: input("node", window, cx),
             custom_args: input("/path/to/agent.js --acp", window, cx),
+            custom_args_error: None,
             market_list: ListState::new(0, ListAlignment::Top, px(120.)).measure_all(),
             market_rows: crate::motion::list_rows::ListRows::over(crate::motion::KEYSTROKE),
             market_flip: Default::default(),
             market_ids: Vec::new(),
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
-        };
-        // The registry is the host owner's: a link whose scope is not known
-        // yet is not asked, nor is a space, which the host would refuse.
-        panel.store.update(cx, |store, _cx| {
-            if store.can_manage_host() {
-                store.refresh_acp_registry();
-            }
-        });
-        panel
+        }
     }
 
+    /// The registry is asked for on every opening, not when the panel is
+    /// built with the settings page, before a link knows its scope. The host
+    /// answers from its cache while that is fresh, so an opening costs no
+    /// fetch.
     pub fn prepare_to_open(&mut self, cx: &mut Context<Self>) {
         self.view = PanelView::Home;
+        self.store
+            .update(cx, |store, _| store.refresh_acp_registry());
         cx.notify();
     }
 
@@ -267,15 +268,27 @@ impl AcpPanel {
         }
         self.market_rows
             .settle_list(&self.market_list, &keys, window, cx);
-        let error = self.store.read(cx).acp_registry_error();
-        let loading = self.store.read(cx).acp_registry_loading();
-        let empty = market.is_empty();
-        let error = error.filter(|_| empty);
+        let store = self.store.read(cx);
+        let error = store.acp_registry_error();
+        // What stands in the list's place, and whether it is a failure.
+        let notice = if !store.scope().is_full() {
+            Some((crate::tr!("providers.acp.owner_only").into_owned(), false))
+        } else if !store.acp_registry_loaded() {
+            error.clone().map(|error| (error, true))
+        } else if !market.is_empty() {
+            None
+        } else if store.acp_marketplace_items().is_empty() {
+            Some((crate::tr!("providers.acp.empty").into_owned(), false))
+        } else {
+            Some((crate::tr!("providers.acp.no_matches").into_owned(), false))
+        };
+        // A failed refresh over a registry the host still holds.
+        let stale = error.filter(|_| notice.is_none());
         let state = crate::motion::CrossFade::new(
             "acp-market-state",
-            if error.is_some() {
+            if notice.is_some() {
                 0
-            } else if empty && loading {
+            } else if !store.acp_registry_loaded() {
                 1
             } else {
                 2
@@ -286,14 +299,15 @@ impl AcpPanel {
             cx,
         )
         .fill();
-        let error = crate::motion::shown("acp-market-error", error, SHOW, window, cx)
-            .map(|error| error.value);
+        let notice = crate::motion::shown("acp-market-error", notice, SHOW, window, cx)
+            .map(|notice| notice.value);
+        let stale = crate::motion::shown("acp-market-stale", stale, SHOW, window, cx);
         let mut layers = Vec::new();
-        if let Some(error) = error.filter(|_| state.shows(0)) {
+        if let Some((notice, failed)) = notice.filter(|_| state.shows(0)) {
             layers.push((
                 0,
-                material::empty_row(error, cx)
-                    .text_color(cx.theme().danger_foreground)
+                material::empty_row(notice, cx)
+                    .when(failed, |row| row.text_color(cx.theme().danger_foreground))
                     .into_any_element(),
             ));
         }
@@ -352,6 +366,16 @@ impl AcpPanel {
             .min_h_0()
             .gap_3()
             .child(Input::new(&self.search).placeholder(crate::tr!("providers.acp.search")))
+            .when_some(stale, |panel, stale| {
+                panel.child(
+                    stale.fade(
+                        div()
+                            .text_secondary(false, cx)
+                            .text_color(cx.theme().danger_foreground)
+                            .child(stale.value.clone()),
+                    ),
+                )
+            })
             .child(
                 v_flex()
                     .w_full()
@@ -415,6 +439,14 @@ impl AcpPanel {
             .child(Input::new(&self.custom_name))
             .child(Input::new(&self.custom_command))
             .child(Input::new(&self.custom_args))
+            .when_some(self.custom_args_error.clone(), |form, error| {
+                form.child(
+                    div()
+                        .text_secondary(false, cx)
+                        .text_color(cx.theme().danger_foreground)
+                        .child(crate::tr!("providers.acp.args_unreadable", error = error)),
+                )
+            })
             .child(
                 DialogActions::new()
                     .w_full()
@@ -436,12 +468,17 @@ impl AcpPanel {
                                 if name.trim().is_empty() || command.trim().is_empty() {
                                     return;
                                 }
-                                let args = args
-                                    .read(cx)
-                                    .value()
-                                    .split_whitespace()
-                                    .map(str::to_string)
-                                    .collect();
+                                let args = match tcode_core::settings::split_args(
+                                    &args.read(cx).value(),
+                                ) {
+                                    Ok(args) => args,
+                                    Err(error) => {
+                                        this.custom_args_error = Some(error);
+                                        cx.notify();
+                                        return;
+                                    }
+                                };
+                                this.custom_args_error = None;
                                 this.store.update(cx, |store, _cx| {
                                     store.add_custom_acp_agent(name, command, args);
                                 });
@@ -550,6 +587,44 @@ mod tests {
         cx.run_until_parked();
         cx.run_until_parked();
         (store, pump)
+    }
+
+    /// The dialog is built with the settings page, before a link knows it may
+    /// manage its host; opening it asks the host for the registry.
+    #[gpui::test]
+    fn opening_the_dialog_asks_for_the_registry(cx: &mut TestAppContext) {
+        use tcode_protocol::{ClientMessage, ClientPayload, Command};
+
+        cx.update(crate::test_client::init);
+        let (to_host, requests) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link.pump().await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                cx,
+            )
+        });
+        let (panel, _) = cx.add_window_view(|window, cx| AcpPanel::new(store.clone(), window, cx));
+        crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
+        panel.update(cx, |panel, cx| panel.prepare_to_open(cx));
+        cx.run_until_parked();
+        let asked = std::iter::from_fn(|| requests.try_recv().ok()).any(|line| {
+            serde_json::from_str::<ClientMessage>(&line).is_ok_and(|message| {
+                matches!(
+                    message.payload,
+                    ClientPayload::Command(Command::RefreshAcpRegistry)
+                )
+            })
+        });
+        assert!(asked);
     }
 
     #[gpui::test]

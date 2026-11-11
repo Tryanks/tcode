@@ -182,7 +182,6 @@ impl DomainDiff {
             let stale = self.providers.as_ref().is_none_or(|last| {
                 settings_changed
                     || self.providers_revisions != providers_revisions
-                    || last.acp_registry_loading != state.acp_registry_loading
                     || last.acp_registry_error != state.acp_registry_error
                     || last.acp_installing != state.acp_installing_ids()
             });
@@ -1053,8 +1052,8 @@ impl AppState {
     pub fn providers_status_snapshot(&self) -> ProvidersStatus {
         let mut status = self.providers.status_snapshot(
             self.acp_marketplace_items(),
-            self.acp_registry_loading,
             self.acp_registry_error.clone(),
+            self.acp_registry.is_some(),
             self.acp_installing_ids(),
             self.provider_plugin_catalogs(),
         );

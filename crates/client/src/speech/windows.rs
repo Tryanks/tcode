@@ -240,7 +240,16 @@ async fn dictate(
     _ = sink.try_send(SpeechEvent::Ready);
 
     let mut separator_due = false;
-    while let Ok(message) = messages.recv().await {
+    // What a failed stop found already waiting, handled before more is read.
+    let mut queued = std::collections::VecDeque::new();
+    loop {
+        let message = match queued.pop_front() {
+            Some(message) => message,
+            None => match messages.recv().await {
+                Ok(message) => message,
+                Err(_) => break,
+            },
+        };
         match message {
             Message::Hypothesis(text) => {
                 let text = joined(separator_due, separator, &text);
@@ -275,8 +284,15 @@ async fn dictate(
                 // The session may have ended by itself, e.g. after the silence
                 // timeout, with its `Completed` still queued behind this; stopping
                 // it then fails, and that queued event ends the session instead.
+                // Without one, nothing else will end it, and the failure does.
                 if let Err(error) = stopped {
-                    log::debug!("speech: stopping dictation failed: {error}");
+                    queued.extend(std::iter::from_fn(|| messages.try_recv().ok()));
+                    if !queued
+                        .iter()
+                        .any(|message| matches!(message, Message::Completed(_)))
+                    {
+                        return Err(speech_error(error));
+                    }
                 }
             }
         }

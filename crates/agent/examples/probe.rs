@@ -213,7 +213,15 @@ fn main() {
             None => None,
         };
         let exit_code = smol::block_on(async move {
-            match list_models(provider, binary, Default::default(), Default::default()).await {
+            match list_models(
+                provider,
+                binary,
+                Default::default(),
+                Default::default(),
+                &Default::default(),
+            )
+            .await
+            {
                 Ok(models) => {
                     println!("{}", serde_json::to_string_pretty(&models).unwrap());
                     0
@@ -431,6 +439,7 @@ async fn run_probe(
         instructions: None,
         processes: Default::default(),
         clock: Default::default(),
+        worktrees: Vec::new(),
     };
     let handle = match start_session(provider, opts).await {
         Ok(handle) => handle,

@@ -8,7 +8,6 @@ mod common;
 
 use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
 
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
@@ -23,7 +22,6 @@ use wayland_protocols::xdg::shell::client::{
 };
 
 const VIEW: ViewId = ViewId(0);
-const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 struct Client {
@@ -62,7 +60,7 @@ fn a_frame_callback_is_answered_once_the_host_presents_its_frame() {
     surface.attach(Some(&buffer(&shm, &qh)), 0, 0);
     surface.commit();
     connection.flush().expect("flush");
-    common::next_frame(&nest, VIEW, TIMEOUT, || {}).expect("the first frame");
+    common::next_frame(&nest, VIEW).expect("the first frame");
 
     // Draw again before the host has shown the first frame. The roundtrip
     // returns after the nest has handled the commit and sent whatever it
@@ -87,15 +85,10 @@ fn a_frame_callback_is_answered_once_the_host_presents_its_frame() {
         queue.blocking_dispatch(&mut client).expect("dispatch");
     }
     assert_eq!(client.done, [1]);
-    common::wait_for(
-        &nest,
-        TIMEOUT,
-        || {},
-        |event| match event {
-            Event::Frame { view, .. } if view == VIEW => Some(()),
-            _ => None,
-        },
-    )
+    common::wait_for(&nest, |event| match event {
+        Event::Frame { view, .. } if view == VIEW => Some(()),
+        _ => None,
+    })
     .expect("the second frame");
     queue.roundtrip(&mut client).expect("roundtrip");
     assert_eq!(client.done, [1]);

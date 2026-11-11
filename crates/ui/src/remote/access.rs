@@ -156,25 +156,6 @@ impl AccessSection {
         }
     }
 
-    fn sync_ticker(&mut self, live: bool, cx: &mut Context<Self>) {
-        match (live, self.ticker.is_some()) {
-            (true, false) => {
-                self.ticker = Some(cx.spawn(async move |this, cx| {
-                    loop {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_secs(1))
-                            .await;
-                        if this.update(cx, |_, cx| cx.notify()).is_err() {
-                            return;
-                        }
-                    }
-                }));
-            }
-            (false, true) => self.ticker = None,
-            _ => {}
-        }
-    }
-
     fn invitation(
         &mut self,
         spaces: &Entity<Spaces>,
@@ -194,7 +175,7 @@ impl AccessSection {
                 report("remote.failed", task, window, cx);
             }
         });
-        self.sync_ticker(invitation.is_some(), cx);
+        super::sync_countdown(&mut self.ticker, invitation.is_some(), cx);
         let expired = invitation.is_none().then_some(());
         let live = crate::motion::shown(
             "remote-invitation-live",
@@ -400,7 +381,7 @@ impl gpui::Render for AccessSection {
         // the machine it last showed once there is none to manage: hosting
         // stopped, or the attachment lost the scope.
         let Some(shown) = crate::motion::shown("remote-access", loaded, SHOW, window, cx) else {
-            self.sync_ticker(false, cx);
+            super::sync_countdown(&mut self.ticker, false, cx);
             return div().into_any_element();
         };
         let spaces = shown.value.clone();
@@ -432,7 +413,7 @@ impl gpui::Render for AccessSection {
             )));
         }
         if !accepting {
-            self.sync_ticker(false, cx);
+            super::sync_countdown(&mut self.ticker, false, cx);
         }
         let invitation = crate::motion::shown(
             "remote-invitation-group",

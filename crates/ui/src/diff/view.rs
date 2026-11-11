@@ -864,7 +864,7 @@ impl DiffPanel {
             let store = self.workspace_store.read(cx);
             self.session_id.as_deref().and_then(|id| {
                 let agents = Agents::of(store, id, cx);
-                (!agents.is_empty() || active == RightTab::Agents).then(|| agents.outstanding())
+                (!agents.is_empty() || active == RightTab::Agents).then(|| agents.count())
             })
         };
         let count = self.session_id.as_deref().map_or(0, |id| {
@@ -898,12 +898,12 @@ impl DiffPanel {
                         .selected(active == RightTab::Plan)
                         .on_click(move |_, _, cx| select_plan(RightTab::Plan, cx)),
                 );
-            let tabs = if let Some(outstanding) = agents {
+            let tabs = if let Some(listed) = agents {
                 tabs.item(
                     TabItem::new("agents-tab", crate::tr!("agents.title").into_owned())
                         .icon(IconName::Bot)
                         .selected(active == RightTab::Agents)
-                        .count(outstanding)
+                        .count(listed)
                         .on_click(move |_, _, cx| select_agents(RightTab::Agents, cx)),
                 )
             } else {

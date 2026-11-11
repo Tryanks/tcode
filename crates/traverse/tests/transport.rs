@@ -5,13 +5,14 @@ mod original_fixture;
 mod real_host;
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::{Value, json};
 use tcode_client::host::{StreamTarget, Transport};
 use tcode_client::pairing::{PairInvite, PairedHost};
 use tcode_client::recovery::Wake;
 use tcode_client::{ConnectionFailure, ConnectionState};
+use tcode_protocol::HostingAction;
 use tcode_traverse::manifest::ManifestSource;
 use tcode_traverse::{DeviceIdentity, HostConfig, HostMux, PairError, TraverseHost};
 
@@ -244,7 +245,7 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
     assert!(host.pairing_enabled());
     std::fs::remove_dir(&blocker).unwrap();
 
-    host.set_pairing_enabled(false).unwrap();
+    host.hosting(HostingAction::SetEnabled(false)).unwrap();
     let minted = host.new_invitation();
     assert_eq!(pair(&minted.invite, &other), Err(PairError::Disabled));
     host.shutdown();
@@ -334,14 +335,14 @@ fn invitation_changes_are_reported_in_order() {
     assert_eq!(events.recv_blocking().unwrap(), Some(third.clone()));
     pair(&third.invite, &phone).unwrap();
     assert_eq!(events.recv_blocking().unwrap(), None, "used");
-    host.set_pairing_enabled(false).unwrap();
+    host.hosting(HostingAction::SetEnabled(false)).unwrap();
     assert!(events.try_recv().is_err(), "nothing to withdraw");
-    host.set_pairing_enabled(true).unwrap();
     let late = host.invitation_events();
-    let fourth = host.new_invitation();
-    assert_eq!(events.recv_blocking().unwrap(), Some(fourth.clone()));
-    assert_eq!(late.recv_blocking().unwrap(), Some(fourth));
-    host.set_pairing_enabled(false).unwrap();
+    host.hosting(HostingAction::SetEnabled(true)).unwrap();
+    let fourth = events.recv_blocking().unwrap();
+    assert!(fourth.is_some(), "turning pairing on mints an invitation");
+    assert_eq!(late.recv_blocking().unwrap(), fourth);
+    host.hosting(HostingAction::SetEnabled(false)).unwrap();
     assert_eq!(events.recv_blocking().unwrap(), None, "pairing off");
     assert_eq!(late.recv_blocking().unwrap(), None);
     assert!(events.try_recv().is_err());
@@ -372,13 +373,8 @@ fn cache_manifest(path: &std::path::Path, name: &str) {
 }
 
 fn wait_relays(device: &DeviceIdentity, wanted: &[&str]) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut seen = device.relays();
-    while seen != wanted && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-        seen = device.relays();
-    }
-    assert_eq!(seen, wanted);
+    let mut relays = device.relay_changes();
+    tcode_traverse::block_on(relays.wait_for(|seen| seen == wanted)).unwrap();
 }
 
 /// A device's relays are those of its machines' Traverse instances: a
@@ -511,7 +507,7 @@ fn an_unreachable_self_hosted_instance_still_lets_the_lan_pair_and_connect() {
     recv_type(&client, "ack", Some(1));
     wait_state(&client, connected_directly);
     assert!(
-        phone.relays().is_empty(),
+        phone.relay_changes().borrow().is_empty(),
         "the device took no relay from anywhere"
     );
     client.to_host.close();
@@ -561,7 +557,10 @@ fn a_parked_link_closes_the_endpoint_and_the_return_delivers_what_was_written_me
     client.to_host.wake(Wake::Reconnect);
     wait_state(&client, syncing_directly);
     recv_type(&client, "ack", Some(2));
-    assert_eq!(phone.relays(), ["https://official.relay.test/"]);
+    assert_eq!(
+        *phone.relay_changes().borrow(),
+        ["https://official.relay.test/"]
+    );
     host.shutdown();
     real_host::stop(runtime, &mux);
 }
@@ -835,7 +834,7 @@ fn a_restarted_machine_rejoins_and_delivers_writes_buffered_while_it_was_down() 
     });
     let endpoint_id = host.endpoint_id();
 
-    host.set_pairing_enabled(false).unwrap();
+    host.hosting(HostingAction::SetEnabled(false)).unwrap();
     host.shutdown();
     wait_state(&client, |state| {
         link.set_connection_state(state.clone());
@@ -1104,9 +1103,9 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     assert!(host.space_link_url(&id).is_none());
     assert_eq!(pair(&invite, &other), Err(PairError::SpaceUnavailable));
     host.set_space_link_enabled(&id, true).unwrap();
-    host.set_pairing_enabled(false).unwrap();
+    host.hosting(HostingAction::SetEnabled(false)).unwrap();
     assert_eq!(pair(&invite, &other), Err(PairError::Disabled));
-    host.set_pairing_enabled(true).unwrap();
+    host.hosting(HostingAction::SetEnabled(true)).unwrap();
     let one_shot = host.new_invitation();
     let wrong = PairInvite {
         secret: "AAAAAAAAAAAAAAAAAAAAAA".into(),

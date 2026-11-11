@@ -211,17 +211,9 @@ fn load_file_texts(
         .collect()
 }
 
-fn git_branches(cwd: &Path) -> (Vec<String>, Option<String>) {
-    let args = vec![
-        "for-each-ref".into(),
-        "--format=%(refname:short)".into(),
-        "refs/heads".into(),
-    ];
-    let mut branches = git_output(cwd, &args)
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| parse_branch_list(&String::from_utf8_lossy(&output.stdout)))
-        .unwrap_or_default();
+/// The local branches and the one a branch diff defaults to, or git's error.
+fn git_branches(cwd: &Path) -> Result<(Vec<String>, Option<String>), String> {
+    let mut branches = list_git_branches(cwd)?;
     let origin_args = vec![
         "symbolic-ref".into(),
         "--quiet".into(),
@@ -247,7 +239,7 @@ fn git_branches(cwd: &Path) -> (Vec<String>, Option<String>) {
                 .map(str::to_string)
         })
         .or_else(|| branches.first().cloned());
-    (branches, default)
+    Ok((branches, default))
 }
 
 pub fn load_git_diff(
@@ -256,7 +248,15 @@ pub fn load_git_diff(
     base: Option<&str>,
     ignore_whitespace: bool,
 ) -> GitDiffResult {
-    let (branches, default_base) = git_branches(cwd);
+    let (branches, default_base) = match git_branches(cwd) {
+        Ok(branches) => branches,
+        Err(error) => {
+            return GitDiffResult {
+                error: Some(error),
+                ..GitDiffResult::default()
+            };
+        }
+    };
     let mut base_revision = None;
     let mut used_base = None;
     let args = match scope {
@@ -393,16 +393,18 @@ fn parse_branch_list(output: &str) -> Vec<String> {
         .collect()
 }
 
-/// List local git branches for `cwd` (empty when not a repo / git fails).
-pub fn list_git_branches(cwd: &Path) -> Vec<String> {
-    let output = crate::process::command("git")
-        .args(["for-each-ref", "refs/heads", "--format=%(refname:short)"])
-        .current_dir(cwd)
-        .output();
-    match output {
-        Ok(out) if out.status.success() => parse_branch_list(&String::from_utf8_lossy(&out.stdout)),
-        _ => Vec::new(),
+/// The local git branches of `cwd`, or git's error.
+pub fn list_git_branches(cwd: &Path) -> Result<Vec<String>, String> {
+    let args = [
+        "for-each-ref".into(),
+        "--format=%(refname:short)".into(),
+        "refs/heads".into(),
+    ];
+    let output = git_output(cwd, &args)?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
+    Ok(parse_branch_list(&String::from_utf8_lossy(&output.stdout)))
 }
 
 /// Why a `git checkout` was refused.
@@ -1036,7 +1038,7 @@ mod tests {
             std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
             "dirty\n"
         );
-        assert_eq!(list_git_branches(&root), ["feature/x", "main"]);
+        assert_eq!(list_git_branches(&root).unwrap(), ["feature/x", "main"]);
         run(&root, &["checkout", "--", "tracked.txt"]);
         assert_eq!(checkout_if_clean(&root, "feature/x"), Ok(()));
         assert_eq!(read_git_branch(&root), Some("feature/x".into()));

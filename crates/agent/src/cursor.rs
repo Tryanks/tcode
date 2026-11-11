@@ -37,7 +37,11 @@ pub fn state_dirs(launch_env: &LaunchEnv) -> Vec<PathBuf> {
     for key in ["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"] {
         let dir = launch_env
             .child_path(ProviderKind::Cursor, key)
-            .or_else(|| dirs::home_dir().map(|home| home.join(".cursor")));
+            .or_else(|| {
+                launch_env
+                    .child_home(ProviderKind::Cursor)
+                    .map(|home| home.join(".cursor"))
+            });
         if let Some(dir) = dir.filter(|dir| !found.contains(dir)) {
             found.push(dir);
         }
@@ -81,6 +85,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
 pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
+    processes: &crate::SessionProcesses,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     let opts = SessionOptions {
         cwd: std::env::temp_dir(),
@@ -94,8 +99,9 @@ pub async fn list_models(
         extra_args: Vec::new(),
         acp: None,
         instructions: None,
-        processes: Default::default(),
+        processes: processes.clone(),
         clock: Default::default(),
+        worktrees: Vec::new(),
     };
     let cursor = Cursor::new(&opts);
     acp_session::query(

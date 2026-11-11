@@ -2,7 +2,7 @@
   "claude": { "package": "@anthropic-ai/claude-code", "commands": ["claude"] },
   "codex": { "package": "@openai/codex", "commands": ["codex"] },
   "pi": { "package": "@earendil-works/pi-coding-agent", "commands": ["pi"] },
-  "opencode": { "package": "@opencode/cli", "commands": ["opencode"] },
+  "opencode": { "package": "@opencode/cli", "commands": ["opencode"], "replaces": ["opencode-ai"] },
   "cursor": { "installer": "https://cursor.com/install", "commands": ["cursor-agent", "agent"] },
   "grok": { "package": "@xai-official/grok", "commands": ["grok"], "current": ".grok/bin/grok" }
 }

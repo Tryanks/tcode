@@ -31,6 +31,17 @@ pub enum ThreadExportFormat {
     Markdown,
 }
 
+/// When a scheduled turn is sent, by the host's clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnDue {
+    /// This many seconds after the host takes the command in.
+    AfterSecs(u64),
+    /// At this Unix time, one the host or a harness gave; at once when it
+    /// has passed.
+    AtUnixSecs(u64),
+}
+
 /// A backend mutation requested by a client.
 ///
 /// Variants correspond to serializable `AppState` mutations used by the UI.
@@ -300,6 +311,11 @@ pub enum Command {
     CancelPluginOperation {
         profile_id: String,
     },
+    /// Stop the profile's plugin listings still running and the commands
+    /// they run; each catalog keeps what it last listed, marked stopped.
+    StopPluginListing {
+        profile_id: String,
+    },
     ResetSettings,
     WriteRelaunchMarker {
         /// The thread to reopen; absent when none is on screen.
@@ -544,14 +560,14 @@ pub enum Command {
         text: String,
         attachment_paths: Vec<PathBuf>,
     },
-    /// Keep a user-authored turn in the session's in-memory queue until the
-    /// given Unix timestamp. Scheduled turns deliberately share the ordinary
-    /// queue and are not persisted as conversation events before delivery.
+    /// Keep a user-authored turn in the session's in-memory queue until it is
+    /// due. Scheduled turns deliberately share the ordinary queue and are not
+    /// persisted as conversation events before delivery.
     ScheduleTurn {
         session_id: String,
         text: String,
         attachment_paths: Vec<PathBuf>,
-        fire_at_unix_secs: u64,
+        due: TurnDue,
     },
     ConfirmRelayAndSend {
         session_id: String,
@@ -735,6 +751,16 @@ pub enum CommandResponse {
     /// `VerifyHostToken`: what the host answered; the token was saved only when accepted.
     TokenCheck(tcode_core::settings::TokenCheck),
     RewindPreview(agent::RewindPreviewResult),
+    /// `Interrupt` before the next turn reached the provider: the messages
+    /// that were waiting for it, taken out of the queue for the composer.
+    Unsent(Vec<UnsentMessage>),
+}
+
+/// A message the user sent that Stop took back before the provider had it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnsentMessage {
+    pub text: String,
+    pub attachments: Vec<agent::Attachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

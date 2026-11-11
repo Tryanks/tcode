@@ -28,7 +28,7 @@ pub(crate) enum LimitResume {
         on_retry: ClickHandler,
         on_cancel: ClickHandler,
     },
-    /// No resume is queued and the reset is still ahead: offer to schedule one.
+    /// No resume is queued: offer to resume at the reset.
     Offer { on_schedule: ClickHandler },
     /// A resume is queued for the reset: live countdown plus cancel.
     Scheduled {
@@ -36,9 +36,6 @@ pub(crate) enum LimitResume {
         resets_at: u64,
         on_cancel: ClickHandler,
     },
-    /// The reset has passed and nothing followed the error (the scheduled
-    /// resume does not survive a restart): offer to continue right now.
-    Continue { on_continue: ClickHandler },
 }
 
 /// A provider/app error as a first-class timeline block: a danger-tinted card
@@ -117,19 +114,6 @@ pub(crate) fn error_card(
                     .icon(IconName::ArrowUp)
                     .label(crate::tr!("chat.limit_resume.schedule"))
                     .on_click(on_schedule),
-            )
-            .into_any_element(),
-        LimitResume::Continue { on_continue } => h_flex()
-            .gap_2()
-            .items_center()
-            .child(
-                Button::new(SharedString::from(format!("continue-limit-resume:{id}")))
-                    .motion(motion)
-                    .outline()
-                    .xsmall()
-                    .icon(IconName::ArrowUp)
-                    .label(crate::tr!("chat.limit_resume.continue_now"))
-                    .on_click(on_continue),
             )
             .into_any_element(),
         LimitResume::Scheduled {

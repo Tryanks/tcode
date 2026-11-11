@@ -71,12 +71,11 @@ impl InstalledAcpAgent {
         !agent::HIDDEN_ACP_AGENT_IDS.contains(&self.id.as_str())
     }
 
-    /// The whitespace-split launch arguments (mirrors Claude's "Launch arguments").
-    pub fn extra_args(&self) -> Vec<String> {
+    /// The agent's `Launch arguments` field, as arguments.
+    pub fn extra_args(&self) -> Result<Vec<String>, String> {
         self.launch_args
             .as_deref()
-            .map(|args| args.split_whitespace().map(str::to_string).collect())
-            .unwrap_or_default()
+            .map_or(Ok(Vec::new()), crate::settings::split_args)
     }
 }
 

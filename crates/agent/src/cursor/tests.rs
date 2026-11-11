@@ -40,6 +40,7 @@ fn options() -> SessionOptions {
         instructions: None,
         processes: Default::default(),
         clock: Default::default(),
+        worktrees: Vec::new(),
     }
 }
 

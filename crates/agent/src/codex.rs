@@ -230,22 +230,16 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
 pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
+    processes: &crate::SessionProcesses,
 ) -> Result<Vec<ModelSpec>, AgentError> {
-    let (mut child, mut stdin, lines, mut stderr_tail) =
+    let (child, mut stdin, lines, mut stderr_tail) =
         spawn_server(binary_path.as_deref(), &[], &launch_env)?;
+    let child = processes.hold(child);
     let windows = home_dir(&launch_env)
         .map(|home| model_windows::read(&home))
         .unwrap_or_default();
     let result = collect_models(&mut stdin, &lines, &windows).await;
-    // The stdout reader can observe EOF a few milliseconds before the process
-    // becomes waitable. Give a self-exiting child time to publish its real
-    // status so `stop_child` does not replace it with a kill status.
-    let status = result
-        .is_err()
-        .then(|| settle_child_exit(&mut child))
-        .flatten();
-    stop_child(&mut child, stdin);
-    result.map_err(|err| enrich_startup_error(err, status, &mut stderr_tail))
+    finish_one_shot(child, stdin, &mut stderr_tail, result).await
 }
 
 /// Read the account-wide rate limits from `codex app-server` and tear the
@@ -254,7 +248,7 @@ pub async fn read_rate_limits(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
 ) -> Result<Value, AgentError> {
-    let (mut child, mut stdin, lines, mut stderr_tail) =
+    let (child, mut stdin, lines, mut stderr_tail) =
         spawn_server(binary_path.as_deref(), &[], &launch_env)?;
     let result = async {
         initialize(&mut stdin, &lines).await?;
@@ -265,12 +259,29 @@ pub async fn read_rate_limits(
         wait_for_response(&lines, 2).await
     }
     .await;
-    let status = result
-        .is_err()
-        .then(|| settle_child_exit(&mut child))
-        .flatten();
-    stop_child(&mut child, stdin);
-    result.map_err(|err| enrich_startup_error(err, status, &mut stderr_tail))
+    finish_one_shot(child, stdin, &mut stderr_tail, result).await
+}
+
+/// Stop a server started for one request, and fold its death into the
+/// request's error.
+async fn finish_one_shot<T>(
+    child: ProcessTree<Child>,
+    stdin: BufWriter<ChildStdin>,
+    stderr_tail: &mut StderrTail,
+    result: Result<T, AgentError>,
+) -> Result<T, AgentError> {
+    match result {
+        Ok(value) => {
+            let mut child = child;
+            stop_child(&mut child, stdin);
+            Ok(value)
+        }
+        Err(err) => {
+            let (mut child, status) = exit_status_once_gone(child, &err).await;
+            stop_child(&mut child, stdin);
+            Err(enrich_startup_error(err, status, stderr_tail))
+        }
+    }
 }
 
 async fn initialize(
@@ -309,7 +320,11 @@ pub fn inherit_config(from: &Path, to: &Path) -> std::io::Result<()> {
 pub fn home_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
     launch_env
         .child_path(ProviderKind::Codex, "CODEX_HOME")
-        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+        .or_else(|| {
+            launch_env
+                .child_home(ProviderKind::Codex)
+                .map(|home| home.join(".codex"))
+        })
 }
 
 async fn collect_models(
@@ -433,6 +448,7 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
                 label: "Reasoning".into(),
                 options: select_options,
                 default_value,
+                minimum: None,
             });
         }
     }
@@ -465,6 +481,7 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
             label: "Service Tier".into(),
             options: select_options,
             default_value: Some(default_value),
+            minimum: None,
         });
     }
     options.push(context_window_descriptor(windows));
@@ -513,6 +530,7 @@ fn context_window_descriptor(windows: Option<&model_windows::ModelWindows>) -> O
         label: "Context Window".into(),
         options,
         default_value,
+        minimum: None,
     }
 }
 
@@ -730,6 +748,8 @@ struct PendingApproval {
     replies: HashMap<String, Value>,
     cancel_reply: Value,
     cancel_interrupt: Option<Value>,
+    /// The command or file change the approval would let run.
+    item_id: Option<String>,
 }
 
 struct PendingElicitation {
@@ -804,6 +824,8 @@ struct Actor {
     /// Subagents a completed turn left running, reported as backgrounded.
     backgrounded_subagents: HashSet<String>,
     background_terminals: Vec<crate::BackgroundTask>,
+    /// The commands whose background terminals the user stopped.
+    stopped_commands: HashSet<String>,
     /// When to read the list again, while any terminal runs.
     background_terminal_read: Option<std::time::Instant>,
     /// Stable parent capsule for each provider-native child thread. Codex 0.150
@@ -851,7 +873,7 @@ async fn run_actor(
 ) {
     let mut extra_args = mcp_args(&opts.mcp_servers);
     extra_args.extend(opts.extra_args.iter().cloned());
-    let (mut child, mut stdin, lines, mut stderr_tail) =
+    let (child, mut stdin, lines, mut stderr_tail) =
         match spawn_server(opts.binary_path.as_deref(), &extra_args, &opts.launch_env) {
             Ok((child, stdin, lines, tail)) => (opts.processes.hold(child), stdin, lines, tail),
             Err(err) => {
@@ -876,9 +898,7 @@ async fn run_actor(
     } = match startup {
         Ok(value) => value,
         Err(err) => {
-            // As in model discovery, stdout EOF may beat process termination
-            // by a scheduling tick. Preserve the provider's natural status.
-            let status = settle_child_exit(&mut child);
+            let (mut child, status) = exit_status_once_gone(child, &err).await;
             stop_child(&mut child, stdin);
             let err = enrich_startup_error(err, status, &mut stderr_tail);
             let _ = ready.send(Err(err)).await;
@@ -916,6 +936,7 @@ async fn run_actor(
         subagents: HashMap::new(),
         backgrounded_subagents: HashSet::new(),
         background_terminals: Vec::new(),
+        stopped_commands: HashSet::new(),
         background_terminal_read: None,
         subagent_parent_by_thread: HashMap::new(),
         seen_subagent_activities: HashSet::new(),
@@ -1246,6 +1267,12 @@ impl SessionActor for Actor {
                 Ok(())
             }
             SessionCommand::StopBackgroundTask { task_id } => {
+                let stopped = self
+                    .background_terminals
+                    .iter()
+                    .filter(|task| task_id.as_ref().is_none_or(|id| *id == task.id))
+                    .filter_map(|task| task.item_id.clone());
+                self.stopped_commands.extend(stopped);
                 let thread_id = self.thread_id.clone();
                 let (method, params) = match task_id {
                     Some(process_id) => (
@@ -1795,7 +1822,7 @@ async fn wait_for_response(lines: &Receiver<ChildOutput>, id: i64) -> Result<Val
         match lines
             .recv()
             .await
-            .map_err(|_| AgentError::Protocol("codex stdout closed during startup".into()))?
+            .map_err(|_| AgentError::Protocol(STDOUT_CLOSED.into()))?
         {
             ChildOutput::Line(line) => {
                 let value: Value = serde_json::from_str(&line).map_err(|err| {
@@ -1813,7 +1840,7 @@ async fn wait_for_response(lines: &Receiver<ChildOutput>, id: i64) -> Result<Val
                     .ok_or_else(|| AgentError::Protocol(format!("response {id} omitted result")));
             }
             ChildOutput::Eof => {
-                return Err(AgentError::Protocol("codex exited during startup".into()));
+                return Err(AgentError::Protocol(EXITED.into()));
             }
             ChildOutput::Error(err) => return Err(AgentError::Protocol(err)),
         }
@@ -1832,18 +1859,34 @@ fn send_json(stdin: &mut BufWriter<ChildStdin>, value: &Value) -> Result<(), Age
     write_json(stdin, value, None)
 }
 
-/// Wait briefly for a child that has already closed stdout to become waitable.
-/// Startup failures are rare, and preserving the real exit code is worth this
-/// bounded delay. A child that remains alive is still killed by `stop_child`.
-fn settle_child_exit(child: &mut ProcessTree<Child>) -> Option<std::process::ExitStatus> {
-    for _ in 0..50 {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
-            Err(_) => return None,
+const STDOUT_CLOSED: &str = "codex stdout closed during startup";
+const EXITED: &str = "codex exited during startup";
+const EXITED_BEFORE_ANSWERING: &str = "codex exited before answering";
+
+/// The exit status of a child that `err` shows has closed its pipes: its
+/// stdout reached EOF, or writing to its stdin broke. It is exiting, and
+/// becomes waitable a moment later; waiting keeps `stop_child`'s kill from
+/// standing in for the status it exits with. A child any other failure
+/// leaves is still running, and `stop_child` stops it.
+async fn exit_status_once_gone(
+    mut child: ProcessTree<Child>,
+    err: &AgentError,
+) -> (ProcessTree<Child>, Option<std::process::ExitStatus>) {
+    let gone = match err {
+        AgentError::Protocol(message) => {
+            [EXITED, STDOUT_CLOSED, EXITED_BEFORE_ANSWERING].contains(&message.as_str())
         }
+        AgentError::Io(error) => error.kind() == std::io::ErrorKind::BrokenPipe,
+        _ => false,
+    };
+    if !gone {
+        return (child, None);
     }
-    None
+    crate::process::unblock(move || {
+        let status = child.wait().ok();
+        (child, status)
+    })
+    .await
 }
 
 impl Actor {
@@ -1898,6 +1941,13 @@ impl Actor {
         if let Some(risk) = review.get("riskLevel").filter(|risk| !risk.is_null()) {
             input["risk"] = risk.clone();
         }
+        let family = ToolFamily::Review {
+            action: summary,
+            risk: review
+                .get("riskLevel")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        };
         let item_status = match status {
             "inProgress" => ItemStatus::InProgress,
             "approved" => ItemStatus::Completed,
@@ -1913,7 +1963,7 @@ impl Actor {
                 input,
                 output: (!rationale.is_empty()).then(|| rationale.to_owned()),
                 status: item_status,
-                family: None,
+                family: Some(Box::new(family)),
             },
         };
         self.events
@@ -2063,8 +2113,8 @@ impl Actor {
                 })
             })
             .collect();
-        self.background_terminal_read = (!tasks.is_empty())
-            .then(|| std::time::Instant::now() + BACKGROUND_TERMINAL_READ_INTERVAL);
+        self.background_terminal_read =
+            (!tasks.is_empty()).then(|| self.clock.now() + BACKGROUND_TERMINAL_READ_INTERVAL);
         if tasks == self.background_terminals {
             return;
         }
@@ -2514,6 +2564,7 @@ impl Actor {
                 cancel_interrupt: (method == "item/permissions/requestApproval").then(
                     || json!({"threadId":params.get("threadId"),"turnId":params.get("turnId")}),
                 ),
+                item_id: (!item_id.is_empty()).then(|| item_id.to_owned()),
             },
         );
         self.events
@@ -2601,6 +2652,7 @@ impl Actor {
                     replies,
                     cancel_reply: json!({"action":"cancel"}),
                     cancel_interrupt: None,
+                    item_id: None,
                 },
             );
             self.events
@@ -2756,7 +2808,7 @@ impl Actor {
             }
             "turn/completed" => {
                 self.background_terminal_read =
-                    Some(std::time::Instant::now() + BACKGROUND_TERMINAL_TURN_END_READ);
+                    Some(self.clock.now() + BACKGROUND_TERMINAL_TURN_END_READ);
                 let turn = params.get("turn").unwrap_or(&Value::Null);
                 let id = turn
                     .get("id")
@@ -2790,7 +2842,9 @@ impl Actor {
                     self.clear_retry().await;
                 }
                 self.active_turn = None;
-                // An answer can only steer the turn that asked.
+                // An async question is answered by steering the turn that
+                // asked it, so it ends with that turn: its card goes, and
+                // nothing is sent to Codex, which waited on no answer.
                 if let Some((request_id, _)) = self.async_questions.take() {
                     self.events
                         .emit(AgentEvent::UserInputResolved {
@@ -2908,6 +2962,23 @@ impl Actor {
                 }
                 if let Some(mut item) = item_value.and_then(|value| lifecycle_item(method, value)) {
                     self.capture_read_image(&mut item).await;
+                    // A command the user stopped ends as Codex reports a
+                    // killed process: failed, with exit code -1, its
+                    // `unwrap_or(-1)` for a process that left no code
+                    // (`core/src/unified_exec/async_watcher.rs`). It was
+                    // stopped, not failed, and it gave no code.
+                    if method == "item/completed"
+                        && self.stopped_commands.remove(&item.id)
+                        && let ItemContent::CommandExecution {
+                            exit_code, status, ..
+                        } = &mut item.content
+                        && *status == ItemStatus::Failed
+                    {
+                        *status = ItemStatus::Interrupted;
+                        if *exit_code == Some(-1) {
+                            *exit_code = None;
+                        }
+                    }
                     if let Some(subagent) = self.subagents.get(&item.id) {
                         let status = if method == "item/completed" {
                             item_status(&item.content)
@@ -3274,11 +3345,34 @@ impl Actor {
             return;
         };
         let request_id = request_id_string(id);
-        let event = if self.approvals.remove(&request_id).is_some() {
-            AgentEvent::ApprovalResolved {
-                request_id,
-                decision: ApprovalDecision::Cancel,
+        let event = if let Some(approval) = self.approvals.remove(&request_id) {
+            self.events
+                .emit(AgentEvent::ApprovalResolved {
+                    request_id,
+                    decision: ApprovalDecision::Cancel,
+                })
+                .await;
+            // Codex started the item when it asked, and on settling the
+            // request itself, as a turn's end does, drops the item without
+            // completing it (`on_command_execution_request_approval_response`
+            // and its file-change twin in `bespoke_event_handling.rs`
+            // return on a turn-transition error): it never ran.
+            let Some(mut item) = approval
+                .item_id
+                .and_then(|item_id| self.items.get(&item_id).cloned())
+                .filter(|item| item_status(&item.content) == ItemStatus::InProgress)
+            else {
+                return;
+            };
+            if let ItemContent::CommandExecution { status, .. }
+            | ItemContent::FileChange { status, .. } = &mut item.content
+            {
+                *status = ItemStatus::Interrupted;
+            } else {
+                return;
             }
+            self.items.insert(item.id.clone(), item.clone());
+            AgentEvent::ItemCompleted(item)
         } else if self.user_inputs.remove(&request_id).is_some()
             || self.elicitations.remove(&request_id).is_some()
         {
@@ -4149,7 +4243,10 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             input: json!({ "duration_ms": item.get("durationMs").cloned().unwrap_or(Value::Null) }),
             output: None,
             status: map_status(item.get("status").and_then(Value::as_str)),
-            family: None,
+            family: item
+                .get("durationMs")
+                .and_then(Value::as_u64)
+                .map(|duration_ms| Box::new(ToolFamily::Wait { duration_ms })),
         },
         "imageGeneration" => image_generation(item),
         _ => ItemContent::Other {
@@ -4221,7 +4318,9 @@ pub fn image_generation(item: &Value) -> ItemContent {
         input: Value::Object(input),
         output: failure.map(Value::to_string),
         status,
-        family: None,
+        family: Some(Box::new(ToolFamily::ImageGeneration {
+            prompt: text("revisedPrompt").map(str::to_owned),
+        })),
     }
 }
 
@@ -5330,6 +5429,7 @@ mod tests {
                 subagents: HashMap::new(),
                 backgrounded_subagents: HashSet::new(),
                 background_terminals: Vec::new(),
+                stopped_commands: HashSet::new(),
                 background_terminal_read: None,
                 subagent_parent_by_thread: HashMap::new(),
                 seen_subagent_activities: HashSet::new(),
@@ -6099,6 +6199,7 @@ mod tests {
                 apply: _,
                 recommended: _,
                 permissive: _,
+                minimum: _,
                 id,
                 label: _,
                 options,
@@ -6258,6 +6359,7 @@ mod tests {
         let message = smol::block_on(list_models(
             Some(PathBuf::from("/bin/cat")),
             LaunchEnv::default(),
+            &Default::default(),
         ))
         .unwrap_err()
         .to_string();
@@ -7111,9 +7213,9 @@ mod tests {
     }
 
     /// A sleep and an image generation, as Codex sent them, arrive as the
-    /// calls a rollout records them as: the sleep finished once it
-    /// completes, the picture an image the call holds, kept where Codex
-    /// saved it.
+    /// calls a rollout records them as, of the families they are: the sleep
+    /// finished once it completes, the picture an image the call holds,
+    /// kept where Codex saved it.
     #[test]
     fn sleeps_and_image_generations_arrive_as_their_calls() {
         let sleep = json!({"type":"sleep","id":"call_000000000000000000000003","durationMs":20000});
@@ -7123,7 +7225,9 @@ mod tests {
             input: json!({"duration_ms": 20000}),
             output: None,
             status,
-            family: None,
+            family: Some(Box::new(ToolFamily::Wait {
+                duration_ms: 20_000,
+            })),
         };
         assert_eq!(
             lifecycle_item("item/started", &sleep).unwrap().content,
@@ -7150,7 +7254,12 @@ mod tests {
             }),
             output: None,
             status: ItemStatus::Completed,
-            family: None,
+            family: Some(Box::new(ToolFamily::ImageGeneration {
+                prompt: Some(
+                    "Edit the reference image: keep the subject, make the background transparent."
+                        .into(),
+                ),
+            })),
         };
         assert_eq!(
             lifecycle_item("item/completed", &generation)
@@ -7922,6 +8031,7 @@ mod tests {
                     instructions: None,
                     processes: Default::default(),
                     clock: Default::default(),
+                    worktrees: Vec::new(),
                 };
                 let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
                     .await
@@ -8012,6 +8122,7 @@ mod tests {
                     instructions: None,
                     processes: Default::default(),
                     clock: Default::default(),
+                    worktrees: Vec::new(),
                 };
                 let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
                     .await

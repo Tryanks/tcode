@@ -282,6 +282,11 @@ fn should_skip(value: &Value) -> bool {
 /// `<local-command-stderr>` and shown unless it is empty or "(no content)";
 /// the caveat recorded before such output is not shown.
 fn user_text(text: String) -> Vec<ItemContent> {
+    // Claude Code's own mark that it cut a request off, which it shows as
+    // its notice of the interruption and not as the user's words.
+    if agent::claude::is_interruption_marker(&text) {
+        return Vec::new();
+    }
     if let Some(name) = tagged(&text, "command-name") {
         let line = match tagged(&text, "command-args").filter(|args| !args.is_empty()) {
             Some(args) => format!("{name} {args}"),

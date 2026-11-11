@@ -1912,19 +1912,26 @@ impl AppState {
     }
 
     /// Remove app-owned worktrees that no thread in the store works in and the
-    /// user did not keep.
+    /// user did not keep. What the sweep could not do is reported.
     pub(crate) fn recover_orphaned_worktrees(&self, cx: &mut HostCx) {
         let store = self.store.clone();
+        let now = cx.clock().wall();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let summary = host_cx.unblock(move || cleanup_orphans(&store)).await;
-            if !summary.removed.is_empty() || !summary.skipped.is_empty() {
-                log::info!(
-                    "worktree orphan recovery removed {}, left {}",
-                    summary.removed.len(),
-                    summary.skipped.len()
-                );
-            }
+            let error = match host_cx.unblock(move || cleanup_orphans(&store, now)).await {
+                Ok(summary) if summary.failed.is_empty() => return,
+                Ok(summary) => RuntimeError::OrphansLeft {
+                    left: summary
+                        .failed
+                        .into_iter()
+                        .map(|(path, error)| tcode_protocol::LeftOrphan { path, error })
+                        .collect(),
+                },
+                Err(error) => RuntimeError::OrphanSweepSkipped {
+                    error: error.to_string(),
+                },
+            };
+            host_cx.enqueue(move |state, cx| state.report_error(error, cx));
         });
     }
 

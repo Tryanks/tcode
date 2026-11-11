@@ -1359,14 +1359,22 @@ mod platform {
             // The HWND may be destroyed while WebView2 builds the controller
             // by design; creation then fails, or completes with a controller
             // discarded unless the same window/panel/generation are still live.
-            let built = webview2::create(environment, parent, private).await;
-
-            if let Ok(controller) = &built
-                && let Ok(webview) = webview2::core_webview(controller)
-                && let Err(error) = page_agent::prepare(webview, nonce.clone()).await
-            {
-                log::warn!("preview: the page agent could not be installed: {error}");
-            }
+            let built = match webview2::create(environment, parent, private).await {
+                Ok(controller) => {
+                    let prepared = match webview2::core_webview(&controller) {
+                        Ok(webview) => page_agent::prepare(webview, nonce.clone()).await,
+                        Err(error) => Err(error.to_string()),
+                    };
+                    match prepared {
+                        Ok(()) => Ok(controller),
+                        Err(error) => {
+                            webview2::discard(&controller);
+                            Err(format!("the page agent could not be installed: {error}"))
+                        }
+                    }
+                }
+                Err(error) => Err(error),
+            };
 
             match built {
                 Ok(controller) => {

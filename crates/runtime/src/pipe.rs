@@ -727,7 +727,13 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                 cx.spawn_background(async move { task.await.map(CommandResponse::ProfileId) }),
             );
         }
-        Command::DeleteProfile { profile_id } => app.delete_profile(&profile_id, cx),
+        Command::DeleteProfile { profile_id } => {
+            let removed = app.delete_profile(&profile_id, cx);
+            return CommandOutcome::Pending(cx.spawn_background(async move {
+                removed.await;
+                Ok(CommandResponse::Unit)
+            }));
+        }
         Command::StartProviderLogin { profile_id } => app.start_provider_login(&profile_id, cx),
         Command::SubmitProviderLoginCode { profile_id, code } => {
             app.submit_provider_login_code(&profile_id, &code)
@@ -858,6 +864,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::CancelPluginOperation { profile_id } => {
             app.cancel_plugin_operation(&profile_id, cx)
         }
+        Command::StopPluginListing { profile_id } => app.stop_plugin_listing(&profile_id),
         Command::ResetSettings => app.reset_settings(cx),
         Command::WriteRelaunchMarker {
             session_id,
@@ -1099,8 +1106,8 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             session_id,
             text,
             attachment_paths,
-            fire_at_unix_secs,
-        } => app.schedule_turn(&session_id, text, attachment_paths, fire_at_unix_secs, cx),
+            due,
+        } => app.schedule_turn(&session_id, text, attachment_paths, due, cx),
         Command::ConfirmRelayAndSend {
             session_id,
             text,
@@ -1128,10 +1135,13 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             );
         }
         Command::Interrupt { session_id } => {
-            return CommandOutcome::Immediate(
-                app.interrupt(&session_id, cx)
-                    .map(|()| CommandResponse::Unit),
-            );
+            return CommandOutcome::Immediate(app.interrupt(&session_id, true, cx).map(|unsent| {
+                if unsent.is_empty() {
+                    CommandResponse::Unit
+                } else {
+                    CommandResponse::Unsent(unsent)
+                }
+            }));
         }
         Command::ForceTerminate { session_id } => {
             return CommandOutcome::Immediate(
@@ -1220,7 +1230,12 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             app.set_active_option(&session_id, &id, value, cx);
             app.release_policy_holds(&session_id, cx);
         }
-        Command::LoadBranches { session_id } => app.load_branches(&session_id, cx),
+        Command::LoadBranches { session_id } => {
+            let loaded = app.load_branches(&session_id, cx);
+            return CommandOutcome::Pending(
+                cx.spawn_background(async move { loaded.await.map(|()| CommandResponse::Unit) }),
+            );
+        }
         Command::CheckoutBranch { session_id, branch } => {
             app.checkout_branch(&session_id, branch, cx);
         }
@@ -1615,7 +1630,11 @@ mod tests {
         // Started in the harness slot of a model catalog query, which it
         // never answers.
         let catalog = std::thread::spawn(move || {
-            smol::block_on(agent::pi::list_models(Some(stuck), Default::default()))
+            smol::block_on(agent::pi::list_models(
+                Some(stuck),
+                Default::default(),
+                &Default::default(),
+            ))
         });
         let harness: libc::pid_t = std::fs::read_to_string(&pid_file)
             .unwrap()
@@ -1708,7 +1727,7 @@ mod tests {
                 session_id: "gone".into(),
                 text: "hi".into(),
                 attachment_paths: Vec::new(),
-                fire_at_unix_secs: 1,
+                due: tcode_protocol::TurnDue::AtUnixSecs(1),
             },
             Command::Steer {
                 session_id: "gone".into(),

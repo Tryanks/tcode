@@ -314,6 +314,10 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                         first_line: None,
                                         note: None,
                                     }),
+                                    _ if is_sleep(payload) => input
+                                        .get("duration_ms")
+                                        .and_then(Value::as_u64)
+                                        .map(|duration_ms| ToolFamily::Wait { duration_ms }),
                                     _ => agent::codex::question_family(&name, &input, None),
                                 }
                                 .map(Box::new),
@@ -759,6 +763,13 @@ const WRITE_STDIN: &str = "write_stdin";
 const UPDATE_PLAN: &str = "update_plan";
 /// The tool that shows Codex an image (`view_image_spec.rs`).
 const VIEW_IMAGE: &str = "view_image";
+
+/// Whether a call is Codex's `sleep` in the `clock` namespace, which takes
+/// `{duration_ms}` (`core/src/tools/handlers/sleep.rs`).
+fn is_sleep(payload: &Value) -> bool {
+    payload.get("namespace").and_then(Value::as_str) == Some("clock")
+        && payload.get("name").and_then(Value::as_str) == Some("sleep")
+}
 
 /// A command's result as Codex words it for the model: a header of
 /// `Key: value` lines, the code it exited with among them, then `Output:`

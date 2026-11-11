@@ -1,26 +1,15 @@
-//! Windows for calls about neither the workspace nor the session whose name
-//! and input say plainly what they did: a wait, an image generated.
+//! Windows for calls about neither the workspace nor the session: a wait,
+//! an image generated.
 
 use std::path::Path;
 
+use agent::ToolFamily;
 use gpui::AnyElement;
-use serde::Deserialize;
 
 use super::window::{Argument, Header, Verb};
 use super::{Bound, Call, ToolCtx, ToolView, copy, output_section, thumbnails};
 use crate::chat::model::{format_elapsed, one_line};
 use crate::icon::IconName;
-
-#[derive(Deserialize)]
-struct Sleep {
-    duration_ms: u64,
-}
-
-#[derive(Deserialize)]
-struct ImageGeneration<'a> {
-    #[serde(borrow, default)]
-    revised_prompt: Option<&'a str>,
-}
 
 enum Kind<'a> {
     Wait(u64),
@@ -28,12 +17,10 @@ enum Kind<'a> {
 }
 
 pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView + 'a>> {
-    let kind = if call.named(&["sleep"]) {
-        Kind::Wait(call.input::<Sleep>()?.duration_ms)
-    } else if call.named(&["image_generation"]) {
-        Kind::GenerateImage(call.input::<ImageGeneration<'a>>()?.revised_prompt)
-    } else {
-        return None;
+    let kind = match call.family {
+        Some(ToolFamily::Wait { duration_ms }) => Kind::Wait(*duration_ms),
+        Some(ToolFamily::ImageGeneration { prompt }) => Kind::GenerateImage(prompt.as_deref()),
+        _ => return None,
     };
     Some(Box::new(Other { kind }))
 }

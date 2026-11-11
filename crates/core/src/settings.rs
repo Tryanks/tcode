@@ -133,6 +133,9 @@ pub enum TokenCheck {
     /// The host could not be asked: no answer (`status` none), or an answer about something
     /// other than the token.
     Unreachable { status: Option<u16> },
+    /// The host took the token, but its answer could not be read or was not what its API
+    /// sends, so whose the token is stays unknown.
+    Unreadable { status: u16, error: String },
     /// The host never says whose a token of this kind is, so nothing can confirm it before use.
     Unconfirmed,
 }
@@ -384,13 +387,18 @@ impl ProviderSettings {
         }
     }
 
-    /// A native provider's `Launch arguments` field, split on whitespace.
-    pub fn extra_args(&self) -> Vec<String> {
+    /// A native provider's `Launch arguments` field, as arguments.
+    pub fn extra_args(&self) -> Result<Vec<String>, String> {
         self.launch_args
             .as_deref()
-            .map(|s| s.split_whitespace().map(str::to_string).collect())
-            .unwrap_or_default()
+            .map_or(Ok(Vec::new()), split_args)
     }
+}
+
+/// Arguments the user typed on one line, split the way a POSIX shell splits
+/// them, so a quoted path with spaces stays one argument.
+pub fn split_args(text: &str) -> Result<Vec<String>, String> {
+    shell_words::split(text).map_err(|error| error.to_string())
 }
 
 /// A user-created provider profile (Settings → Harnesses "+ New profile").

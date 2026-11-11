@@ -2898,6 +2898,14 @@ impl WorkspaceStore {
             .unwrap_or_default()
     }
 
+    /// Why the latest listing of `provider`'s models failed.
+    pub(crate) fn models_error(&self, provider: agent::ProviderKind) -> Option<&str> {
+        self.providers_replica
+            .model_errors
+            .get(&provider)
+            .map(String::as_str)
+    }
+
     pub(crate) fn models_loading(&self, provider: agent::ProviderKind) -> bool {
         self.providers_replica.models_loading.get(&provider) == Some(&true)
             && self
@@ -3091,12 +3099,12 @@ impl WorkspaceStore {
             .map(|status| status.cwd.clone())
     }
 
-    pub fn acp_registry_loading(&self) -> bool {
-        self.providers_replica.acp_registry_loading
-    }
-
     pub fn acp_registry_error(&self) -> Option<String> {
         self.providers_replica.acp_registry_error.clone()
+    }
+
+    pub fn acp_registry_loaded(&self) -> bool {
+        self.providers_replica.acp_registry_loaded
     }
 
     pub fn acp_installing(&self, agent_id: &str) -> bool {

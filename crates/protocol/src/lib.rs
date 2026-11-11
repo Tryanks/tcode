@@ -35,7 +35,7 @@ mod wire;
 
 pub use command::{
     ChildSettlement, Command, CommandResponse, ForkAt, SettingsPatch, SettleChildrenResult,
-    TerminalSelection, ThreadExportFormat,
+    TerminalSelection, ThreadExportFormat, TurnDue, UnsentMessage,
 };
 pub use event::{
     AccountDiskUsage, AcpMarketplaceItem, AgentStatus, ArchivedSessions, BackgroundActivity,
@@ -43,7 +43,7 @@ pub use event::{
     DiskUsageState, EndpointDescription, EndpointPresetDescription, EventEnvelope,
     ExternalImportState, ExternalImportStatus, ForkAvailability, ForkStatus, GitActionRequest,
     GitStatusStatus, HarnessDescription, HarnessPermission, ImportFailure, IndexSnapshot,
-    IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools,
+    IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools, LeftOrphan,
     MergeWorktreeFailure, NoticeSeverity, PendingRewind, PluginCatalogState, PluginChallenge,
     PluginChallengeKind, PluginOperationTarget, PluginStaleReason, PluginsDescription,
     ProviderDiskUsage, ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun,
@@ -344,6 +344,8 @@ pub use wire::{
 // Command gains stop_stack_rebase; StackRebaseFailure gains stopped.
 // Command gains cancel_provider_update, RuntimeToast provider_update_cancelled.
 // ProvidersStatus gains secrets_unreadable.
+// ProvidersStatus gains model_errors, why a provider's latest model listing
+// failed.
 // The agent event stream gains unreadable_record {line}: a row of a thread's
 // log the host cannot read is sent as it is stored instead of left out, and so
 // is a subagent's item (with parent_item_id) a build before v0.1.42 wrote
@@ -369,12 +371,16 @@ pub use wire::{
 // {scope, pattern, path, glob, hits}, each hit {path, line, text}; question
 // {questions}, each {question, options, answers}; fetch {url, prompt};
 // web_search {query, links}, each link {title, url}; load_tools {query,
-// tools}; skill {name}.
+// tools}; skill {name}; wait {duration_ms}; image_generation {prompt};
+// review {action, risk}.
 // The served_model event gains from, the model the harness named before it.
 // RuntimeError gains title_attachment_unreadable {path, error}.
 // PullRequestFile's additions and deletions may be absent: a binary or
 // oversized file whose host gave no count.
 // SelectOption gains approval, the ApprovalClass of a permission value.
+// A select OptionDescriptor gains minimum, the smallest value of its own the
+// harness takes (Claude's context window); a context window has no other
+// lower bound.
 // SessionStatus gains background_control {stop, move_running} and
 // harness_option_labels.
 // HarnessDescription's plugins is a PluginsDescription {actions, marketplaces,
@@ -387,6 +393,17 @@ pub use wire::{
 // truncated, unreadable}; ListActiveWorkspace lists a thread that is not
 // running too, and answers unknown_session or git's or the file system's error
 // where it was an empty list.
+// ProvidersStatus gains acp_registry_loaded and loses acp_registry_loading.
+// Command gains stop_plugin_listing; PluginStaleReason gains stopped.
+// ScheduleTurn carries due, a TurnDue (after_secs from when the host takes it
+// in, or at_unix_secs), instead of fire_at_unix_secs computed by the client's
+// clock.
+// RuntimeError gains orphan_sweep_skipped {error} and orphans_left {left}, each
+// a LeftOrphan {path, error}.
+// TokenCheck gains unreadable {status, error}: a host took the token but its
+// answer could not be read.
+// CommandResponse gains unsent, the UnsentMessage {text, attachments} list an
+// Interrupt answers with when the next turn had not reached the provider.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

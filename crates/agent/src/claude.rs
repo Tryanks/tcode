@@ -80,15 +80,22 @@ fn effective_permission_mode(internal: &str, extra_args: &[String]) -> String {
 /// The directory the CLI launched with `launch_env` keeps its settings,
 /// sign-in and transcripts in.
 pub fn config_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
-    let child_env = |key: &str| launch_env.child_path(ProviderKind::ClaudeCode, key);
-    child_env("CLAUDE_CONFIG_DIR").or_else(|| child_env("HOME").map(|home| home.join(".claude")))
+    launch_env
+        .child_path(ProviderKind::ClaudeCode, "CLAUDE_CONFIG_DIR")
+        .or_else(|| {
+            launch_env
+                .child_home(ProviderKind::ClaudeCode)
+                .map(|home| home.join(".claude"))
+        })
 }
 
 /// The CLI's account file, `.claude.json`: in `CLAUDE_CONFIG_DIR` when that
 /// is set, else in the home directory itself rather than in `~/.claude`.
 pub fn account_file(launch_env: &LaunchEnv) -> Option<PathBuf> {
-    let child_env = |key: &str| launch_env.child_path(ProviderKind::ClaudeCode, key);
-    account_file_in(child_env("CLAUDE_CONFIG_DIR"), child_env("HOME"))
+    account_file_in(
+        launch_env.child_path(ProviderKind::ClaudeCode, "CLAUDE_CONFIG_DIR"),
+        launch_env.child_home(ProviderKind::ClaudeCode),
+    )
 }
 
 fn account_file_in(config_dir: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
@@ -439,6 +446,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
 
     let session_config = SessionConfig {
         cwd: opts.cwd.clone(),
+        worktrees: opts.worktrees.clone(),
         claude_dir: config_dir(&opts.launch_env),
         launch,
         resumed: opts.resume.is_some(),
@@ -814,6 +822,8 @@ struct PendingSettings {
 struct SessionConfig {
     /// The directory the process was started in.
     cwd: PathBuf,
+    /// [`SessionOptions::worktrees`].
+    worktrees: Vec<PathBuf>,
     claude_dir: Option<PathBuf>,
     launch: ClaudeLaunchOptions,
     /// The transcript already holds history this process did not write.
@@ -903,6 +913,7 @@ async fn actor_loop(
     mapper.applied_settings = config.launch.clone();
     mapper.launch_cwd = Some(config.cwd.clone());
     mapper.cwd = Some(config.cwd.clone());
+    mapper.worktrees = config.worktrees.clone();
     let claude_dir = config.claude_dir.clone();
     // Before any user message, so no worktree is made without the host.
     let initialize = mapper.initialize_request();
@@ -1281,6 +1292,8 @@ async fn handle_command(
             let _ = event_tx.send(AgentEvent::TurnStarted { turn_id }).await;
             ControlFlow::Continue(())
         }
+        // The CLI reads its stdin in order: an interrupt written while it is
+        // still starting reaches it after the turn's message, once it is up.
         SessionCommand::Interrupt => {
             let msg = mapper.interrupt_request();
             let _ = write_line(stdin, &msg).await;
@@ -1670,6 +1683,38 @@ async fn write_line<W: AsyncWrite + Unpin>(stdin: &mut W, value: &Value) -> std:
 /// Build a stream-json user message line. Text comes first, followed by one
 /// `image` content block per attachment (`source: {type: "base64", media_type,
 /// data}` — the Anthropic content-block shape the CLI accepts).
+/// The texts Claude Code writes in a message of the user's role for a
+/// request, an agent or a tool call it cut off, which it reads as no one's
+/// words: the entries of its marker list that say so, matched as it matches
+/// them, by prefix (`Vxe` and `uh` in Claude Code 2.1.322).
+const INTERRUPTION_MARKERS: [&str; 7] = [
+    "[Request interrupted by user]",
+    "[Request interrupted: the session ended before this agent finished. Nobody asked it to stop.]",
+    "[Agent call interrupted: the process running this conversation stopped before this agent finished, so it returned no result. Nobody asked it to stop.]",
+    "[Tool call did not complete: the turn was ended to deliver the message that follows. Nothing refused it; re-run it if still needed.]",
+    "[Tool call interrupted: the session ended before this call's result was recorded, so its outcome is unknown. Check whether it took effect before relying on it or running it again.]",
+    "[Tool call skipped: the turn was stopped before this call ran, by the check whose denial is on another call in this batch. Nothing refused this call and it had no effects; re-run it if still needed.]",
+    "[Tool call skipped: the turn ended to deliver the message that follows before this call ran. Nothing refused it; re-run it if still needed.]",
+];
+
+/// Whether `text` is Claude Code's own mark that it cut something off, not
+/// anything the user said or a tool answered.
+pub fn is_interruption_marker(text: &str) -> bool {
+    INTERRUPTION_MARKERS
+        .iter()
+        .any(|marker| text.starts_with(marker))
+}
+
+/// How a call ended, from its `tool_result`: cut off when Claude Code says it
+/// cut it off, failed when it is an error otherwise.
+fn tool_result_status(is_error: bool, output: &str) -> ItemStatus {
+    match is_error {
+        true if is_interruption_marker(output) => ItemStatus::Interrupted,
+        true => ItemStatus::Failed,
+        false => ItemStatus::Completed,
+    }
+}
+
 fn user_message(text: &str, attachments: &[Attachment]) -> Value {
     let mut content = vec![json!({ "type": "text", "text": text })];
     for attachment in attachments {
@@ -1791,13 +1836,9 @@ impl ToolItem {
             .get("is_error")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let status = if is_error {
-            ItemStatus::Failed
-        } else {
-            ItemStatus::Completed
-        };
         let ToolOutput { text, images } =
             ToolOutput::from_content(block.get("content").unwrap_or(&Value::Null));
+        let status = tool_result_status(is_error, &text);
         match self {
             ToolItem::Command { command, .. } => {
                 let (output, exit_code) = match is_error.then(|| exited(&text)).flatten() {
@@ -2029,6 +2070,12 @@ pub(crate) struct Mapper {
     /// in now, as far as Claude has said. `None` in fixtures that start nowhere.
     launch_cwd: Option<PathBuf>,
     cwd: Option<PathBuf>,
+    /// The worktrees Tcode made for this thread: those it had when the
+    /// process started and each the host has given since.
+    worktrees: Vec<PathBuf>,
+    /// Where the session worked before `EnterWorktree` took it into a
+    /// worktree, which `ExitWorktree` returns it to.
+    before_worktree: Option<PathBuf>,
     outgoing: Vec<Value>,
     request_usage: Value,
     latest_usage: TokenUsage,
@@ -2102,6 +2149,8 @@ impl Mapper {
             subagent_worktrees: HashMap::new(),
             launch_cwd: None,
             cwd: None,
+            worktrees: Vec::new(),
+            before_worktree: None,
             outgoing: Vec::new(),
             request_usage: json!({}),
             latest_usage: TokenUsage::default(),
@@ -2477,6 +2526,7 @@ impl Mapper {
         };
         let response = match (&request, answer) {
             (WorktreeRequest::Create { cwd, name }, WorktreeAnswer::Ready { path, .. }) => {
+                self.worktrees.push(path.clone());
                 if let Some(agent_id) = name.strip_prefix(SUBAGENT_WORKTREE_PREFIX) {
                     self.subagent_worktrees
                         .insert(agent_id.to_owned(), (cwd.clone(), path.clone()));
@@ -2503,8 +2553,7 @@ impl Mapper {
 
     /// The session works in `to` from now on, as Claude reported it: a move, unless
     /// that is where it works already.
-    fn move_session(&mut self, to: &str) -> Option<AgentEvent> {
-        let to = PathBuf::from(to);
+    fn move_session(&mut self, to: PathBuf) -> Option<AgentEvent> {
         let from = self.cwd.as_ref()?;
         if same_directory(from, &to) {
             return None;
@@ -2751,13 +2800,20 @@ impl Mapper {
             }
             self.applied_permission_mode = mode.to_owned();
         }
-        // A resumed session goes on where it last worked, which Claude restores
-        // itself: a worktree it had entered rather than the directory it was
-        // started in.
+        // A resumed session goes on in the worktree it had entered, which
+        // Claude restores itself (2.1.322) wherever it was started. Any other
+        // directory here is where the Bash tool's shell last cd'd to, which
+        // Claude carries from turn to turn and does not restore on resume:
+        // that is not the session moving.
         let moved = msg
             .get("cwd")
             .and_then(Value::as_str)
-            .and_then(|cwd| self.move_session(cwd));
+            .filter(|cwd| {
+                self.worktrees
+                    .iter()
+                    .any(|worktree| same_directory(worktree, Path::new(cwd)))
+            })
+            .and_then(|cwd| self.move_session(PathBuf::from(cwd)));
         if self.session_id.is_some() {
             let mut events = vec![self.permission_options()];
             events.extend(moved);
@@ -2945,7 +3001,9 @@ impl Mapper {
         };
         let status = match status {
             "completed" => ItemStatus::Completed,
-            "failed" | "killed" => ItemStatus::Failed,
+            "failed" => ItemStatus::Failed,
+            // Stopped, by the user or by its session's end: it did not fail.
+            "killed" => ItemStatus::Interrupted,
             _ => ItemStatus::InProgress,
         };
         // The tail is stopped by the task_notification that follows a
@@ -2989,10 +3047,10 @@ impl Mapper {
         });
         // A notification is the task's terminal frame: `completed`, `failed`
         // or `stopped`.
-        let status = if msg.get("status").and_then(Value::as_str) == Some("completed") {
-            ItemStatus::Completed
-        } else {
-            ItemStatus::Failed
+        let status = match msg.get("status").and_then(Value::as_str) {
+            Some("completed") => ItemStatus::Completed,
+            Some("stopped") => ItemStatus::Interrupted,
+            _ => ItemStatus::Failed,
         };
         let summary = handback_summary(
             msg.get("handback"),
@@ -3627,24 +3685,34 @@ impl Mapper {
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            // Where the session works after it entered or left a worktree.
+            // Where the session works after it entered or left a worktree:
+            // the worktree, and on leaving it the directory it worked in
+            // before, which `restoredCwd` names only as the shell's last cd.
+            let result_path = |key: &str| {
+                msg.pointer(&format!("/tool_use_result/{key}"))
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from)
+            };
             let moved_to = match &item {
                 ToolItem::Tool { name, .. } if !is_error => match name.as_str() {
-                    "EnterWorktree" => msg.pointer("/tool_use_result/worktreePath"),
-                    "ExitWorktree" => msg.pointer("/tool_use_result/restoredCwd"),
+                    "EnterWorktree" => {
+                        let to = result_path("worktreePath");
+                        if to.is_some() {
+                            self.before_worktree = self.cwd.clone();
+                        }
+                        to
+                    }
+                    "ExitWorktree" => self
+                        .before_worktree
+                        .take()
+                        .or_else(|| result_path("restoredCwd")),
                     _ => None,
                 },
                 _ => None,
-            }
-            .and_then(Value::as_str)
-            .map(str::to_owned);
+            };
             let output =
                 ToolOutput::from_content(block.get("content").unwrap_or(&Value::Null)).text;
-            let status = if is_error {
-                ItemStatus::Failed
-            } else {
-                ItemStatus::Completed
-            };
+            let status = tool_result_status(is_error, &output);
             let mut parent_item_id = None;
             let backgrounded = launched_in_background && matches!(item, ToolItem::Command { .. });
             if let Some(task_id) = msg
@@ -3730,7 +3798,7 @@ impl Mapper {
                     parent_item_id: None,
                 });
             }
-            out.extend(moved_to.and_then(|to| self.move_session(&to)));
+            out.extend(moved_to.and_then(|to| self.move_session(to)));
         }
         out
     }
@@ -4038,7 +4106,6 @@ impl Mapper {
             ClaudeRequestType::ExecCommand => ApprovalKind::ExecCommand {
                 command: input
                     .get("command")
-                    .or_else(|| input.get("cmd"))
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),
@@ -4222,10 +4289,15 @@ impl Mapper {
             .current_turn_id
             .take()
             .unwrap_or_else(|| format!("turn-{}", self.turn_counter.max(1)));
+        // A turn stopped before the model wrote anything: the CLI may close
+        // it as a success, with nothing in it.
+        let answered = !self.assistant_messages.is_empty();
         // No message outlives its turn, so the block counters can go.
         self.assistant_messages.clear();
         let mut status = result_status(msg);
-        if std::mem::take(&mut self.interrupt_pending) && status != TurnStatus::Completed {
+        if std::mem::take(&mut self.interrupt_pending)
+            && (status != TurnStatus::Completed || !answered)
+        {
             status = TurnStatus::Interrupted;
         }
         let usage = msg.get("usage").map(|u| {
@@ -4800,11 +4872,7 @@ fn classify_claude_tool(name: &str) -> ClaudeRequestType {
 
 /// Summarize a command, subagent brief, or tool input for its approval prompt.
 fn approval_detail(tool_name: &str, input: &Value) -> String {
-    if let Some(cmd) = input
-        .get("command")
-        .or_else(|| input.get("cmd"))
-        .and_then(Value::as_str)
-    {
+    if let Some(cmd) = input.get("command").and_then(Value::as_str) {
         let clipped: String = cmd.trim().chars().take(400).collect();
         return format!("{tool_name}: {clipped}");
     }
@@ -5123,17 +5191,13 @@ pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
     refresh: CatalogRefresh,
+    processes: &crate::SessionProcesses,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     crate::process::unblock(move || {
         crate::claude_manifest::refresh(refresh.cache_dir.as_deref(), refresh.network)
     })
     .await;
-    let version = claude_version(
-        binary_path.as_deref(),
-        &launch_env,
-        &crate::SessionProcesses::default(),
-    )
-    .await;
+    let version = claude_version(binary_path.as_deref(), &launch_env, processes).await;
     Ok(crate::claude_manifest::current().models_for_version(version))
 }
 
@@ -5476,11 +5540,13 @@ mod tests {
         );
     }
 
-    /// The session's directory follows Claude: into the worktree `EnterWorktree`
-    /// made, back to the one `ExitWorktree` restored (in the spelling Tcode
-    /// started it with, though Claude reports it resolved), and, on resume, to
-    /// the worktree `system/init` says Claude restored. A subagent's own
-    /// `EnterWorktree` moves only that subagent.
+    /// The session's directory follows Claude in and out of worktrees: into
+    /// the worktree `EnterWorktree` made, back to where it worked before when
+    /// `ExitWorktree` leaves it (in the spelling Tcode started it with), and,
+    /// on resume, to a worktree of the thread's that `system/init` says Claude
+    /// restored. A directory the shell merely cd'd to, which `system/init`
+    /// reports too, is not a move. A subagent's own `EnterWorktree` moves only
+    /// that subagent.
     #[cfg(unix)]
     #[test]
     fn the_session_directory_follows_claude_in_and_out_of_worktrees() {
@@ -5496,6 +5562,7 @@ mod tests {
             let mut mapper = Mapper::new();
             mapper.launch_cwd = Some(link.clone());
             mapper.cwd = Some(link.clone());
+            mapper.worktrees = vec![worktree.clone()];
             let events = mapper.on_message(json!({"type":"system","subtype":"init","cwd":cwd,"session_id":"native","permissionMode":"default"}));
             (mapper, events)
         };
@@ -5515,6 +5582,8 @@ mod tests {
 
         let (mut mapper, events) = started(&resolved);
         assert_eq!(moved(&events), []);
+        let shell = mapper.on_message(json!({"type":"system","subtype":"init","cwd":resolved.join("src"),"session_id":"native","permissionMode":"default"}));
+        assert_eq!(moved(&shell), []);
         let tool = |id: &str, name: &str, result: Value| {
             [
                 json!({"type":"assistant","message":{"id":format!("msg-{id}"),"role":"assistant","content":[{"type":"tool_use","id":id,"name":name,"input":{}}]},"parent_tool_use_id":null,"session_id":"native"}),

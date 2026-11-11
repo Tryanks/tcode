@@ -665,6 +665,21 @@ impl ActiveSession {
         }
     }
 
+    /// Take out the messages the user sent that wait for the provider, not
+    /// for a time: what a Stop before delivery hands back to the composer.
+    pub(super) fn take_unsent(&mut self) -> Vec<QueuedMessage> {
+        let (unsent, kept) = std::mem::take(&mut self.queue)
+            .into_iter()
+            .partition(|message| {
+                self.delivery_in_flight != Some(message.id)
+                    && message.kind == QueuedMessageKind::User
+                    && message.origin == MessageOrigin::Human
+                    && message.not_before.is_none()
+            });
+        self.queue = kept;
+        unsent
+    }
+
     /// Pull a message out of the queue by id (the strip's steer/✕ buttons).
     pub(super) fn take_queued(&mut self, id: u64) -> Option<QueuedMessage> {
         if self.delivery_in_flight == Some(id) {

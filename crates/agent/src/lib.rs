@@ -1218,6 +1218,9 @@ pub struct SessionOptions {
     /// stop them whatever the session is waiting on.
     #[cfg(feature = "process")]
     pub processes: SessionProcesses,
+    /// The worktrees Tcode made for the thread, which a resumed session may
+    /// report it works in.
+    pub worktrees: Vec<PathBuf>,
     /// The host's time, which the session's waits on its harness read.
     #[cfg(feature = "process")]
     pub clock: Clock,
@@ -1277,6 +1280,16 @@ impl LaunchEnv {
             .find(|(name, _)| name == key)
             .map(|(_, value)| PathBuf::from(value))
             .or_else(|| std::env::var_os(key).map(PathBuf::from))
+    }
+
+    /// The home directory a child of `provider` launched with this
+    /// environment resolves `~` against: the `HOME` (`USERPROFILE` on
+    /// Windows) it is given, else the account's, as the CLIs' own lookups
+    /// fall back to it.
+    #[cfg(feature = "process")]
+    pub fn child_home(&self, provider: ProviderKind) -> Option<PathBuf> {
+        let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        self.child_path(provider, key).or_else(dirs::home_dir)
     }
 }
 
@@ -1360,6 +1373,10 @@ pub enum OptionDescriptor {
         recommended: Option<String>,
         #[serde(default)]
         permissive: Option<String>,
+        /// The smallest value the harness takes beyond the presets, for a
+        /// select that also takes one of its own (a context window).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        minimum: Option<u64>,
     },
     Boolean {
         id: String,
@@ -1665,6 +1682,7 @@ pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
         apply,
         recommended: Some(recommended.into()),
         permissive: Some(permissive.into()),
+        minimum: None,
     })
 }
 
@@ -2130,19 +2148,25 @@ pub struct CatalogRefresh {
 /// provider's configured environment/home so the catalog reflects the same CLI
 /// (and account) a session would actually run against.
 #[cfg(feature = "process")]
+///
+/// The harness processes the listing starts are held in `processes`, which
+/// stops them, and so ends the listing, whatever it is waiting on.
 pub async fn list_models(
     provider: ProviderKind,
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
     refresh: CatalogRefresh,
+    processes: &SessionProcesses,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     match provider {
-        ProviderKind::Codex => codex::list_models(binary_path, launch_env).await,
-        ProviderKind::ClaudeCode => claude::list_models(binary_path, launch_env, refresh).await,
-        ProviderKind::Pi => pi::list_models(binary_path, launch_env).await,
-        ProviderKind::OpenCode => opencode::list_models(binary_path, launch_env).await,
-        ProviderKind::Cursor => cursor::list_models(binary_path, launch_env).await,
-        ProviderKind::Grok => grok::list_models(binary_path, launch_env).await,
+        ProviderKind::Codex => codex::list_models(binary_path, launch_env, processes).await,
+        ProviderKind::ClaudeCode => {
+            claude::list_models(binary_path, launch_env, refresh, processes).await
+        }
+        ProviderKind::Pi => pi::list_models(binary_path, launch_env, processes).await,
+        ProviderKind::OpenCode => opencode::list_models(binary_path, launch_env, processes).await,
+        ProviderKind::Cursor => cursor::list_models(binary_path, launch_env, processes).await,
+        ProviderKind::Grok => grok::list_models(binary_path, launch_env, processes).await,
         // ACP agents advertise their models over the wire at session start
         // (`AgentEvent::ProviderOptions`), so there is no catalog to pre-fetch.
         ProviderKind::Acp => Ok(Vec::new()),
@@ -3167,6 +3191,41 @@ pub enum ToolFamily {
     },
     /// A skill the harness launched or loaded.
     Skill { name: String },
+    /// A pause the model asked for, of the length it asked.
+    Wait { duration_ms: u64 },
+    /// A picture the harness generated. The call's images are the picture.
+    ImageGeneration {
+        /// The prompt the picture was generated from, as the harness
+        /// rewrote it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+    },
+    /// The harness's automatic reviewer's verdict on an action the model
+    /// took. The call's output is its rationale.
+    Review {
+        /// The action reviewed.
+        action: String,
+        /// The risk it rated the action, when it rated one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        risk: Option<String>,
+    },
+}
+
+impl ToolFamily {
+    /// What the call is about, as its family names it.
+    pub fn subject(&self) -> Option<&str> {
+        match self {
+            Self::Read { path, .. } => Some(path),
+            Self::Search { pattern, path, .. } => pattern.as_deref().or(path.as_deref()),
+            Self::Question { questions } => questions.first().map(|asked| asked.question.as_str()),
+            Self::Fetch { url, .. } => Some(url),
+            Self::WebSearch { query, .. } | Self::LoadTools { query, .. } => Some(query),
+            Self::Skill { name } => Some(name),
+            Self::Wait { .. } => None,
+            Self::ImageGeneration { prompt } => prompt.as_deref(),
+            Self::Review { action, .. } => Some(action),
+        }
+    }
 }
 
 /// A page a web search found.

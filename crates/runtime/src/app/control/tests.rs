@@ -986,6 +986,7 @@ fn delete_threads_previews_then_deletes_the_tree() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-control-delete");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (reply, response) = smol::channel::bounded(1);
     state.update(cx, |state, cx| {
         let caller = granted(thread("caller", "p"), &[ControlCategory::Delete]);
         state.sessions.push(caller.clone());
@@ -1010,9 +1011,13 @@ fn delete_threads_previews_then_deletes_the_tree() {
         );
         assert!(state.find_meta("lead").is_some() && state.find_meta("kid").is_some());
 
-        let deleted = call(state, "caller", delete(false), cx).unwrap();
-        assert_eq!(deleted["results"][0]["outcome"], "applied");
-        assert_eq!(deleted["results"][1]["reason"], "unknown_thread");
+        state.handle_control_op("caller".into(), delete(false), reply, cx);
+    });
+    // The answer waits for the deleted threads' uploads to be removed.
+    let deleted = cx.run_until_recv(&response).unwrap();
+    assert_eq!(deleted["results"][0]["outcome"], "applied");
+    assert_eq!(deleted["results"][1]["reason"], "unknown_thread");
+    state.read(|state| {
         assert!(state.find_meta("lead").is_none() && state.find_meta("kid").is_none());
         let audited = state
             .resident("caller")

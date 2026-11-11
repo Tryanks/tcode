@@ -31,63 +31,6 @@ impl WorkspaceStore {
         }
     }
 
-    fn host_global_command(command: &Command) -> bool {
-        matches!(
-            command,
-            Command::DeleteSession { .. }
-                | Command::DeleteProject { .. }
-                | Command::CreateProject { .. }
-                | Command::CreateNewProject { .. }
-                | Command::StartScratchDraft
-                | Command::SetProjectIcon { .. }
-                | Command::SetProjectRoot { .. }
-                | Command::StartExternalImport { .. }
-                | Command::OpenLatestSession
-                | Command::ShutdownAllAndFlush
-                | Command::ApplyPendingRelaunch
-                | Command::PatchSettings { .. }
-                | Command::ResetSettings
-                | Command::CycleProjectSort
-                | Command::ToggleFavoriteModel { .. }
-                | Command::ToggleProjectCollapsed { .. }
-                | Command::PreviewReply { .. }
-                | Command::ShowPreviewHere { .. }
-                | Command::ReportPreviewTabs { .. }
-                | Command::ReportPreviewInput { .. }
-                | Command::ReloadProvider
-                | Command::SetProfileSecret { .. }
-                | Command::UpdateProfileSettings { .. }
-                | Command::CreateThirdPartyProfile { .. }
-                | Command::CreateAccountProfile { .. }
-                | Command::DeleteProfile { .. }
-                | Command::StartProviderLogin { .. }
-                | Command::SubmitProviderLoginCode { .. }
-                | Command::CancelProviderLogin { .. }
-                | Command::LogoutProvider { .. }
-                | Command::RefreshProviderStatus
-                | Command::RefreshProviderUsage
-                | Command::CheckProviderVersions
-                | Command::MeasureDiskUsage
-                | Command::UpdateProviders { .. }
-                | Command::CancelProviderUpdate
-                | Command::RefreshAcpRegistry
-                | Command::InstallAcpAgent { .. }
-                | Command::CancelAcpInstall { .. }
-                | Command::RemoveAcpAgent { .. }
-                | Command::AddCustomAcpAgent { .. }
-                | Command::UpdateAcpAgent { .. }
-                | Command::RefreshProviderPlugins { .. }
-                | Command::InstallProviderPlugin { .. }
-                | Command::UninstallProviderPlugin { .. }
-                | Command::SetProviderPluginEnabled { .. }
-                | Command::UpdateProviderPlugin { .. }
-                | Command::AddProviderMarketplace { .. }
-                | Command::RemoveProviderMarketplace { .. }
-                | Command::ResolvePluginChallenge { .. }
-                | Command::CancelPluginOperation { .. }
-        )
-    }
-
     pub(super) fn dispatch(&mut self, command: Command) {
         if !self.scope.is_full() {
             match &command {
@@ -132,9 +75,6 @@ impl WorkspaceStore {
                         .insert(session_id.clone(), 0);
                 }
                 _ => {
-                    if Self::host_global_command(&command) {
-                        return;
-                    }
                     self.send(command);
                     return;
                 }
@@ -186,11 +126,6 @@ impl WorkspaceStore {
         command: Command,
         cx: &mut App,
     ) -> Task<Result<CommandResponse, ProtocolError>> {
-        if !self.scope.is_full() && Self::host_global_command(&command) {
-            return cx.spawn(async |_| {
-                Err(ProtocolError::out_of_scope("command is outside this space"))
-            });
-        }
         let host = self.host.clone();
         cx.spawn(async move |_| host.command(command).await)
     }
@@ -851,13 +786,13 @@ impl WorkspaceStore {
         session_id: String,
         text: String,
         attachment_paths: Vec<PathBuf>,
-        fire_at_unix_secs: u64,
+        due: tcode_protocol::TurnDue,
     ) {
         self.dispatch(Command::ScheduleTurn {
             session_id,
             text,
             attachment_paths,
-            fire_at_unix_secs,
+            due,
         });
     }
     pub fn confirm_relay_and_send_for(
@@ -1515,6 +1450,9 @@ impl WorkspaceStore {
     }
     pub fn resolve_plugin_challenge(&mut self, op_id: RuntimeOperationId, accept: bool) {
         self.dispatch(Command::ResolvePluginChallenge { op_id, accept });
+    }
+    pub fn stop_plugin_listing(&mut self, profile_id: String) {
+        self.dispatch(Command::StopPluginListing { profile_id });
     }
     pub fn cancel_plugin_operation(&mut self, profile_id: String) {
         self.dispatch(Command::CancelPluginOperation { profile_id });

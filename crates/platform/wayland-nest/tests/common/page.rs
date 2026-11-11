@@ -2,16 +2,17 @@
 //! process on the nest's socket, a frame presented before the next is
 //! answered, input sent in view coordinates.
 
-use std::time::{Duration, Instant};
+use std::future::Future as _;
+use std::task::Poll;
 
+use gtk::glib;
 use gtk::prelude::*;
-use wayland_nest::{Frame, Nest, PointerEvent, ViewId, button, evdev_key, modifier};
+use wayland_nest::{Event, Frame, Nest, PointerEvent, ViewId, button, evdev_key, modifier};
 use webkit2gtk::WebViewExt as _;
 
 pub const VIEW: ViewId = ViewId(0);
 pub const WIDTH: u32 = 400;
 pub const HEIGHT: u32 = 300;
-pub const TIMEOUT: Duration = Duration::from_secs(30);
 /// The page's background, `rgb(0, 128, 0)`, as the nest's native-endian
 /// premultiplied ARGB.
 pub const BACKGROUND: [u8; 4] = 0xff00_8000_u32.to_ne_bytes();
@@ -46,12 +47,8 @@ pub struct Page {
     pub window: gtk::Window,
     pub webview: webkit2gtk::WebView,
     pub frame: Option<Frame>,
-}
-
-pub fn pump_gtk() {
-    while gtk::events_pending() {
-        gtk::main_iteration_do(false);
-    }
+    /// Told each time the page's title, where it reports its state, changes.
+    titles: async_channel::Receiver<()>,
 }
 
 impl Page {
@@ -65,6 +62,10 @@ impl Page {
         window.set_title(&VIEW.title());
         window.set_decorated(false);
         let webview = webkit2gtk::WebView::new();
+        let (title_changed, titles) = async_channel::unbounded();
+        webview.connect_title_notify(move |_| {
+            let _ = title_changed.try_send(());
+        });
         window.add(&webview);
         nest.configure(VIEW, WIDTH, HEIGHT);
         webview.load_html(PAGE, None);
@@ -75,6 +76,7 @@ impl Page {
             window,
             webview,
             frame: None,
+            titles,
         };
         page.run_until("the page's first frame", |state, frame| {
             state.is_object() && pixel(frame, WIDTH - 1, HEIGHT - 1) == BACKGROUND
@@ -107,29 +109,55 @@ impl Page {
             .unwrap_or_default()
     }
 
+    /// Runs GTK until the nest sends an event `pick` accepts; other events
+    /// are dropped. `None` when the nest has stopped.
+    pub fn wait_for<T>(&self, mut pick: impl FnMut(Event) -> Option<T>) -> Option<T> {
+        let events = self.nest.events();
+        glib::MainContext::default().block_on(async move {
+            while let Ok(event) = events.recv().await {
+                if let Some(found) = pick(event) {
+                    return Some(found);
+                }
+            }
+            None
+        })
+    }
+
     /// Presents frames as the host does, each answered once shown, until
-    /// `done` holds for the page's state and its last frame.
+    /// `done` holds for the page's state and its last frame. Runs GTK while
+    /// it waits, and looks again at each frame and each change of state.
     pub fn run_until(
         &mut self,
         what: &str,
         mut done: impl FnMut(&serde_json::Value, &Frame) -> bool,
     ) {
-        let deadline = Instant::now() + TIMEOUT;
+        let events = self.nest.events();
         loop {
             if let Some(frame) = &self.frame
                 && done(&self.state(), frame)
             {
                 return;
             }
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for {what}: {}",
-                self.state()
-            );
-            let frame = super::next_frame(&self.nest, VIEW, Duration::from_millis(50), pump_gtk);
-            if let Some(frame) = frame {
-                self.frame = Some(frame);
-                self.nest.presented(VIEW);
+            let woke = {
+                let mut event = Box::pin(events.recv());
+                let mut title = Box::pin(self.titles.recv());
+                glib::MainContext::default().block_on(std::future::poll_fn(|cx| {
+                    if let Poll::Ready(event) = event.as_mut().poll(cx) {
+                        return Poll::Ready(Some(event));
+                    }
+                    if title.as_mut().poll(cx).is_ready() {
+                        return Poll::Ready(None);
+                    }
+                    Poll::Pending
+                }))
+            };
+            match woke {
+                Some(Ok(Event::Frame { view, frame })) if view == VIEW => {
+                    self.frame = Some(frame);
+                    self.nest.presented(VIEW);
+                }
+                Some(Ok(_)) | None => {}
+                Some(Err(_)) => panic!("the nest stopped before {what}: {}", self.state()),
             }
         }
     }

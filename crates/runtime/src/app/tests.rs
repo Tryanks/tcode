@@ -2377,7 +2377,8 @@ fn installed_acp_duplicates_of_native_providers_only_serve_their_existing_sessio
             &state.settings,
             LaunchEnv::default(),
             McpServers::default(),
-        );
+        )
+        .unwrap();
         assert_eq!(opts.acp.map(|agent| agent.id).as_deref(), Some("cursor"));
     });
 }
@@ -2511,6 +2512,52 @@ fn an_unreadable_settings_file_is_never_written_over() {
 
 /// A deleted profile's id comes back with the next profile of that name, which
 /// owns none of its stars; other accounts' stars and bare ids stay.
+/// A directory already in `profile-homes` — the config directory of an
+/// account whose profile the settings no longer hold — is that account's: a
+/// new profile of the same name gets a directory of its own, and deleting the
+/// new profile leaves the old directory as it was.
+#[test]
+fn a_new_profile_never_takes_over_a_directory_left_in_profile_homes() {
+    let store = TestStore::new("tcode-profile-home-left");
+    let left = store.root().join("profile-homes").join("work");
+    let account = r#"{"oauthAccount":{"emailAddress":"work@example.com"}}"#;
+    std::fs::create_dir_all(left.join("projects/-repo")).unwrap();
+    std::fs::write(left.join(".claude.json"), account).unwrap();
+    std::fs::write(left.join("projects/-repo/session.jsonl"), "{}").unwrap();
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+
+    state.dispatch_command(
+        cx,
+        1,
+        Command::CreateThirdPartyProfile {
+            provider: ProviderKind::ClaudeCode,
+            name: "Work".into(),
+            base_url: "https://proxy.test".into(),
+            model: None,
+            api_key: "sk-test".into(),
+            inherit_config: false,
+        },
+    );
+    cx.run_until(|state| !state.settings.profiles.is_empty());
+    let (id, home) = state.read(|state| {
+        let (id, profile) = state.settings.profiles.iter().next().unwrap();
+        (id.clone(), profile.settings.home_path.clone().unwrap())
+    });
+    assert_ne!(home, left);
+    assert_eq!(home, store.root().join("profile-homes").join(&id));
+    assert!(home.join(".claude.json").is_file());
+
+    state.dispatch_command(cx, 2, Command::DeleteProfile { profile_id: id });
+    answered(cx, 2);
+    assert!(!home.exists());
+    assert_eq!(
+        std::fs::read_to_string(left.join(".claude.json")).unwrap(),
+        account
+    );
+    assert!(left.join("projects/-repo/session.jsonl").is_file());
+}
+
 #[test]
 fn deleting_a_profile_takes_its_stars_with_it() {
     let cx = &mut TestAppContext::default();
@@ -2532,7 +2579,7 @@ fn deleting_a_profile_takes_its_stars_with_it() {
             .favorite_models
             .push(FavoriteModel::Id("older".into()));
 
-        state.delete_profile("second-account", cx);
+        state.delete_profile("second-account", cx).detach();
 
         assert_eq!(
             state.settings.favorite_models,
@@ -3024,7 +3071,8 @@ fn provider_binary_and_launch_arguments_follow_the_selected_profile() {
         &settings,
         LaunchEnv::default(),
         McpServers::default(),
-    );
+    )
+    .unwrap();
     assert_eq!(opts.binary_path, Some(PathBuf::from("/custom/claude")));
     assert_eq!(opts.extra_args, vec!["--chrome", "--verbose"]);
 
@@ -3035,7 +3083,8 @@ fn provider_binary_and_launch_arguments_follow_the_selected_profile() {
         &settings,
         LaunchEnv::default(),
         McpServers::default(),
-    );
+    )
+    .unwrap();
     assert_eq!(opts.binary_path, Some(PathBuf::from("/custom/codex")));
     assert!(opts.extra_args.is_empty());
 
@@ -3046,7 +3095,8 @@ fn provider_binary_and_launch_arguments_follow_the_selected_profile() {
         &settings,
         LaunchEnv::default(),
         McpServers::default(),
-    );
+    )
+    .unwrap();
     assert_eq!(opts.extra_args, vec!["--verbose"]);
 
     settings
@@ -3058,7 +3108,8 @@ fn provider_binary_and_launch_arguments_follow_the_selected_profile() {
         &settings,
         LaunchEnv::default(),
         McpServers::default(),
-    );
+    )
+    .unwrap();
     assert_eq!(opts.extra_args, vec!["--verbose", "--approve"]);
 }
 
@@ -3245,7 +3296,7 @@ fn third_party_profile_launches_in_parallel_with_builtin() {
             .iter()
             .any(|(k, v)| k == "ANTHROPIC_BASE_URL" && v == "https://api.kimi.com/coding/")
     );
-    let opts = session_options(&meta, &state.settings, launch_env, McpServers::default());
+    let opts = session_options(&meta, &state.settings, launch_env, McpServers::default()).unwrap();
     assert_eq!(opts.binary_path, Some(PathBuf::from("/opt/kimi/claude")));
 }
 
@@ -3277,7 +3328,8 @@ fn session_launch_scopes_mcp_registrations() {
                     computer_use: Some(computer.clone()),
                     control: Some(control.clone()),
                 },
-            );
+            )
+            .unwrap();
             let mut expected = Vec::new();
             for (enabled, reg) in [
                 (preview_supported, &preview),
@@ -4739,7 +4791,7 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
             "scheduled-active",
             "scheduled".into(),
             Vec::new(),
-            fire_at,
+            tcode_protocol::TurnDue::AtUnixSecs(fire_at),
             cx,
         );
 
@@ -4827,7 +4879,7 @@ fn native_retry_keeps_queue_waiting_and_cancellation_releases_it() {
                 "queued text must not race the native retry"
             );
             if automatic {
-                state.interrupt("retry", cx).unwrap();
+                state.interrupt("retry", true, cx).unwrap();
                 assert!(matches!(
                     next_command(&receiver),
                     Ok(SessionCommand::Interrupt)
@@ -5050,7 +5102,7 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
             "mid-turn-relay",
             "check the logs".into(),
             Vec::new(),
-            cx.clock().unix_secs(),
+            tcode_protocol::TurnDue::AfterSecs(0),
             cx,
         );
 
@@ -7350,15 +7402,16 @@ fn force_terminate_kills_a_harness_that_does_not_answer_a_stop() {
     });
 }
 
-/// A provider still starting has no turn to interrupt: Stop kills it, which
-/// ends the start it was waiting on, and the message waits in the queue. The
-/// provider is an ACP agent that reads its stdin and never answers
-/// `initialize` (cline 3.0.39 does the same).
+/// A provider still starting has no turn to interrupt: Stop leaves the start
+/// alone (the harness may already hold the conversation), hands the message it
+/// waited for back to whoever pressed Stop, and the thread reads as stopping;
+/// a start that never ends is ended by Force quit. The provider is an ACP
+/// agent that reads its stdin and never answers `initialize` (cline 3.0.39
+/// does the same).
 #[test]
-fn a_stop_while_the_provider_starts_kills_it_and_keeps_the_message() {
+fn a_stop_while_the_provider_starts_hands_the_message_back_and_force_quit_ends_the_start() {
     const ROLE: &str = "TCODE_TEST_SILENT_AGENT";
-    const NAME: &str =
-        "app::tests::a_stop_while_the_provider_starts_kills_it_and_keeps_the_message";
+    const NAME: &str = "app::tests::a_stop_while_the_provider_starts_hands_the_message_back_and_force_quit_ends_the_start";
     if std::env::var_os(ROLE).is_some() {
         let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
         return;
@@ -7417,18 +7470,37 @@ fn a_stop_while_the_provider_starts_kills_it_and_keeps_the_message() {
             .is_some_and(|status| status.preparing_turn)
     });
 
-    state.dispatch_command(
+    let stopped = through_pipe(
+        &state,
         cx,
         3,
-        Command::Interrupt {
+        tcode_protocol::ClientPayload::Command(Command::Interrupt {
+            session_id: session_id.clone(),
+        }),
+    );
+    assert!(stopped.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack { id: 3, result: Ok(CommandResponse::Unsent(unsent)) }
+            if unsent.len() == 1 && unsent[0].text == "start"
+    )));
+    assert!(ended.try_recv().is_err(), "the start goes on");
+    state.read(|state| {
+        let status = state.session_status_snapshot(&session_id).unwrap();
+        assert!(status.stopping);
+        assert!(status.queued_messages.is_empty());
+    });
+
+    state.dispatch_command(
+        cx,
+        4,
+        Command::ForceTerminate {
             session_id: session_id.clone(),
         },
     );
     assert_eq!(ended.recv_blocking(), Ok(true));
     state.read(|state| {
         let status = state.session_status_snapshot(&session_id).unwrap();
-        assert!(!status.preparing_turn && !status.activity.working);
-        assert_eq!(status.queued_messages.len(), 1);
+        assert!(!status.preparing_turn && !status.stopping && !status.activity.working);
     });
 }
 
@@ -8650,7 +8722,7 @@ fn stop_then_new_thread_keeps_the_first_message_visible() {
 
         // Stop. The provider reports an error and an interrupted turn while
         // preserving the complete multi-line error for later presentation.
-        state.host.interrupt(state.selected.as_deref().unwrap_or_default(), cx).expect("interrupt delivered");
+        state.host.interrupt(state.selected.as_deref().unwrap_or_default(), true, cx).expect("interrupt delivered");
         assert!(matches!(
             commands_a.try_recv(),
             Ok(SessionCommand::Interrupt)
@@ -9523,7 +9595,7 @@ fn orphan_sweep_leaves_worktrees_a_thread_works_in_or_the_user_kept() {
         filetime::set_file_mtime(path, abandoned).unwrap();
     }
 
-    let summary = cleanup_orphans(&store);
+    let summary = cleanup_orphans(&store, std::time::SystemTime::now()).unwrap();
 
     assert_eq!(summary.removed, std::slice::from_ref(&orphan));
     assert!(!orphan.exists());
@@ -10229,7 +10301,7 @@ fn computer_use_registrations_survive_stop_but_are_replaced_after_provider_shutd
             first.bearer_token != second.bearer_token,
             "provider sessions must not share one cancellation scope"
         );
-        state.host.interrupt(&meta.id, cx).unwrap();
+        state.host.interrupt(&meta.id, true, cx).unwrap();
         assert!(matches!(commands.try_recv(), Ok(SessionCommand::Interrupt)));
         assert!(
             state
@@ -10277,7 +10349,7 @@ fn interrupt_reports_stopping_until_the_turn_completes() {
     active.turn_in_flight = true;
     assert!(!state.session_status_snapshot(&id).unwrap().stopping);
 
-    state.interrupt(&id, &mut cx).unwrap();
+    state.interrupt(&id, true, &mut cx).unwrap();
     assert!(state.session_status_snapshot(&id).unwrap().stopping);
 
     state.on_event(
@@ -12534,7 +12606,7 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
             session_id: "parent".into(),
             text: "human later".into(),
             attachment_paths: vec![],
-            fire_at_unix_secs: cx.now_secs() + 3600,
+            due: tcode_protocol::TurnDue::AfterSecs(3600),
         }),
     );
     let denied = through_pipe(

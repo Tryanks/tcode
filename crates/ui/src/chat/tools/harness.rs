@@ -9,7 +9,6 @@ use gpui::{
     AnyElement, InteractiveElement as _, IntoElement as _, ParentElement as _, Styled as _, div,
 };
 use gpui_base::h_flex;
-use serde::Deserialize;
 
 use super::window::{Argument, Chip, Header, Verb, first_line, section};
 use super::{Bound, Call, ToolCtx, ToolView, bounded_text, copy, output_section};
@@ -18,20 +17,17 @@ use crate::icon::IconName;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 
-/// A reviewer's verdict on an action: the action, and the risk it rated
-/// when it rated one. Its rationale is the call's output.
-#[derive(Deserialize)]
-struct Review<'a> {
-    #[serde(borrow)]
-    summary: &'a str,
-    #[serde(default, borrow)]
-    risk: Option<&'a str>,
-}
-
 enum Kind<'a> {
-    LoadTools { query: &'a str, tools: &'a [String] },
+    LoadTools {
+        query: &'a str,
+        tools: &'a [String],
+    },
     Skill(&'a str),
-    Review(Review<'a>),
+    /// A reviewer's verdict on an action. Its rationale is the call's output.
+    Review {
+        action: &'a str,
+        risk: Option<&'a str>,
+    },
 }
 
 pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView + 'a>> {
@@ -41,7 +37,10 @@ pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView
             tools: tools.as_deref().unwrap_or_default(),
         },
         Some(ToolFamily::Skill { name }) => Kind::Skill(name),
-        _ if call.named(&["auto-reviewer"]) => Kind::Review(call.input::<Review<'a>>()?),
+        Some(ToolFamily::Review { action, risk }) => Kind::Review {
+            action,
+            risk: risk.as_deref(),
+        },
         _ => return None,
     };
     Some(Box::new(Harness { kind }))
@@ -64,7 +63,7 @@ impl ToolView for Harness<'_> {
             Kind::Skill(skill) => {
                 Header::with_icon("icons/puzzle.svg", Verb("skill")).argument(Argument::mono(skill))
             }
-            Kind::Review(Review { summary, risk }) => {
+            Kind::Review { action, risk } => {
                 let verb = match call.status {
                     ItemStatus::InProgress => Verb("review"),
                     ItemStatus::Completed => Verb("review_approved"),
@@ -79,7 +78,7 @@ impl ToolView for Harness<'_> {
                     }
                 });
                 Header::new(IconName::BadgeCheck, verb)
-                    .argument(Argument::plain(one_line(summary)))
+                    .argument(Argument::plain(one_line(action)))
                     .chip(risk)
                     .error(first_line(output))
             }
@@ -115,7 +114,7 @@ impl ToolView for Harness<'_> {
                     .then(|| super::raw_section(call.entry, output, ctx));
                 super::body(std::iter::once(loaded).chain(raw))
             }
-            Kind::Review(_) => {
+            Kind::Review { .. } => {
                 let rationale = output.trim();
                 let text = (!rationale.is_empty()).then(|| {
                     let text =
@@ -134,7 +133,7 @@ impl ToolView for Harness<'_> {
             Kind::LoadTools { tools, .. } => {
                 copy(&mut items, "chat.copy_output", &tools.join("\n"))
             }
-            Kind::Skill(_) | Kind::Review(_) => copy(
+            Kind::Skill(_) | Kind::Review { .. } => copy(
                 &mut items,
                 "chat.copy_output",
                 call.output.unwrap_or_default(),

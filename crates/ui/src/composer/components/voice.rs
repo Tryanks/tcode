@@ -21,7 +21,7 @@ pub(in super::super) struct Voice {
     /// A send that arrived mid-dictation, with its steer flag. Platforms
     /// recognize behind the audio, so sending at once would cut off speech
     /// that has been spoken but not yet transcribed.
-    pending_submit: Option<bool>,
+    pub(in super::super) pending_submit: Option<bool>,
 }
 
 /// Where a dictation writes. Its settled text stays as written; each
@@ -177,6 +177,7 @@ impl Composer {
                 .ghost()
                 .chip()
                 .disabled(!available)
+                .aria_label(tooltip.clone())
                 .tooltip(tooltip)
                 .child(mark)
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -186,12 +187,24 @@ impl Composer {
         )
     }
 
+    /// Whether a dictation is listening: connecting or recording, not yet
+    /// stopped.
+    pub(in super::super) fn dictating(&self, cx: &App) -> bool {
+        matches!(
+            self.voice.state.read(cx).status(),
+            SpeechStatus::Connecting | SpeechStatus::Recording
+        )
+    }
+
+    /// Stops a dictation, or, while a stop already waits for the
+    /// recognizer's last result, stops waiting, as the mic button does: what
+    /// it wrote stays, and a send waiting on it does not go.
     pub(in super::super) fn stop_dictation(&mut self, cx: &mut Context<Self>) -> bool {
-        let active = self.voice.state.read(cx).status().is_active();
-        if active {
-            self.voice.state.update(cx, |state, cx| state.stop(cx));
+        let status = self.voice.state.read(cx).status();
+        if status.is_active() {
+            self.voice.state.update(cx, |state, cx| state.toggle(cx));
         }
-        active
+        status.is_active()
     }
 
     /// Stops an active dictation and defers the send until its final

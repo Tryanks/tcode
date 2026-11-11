@@ -145,7 +145,7 @@ impl TranscriptMapper {
                     .then(|| block.get("text").and_then(Value::as_str))
                     .flatten()
             }) {
-                if is_user_noise(text) {
+                if is_user_noise(text) || crate::claude::is_interruption_marker(text) {
                     continue;
                 }
                 self.next_user_id += 1;

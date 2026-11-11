@@ -83,7 +83,10 @@ impl From<WorktreeError> for ProvisionError {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CleanupSummary {
     pub removed: Vec<PathBuf>,
-    pub skipped: Vec<PathBuf>,
+    /// Possible orphans the sweep could not judge or remove, with why. One
+    /// left on purpose (too new, holding uncommitted work, not a worktree)
+    /// is not among them.
+    pub failed: Vec<(PathBuf, String)>,
 }
 
 /// How a clean dedicated-worktree branch was integrated into its original checkout.
@@ -566,22 +569,11 @@ pub fn worktrees_root(data_dir: &Path) -> PathBuf {
 ///
 /// Fresh unknown entries are presumed live and preserved for at least
 /// [`ORPHAN_MIN_AGE`]. Removal is never forced: a worktree may hold
-/// uncommitted work. Nothing is removed when the store cannot be read.
-pub fn cleanup_orphans(store: &SessionStore) -> CleanupSummary {
-    let sessions = match store.read_file() {
-        Ok(file) => file.sessions,
-        Err(error) => {
-            log::warn!("skipping orphaned worktree recovery: {error}");
-            return CleanupSummary::default();
-        }
-    };
-    let kept = match store.kept_worktrees() {
-        Ok(kept) => kept,
-        Err(error) => {
-            log::warn!("skipping orphaned worktree recovery: {error}");
-            return CleanupSummary::default();
-        }
-    };
+/// uncommitted work. Nothing is removed when the store cannot be read, and
+/// that is the error. `now` is the host's time.
+pub fn cleanup_orphans(store: &SessionStore, now: SystemTime) -> std::io::Result<CleanupSummary> {
+    let sessions = store.read_file()?.sessions;
+    let kept = store.kept_worktrees()?;
     let known_ids = sessions.iter().map(|meta| meta.id.clone()).collect();
     let in_use: Vec<_> = sessions
         .into_iter()
@@ -591,13 +583,13 @@ pub fn cleanup_orphans(store: &SessionStore) -> CleanupSummary {
         })
         .chain(kept)
         .collect();
-    cleanup_orphans_at(
+    Ok(cleanup_orphans_at(
         &worktrees_root(store.root()),
         &known_ids,
         &in_use,
-        SystemTime::now(),
+        now,
         ORPHAN_MIN_AGE,
-    )
+    ))
 }
 
 /// `in_use` holds paths that keep the worktree containing them: thread cwds,
@@ -670,54 +662,47 @@ fn sweep(
     if named_for_thread || in_use.iter().any(|used| used.starts_with(&path)) {
         return;
     }
+    let mut failed = |path: PathBuf, error: String| {
+        log::warn!("leaving possible orphan at {}: {error}", path.display());
+        summary.failed.push((path, error));
+    };
     let modified = match std::fs::metadata(&path).and_then(|metadata| metadata.modified()) {
         Ok(modified) => modified,
-        Err(error) => {
-            log::warn!("leaving possible orphan at {}: {error}", path.display());
-            summary.skipped.push(path);
-            return;
-        }
+        Err(error) => return failed(path, error.to_string()),
     };
     if !old_enough(modified, now, minimum_age) {
         log::info!("leaving fresh possible worktree at {}", path.display());
-        summary.skipped.push(path);
+        return;
+    }
+    // A worktree has its `.git` file; a directory without one is not Tcode's to judge.
+    if std::fs::symlink_metadata(path.join(".git")).is_err() {
+        log::info!("leaving non-worktree directory at {}", path.display());
         return;
     }
     let registered = match registered_worktree(&path, &path) {
         Ok(Some(registered)) => registered,
         Ok(None) => {
-            log::warn!("leaving non-worktree directory at {}", path.display());
-            summary.skipped.push(path);
+            log::info!("leaving non-worktree directory at {}", path.display());
             return;
         }
-        Err(error) => {
-            log::warn!(
-                "failed to inspect possible orphan at {}: {error}",
-                path.display()
-            );
-            summary.skipped.push(path);
-            return;
-        }
+        Err(error) => return failed(path, error.to_string()),
     };
     let main_checkout = match registered_worktrees(&path).map(|all| all.into_iter().next()) {
         Ok(Some(main)) => main.path,
-        Ok(None) => {
-            log::warn!(
-                "git lists no main checkout for orphan at {}",
-                path.display()
-            );
-            summary.skipped.push(path);
-            return;
-        }
-        Err(error) => {
-            log::warn!(
-                "failed to resolve the main checkout for orphan at {}: {error}",
-                path.display()
-            );
-            summary.skipped.push(path);
-            return;
-        }
+        Ok(None) => return failed(path, "git lists no main checkout for it".into()),
+        Err(error) => return failed(path, error.to_string()),
     };
+    match tree_is_clean(&path) {
+        Ok(true) => {}
+        Ok(false) => {
+            log::info!(
+                "leaving possible orphan with uncommitted work at {}",
+                path.display()
+            );
+            return;
+        }
+        Err(error) => return failed(path, error.to_string()),
+    }
     match remove_registered(&main_checkout, &registered.path, false) {
         Ok(()) => {
             log::info!("removed orphaned tcode worktree {}", path.display());
@@ -726,10 +711,7 @@ fn sweep(
             }
             summary.removed.push(path);
         }
-        Err(error) => {
-            log::warn!("leaving possible orphan at {}: {error}", path.display());
-            summary.skipped.push(path);
-        }
+        Err(error) => failed(path, error.to_string()),
     }
 }
 
@@ -1319,12 +1301,8 @@ mod tests {
 
         let fresh = cleanup_orphans_at(&worktrees, &known, &cwds, modified, ORPHAN_MIN_AGE);
         assert!(fresh.removed.is_empty());
-        let mut skipped = fresh.skipped;
-        skipped.sort();
-        let mut expected = [dirty.clone(), legacy_orphan.clone(), orphan.clone()];
-        expected.sort();
-        assert_eq!(skipped, expected);
-        assert!(orphan.exists());
+        assert!(fresh.failed.is_empty(), "{:?}", fresh.failed);
+        assert!(orphan.exists() && legacy_orphan.exists());
 
         let later = || SystemTime::now() + ORPHAN_MIN_AGE + Duration::from_secs(1);
         let old = cleanup_orphans_at(&worktrees, &known, &cwds, later(), ORPHAN_MIN_AGE);
@@ -1333,7 +1311,7 @@ mod tests {
         let mut expected = [legacy_orphan.clone(), orphan.clone()];
         expected.sort();
         assert_eq!(removed, expected);
-        assert_eq!(old.skipped.as_slice(), std::slice::from_ref(&dirty));
+        assert!(old.failed.is_empty(), "{:?}", old.failed);
         assert!(!orphan.exists() && !legacy_orphan.exists());
         assert!(!has_branch(&root, "tcode/orphan"));
         assert!(!has_branch(&root, "tcode/legacy-orphan"));
@@ -1346,12 +1324,8 @@ mod tests {
         std::fs::create_dir(&unrelated).unwrap();
         let summary = cleanup_orphans_at(&worktrees, &known, &cwds, later(), ORPHAN_MIN_AGE);
         assert!(summary.removed.is_empty());
-        let mut skipped = summary.skipped;
-        skipped.sort();
-        let mut expected = [dirty, unrelated.clone()];
-        expected.sort();
-        assert_eq!(skipped, expected);
-        assert!(unrelated.exists());
+        assert!(summary.failed.is_empty(), "{:?}", summary.failed);
+        assert!(unrelated.exists() && dirty.join("notes.txt").exists());
         let _ = std::fs::remove_dir_all(temp);
     }
 }

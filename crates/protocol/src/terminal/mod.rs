@@ -11,6 +11,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod mappings;
 
+/// The most columns, and the most rows, a host gives a terminal: a resize
+/// asking for more is held to it, so no client can make the host allocate an
+/// arbitrarily large grid.
+pub const MAX_TERMINAL_CELLS: u16 = 1000;
+
 bitflags::bitflags! {
     /// Mirror of rio's `crosswords::Mode`. The wire carries the raw bits;
     /// `term`'s projection tests assert both definitions still agree.

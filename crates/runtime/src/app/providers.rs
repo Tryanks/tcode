@@ -19,11 +19,13 @@ struct UpdateRun {
 
 #[derive(Default)]
 struct ModelRefresh {
-    configuration: ProviderSettings,
-    profile_revision: u64,
-    network: bool,
     generation: u64,
     loading: bool,
+    /// Why the latest listing that ended failed.
+    failure: Option<String>,
+    /// The harness processes the latest listing started, which the next one
+    /// stops.
+    processes: agent::SessionProcesses,
 }
 
 struct SecretWrite {
@@ -107,39 +109,37 @@ impl ProviderCatalog {
         }
     }
 
-    fn begin_model_refresh(
-        &mut self,
-        provider: ProviderKind,
-        configuration: ProviderSettings,
-        profile_revision: u64,
-        network: bool,
-    ) -> Option<u64> {
+    /// A new listing of `provider`'s models, which replaces one still
+    /// running: that one's harness is stopped, and its answer is not taken.
+    fn begin_model_refresh(&mut self, provider: ProviderKind) -> (u64, agent::SessionProcesses) {
         let refresh = self.model_refreshes.entry(provider).or_default();
-        if refresh.loading
-            && refresh.configuration == configuration
-            && refresh.profile_revision == profile_revision
-            && refresh.network == network
-        {
-            return None;
-        }
+        refresh.processes.stop();
         *refresh = ModelRefresh {
-            configuration,
-            profile_revision,
-            network,
             generation: refresh.generation + 1,
             loading: true,
+            failure: None,
+            processes: agent::SessionProcesses::default(),
         };
-        Some(refresh.generation)
+        (refresh.generation, refresh.processes.clone())
     }
 
-    fn finish_model_refresh(&mut self, provider: ProviderKind, generation: u64) -> bool {
-        let Some(refresh) = self.model_refreshes.get_mut(&provider) else {
+    /// Ends the listing of `generation` with why it failed, if it did;
+    /// `false` when a later one replaced it.
+    fn finish_model_refresh(
+        &mut self,
+        provider: ProviderKind,
+        generation: u64,
+        failure: Option<String>,
+    ) -> bool {
+        let Some(refresh) = self
+            .model_refreshes
+            .get_mut(&provider)
+            .filter(|refresh| refresh.generation == generation)
+        else {
             return false;
         };
-        if refresh.generation != generation {
-            return false;
-        }
         refresh.loading = false;
+        refresh.failure = failure;
         true
     }
 
@@ -252,8 +252,8 @@ impl ProviderCatalog {
     pub(super) fn status_snapshot(
         &self,
         acp_marketplace_items: Vec<AcpMarketplaceItem>,
-        acp_registry_loading: bool,
         acp_registry_error: Option<String>,
+        acp_registry_loaded: bool,
         acp_installing: HashSet<String>,
         plugins: Vec<tcode_protocol::ProviderPluginCatalog>,
     ) -> ProvidersStatus {
@@ -263,6 +263,11 @@ impl ProviderCatalog {
                 .model_refreshes
                 .iter()
                 .map(|(provider, refresh)| (*provider, refresh.loading))
+                .collect(),
+            model_errors: self
+                .model_refreshes
+                .iter()
+                .filter_map(|(provider, refresh)| Some((*provider, refresh.failure.clone()?)))
                 .collect(),
             provider_versions: self
                 .provider_versions
@@ -300,8 +305,8 @@ impl ProviderCatalog {
             provider_usage: self.provider_usage.clone(),
             usage_checking: self.usage_checking.clone(),
             acp_marketplace_items,
-            acp_registry_loading,
             acp_registry_error,
+            acp_registry_loaded,
             acp_installing,
             providers_checked_at: self
                 .provider_snapshots
@@ -340,14 +345,7 @@ impl AppState {
                 .copied()
                 .unwrap_or(0);
             let network = self.provider_update_checks_enabled();
-            let Some(generation) = self.providers.begin_model_refresh(
-                provider,
-                configuration.clone(),
-                profile_revision,
-                network,
-            ) else {
-                continue;
-            };
+            let (generation, processes) = self.providers.begin_model_refresh(provider);
             let binary = configuration.binary_path.clone();
             let launch_env = self.prepare_profile_env(&profile_id, cx);
             let store = self.store.clone();
@@ -360,13 +358,19 @@ impl AppState {
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
                 let result = match launch_env.await {
-                    Ok(launch_env) => list_models(provider, binary, launch_env, refresh)
-                        .await
-                        .map_err(|error| error.to_string()),
+                    Ok(launch_env) => {
+                        list_models(provider, binary, launch_env, refresh, &processes)
+                            .await
+                            .map_err(|error| error.to_string())
+                    }
                     Err(error) => Err(error),
                 };
                 host_cx.enqueue(move |state, _cx| {
-                    if !state.providers.finish_model_refresh(provider, generation) {
+                    let failure = result.as_ref().err().cloned();
+                    if !state
+                        .providers
+                        .finish_model_refresh(provider, generation, failure)
+                    {
                         return;
                     }
                     if state.settings.provider(provider) != configuration
@@ -784,14 +788,16 @@ impl AppState {
 
     /// Delete a user profile: remove its card, its secrets, and detach any
     /// sessions still pointing at it (they fall back to the built-in profile).
-    /// Built-in ids are ignored.
-    pub fn delete_profile(&mut self, id: &str, cx: &mut HostCx) {
+    /// Built-in ids are ignored. The task returned ends once the config
+    /// directory Tcode made for it is gone, or its removal failed and was
+    /// reported.
+    pub fn delete_profile(&mut self, id: &str, cx: &mut HostCx) -> HostTask<()> {
         if Settings::is_builtin_profile_id(id) || self.settings_change_refused(cx) {
-            return;
+            return cx.spawn_background(async {});
         }
         let mut settings = self.settings.clone();
         let Some(profile) = settings.profiles.remove(id) else {
-            return;
+            return cx.spawn_background(async {});
         };
         // A later profile of the same name gets this id and owns none of its stars.
         settings.favorite_models.retain(|favorite| {
@@ -808,20 +814,20 @@ impl AppState {
         // Only the directory Tcode made; a home the user chose is theirs.
         let home = self.store.root().join("profile-homes").join(id);
         if profile.settings.home_path.as_ref() != Some(&home) {
-            return;
+            return cx.spawn_background(async {});
         }
         let removed = cx.unblock(move || match std::fs::remove_dir_all(&home) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
             _ => Ok(()),
         });
         let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
+        cx.spawn_background(async move {
             if let Err(error) = removed.await {
                 host_cx.enqueue(move |state, cx| {
                     state.report_error(RuntimeError::ProfileConfig { error }, cx);
                 });
             }
-        });
+        })
     }
 
     /// The snapshots as clients see them: a Claude account profile whose CLI
@@ -1919,7 +1925,7 @@ pub(super) fn session_options(
     settings: &Settings,
     launch_env: LaunchEnv,
     servers: McpServers,
-) -> SessionOptions {
+) -> Result<SessionOptions, String> {
     // A session's binary / launch-args come from its selected profile (built-in
     // or user-created), so a third-party profile can point at its own CLI while
     // sharing the protocol adapter. Falls back to the kind's built-in card.
@@ -1931,7 +1937,30 @@ pub(super) fn session_options(
         .as_deref()
         .and_then(|id| settings.acp_agent(id))
         .cloned();
-    SessionOptions {
+    // Native providers that expose "Launch arguments" use their profile;
+    // an ACP agent carries its own from the installed-agent card.
+    let extra_args = if meta.provider.caps().launch_args {
+        match meta.provider {
+            ProviderKind::ClaudeCode
+            | ProviderKind::OpenCode
+            | ProviderKind::Cursor
+            | ProviderKind::Grok => provider_settings.extra_args(),
+            ProviderKind::Pi => provider_settings.extra_args().map(|mut extra_args| {
+                if provider_settings.pi.trust_project_extensions {
+                    extra_args.push("--approve".into());
+                }
+                extra_args
+            }),
+            ProviderKind::Acp => acp_agent
+                .as_ref()
+                .map_or(Ok(Vec::new()), InstalledAgent::extra_args),
+            ProviderKind::Codex => Ok(Vec::new()),
+        }
+        .map_err(|error| format!("Launch arguments: {error}"))?
+    } else {
+        Vec::new()
+    };
+    Ok(SessionOptions {
         cwd: meta.cwd.clone(),
         model: meta.model.clone(),
         resume: meta.resume_cursor.clone(),
@@ -1957,39 +1986,23 @@ pub(super) fn session_options(
         .flatten()
         .collect(),
         launch_env,
-        // Native providers that expose "Launch arguments" use their profile;
-        // an ACP agent carries its own from the installed-agent card.
-        extra_args: if meta.provider.caps().launch_args {
-            match meta.provider {
-                ProviderKind::ClaudeCode
-                | ProviderKind::OpenCode
-                | ProviderKind::Cursor
-                | ProviderKind::Grok => provider_settings.extra_args(),
-                ProviderKind::Pi => {
-                    let mut extra_args = provider_settings.extra_args();
-                    if provider_settings.pi.trust_project_extensions {
-                        extra_args.push("--approve".into());
-                    }
-                    extra_args
-                }
-                ProviderKind::Acp => acp_agent
-                    .as_ref()
-                    .map(|agent| agent.extra_args())
-                    .unwrap_or_default(),
-                ProviderKind::Codex => Vec::new(),
-            }
-        } else {
-            Vec::new()
-        },
+        extra_args,
         acp: acp_agent.map(|agent| agent::AcpAgent {
             id: agent.id.clone(),
             name: agent.name.clone(),
             launch: agent.launch.clone(),
         }),
         instructions: None,
+        worktrees: meta
+            .worktree
+            .as_ref()
+            .map(|_| meta.cwd.clone())
+            .into_iter()
+            .chain(meta.other_worktrees.iter().map(|owned| owned.path.clone()))
+            .collect(),
         processes: Default::default(),
         clock: Default::default(),
-    }
+    })
 }
 
 /// Claude Code before 2.1.144 keeps the OAuth sign-in in one macOS Keychain

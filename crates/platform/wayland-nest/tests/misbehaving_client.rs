@@ -8,7 +8,6 @@ mod common;
 
 use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
 
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
@@ -24,7 +23,6 @@ use wayland_protocols::xdg::shell::client::{
 };
 
 const VIEW: ViewId = ViewId(0);
-const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 struct Client {
@@ -59,7 +57,7 @@ fn a_client_with_absurd_geometry_does_not_stop_the_nest() {
     surface.attach(Some(&buffer(&shm, &qh, 64, 48)), 0, 0);
     surface.commit();
     connection.flush().expect("flush");
-    let first = common::next_frame(&nest, VIEW, TIMEOUT, || {}).expect("a first frame");
+    let first = common::next_frame(&nest, VIEW).expect("a first frame");
     assert_eq!((first.width, first.height), (64, 48));
 
     let child = compositor.create_surface(&qh, ());
@@ -79,10 +77,8 @@ fn a_client_with_absurd_geometry_does_not_stop_the_nest() {
     connection.flush().expect("flush");
     nest.presented(VIEW);
 
-    let next = common::next_frame(&nest, VIEW, TIMEOUT, || {
-        let _ = queue.dispatch_pending(&mut client);
-    })
-    .expect("the nest still composites after the absurd geometry");
+    let next = common::next_frame(&nest, VIEW)
+        .expect("the nest still composites after the absurd geometry");
     assert_eq!((next.width, next.height), (64, 48));
     queue
         .roundtrip(&mut client)

@@ -1338,19 +1338,31 @@ mod section {
                 .debug_selector(|| "spaces-section".into())
                 .into_any_element();
             };
+            #[derive(Clone)]
+            enum Row {
+                Space(SpaceInfo),
+                /// Before the machine's first answer its spaces are unknown,
+                /// not none.
+                Loading,
+                New,
+            }
             // A space made or deleted folds in or out where it is; the way to
             // make one is the last row.
+            let spaces = spaces.read(cx);
             let list = spaces
-                .read(cx)
                 .spaces()
                 .iter()
                 .map(|space| {
                     (
                         SharedString::from(format!("space-{}", space.id)),
-                        Some(space.clone()),
+                        Row::Space(space.clone()),
                     )
                 })
-                .chain([(SharedString::from("spaces-new"), None)])
+                .chain(
+                    (!spaces.loaded())
+                        .then(|| (SharedString::from("spaces-loading"), Row::Loading)),
+                )
+                .chain([(SharedString::from("spaces-new"), Row::New)])
                 .collect::<Vec<_>>();
             let rows =
                 crate::settings_rows::grouped_keyed(
@@ -1358,9 +1370,13 @@ mod section {
                     list,
                     window,
                     cx,
-                    |_, space, window, cx| match space {
-                        Some(space) => self.space_row(space, compact, window, cx),
-                        None => group_row(cx)
+                    |_, row, window, cx| match row {
+                        Row::Space(space) => self.space_row(space, compact, window, cx),
+                        Row::Loading => {
+                            crate::material::empty_row(crate::tr!("spaces.share.loading"), cx)
+                                .into_any_element()
+                        }
+                        Row::New => group_row(cx)
                             .child(
                                 Button::new("spaces-new")
                                     .ghost()

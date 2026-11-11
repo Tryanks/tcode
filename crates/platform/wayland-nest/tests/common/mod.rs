@@ -5,7 +5,6 @@
 pub mod page;
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
 use wayland_nest::{Event, Frame, Nest, ViewId};
 
@@ -26,42 +25,22 @@ pub fn runtime_dir() -> PathBuf {
     dir
 }
 
-/// Waits for the next event `pick` accepts, running `pump` between polls
-/// (the GTK main loop, when the client lives on this thread). Other events
-/// are dropped.
-pub fn wait_for<T>(
-    nest: &Nest,
-    timeout: Duration,
-    mut pump: impl FnMut(),
-    mut pick: impl FnMut(Event) -> Option<T>,
-) -> Option<T> {
+/// Blocks until the nest sends an event `pick` accepts; other events are
+/// dropped. `None` when the nest has stopped. A client on this thread waits
+/// with [`page::Page::wait_for`], which runs its GTK loop meanwhile.
+pub fn wait_for<T>(nest: &Nest, mut pick: impl FnMut(Event) -> Option<T>) -> Option<T> {
     let events = nest.events();
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        pump();
-        match events.try_recv() {
-            Ok(event) => {
-                if let Some(found) = pick(event) {
-                    return Some(found);
-                }
-            }
-            Err(async_channel::TryRecvError::Empty) => {
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            Err(async_channel::TryRecvError::Closed) => return None,
+    while let Ok(event) = events.recv_blocking() {
+        if let Some(found) = pick(event) {
+            return Some(found);
         }
     }
     None
 }
 
 /// The next frame of `view`.
-pub fn next_frame(
-    nest: &Nest,
-    view: ViewId,
-    timeout: Duration,
-    pump: impl FnMut(),
-) -> Option<Frame> {
-    wait_for(nest, timeout, pump, |event| match event {
+pub fn next_frame(nest: &Nest, view: ViewId) -> Option<Frame> {
+    wait_for(nest, |event| match event {
         Event::Frame { view: id, frame } if id == view => Some(frame),
         _ => None,
     })

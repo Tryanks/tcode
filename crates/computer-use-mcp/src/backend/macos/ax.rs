@@ -523,6 +523,14 @@ pub(super) fn observe_tree(root: &RootInfo) -> Result<UiNode, BackendError> {
     Ok(tree)
 }
 
+/// The name an observation gives an element, and that acting on its ref
+/// finds it by again.
+fn element_title(element: AXUIElementRef) -> String {
+    attribute_string(element, "AXTitle")
+        .or_else(|| attribute_string(element, "AXLabel"))
+        .unwrap_or_default()
+}
+
 pub(super) fn locate_target(
     root: &RootInfo,
     path: &[usize],
@@ -563,14 +571,13 @@ pub(super) fn locate_target(
             ));
         }
     }
-    if let Some(expected_title) = expected_title.filter(|title| !title.is_empty()) {
-        let actual = attribute_string(element.as_ax(), "AXTitle").unwrap_or_default();
-        if !actual.is_empty() && actual != expected_title {
-            return Err(BackendError::new(
-                BackendErrorCode::OperationFailed,
-                "target title changed; call observe_ui again",
-            ));
-        }
+    if let Some(expected_title) = expected_title.filter(|title| !title.is_empty())
+        && element_title(element.as_ax()) != expected_title
+    {
+        return Err(BackendError::new(
+            BackendErrorCode::OperationFailed,
+            "target title changed; call observe_ui again",
+        ));
     }
     Ok(Target {
         _application: application,
@@ -717,6 +724,7 @@ fn walk_tree(root: AXUIElementRef, context: &mut WalkContext) -> Option<UiNode> 
         };
         let invisible_leaf = node.children.is_empty()
             && node.children_error.is_none()
+            && !node.children_omitted
             && !node.is_interactive()
             && node.title.is_empty()
             && node.value.is_empty()
@@ -738,9 +746,7 @@ fn read_element(
     }
     context.count += 1;
     let role = attribute_string(element, "AXRole").unwrap_or_else(|| "AXUnknown".into());
-    let title = attribute_string(element, "AXTitle")
-        .or_else(|| attribute_string(element, "AXLabel"))
-        .unwrap_or_default();
+    let title = element_title(element);
     let value = attribute_text(element, "AXValue").unwrap_or_default();
     let description = ["AXDescription", "AXHelp", "AXRoleDescription"]
         .into_iter()

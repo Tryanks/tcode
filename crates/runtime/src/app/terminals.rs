@@ -1,5 +1,6 @@
 use super::*;
 use crate::terminal::{TerminalProjection, TerminalUpdate};
+use tcode_protocol::terminal::MAX_TERMINAL_CELLS;
 use term::TermEvent;
 
 impl AppState {
@@ -164,8 +165,8 @@ impl AppState {
             return;
         };
         terminal.resize_with_cell_size(
-            usize::from(cols.clamp(2, 1000)),
-            usize::from(rows.clamp(2, 1000)),
+            usize::from(cols.min(MAX_TERMINAL_CELLS)),
+            usize::from(rows.min(MAX_TERMINAL_CELLS)),
             u32::from(cell_width.max(1)),
             u32::from(cell_height.max(1)),
         );

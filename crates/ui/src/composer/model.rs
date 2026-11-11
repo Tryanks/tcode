@@ -73,9 +73,10 @@ pub(super) enum LaterError {
     },
 }
 
-/// Parse a scheduled-message command against an injectable local clock. A
-/// non-command returns `None`, keeping provider commands and lookalikes on the
-/// ordinary submit path; recognized but malformed commands return an error.
+/// Parse a scheduled-message command into the seconds from `now` until it is
+/// due and the message. A non-command returns `None`, keeping provider
+/// commands and lookalikes on the ordinary submit path; recognized but
+/// malformed commands return an error.
 pub(super) fn parse_later(
     text: &str,
     now: DateTime<Local>,
@@ -96,16 +97,16 @@ pub(super) fn parse_later(
         return Some(Err(LaterError::MissingMessage));
     }
 
-    let fire_at = if let Some((hour, minute)) = parse_wall_clock(time_spec) {
-        next_wall_clock(now, hour, minute)
+    let delay = if let Some((hour, minute)) = parse_wall_clock(time_spec) {
+        next_wall_clock(now, hour, minute).map(|at| at - now)
     } else {
         parse_relative(time_spec)
-            .and_then(|duration| now.checked_add_signed(duration))
+            .filter(|duration| now.checked_add_signed(*duration).is_some())
             .ok_or(LaterError::InvalidTime)
     };
-    Some(fire_at.and_then(|fire_at| {
-        u64::try_from(fire_at.timestamp())
-            .map(|timestamp| (timestamp, message.to_string()))
+    Some(delay.and_then(|delay| {
+        u64::try_from(delay.num_seconds())
+            .map(|secs| (secs, message.to_string()))
             .map_err(|_| LaterError::InvalidTime)
     }))
 }
@@ -292,18 +293,26 @@ pub(super) fn option_selection_bool(
         .and_then(|s| s.value.as_bool())
 }
 
-/// The resolved value of a select descriptor: an accepted persisted selection,
+/// The value a select descriptor runs with: the stored selection as the host
+/// passes it to the harness, even one the current options no longer list,
 /// else the descriptor default.
 pub(super) fn resolved_select_value(
     id: &str,
-    options: &[agent::SelectOption],
     default_value: &Option<String>,
     selections: &[agent::OptionSelection],
 ) -> Option<String> {
     option_selection_str(selections, id)
-        .filter(|v| options.iter().any(|o| &o.value == v))
         .map(str::to_string)
         .or_else(|| default_value.clone())
+}
+
+/// How a select value is named: its option's label, or the value itself when
+/// no option carries it.
+pub(super) fn select_value_label(options: &[agent::SelectOption], value: &str) -> String {
+    options
+        .iter()
+        .find(|option| option.value == value)
+        .map_or_else(|| value.to_owned(), |option| option.label.clone())
 }
 
 /// The traits chip label: every resolved descriptor label joined with " · "
@@ -326,9 +335,8 @@ pub(super) fn traits_chip_label(
                 default_value,
                 ..
             } => {
-                let part = resolved_select_value(id, options, default_value, selections)
-                    .and_then(|value| options.iter().find(|o| o.value == value))
-                    .map(|option| option.label.clone())
+                let part = resolved_select_value(id, default_value, selections)
+                    .map(|value| select_value_label(options, &value))
                     .unwrap_or_else(|| label.clone());
                 parts.push(part);
             }
@@ -497,11 +505,8 @@ mod tests {
     }
 
     fn parsed_later(text: &str, now: DateTime<Local>) -> (DateTime<Local>, String) {
-        let (timestamp, message) = parse_later(text, now).unwrap().unwrap();
-        (
-            Local.timestamp_opt(timestamp as i64, 0).single().unwrap(),
-            message,
-        )
+        let (delay, message) = parse_later(text, now).unwrap().unwrap();
+        (now + chrono::Duration::seconds(delay as i64), message)
     }
 
     #[test]

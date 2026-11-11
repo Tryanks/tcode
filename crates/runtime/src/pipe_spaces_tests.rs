@@ -373,7 +373,7 @@ fn space_index_and_scope_project_only_the_members_projects() {
             session_id: b,
             text: "later B".into(),
             attachment_paths: Vec::new(),
-            fire_at_unix_secs: u64::from(u32::MAX),
+            due: tcode_protocol::TurnDue::AtUnixSecs(u64::from(u32::MAX)),
         },
     );
     host.query(member.clone(), Query::Ping);
@@ -385,7 +385,7 @@ fn space_index_and_scope_project_only_the_members_projects() {
             session_id: a.clone(),
             text: "later A".into(),
             attachment_paths: Vec::new(),
-            fire_at_unix_secs: u64::from(u32::MAX),
+            due: tcode_protocol::TurnDue::AtUnixSecs(u64::from(u32::MAX)),
         },
     );
     let added = host.event(|event| {

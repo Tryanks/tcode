@@ -28,7 +28,11 @@ use crate::{
 pub fn agent_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
     launch_env
         .child_path(ProviderKind::Pi, "PI_CODING_AGENT_DIR")
-        .or_else(|| dirs::home_dir().map(|home| home.join(".pi/agent")))
+        .or_else(|| {
+            launch_env
+                .child_home(ProviderKind::Pi)
+                .map(|home| home.join(".pi/agent"))
+        })
 }
 
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
@@ -44,13 +48,19 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
 pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
+    processes: &crate::SessionProcesses,
 ) -> Result<Vec<ModelSpec>, AgentError> {
-    crate::process::unblock(move || list_models_blocking(binary_path.as_deref(), &launch_env)).await
+    let processes = processes.clone();
+    crate::process::unblock(move || {
+        list_models_blocking(binary_path.as_deref(), &launch_env, &processes)
+    })
+    .await
 }
 
 fn list_models_blocking(
     binary_path: Option<&Path>,
     launch_env: &LaunchEnv,
+    processes: &crate::SessionProcesses,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     let binary = crate::resolve_binary(binary_path, "pi")?;
     let mut cmd = crate::process::harness_command(&binary);
@@ -63,10 +73,10 @@ fn list_models_blocking(
     for (key, value) in launch_env.pairs(ProviderKind::Pi) {
         cmd.env(key, value);
     }
-    let mut child = ProcessTree::new(
-        cmd.spawn()
-            .map_err(|err| AgentError::Spawn(format!("spawning `{}`: {err}", binary.display())))?,
-    );
+    let mut child = processes
+        .hold(ProcessTree::new(cmd.spawn().map_err(|err| {
+            AgentError::Spawn(format!("spawning `{}`: {err}", binary.display()))
+        })?));
     let mut stdin = BufWriter::new(
         child
             .stdin
@@ -177,6 +187,7 @@ fn map_model(
             apply: crate::ApplyTiming::Live,
             recommended: None,
             permissive: None,
+            minimum: None,
         });
     }
     Some(ModelSpec {

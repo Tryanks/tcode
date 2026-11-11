@@ -367,6 +367,10 @@ pub struct ImportFailure {
 pub struct ProvidersStatus {
     pub model_catalogs: HashMap<ProviderKind, Vec<agent::ModelSpec>>,
     pub models_loading: HashMap<ProviderKind, bool>,
+    /// Why the latest listing of a provider's models failed, as the harness
+    /// or the process said; its catalog is the one listed before, if any.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_errors: HashMap<ProviderKind, String>,
     pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
     pub update_run: Option<ProviderUpdateRun>,
     pub tcode_update: TcodeUpdateStatus,
@@ -376,8 +380,10 @@ pub struct ProvidersStatus {
     /// Profile ids with a usage fetch in flight.
     pub usage_checking: HashSet<String>,
     pub acp_marketplace_items: Vec<AcpMarketplaceItem>,
-    pub acp_registry_loading: bool,
     pub acp_registry_error: Option<String>,
+    /// Whether the host holds a registry index, fetched or cached. Until it
+    /// does, `acp_marketplace_items` is empty because nothing is known yet.
+    pub acp_registry_loaded: bool,
     pub acp_installing: HashSet<String>,
     pub providers_checked_at: Option<u64>,
     pub providers_checking: bool,
@@ -610,6 +616,8 @@ pub enum PluginStaleReason {
     ContextChanged,
     /// A native change went through and has not been listed yet.
     Changed,
+    /// The user stopped the listing before it finished.
+    Stopped,
 }
 
 /// A native confirmation an operation is waiting on. It is answered with
@@ -1279,6 +1287,13 @@ pub enum RuntimeToast {
     },
 }
 
+/// A possible orphaned worktree left where it is, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeftOrphan {
+    pub path: PathBuf,
+    pub error: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum RuntimeError {
@@ -1313,6 +1328,15 @@ pub enum RuntimeError {
     },
     WorktreeRemove {
         error: String,
+    },
+    /// The start's sweep of abandoned worktrees did not run: the host's
+    /// threads, which say which worktrees are in use, could not be read.
+    OrphanSweepSkipped {
+        error: String,
+    },
+    /// Abandoned worktrees the start's sweep could not judge or remove.
+    OrphansLeft {
+        left: Vec<LeftOrphan>,
     },
     DeleteSession {
         error: String,

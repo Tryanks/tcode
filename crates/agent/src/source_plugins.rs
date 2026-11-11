@@ -17,7 +17,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Output;
-use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -29,16 +28,13 @@ use crate::{
     ProviderPluginEntry, Tri,
 };
 
-const LIST_TIMEOUT: Duration = Duration::from_secs(30);
-
 async fn run_cli(
     provider: ProviderKind,
     default: &str,
     context: &PluginContext,
     args: &[String],
-    bound: Option<Duration>,
 ) -> Result<String, AgentError> {
-    cli_stdout(cli_output(provider, default, context, args, bound).await?)
+    cli_stdout(cli_output(provider, default, context, args).await?)
 }
 
 async fn cli_output(
@@ -46,7 +42,6 @@ async fn cli_output(
     default: &str,
     context: &PluginContext,
     args: &[String],
-    bound: Option<Duration>,
 ) -> Result<Output, AgentError> {
     let display = format!("{default} {}", args.join(" "));
     let binary = crate::resolve_binary(context.binary_path.as_deref(), default)?;
@@ -55,19 +50,11 @@ async fn cli_output(
     for (key, value) in context.launch_env.pairs(provider) {
         command.env(key, value);
     }
-    // A listing, which no one can stop, is bounded; a change runs until it
-    // ends or the user cancels it, which drops this and stops the command.
-    let output = crate::process::tree_output(command);
-    match bound {
-        Some(bound) => smol::future::or(async { Some(output.await) }, async {
-            smol::Timer::after(bound).await;
-            None
-        })
+    // The command runs until it ends or the user stops it, which drops this
+    // and stops the command.
+    crate::process::tree_output(command)
         .await
-        .ok_or_else(|| AgentError::Provider(format!("`{display}` timed out")))?,
-        None => output.await,
-    }
-    .map_err(|error| AgentError::Spawn(format!("spawning `{display}`: {error}")))
+        .map_err(|error| AgentError::Spawn(format!("spawning `{display}`: {error}")))
 }
 
 fn cli_stdout(output: Output) -> Result<String, AgentError> {
@@ -226,14 +213,7 @@ pub(crate) async fn list_pi(context: &PluginContext) -> Result<PluginListing, Ag
     if context.project {
         list_args.push("--approve".to_string());
     }
-    let stdout = run_cli(
-        ProviderKind::Pi,
-        "pi",
-        context,
-        &list_args,
-        Some(LIST_TIMEOUT),
-    )
-    .await?;
+    let stdout = run_cli(ProviderKind::Pi, "pi", context, &list_args).await?;
     let mut errors = Vec::new();
     Ok(PluginListing {
         entries: pi_entries(&stdout, context.project, &mut errors),
@@ -285,7 +265,7 @@ pub(crate) async fn run_pi(
     context: &PluginContext,
     op: &PluginOp,
 ) -> Result<PluginOpOutcome, AgentError> {
-    run_cli(ProviderKind::Pi, "pi", context, &pi::op_args(op)?, None)
+    run_cli(ProviderKind::Pi, "pi", context, &pi::op_args(op)?)
         .await
         .map(done)
 }
@@ -324,16 +304,7 @@ pub(crate) async fn opencode_global_config(
 ) -> Result<Vec<Value>, AgentError> {
     let run = |args: &[&str]| {
         let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
-        async move {
-            run_cli(
-                ProviderKind::OpenCode,
-                "opencode",
-                context,
-                &args,
-                Some(LIST_TIMEOUT),
-            )
-            .await
-        }
+        async move { run_cli(ProviderKind::OpenCode, "opencode", context, &args).await }
     };
     let config_dir = run(&["debug", "paths", "config"]).await?;
     let config = run(&["debug", "config", "--standalone"]).await?;
@@ -440,16 +411,7 @@ fn opencode_check_report(output: Output) -> Result<String, AgentError> {
 pub(crate) async fn list_opencode(context: &PluginContext) -> Result<PluginListing, AgentError> {
     let run = |args: &'static [&'static str]| {
         let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
-        async move {
-            cli_output(
-                ProviderKind::OpenCode,
-                "opencode",
-                context,
-                &args,
-                Some(LIST_TIMEOUT),
-            )
-            .await
-        }
+        async move { cli_output(ProviderKind::OpenCode, "opencode", context, &args).await }
     };
     let configured = configured_plugins(&opencode_global_config(context).await?);
     if configured.is_empty() {
@@ -527,7 +489,6 @@ pub(crate) async fn run_opencode(
         "opencode",
         context,
         &opencode::op_args(op)?,
-        None,
     )
     .await
     .map(done)

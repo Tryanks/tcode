@@ -81,7 +81,7 @@ fn a_webkit_page_on_the_nest() {
         page.run_until("the typed text", |state, _| state["value"] == value);
         page.press(&[modifier::CONTROL], "a");
         page.press(&[modifier::CONTROL], "c");
-        let copied = common::wait_for(&page.nest, TIMEOUT, pump_gtk, |event| match event {
+        let copied = page.wait_for(|event| match event {
             Event::Clipboard(text) => Some(text),
             Event::Frame { .. } => {
                 page.nest.presented(VIEW);

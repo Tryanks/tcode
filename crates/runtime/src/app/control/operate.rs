@@ -505,7 +505,7 @@ impl AppState {
                 session_id: target.to_owned(),
                 text: text.clone(),
                 attachment_paths: Vec::new(),
-                fire_at_unix_secs: *at,
+                due: tcode_protocol::TurnDue::AtUnixSecs(*at),
             },
             SendMode::Queue | SendMode::Steer => Command::SendTurn {
                 session_id: target.to_owned(),
@@ -864,10 +864,17 @@ impl AppState {
                 let running = self
                     .resident(target)
                     .is_some_and(|session| session.turn_in_flight || session.timeline.turn_running);
-                self.interrupt(target, cx)
+                let preparing = !running
+                    && self
+                        .resident(target)
+                        .is_some_and(|session| session.preparing_turn());
+                // The queued messages are the user's; an agent's stop leaves them queued.
+                self.interrupt(target, false, cx)
                     .map_err(|error| failed(error.message))?;
                 if running {
                     "interrupted"
+                } else if preparing {
+                    "the provider is still getting ready; its queued messages stay queued"
                 } else {
                     "nothing was running"
                 }

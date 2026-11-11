@@ -300,6 +300,8 @@ struct ProviderRow {
     version: Option<ProtocolProviderVersionStatus>,
     models: Vec<ModelRow>,
     models_loading: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    models_error: Option<String>,
     profiles: Vec<ProfileRow>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     acp_agents: Vec<AcpAgentRow>,
@@ -1084,10 +1086,13 @@ impl AppState {
                     Ok(_) => answer.error = Some("not a git repository".into()),
                     Err(error) => answer.error = Some(error),
                 },
-                GitWhat::Branches => {
-                    answer.branches = Some(tcode_services::git::list_git_branches(&cwd));
-                    answer.current_branch = tcode_services::git::read_git_branch(&cwd);
-                }
+                GitWhat::Branches => match tcode_services::git::list_git_branches(&cwd) {
+                    Ok(branches) => {
+                        answer.branches = Some(branches);
+                        answer.current_branch = tcode_services::git::read_git_branch(&cwd);
+                    }
+                    Err(error) => answer.error = Some(error),
+                },
                 GitWhat::Diff => {
                     let diff = tcode_services::git::load_git_diff(
                         &cwd,
@@ -1218,6 +1223,7 @@ impl AppState {
                         })
                         .collect(),
                     models_loading: status.models_loading.get(&kind).copied().unwrap_or(false),
+                    models_error: status.model_errors.get(&kind).cloned(),
                     profiles: self
                         .settings
                         .profiles_for_kind(kind)

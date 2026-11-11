@@ -329,19 +329,14 @@ impl TimelineView {
                                     cx,
                                 )
                                 .unwrap_or(false);
-                            match limit_resume_action(
-                                resets_at,
-                                queued_id,
-                                now_secs(cx),
-                                ends_thread,
-                                queue_empty,
-                            ) {
+                            match limit_resume_action(queued_id, ends_thread, queue_empty) {
                                 LimitResumeAction::Scheduled { queued_id: id } => {
                                     Some(components::error_card::LimitResume::Scheduled {
                                         resets_at,
                                         on_cancel: Box::new(cx.listener(move |this, _, _, cx| {
-                                            let session_id =
-                                                this.session_id.clone().unwrap_or_default();
+                                            let Some(session_id) = this.session_id.clone() else {
+                                                return;
+                                            };
                                             this.workspace_store.update(cx, |store, _| {
                                                 store.drop_queued_for(session_id, id)
                                             });
@@ -352,33 +347,19 @@ impl TimelineView {
                                     Some(components::error_card::LimitResume::Offer {
                                         on_schedule: Box::new(cx.listener(
                                             move |this, _, _, cx| {
-                                                let session_id =
-                                                    this.session_id.clone().unwrap_or_default();
+                                                let Some(session_id) = this.session_id.clone()
+                                                else {
+                                                    return;
+                                                };
                                                 this.workspace_store.update(cx, |store, _| {
                                                     store.schedule_turn_for(
                                                         session_id,
                                                         tcode_core::session::RESUME_PROMPT
                                                             .to_string(),
                                                         vec![],
-                                                        resets_at,
-                                                    )
-                                                });
-                                            },
-                                        )),
-                                    })
-                                }
-                                LimitResumeAction::ContinueNow => {
-                                    Some(components::error_card::LimitResume::Continue {
-                                        on_continue: Box::new(cx.listener(
-                                            move |this, _, _, cx| {
-                                                let session_id =
-                                                    this.session_id.clone().unwrap_or_default();
-                                                this.workspace_store.update(cx, |store, _| {
-                                                    store.send_turn_for(
-                                                        session_id,
-                                                        tcode_core::session::RESUME_PROMPT
-                                                            .to_string(),
-                                                        vec![],
+                                                        tcode_protocol::TurnDue::AtUnixSecs(
+                                                            resets_at,
+                                                        ),
                                                     )
                                                 });
                                             },
@@ -426,13 +407,17 @@ impl TimelineView {
                             components::error_card::LimitResume::Retry {
                                 retry_at: retry.retry_at,
                                 on_retry: Box::new(cx.listener(move |this, _, _, cx| {
-                                    let session_id = this.session_id.clone().unwrap_or_default();
+                                    let Some(session_id) = this.session_id.clone() else {
+                                        return;
+                                    };
                                     this.workspace_store.update(cx, |store, _| {
                                         store.retry_turn_for(session_id, turn_id.clone())
                                     });
                                 })),
                                 on_cancel: Box::new(cx.listener(move |this, _, _, cx| {
-                                    let session_id = this.session_id.clone().unwrap_or_default();
+                                    let Some(session_id) = this.session_id.clone() else {
+                                        return;
+                                    };
                                     this.workspace_store
                                         .update(cx, |store, _| store.interrupt_for(session_id));
                                 })),
@@ -550,6 +535,13 @@ impl TimelineView {
             let served_model =
                 divergent_served_model(turn.served_model.as_deref(), requested_model.as_deref())
                     .map(str::to_owned);
+            // After Stop the turn says it is stopping until it ends, however
+            // long its harness takes to take the stop.
+            let stopping = self
+                .workspace_store
+                .read(cx)
+                .session_status_for(self.session_id.as_deref(), cx)
+                .is_some_and(|status| status.stopping);
             let turn = turn.clone();
             trailing = true;
             // The status moves with the trailer when the turn gains a last
@@ -584,6 +576,7 @@ impl TimelineView {
                                 .child(components::indicator::turn_working_indicator(
                                     number,
                                     turn.start_ts,
+                                    stopping,
                                     served_model.clone(),
                                     &indicator_motion,
                                     cx,
@@ -973,9 +966,10 @@ impl TimelineView {
                     .map(|blocked| components::rewind::blocked_reason(blocked, &target.harness)),
                 in_progress: target.in_progress,
             });
-        let rewind = rewind_menu
-            .as_ref()
-            .map(|menu| self.compose_rewind(menu, cx));
+        let rewind = rewind_menu.map(|menu| {
+            let action = self.compose_rewind(&menu, cx);
+            (menu, action)
+        });
         let markdown = self.md_states.get(entry_id).map(|md| md.state.clone());
         let copy_key = format!("user:{entry_id}");
         let copied = self.copied.is(&copy_key);
@@ -988,8 +982,8 @@ impl TimelineView {
                 let path = PathBuf::from(path);
                 let title = path
                     .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "image".to_string());
+                    .map_or_else(|| path.to_string_lossy(), |name| name.to_string_lossy())
+                    .into_owned();
                 Box::new(cx.listener(move |_, _, window, cx| {
                     crate::image_viewer::open(
                         crate::image_viewer::ViewerSource::original(
@@ -1034,7 +1028,6 @@ impl TimelineView {
                 copied,
                 markdown,
                 rewind,
-                rewind_menu,
                 hover: self.hover.clone(),
                 motion: self.motion.clone(),
             },
@@ -1102,16 +1095,17 @@ impl TimelineView {
                 && !store.native_subagent_readonly_for(self.session_id.as_deref(), cx)
                 && store.connection_state().is_connected()
         });
-        let session_id = self.session_id.clone().unwrap_or_default();
+        let session_id = self.session_id.clone();
         let store_entity = self.workspace_store.clone();
         let request_id = request.as_ref().map(|request| request.id.clone());
         let on_choose: components::plan::ChooseOption = Rc::new(move |option, _, cx| {
-            let Some(request_id) = request_id.clone() else {
+            let (Some(session_id), Some(request_id)) = (session_id.clone(), request_id.clone())
+            else {
                 return;
             };
             store_entity.update(cx, |store, _| {
                 store.respond_approval_for(
-                    session_id.clone(),
+                    session_id,
                     request_id,
                     agent::ApprovalDecision::Option(option.to_owned()),
                 )
@@ -1370,7 +1364,7 @@ impl TimelineView {
             if capsule_label.is_empty() {
                 capsule_label = crate::tr!("chat.work_log").into_owned();
             }
-            let duration = format_elapsed(activity_run_duration_ms(folded, turn, is_last));
+            let duration = activity_run_duration_ms(folded).map(format_elapsed);
             let outcome = work_log_outcome(turn, is_last);
             let rows = if expanded && !header_only {
                 self.compose_work_log_rows(folded, cwd, live_reasoning_id, false, window, cx)
@@ -1616,7 +1610,7 @@ impl TimelineView {
                     None => tools::window::Detail::Shut,
                 }
             };
-            let header = tools::diff::file_header(file);
+            let header = tools::diff::file_header(file, edit.status);
             // The edit's time belongs to it, told once.
             let elapsed_ms = (file_index == 0)
                 .then(|| tools::window::elapsed(&header, entry))
@@ -2561,8 +2555,7 @@ mod tests {
 
     /// A finished turn's fork is beside its answer's Copy where the Harness
     /// has one, whatever it is called, and never on a user message or a turn
-    /// still running. Used, it opens a thread that names where it came from,
-    /// with nothing in the composer: no message was dropped.
+    /// still running. Used, it opens a thread that names where it came from.
     #[gpui::test]
     fn a_finished_turn_offers_its_fork_beside_the_answer(cx: &mut TestAppContext) {
         use agent::{ProviderKind, TurnStatus};
@@ -2706,7 +2699,7 @@ mod tests {
             let fork = window.update(|_, cx| fork(cx)).unwrap();
             let fork_id = fork.clone();
             window.update(|_, cx| store.update(cx, |store, cx| store.show_alone(fork_id, cx)));
-            let (view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
+            let (_view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(store.clone(), window_state, Some(fork.clone()), window, cx)
             });
             let window: &mut VisualTestContext = window;
@@ -2716,10 +2709,6 @@ mod tests {
             driver.settle_until(window, "the fork's source", |window| {
                 window.debug_bounds("fork-origin").is_some()
             });
-            assert_eq!(
-                view.read_with(window, |view, cx| view.composer.read(cx).draft(cx)),
-                ""
-            );
         }
     }
 

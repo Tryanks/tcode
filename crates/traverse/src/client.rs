@@ -53,6 +53,9 @@ pub(crate) struct DeviceEndpoint {
     /// Transports to probe when the network changes. They outlive the
     /// endpoints they dial from.
     transports: Mutex<Vec<Outgoing>>,
+    /// The relay URLs the open endpoint dials from, sorted; empty while
+    /// none is open.
+    relays: tokio::sync::watch::Sender<Vec<String>>,
 }
 
 /// The Traverse instances the endpoint resolves machines through and relays
@@ -71,6 +74,19 @@ struct Lookups {
     /// endpoint, so it always reads as what the endpoint dials from; the
     /// lock serializes syncs so two cannot undo each other's changes.
     relays: tokio::sync::Mutex<RelayMap>,
+    /// Told the relay URLs after every sync.
+    relay_urls: tokio::sync::watch::Sender<Vec<String>>,
+}
+
+/// A relay map's URLs, sorted.
+fn relay_urls(relays: &RelayMap) -> Vec<String> {
+    let mut urls: Vec<String> = relays
+        .urls::<Vec<_>>()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    urls.sort();
+    urls
 }
 
 struct Source {
@@ -170,6 +186,7 @@ impl Lookups {
             Some(self.lan.clone()),
         );
         live::sync_relays(&self.endpoint, &relays, &wanted).await;
+        self.relay_urls.send_replace(relay_urls(&wanted));
     }
 
     /// Make `source` resolvable: the manifest in hand is installed at once
@@ -378,8 +395,10 @@ impl DeviceIdentity {
             data_dir: inner.data_dir.clone(),
             lan,
             sources: Mutex::new(HashMap::new()),
-            relays: tokio::sync::Mutex::new(relays),
+            relays: tokio::sync::Mutex::new(relays.clone()),
+            relay_urls: inner.endpoint.relays.clone(),
         });
+        inner.endpoint.relays.send_replace(relay_urls(&relays));
         runtime().spawn(
             endpoint
                 .closed()
@@ -425,6 +444,7 @@ impl DeviceIdentity {
         // Each refresher holds the lookups, and with them the endpoint;
         // dropping the sources aborts them, and a closed endpoint claims none.
         client.lookups.sources.lock().unwrap().clear();
+        slot.relays.send_replace(Vec::new());
     }
 
     /// The device's network changed: rebind paths, and redial every
@@ -456,20 +476,10 @@ impl DeviceIdentity {
         runtime().spawn(async move { lookups.reconcile().await });
     }
 
-    /// The relay URLs the endpoint dials from right now; empty while no
-    /// endpoint is open.
-    pub fn relays(&self) -> Vec<String> {
-        let Some(client) = self.open_client() else {
-            return Vec::new();
-        };
-        let relays = block_on(async { client.lookups.relays.lock().await.clone() });
-        let mut urls: Vec<String> = relays
-            .urls::<Vec<_>>()
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        urls.sort();
-        urls
+    /// The relay URLs the endpoint dials from, sorted, as they change with
+    /// the machines' Traverse instances; empty while no endpoint is open.
+    pub fn relay_changes(&self) -> tokio::sync::watch::Receiver<Vec<String>> {
+        self.inner().endpoint.relays.subscribe()
     }
 }
 

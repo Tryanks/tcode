@@ -35,7 +35,6 @@ use self::uia::{
     root_kind_for_control_type,
 };
 
-const MAX_DEPTH: usize = 18;
 const MAX_NODES: usize = 3_000;
 const MAX_CHILDREN_PER_NODE: usize = 500;
 const PROCESS_PATH_CAPACITY: usize = 32_768;
@@ -370,8 +369,15 @@ pub fn list_roots(filters: &RootFilters) -> Result<Vec<RootInfo>, BackendError> 
         )
     })?;
 
+    let (windows, _, error) = raw_children(&walker, &desktop, usize::MAX);
+    if let Some(error) = error {
+        return Err(backend_error(
+            BackendErrorCode::ObservationFailed,
+            format!("uiautomation could not list the desktop's windows: {error}"),
+        ));
+    }
     let mut roots = Vec::new();
-    for element in walker.get_children(&desktop).unwrap_or_default() {
+    for element in windows {
         if element.is_offscreen().unwrap_or(true) {
             continue;
         }
@@ -456,7 +462,7 @@ fn open_root(
             format!("{operation}: uiautomation get_control_view_walker failed: {error}"),
         )
     })?;
-    let element = locate_root_element(&automation, &walker, root, code)?;
+    let element = locate_root_element(&automation, root)?;
     Ok(AutomationRoot {
         automation,
         walker,
@@ -489,69 +495,43 @@ fn create_automation(
     })
 }
 
+/// The root's own window, by its HWND. When that window has closed, the
+/// call fails rather than reading another window of the same process under
+/// the closed one's identity.
 fn locate_root_element(
     automation: &UIAutomation,
-    walker: &UITreeWalker,
     root: &RootInfo,
-    code: BackendErrorCode,
 ) -> Result<UIElement, BackendError> {
-    if let Ok(raw_handle) = isize::try_from(root.window_id) {
-        let handle = Handle::from(raw_handle);
-        if !handle.is_invalid()
-            && let Ok(element) = automation.element_from_handle(handle)
-            && element.get_process_id().ok() == Some(root.pid)
-        {
-            return Ok(element);
-        }
-    }
-
-    let desktop = automation.get_root_element().map_err(|error| {
+    let gone = |reason: String| {
         backend_error(
-            code,
+            BackendErrorCode::RootNotFound,
             format!(
-                "uiautomation could not reopen root {}: {error}",
+                "the window of root {} is no longer open ({reason}); call find_roots again",
                 root.ref_id
             ),
         )
-    })?;
-    walker
-        .get_children(&desktop)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|element| element.get_process_id().ok() == Some(root.pid))
-        .max_by(|left, right| {
-            root_match_score(left, root).total_cmp(&root_match_score(right, root))
-        })
-        .ok_or_else(|| {
-            backend_error(
-                BackendErrorCode::RootNotFound,
-                format!(
-                    "no top-level UIAutomation element matched root {}",
-                    root.ref_id
-                ),
-            )
-        })
-}
-
-fn root_match_score(element: &UIElement, root: &RootInfo) -> f64 {
-    let title = element.get_name().unwrap_or_default();
-    let frame = element_frame(element);
-    let title_score = if !root.title.is_empty() && title == root.title {
-        1_000_000.0
-    } else if !root.title.is_empty()
-        && title
-            .to_ascii_lowercase()
-            .contains(&root.title.to_ascii_lowercase())
-    {
-        100_000.0
-    } else {
-        0.0
     };
-    let frame_distance = (frame.x - root.frame.x).abs()
-        + (frame.y - root.frame.y).abs()
-        + (frame.w - root.frame.w).abs()
-        + (frame.h - root.frame.h).abs();
-    title_score - frame_distance
+    let handle = isize::try_from(root.window_id)
+        .map(Handle::from)
+        .ok()
+        .filter(|handle| !handle.is_invalid())
+        .ok_or_else(|| {
+            gone(format!(
+                "window id {} is not a window handle",
+                root.window_id
+            ))
+        })?;
+    let element = automation
+        .element_from_handle(handle)
+        .map_err(|error| gone(uia_error_text(&error)))?;
+    match element.get_process_id() {
+        Ok(pid) if pid == root.pid => Ok(element),
+        Ok(pid) => Err(gone(format!(
+            "its handle now belongs to process {pid}, not {}",
+            root.pid
+        ))),
+        Err(error) => Err(gone(uia_error_text(&error))),
+    }
 }
 
 struct ElementNode {
@@ -567,12 +547,27 @@ impl ElementNode {
         node
     }
 
-    fn element_at_path(&self, path: &[usize]) -> Option<&UIElement> {
+    fn element_at_path(&self, path: &[usize]) -> Result<&UIElement, BackendError> {
         let mut current = self;
         for &index in path {
-            current = current.children.get(index)?;
+            current = match current.children.get(index) {
+                Some(child) => child,
+                None => {
+                    return Err(backend_error(
+                        BackendErrorCode::OperationFailed,
+                        match &current.node.children_error {
+                            Some(error) => format!(
+                                "could not read the children along the target's UIAutomation path: {error}"
+                            ),
+                            None => {
+                                "the target's UIAutomation path moved; call observe_ui again".into()
+                            }
+                        },
+                    ));
+                }
+            };
         }
-        Some(&current.element)
+        Ok(&current.element)
     }
 }
 
@@ -590,7 +585,7 @@ fn observe_tree(opened: &AutomationRoot, root: &RootInfo) -> Result<UiNode, Back
         root_frame: root.frame,
         walker: &opened.walker,
     };
-    let mut tree = walk_element(&opened.element, 0, &mut context)
+    let mut tree = walk_tree(&opened.element, &mut context)
         .ok_or_else(|| {
             backend_error(
                 BackendErrorCode::ObservationFailed,
@@ -607,11 +602,40 @@ fn observe_tree(opened: &AutomationRoot, root: &RootInfo) -> Result<UiNode, Back
     Ok(tree)
 }
 
-fn walk_element(
+/// The subtree under `root`, depth first, ending once [`MAX_NODES`] nodes are
+/// read. The walk keeps its own stack: a web area's tree can be deeper than
+/// the thread's stack would allow one frame per level.
+fn walk_tree(root: &UIElement, context: &mut WalkContext<'_>) -> Option<ElementNode> {
+    let mut stack = vec![read_element(root, context)?];
+    loop {
+        let (tree, children) = stack.last_mut()?;
+        let child = if context.count < MAX_NODES {
+            children.next()
+        } else {
+            tree.node.children_omitted |= children.len() > 0;
+            None
+        };
+        if let Some(child) = child {
+            if let Some(entry) = read_element(&child, context) {
+                stack.push(entry);
+            }
+            continue;
+        }
+        let (tree, _) = stack.pop()?;
+        let Some((parent, _)) = stack.last_mut() else {
+            return Some(tree);
+        };
+        if !is_invisible_leaf(&tree, context.root_frame) {
+            parent.children.push(tree);
+        }
+    }
+}
+
+/// One element's node, without its children yet, and the children to walk.
+fn read_element(
     element: &UIElement,
-    depth: usize,
     context: &mut WalkContext<'_>,
-) -> Option<ElementNode> {
+) -> Option<(ElementNode, std::vec::IntoIter<UIElement>)> {
     if context.count >= MAX_NODES {
         return None;
     }
@@ -630,7 +654,10 @@ fn walk_element(
         .filter_map(Result::ok)
         .find(|description| !description.is_empty() && description != &title)
         .unwrap_or_default();
-    let mut tree = ElementNode {
+    let maximum = (MAX_NODES - context.count).min(MAX_CHILDREN_PER_NODE);
+    let (children, children_omitted, children_error) =
+        raw_children(context.walker, element, maximum);
+    let tree = ElementNode {
         element: element.clone(),
         node: UiNode {
             ref_id: String::new(),
@@ -643,62 +670,54 @@ fn walk_element(
             enabled: element.is_enabled().unwrap_or(true),
             focused: element.has_keyboard_focus().unwrap_or(false),
             children: Vec::new(),
-            children_error: None,
-            children_omitted: false,
+            children_error,
+            children_omitted,
         },
         children: Vec::new(),
     };
-
-    let maximum = if depth < MAX_DEPTH {
-        (MAX_NODES - context.count).min(MAX_CHILDREN_PER_NODE)
-    } else {
-        0
-    };
-    let (children, more) = raw_children(context.walker, element, maximum);
-    let mut walked = 0;
-    for child in &children {
-        if context.count >= MAX_NODES {
-            break;
-        }
-        walked += 1;
-        let Some(child) = walk_element(child, depth + 1, context) else {
-            continue;
-        };
-        if !is_invisible_leaf(&child, context.root_frame) {
-            tree.children.push(child);
-        }
-    }
-    tree.node.children_omitted = more || walked < children.len();
-    Some(tree)
+    Some((tree, children.into_iter()))
 }
 
-/// Up to `maximum` of an element's children, and whether it has more.
+/// Up to `maximum` of an element's children, whether it has more, and why
+/// the rest could not be read. UIAutomation answers "no child" and "no next
+/// sibling" with a null element, which reaches here as error code 0; any
+/// other error is a failed read.
 fn raw_children(
     walker: &UITreeWalker,
     element: &UIElement,
     maximum: usize,
-) -> (Vec<UIElement>, bool) {
-    let Ok(mut child) = walker.get_first_child(element) else {
-        return (Vec::new(), false);
+) -> (Vec<UIElement>, bool, Option<String>) {
+    let mut child = match walker.get_first_child(element) {
+        Ok(child) => child,
+        Err(error) if error.code() == 0 => return (Vec::new(), false, None),
+        Err(error) => return (Vec::new(), false, Some(uia_error_text(&error))),
     };
     if maximum == 0 {
-        return (Vec::new(), true);
+        return (Vec::new(), true, None);
     }
     let mut children = Vec::with_capacity(maximum.min(32));
     loop {
         children.push(child.clone());
-        let Ok(sibling) = walker.get_next_sibling(&child) else {
-            return (children, false);
+        let sibling = match walker.get_next_sibling(&child) {
+            Ok(sibling) => sibling,
+            Err(error) if error.code() == 0 => return (children, false, None),
+            Err(error) => return (children, false, Some(uia_error_text(&error))),
         };
         if children.len() >= maximum {
-            return (children, true);
+            return (children, true, None);
         }
         child = sibling;
     }
 }
 
+fn uia_error_text(error: &uiautomation::Error) -> String {
+    format!("UIAutomation error {:#010x}: {error}", error.code())
+}
+
 fn is_invisible_leaf(tree: &ElementNode, root_frame: Frame) -> bool {
     tree.children.is_empty()
+        && tree.node.children_error.is_none()
+        && !tree.node.children_omitted
         && !tree.node.is_interactive()
         && tree.node.title.is_empty()
         && tree.node.value.is_empty()
@@ -900,7 +919,7 @@ impl Target {
         let vertical = scroll_amount(y, true);
         let mut failures = Vec::new();
         let mut current = self.element.clone();
-        for _ in 0..=MAX_DEPTH {
+        loop {
             if let Ok(pattern) = current.get_pattern::<UIScrollPattern>() {
                 match pattern.scroll(horizontal, vertical) {
                     Ok(()) => return Ok("uiautomation ScrollPattern completed"),
@@ -981,18 +1000,13 @@ fn locate_target(
         root_frame: root.frame,
         walker: &opened.walker,
     };
-    let tree = walk_element(&opened.element, 0, &mut context).ok_or_else(|| {
+    let tree = walk_tree(&opened.element, &mut context).ok_or_else(|| {
         backend_error(
             BackendErrorCode::OperationFailed,
             "the target's UIAutomation tree disappeared; call observe_ui again",
         )
     })?;
-    let element = tree.element_at_path(path).cloned().ok_or_else(|| {
-        backend_error(
-            BackendErrorCode::OperationFailed,
-            "the target's UIAutomation path moved; call observe_ui again",
-        )
-    })?;
+    let element = tree.element_at_path(path)?.clone();
 
     if let Some(expected_role) = expected_role {
         let actual = element_role(&element);
@@ -1009,7 +1023,7 @@ fn locate_target(
     }
     if let Some(expected_title) = expected_title.filter(|title| !title.is_empty()) {
         let actual = element.get_name().unwrap_or_default();
-        if !actual.is_empty() && actual != expected_title {
+        if actual != expected_title {
             return Err(backend_error(
                 BackendErrorCode::OperationFailed,
                 "target title changed; call observe_ui again",

@@ -235,9 +235,10 @@ fn pump_gtk(host: &Rc<Host>, cx: &App) {
             let Some(host) = weak.upgrade() else {
                 return;
             };
+            let now = cx.background_executor().now();
             if !host.slots.borrow().is_empty() {
                 idle_since = None;
-            } else if idle_since.get_or_insert_with(Instant::now).elapsed() >= GTK_WIND_DOWN {
+            } else if now.duration_since(*idle_since.get_or_insert(now)) >= GTK_WIND_DOWN {
                 host.pumping.set(false);
                 log::debug!("preview: no preview left; GTK is no longer pumped");
                 return;
@@ -303,7 +304,7 @@ pub(super) fn build(
         shown: Cell::new(false),
         size: Cell::new(None),
         unanswered: Cell::new(false),
-        answer_at: Cell::new(Instant::now()),
+        answer_at: Cell::new(cx.background_executor().now()),
         cursor: Cell::new(CursorStyle::Arrow),
         css_cursor: Cell::new(None),
         hovered: Cell::new(false),
@@ -611,7 +612,7 @@ impl Slot {
         if !self.unanswered.replace(false) {
             return;
         }
-        let now = Instant::now();
+        let now = self.cx.background_executor().now();
         let at = self.answer_at.get().max(now);
         self.answer_at.set(at + FRAME_INTERVAL);
         let view = self.id;

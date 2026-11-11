@@ -29,7 +29,11 @@ use crate::{
 pub fn home_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
     launch_env
         .child_path(ProviderKind::Grok, "GROK_HOME")
-        .or_else(|| dirs::home_dir().map(|home| home.join(".grok")))
+        .or_else(|| {
+            launch_env
+                .child_home(ProviderKind::Grok)
+                .map(|home| home.join(".grok"))
+        })
 }
 
 /// The non-interactive auth method: it validates `XAI_API_KEY` (or the key in
@@ -62,6 +66,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
 pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
+    processes: &crate::SessionProcesses,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     let opts = SessionOptions {
         cwd: std::env::temp_dir(),
@@ -75,8 +80,9 @@ pub async fn list_models(
         extra_args: Vec::new(),
         acp: None,
         instructions: None,
-        processes: Default::default(),
+        processes: processes.clone(),
         clock: Default::default(),
+        worktrees: Vec::new(),
     };
     acp_session::query(
         ProviderKind::Grok,
@@ -1565,6 +1571,7 @@ mod tests {
             instructions: None,
             processes: Default::default(),
             clock: Default::default(),
+            worktrees: Vec::new(),
         };
         let launch = Grok::default().launch(&opts).unwrap();
         assert_eq!(launch.program, PathBuf::from("/opt/grok/bin/grok"));
@@ -1822,6 +1829,7 @@ mod tests {
             instructions: None,
             processes: Default::default(),
             clock: Default::default(),
+            worktrees: Vec::new(),
         };
         let before = |checkpoint_id: &str| ForkPoint::Before {
             checkpoint_id: checkpoint_id.into(),

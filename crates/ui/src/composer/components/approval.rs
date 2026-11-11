@@ -220,7 +220,7 @@ impl Composer {
             .motion
             .shown(
                 self.motion_key(format_args!("approval-offline-{}", request.id)),
-                (self.compact && !self.interactive(cx)).then_some(()),
+                (!self.interactive(cx)).then_some(()),
                 SHOW,
                 window,
                 cx,

@@ -6,8 +6,7 @@
 //! `ToolCall`, the family its adapter read it to be ([`agent::ToolFamily`]).
 //! A call of no family is a tool of an MCP server ([`agent::ToolName`], so
 //! `mcp__s__t` and `s/t` name one tool) whose window reads its input's
-//! shape, a call the adapter named for what it is (Codex's `sleep`,
-//! `image_generation`, `auto-reviewer`), or the generic window.
+//! shape, or the generic window.
 
 pub(in crate::chat) mod desktop;
 pub(in crate::chat) mod diff;
@@ -81,17 +80,6 @@ impl<'a> Call<'a> {
             status: *status,
             family: family.as_deref(),
         })
-    }
-
-    /// Whether the call is to the harness's own tool by one of `names`, in
-    /// any case: harnesses spell the same tool `Read` and `read`. An MCP
-    /// server's tool of the same name (tcode_control's `search` and `read`)
-    /// is that server's, not the family's.
-    pub(in crate::chat) fn named(&self, names: &[&str]) -> bool {
-        self.name.server.is_none()
-            && names
-                .iter()
-                .any(|name| self.name.tool.eq_ignore_ascii_case(name))
     }
 
     /// Whether the call is to one of `servers`' tools named one of `names`.
@@ -173,7 +161,7 @@ pub(in crate::chat) fn view<'a>(call: &Call<'a>) -> Box<dyn ToolView + 'a> {
 /// activities counts it as.
 pub(in crate::chat) enum Family {
     Command,
-    /// The files it edited.
+    /// The files it edited: none when the edit failed or was declined.
     Edit(Vec<String>),
     Read,
     Search,
@@ -192,9 +180,15 @@ pub(in crate::chat) fn family(entry: &TimelineEntry) -> Option<Family> {
     };
     Some(match item {
         ItemContent::CommandExecution { .. } => Family::Command,
-        ItemContent::FileChange { changes, .. } => {
-            Family::Edit(changes.iter().map(|change| change.path.clone()).collect())
-        }
+        ItemContent::FileChange {
+            changes, status, ..
+        } => Family::Edit(
+            if matches!(status, ItemStatus::Failed | ItemStatus::Declined) {
+                Vec::new()
+            } else {
+                changes.iter().map(|change| change.path.clone()).collect()
+            },
+        ),
         ItemContent::ToolCall { .. } => {
             let call = Call::of(entry)?;
             if read::tool_call(&call).is_some() {

@@ -200,10 +200,14 @@ impl Composer {
             .collect();
         // Only the built-in profiles have a probed catalog that can still be
         // loading; a third-party profile shows its own slugs immediately.
-        let loading = store.models_loading(provider)
-            && matches!(&rail, PickerRail::Profile(id) if tcode_core::settings::Settings::is_builtin_profile_id(id))
-            && rows.is_empty()
-            && query.is_empty();
+        let builtin_rail = matches!(&rail, PickerRail::Profile(id) if tcode_core::settings::Settings::is_builtin_profile_id(id));
+        let loading =
+            store.models_loading(provider) && builtin_rail && rows.is_empty() && query.is_empty();
+        // A catalog that could not be listed says why rather than that it is empty.
+        let unlisted = (builtin_rail && all_rows.is_empty())
+            .then(|| store.models_error(provider))
+            .flatten()
+            .map(str::to_owned);
 
         let composer = cx.entity();
         let store_entity = self.workspace_store.clone();
@@ -333,6 +337,7 @@ impl Composer {
                         &acp_rail_agents,
                         pending_restart,
                         loading,
+                        unlisted.clone(),
                         &store_entity,
                         &model_search,
                         &composer,
@@ -369,17 +374,10 @@ impl Composer {
                     options,
                     default_value,
                     ..
-                }) => option_selection_str(&composer.active_option_selections, id)
-                    .or(default_value.as_deref())
-                    .map(|value| {
-                        options
-                            .iter()
-                            .find(|option| option.value == value)
-                            .map_or_else(|| value.to_owned(), |option| option.label.clone())
-                    }),
+                }) => resolved_select_value(id, default_value, &composer.active_option_selections)
+                    .map(|value| select_value_label(options, &value)),
                 _ => None,
-            }
-            .unwrap_or_else(|| crate::tr!("composer.context_unknown").into_owned());
+            }?;
             let label = gpui::SharedString::from(label);
             return Some((
                 label.clone(),
@@ -747,6 +745,8 @@ fn render_model_pane(
     acp_agents: &[(String, String)],
     pending_restart: bool,
     loading: bool,
+    // Why the rail's catalog could not be listed, when it has none.
+    unlisted: Option<String>,
     store_entity: &Entity<WorkspaceStore>,
     model_search: &Entity<InputState>,
     composer: &Entity<Composer>,
@@ -925,8 +925,14 @@ fn render_model_pane(
                 let content = match layer {
                     0 => crate::material::empty_row(crate::tr!("composer.loading_models"), cx)
                         .into_any_element(),
-                    1 => crate::material::empty_row(crate::tr!("composer.no_models"), cx)
-                        .into_any_element(),
+                    1 => crate::material::empty_row(
+                        match &unlisted {
+                            Some(error) => crate::tr!("composer.models_unlisted", error = error),
+                            None => crate::tr!("composer.no_models"),
+                        },
+                        cx,
+                    )
+                    .into_any_element(),
                     _ if state == 2 => build_list(shown_rows.clone(), current),
                     _ => build_list(last.clone(), None),
                 };
@@ -1060,7 +1066,7 @@ fn render_compact_model_footer(
             // Use the localized shared label instead of provider-specific copy.
             crate::tr!("composer.effort").into_owned(),
             options.clone(),
-            resolved_select_value(id, options, default_value, &selections),
+            resolved_select_value(id, default_value, &selections),
         )),
         _ => None,
     };
@@ -1399,18 +1405,21 @@ impl PermissionControl {
             }
             OptionDescriptor::Boolean { .. } => return None,
         };
+        let stored = composer
+            .requested_option_selections
+            .iter()
+            .find(|selection| selection.id == id)
+            .map(|selection| selection.value.clone());
+        // While the harness runs, the host gives only what it confirmed; a
+        // stored value it has not confirmed leaves the running one unknown,
+        // never the default. With nothing stored, the default is what runs.
         let current = composer
             .active_option_selections
             .iter()
             .find(|selection| selection.id == id)
             .map(|selection| selection.value.clone())
-            .or(default);
-        let requested = composer
-            .requested_option_selections
-            .iter()
-            .find(|selection| selection.id == id)
-            .map(|selection| selection.value.clone())
-            .filter(|value| Some(value) != current.as_ref());
+            .or_else(|| stored.is_none().then_some(default).flatten());
+        let requested = stored.filter(|value| Some(value) != current.as_ref());
         Some(Self {
             label: crate::i18n::translate_english(&format!("permission.controls.{id}"), &label)
                 .into_owned(),
@@ -1611,12 +1620,7 @@ fn render_effort_slider(
             } => (
                 id.clone(),
                 options.clone(),
-                resolved_select_value(
-                    id,
-                    options,
-                    default_value,
-                    &composer_state.active_option_selections,
-                ),
+                resolved_select_value(id, default_value, &composer_state.active_option_selections),
             ),
             OptionDescriptor::Boolean { .. } => return None,
         };
@@ -1797,7 +1801,7 @@ fn render_traits_pane(
                     continue;
                 }
                 pane = pane.child(section_header(label, cx));
-                let resolved = resolved_select_value(id, options, default_value, selections);
+                let resolved = resolved_select_value(id, default_value, selections);
                 for (index, opt) in options.iter().enumerate() {
                     let is_default = default_value.as_deref() == Some(opt.value.as_str());
                     let is_selected = resolved.as_deref() == Some(opt.value.as_str());

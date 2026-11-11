@@ -728,9 +728,13 @@ impl LatestActivity {
             } => match family.as_deref() {
                 Some(ToolFamily::Read { path, .. }) => Self::Read { path: clip(path) },
                 Some(ToolFamily::WebSearch { query, .. }) => Self::WebSearch { query: clip(query) },
-                _ => Self::Tool {
+                family => Self::Tool {
                     name: clip(name),
-                    target: identifying_argument(input).map(|target| clip(&target)),
+                    target: family
+                        .and_then(ToolFamily::subject)
+                        .map(str::to_owned)
+                        .or_else(|| identifying_argument(input))
+                        .map(|target| clip(&target)),
                 },
             },
             ItemContent::Subagent { description, .. } => Self::Subagent {
@@ -760,29 +764,10 @@ pub fn other_argument(summary: &str) -> Option<String> {
     }
 }
 
-/// The keys that name what a tool call is about, in the order they are
-/// looked for. A call carrying none is named by its first plain value.
-const IDENTIFYING_KEYS: &[&str] = &[
-    "title",
-    "query",
-    "url",
-    "path",
-    "file_path",
-    "filePath",
-    "command",
-    "cmd",
-    "pattern",
-    "name",
-    "subject",
-    "summary",
-    "description",
-    "text",
-    "message",
-    "prompt",
-    "thread_id",
-];
-
-/// The plain value that names what a tool call is about.
+/// The plain value that names what a tool call no family claims is about:
+/// the first the harness gave, a word before a number. Which of a tool's
+/// arguments matters most is the tool's to say, and an unknown tool does
+/// not say it.
 pub fn identifying_argument(input: &serde_json::Value) -> Option<String> {
     use serde_json::Value;
     fn primitive(value: &Value) -> Option<String> {
@@ -794,20 +779,10 @@ pub fn identifying_argument(input: &serde_json::Value) -> Option<String> {
         (!text.is_empty()).then_some(text)
     }
     match input {
-        Value::Object(map) => IDENTIFYING_KEYS
-            .iter()
-            .find_map(|key| primitive(map.get(*key)?))
-            // A question tool names its first question.
-            .or_else(|| {
-                let first = map.get("questions")?.get(0)?;
-                primitive(first.get("question").or_else(|| first.get("title"))?)
-            })
-            // A word names a call better than a number.
-            .or_else(|| {
-                map.values()
-                    .filter(|value| value.is_string())
-                    .find_map(primitive)
-            })
+        Value::Object(map) => map
+            .values()
+            .filter(|value| value.is_string())
+            .find_map(primitive)
             .or_else(|| map.values().find_map(primitive)),
         Value::String(text) => Some(one_line(text)).filter(|text| !text.is_empty()),
         _ => None,

@@ -9,7 +9,7 @@ use std::{
 use tcode_client::HostLink;
 use tcode_protocol::{
     Command, SessionStatus, Subscription, TerminalSelection, TerminalSplitStatus, Topic,
-    terminal::{TerminalClipboard, TerminalDelta, TerminalFrame, TerminalMode},
+    terminal::{MAX_TERMINAL_CELLS, TerminalClipboard, TerminalDelta, TerminalFrame, TerminalMode},
 };
 
 use gpui::{App, Entity};
@@ -116,8 +116,10 @@ impl ClientTerminal {
     }
 
     pub fn resize_with_cell_size(&self, cols: usize, rows: usize, width: u32, height: u32) {
-        let cols = cols.clamp(2, 1000);
-        let rows = rows.clamp(2, 1000);
+        // Held to the host's bound, so the size compared below is the one
+        // the host will give.
+        let cols = cols.min(usize::from(MAX_TERMINAL_CELLS));
+        let rows = rows.min(usize::from(MAX_TERMINAL_CELLS));
         let model = self.model.borrow();
         if (model.cols(), model.rows()) == (cols, rows) {
             return;

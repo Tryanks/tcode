@@ -50,9 +50,6 @@ impl TimelineView {
                 };
                 // The trailer's turn span comes from the timeline, not its
                 // rows: a pending steer after a message belongs to no row.
-                // The rows can trail the live timeline by a frame (e.g.
-                // adopting a running background thread whose timeline is
-                // being re-folded), so the ranges are bounds-checked.
                 let own_range = match &row.part {
                     RowPart::WorkLogHeader { run } => run.clone(),
                     _ => row.entry_range.clone(),
@@ -70,11 +67,8 @@ impl TimelineView {
                             Vec::new()
                         };
                         (
-                            timeline.turns.get(row.turn).cloned().unwrap_or_default(),
-                            entries
-                                .get(own_range)
-                                .map(<[_]>::to_vec)
-                                .unwrap_or_default(),
+                            timeline.turns[row.turn].clone(),
+                            entries[own_range].to_vec(),
                             trailer,
                         )
                     },

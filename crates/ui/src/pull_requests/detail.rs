@@ -840,16 +840,14 @@ impl PullRequestView {
                     if let Some(page) = this.page_mut() {
                         page.refreshing = false;
                     }
+                    let failed = match this.loaded_at() {
+                        Some(loaded) => {
+                            crate::tr!("pull_requests.detail.refresh_failed", ago = ago(loaded, cx))
+                        }
+                        None => crate::tr!("pull_requests.detail.refresh_failed_unloaded"),
+                    };
                     window.push_notification(
-                        Notification::warning(
-                            crate::tr!(
-                                "pull_requests.detail.refresh_failed",
-                                ago = ago(crate::time::now_secs(cx), cx)
-                            )
-                            .into_owned()
-                                + " "
-                                + &reason(&error),
-                        ),
+                        Notification::warning(failed.into_owned() + " " + &reason(&error)),
                         cx,
                     );
                     cx.notify();
@@ -1829,18 +1827,24 @@ impl PullRequestView {
         })
     }
 
+    /// When the oldest part of the page on screen was read, by this
+    /// window's clock; `None` before any was.
+    fn loaded_at(&self) -> Option<u64> {
+        self.page().and_then(|page| {
+            [page.files.loaded_at, page.conversation.loaded_at]
+                .into_iter()
+                .filter(|at| *at > 0)
+                .min()
+        })
+    }
+
     pub(super) fn refresh_button(
         &self,
         refreshing: bool,
         compact: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let loaded = self.page().and_then(|page| {
-            [page.files.loaded_at, page.conversation.loaded_at]
-                .into_iter()
-                .filter(|at| *at > 0)
-                .min()
-        });
+        let loaded = self.loaded_at();
         let tooltip = match (refreshing, loaded) {
             (true, _) => {
                 crate::tr!("pull_requests.detail.refreshing", pr = self.noun(cx).pr).into_owned()

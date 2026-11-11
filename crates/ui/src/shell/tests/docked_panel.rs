@@ -13,23 +13,16 @@ fn panel(cx: &mut VisualTestContext) -> gpui::Bounds<Pixels> {
     cx.debug_bounds("right-panel").expect("the panel")
 }
 
-/// The composer of the first pane holding the keyboard.
-fn typing(shell: &Entity<AppShell>, cx: &mut VisualTestContext) -> gpui::FocusHandle {
-    let input = shell.read_with(cx, |shell, cx| {
-        shell
-            .column
-            .as_ref()
-            .expect("attached")
-            .chat(cx)
-            .read(cx)
-            .composer()
-            .read(cx)
-            .input_focus_handle(cx)
+/// The keyboard given to the first pane's composer.
+fn typing(shell: &Entity<AppShell>, cx: &mut VisualTestContext) {
+    let pane = shell.read_with(cx, |shell, cx| {
+        shell.column.as_ref().expect("attached").all_panes(cx)[0].clone()
     });
-    cx.update(|window, cx| input.focus(window, cx));
-    draw(cx);
-    input
+    type_into(&pane, cx);
 }
+
+/// What a line typed with the keyboard out of every composer reaches.
+const NOWHERE: Vec<String> = Vec::new();
 
 fn open(store: &Entity<WorkspaceStore>, thread: &str, tab: RightTab, cx: &mut VisualTestContext) {
     store.update(cx, |store, cx| store.toggle_tab_panel_for(thread, tab, cx));
@@ -49,20 +42,24 @@ fn one_pane(width: f32, cx: &mut VisualTestContext) {
 fn a_panel_docks_beside_the_conversation_and_leaves_the_keyboard(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     cx.update(|cx| cx.set_reduce_motion(true));
-    let (shell, _host, cx) = mount_panes(cx);
+    let (shell, host, cx) = mount_panes(cx);
     let store = store_of(&shell, cx);
     one_pane(ROOMY, cx);
-    let input = typing(&shell, cx);
+    typing(&shell, cx);
 
     open(&store, "thread-1", RightTab::Plan, cx);
 
     let panel_at = panel(cx);
-    cx.update(|window, _| assert!(input.is_focused(window), "the composer keeps it"));
+    assert_eq!(
+        typed_reaches(&host, cx),
+        ["thread-1"],
+        "the composer keeps it"
+    );
 
     // Escape is the panel's own to use with the keyboard in it.
     cx.simulate_click(panel_at.center(), gpui::Modifiers::default());
     draw(cx);
-    cx.update(|window, _| assert!(!input.is_focused(window), "the press takes it"));
+    assert_eq!(typed_reaches(&host, cx), NOWHERE, "the press takes it");
     cx.simulate_keystrokes("escape");
     crate::test_frames::draw_settled(cx);
     assert_eq!(panel_of(&store, "thread-1", cx), Some(RightTab::Plan));
@@ -82,17 +79,21 @@ fn a_narrow_pane_is_covered_and_its_panel_takes_the_keyboard(cx: &mut TestAppCon
     cx.update(|_, cx| crate::device::DevicePreferences::set_right_panel_width(320, cx));
     resize(cx, 1440.);
     crate::test_frames::draw_settled(cx);
-    let input = typing(&shell, cx);
+    typing(&shell, cx);
 
     open(&store, "thread-1", RightTab::Plan, cx);
 
-    cx.update(|window, _| assert!(!input.is_focused(window), "the panel has the keyboard"));
+    assert_eq!(
+        typed_reaches(&host, cx),
+        NOWHERE,
+        "the panel has the keyboard"
+    );
 
     cx.simulate_keystrokes("escape");
     crate::test_frames::draw_settled(cx);
     assert_eq!(panel_of(&store, "thread-1", cx), None);
     assert_eq!(cx.debug_bounds("right-panel"), None);
-    cx.update(|window, _| assert!(input.is_focused(window), "it goes back"));
+    assert_eq!(typed_reaches(&host, cx), ["thread-1"], "it goes back");
 }
 
 /// A panel covering the pane would lie over an agent opened in that pane's
@@ -157,16 +158,20 @@ fn a_pane_narrowing_into_cover_hands_the_panel_the_keyboard(cx: &mut TestAppCont
     cx.update(|_, cx| cx.set_reduce_motion(true));
     let store = store_of(&shell, cx);
     one_pane(ROOMY, cx);
-    let input = typing(&shell, cx);
+    typing(&shell, cx);
     open(&store, "thread-1", RightTab::Plan, cx);
-    cx.update(|window, _| assert!(input.is_focused(window), "docked, the composer keeps it"));
+    assert_eq!(
+        typed_reaches(&host, cx),
+        ["thread-1"],
+        "docked, the composer keeps it"
+    );
 
     one_pane(CRAMPED, cx);
-    cx.update(|window, _| assert!(!input.is_focused(window), "the composer is covered"));
     assert_eq!(keyboard_pane(&shell, cx), Some(0), "the panel has it");
+    assert_eq!(typed_reaches(&host, cx), NOWHERE, "the composer is covered");
 
     one_pane(ROOMY, cx);
-    cx.update(|window, _| assert!(input.is_focused(window), "it goes back"));
+    assert_eq!(typed_reaches(&host, cx), ["thread-1"], "it goes back");
 
     store.update(cx, |store, cx| {
         store.close_right_panel_for(Some("thread-1"), cx)
@@ -175,9 +180,13 @@ fn a_pane_narrowing_into_cover_hands_the_panel_the_keyboard(cx: &mut TestAppCont
     resize(cx, 2000.);
     crate::test_frames::draw_settled(cx);
     side_by_side(&shell, || serve_thread(&host, "thread-2"), cx);
-    let input = typing(&shell, cx);
+    typing(&shell, cx);
     open(&store, "thread-2", RightTab::Plan, cx);
     resize(cx, 1440.);
     crate::test_frames::draw_settled(cx);
-    cx.update(|window, _| assert!(input.is_focused(window), "the other pane's stays"));
+    assert_eq!(
+        typed_reaches(&host, cx),
+        ["thread-1"],
+        "the other pane's stays"
+    );
 }

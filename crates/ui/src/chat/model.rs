@@ -78,28 +78,23 @@ pub(crate) enum LimitResumeAction {
     Scheduled {
         queued_id: u64,
     },
-    /// The reset is still ahead and nothing is queued for it.
+    /// The error still ends the thread and nothing is queued after it: offer
+    /// to resume at the reset. The host holds it until then by its own clock,
+    /// and sends it at once when the reset has passed. A queued message (the
+    /// resume itself while the provider starts, or the user's own) means
+    /// something already follows the error.
     Schedule,
-    /// The reset has passed while the error still ends the thread and nothing
-    /// is queued after it. The scheduled resume lives in the host's in-memory
-    /// queue, so a restart loses it; the card offers to continue now instead.
-    /// A queued message (the continue itself while the provider starts, or
-    /// the user's own) means something already follows the error.
-    ContinueNow,
     None,
 }
 
 pub(crate) fn limit_resume_action(
-    resets_at: u64,
     queued_id: Option<u64>,
-    now: u64,
     ends_thread: bool,
     queue_empty: bool,
 ) -> LimitResumeAction {
     match queued_id {
         Some(queued_id) => LimitResumeAction::Scheduled { queued_id },
-        None if resets_at > now => LimitResumeAction::Schedule,
-        None if ends_thread && queue_empty => LimitResumeAction::ContinueNow,
+        None if ends_thread && queue_empty => LimitResumeAction::Schedule,
         None => LimitResumeAction::None,
     }
 }
@@ -419,18 +414,16 @@ pub(crate) fn work_log_capsule_label(counts: &WorkLogCounts, activity_count: usi
     clauses.join(" · ")
 }
 
-pub(crate) fn activity_run_duration_ms(
-    activities: &[&TimelineEntry],
-    turn: &TurnMeta,
-    is_last: bool,
-) -> u64 {
-    let first = activities.iter().find_map(|entry| entry.ts);
-    let last = activities.iter().rev().find_map(|entry| entry.ts);
-    match (first, last) {
-        (Some(first), Some(last)) => last.saturating_sub(first),
-        _ if is_last => turn.timing.map_or(0, |timing| timing.total_ms),
-        _ => 0,
-    }
+/// How long a run of activities took: from the first start seen to the
+/// last end seen. `None` when its times do not span any: one activity whose
+/// end was never seen took a time nobody knows.
+pub(crate) fn activity_run_duration_ms(activities: &[&TimelineEntry]) -> Option<u64> {
+    let start = activities.iter().filter_map(|entry| entry.ts).min()?;
+    let end = activities
+        .iter()
+        .filter_map(|entry| entry.finished_ts.or(entry.ts))
+        .max()?;
+    (end > start).then(|| end - start)
 }
 
 // A failed command inside a run is normal agent probing (grep exit 1, a

@@ -1673,6 +1673,7 @@ impl OptionRegistry {
                     apply: crate::ApplyTiming::Live,
                     recommended: None,
                     permissive: None,
+                    minimum: None,
                 },
                 OptionOrigin::Mode,
                 Value::String(modes.current_mode_id.0.to_string()),
@@ -1731,6 +1732,7 @@ impl OptionRegistry {
                             apply: crate::ApplyTiming::Live,
                             recommended: None,
                             permissive: None,
+                            minimum: None,
                         },
                         OptionOrigin::Config(option.id.clone()),
                         Value::String(select.current_value.0.to_string()),
@@ -2263,7 +2265,7 @@ impl State {
 fn command_of(tool: &ToolState) -> String {
     tool.raw_input
         .as_ref()
-        .and_then(|input| input.get("command").or_else(|| input.get("cmd")))
+        .and_then(|input| input.get("command"))
         .and_then(|command| match command {
             Value::String(command) => Some(command.clone()),
             Value::Array(parts) => Some(
@@ -3036,6 +3038,7 @@ mod tests {
             instructions: None,
             processes: processes.clone(),
             clock: Default::default(),
+            worktrees: Vec::new(),
         };
         let start = smol::spawn(crate::start_session(ProviderKind::Acp, opts));
         asked.accept().unwrap();

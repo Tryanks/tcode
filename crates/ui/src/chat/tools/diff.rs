@@ -85,19 +85,23 @@ pub(in crate::chat) fn edit_output(
     }
 }
 
-/// The header of one edited file's window.
-pub(in crate::chat) fn file_header(file: &EditedFile) -> Header {
+/// The header of one edited file's window. An edit that failed or was
+/// declined changed no lines, so its counts are not told.
+pub(in crate::chat) fn file_header(file: &EditedFile, status: ItemStatus) -> Header {
     let (icon, verb) = match file.row.kind {
         FileChangeKind::Create => (IconName::FileText, Verb("create")),
         FileChangeKind::Modify => (IconName::Pencil, Verb("edit")),
         FileChangeKind::Delete => (IconName::Trash, Verb("delete")),
         FileChangeKind::Rename => (IconName::Replace, Verb("rename")),
     };
+    let applied = !matches!(status, ItemStatus::Failed | ItemStatus::Declined);
     Header::new(icon, verb)
+        .undone_when_failed()
         .argument(Argument::mono(file.row.path.clone()))
         .chip(
             file.row
                 .counts
+                .filter(|_| applied)
                 .map(|(added, deleted)| Chip::Lines { added, deleted }),
         )
 }
