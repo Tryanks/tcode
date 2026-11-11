@@ -1968,7 +1968,7 @@ impl Timeline {
         if item.parent_item_id.is_some() {
             return;
         }
-        let mut incoming = EntryContent::Item(item.content.clone());
+        let incoming = EntryContent::Item(item.content.clone());
         if let Some(position) = self.item_entry(&item.id) {
             let entry = Arc::make_mut(&mut self.entries[position]);
             entry.content = merge_content(
@@ -1981,29 +1981,7 @@ impl Timeline {
                 EntryContent::Item(ItemContent::UserMessage { .. })
             ) {
                 self.close_undo();
-                let turn = self.begin_user_turn();
-                if self.entries.iter().any(|entry| {
-                    entry.turn == turn
-                        && matches!(
-                            entry.content,
-                            EntryContent::Item(ItemContent::UserMessage { .. })
-                                | EntryContent::Steer { .. }
-                        )
-                }) {
-                    // Legacy logs represented a steer as a second UserMessage
-                    // item. Preserve their historical accepted rendering.
-                    let EntryContent::Item(ItemContent::UserMessage { text, attachments }) =
-                        incoming
-                    else {
-                        unreachable!();
-                    };
-                    incoming = EntryContent::Steer {
-                        text,
-                        status: SteeringStatus::Accepted,
-                        attachments,
-                    };
-                }
-                turn
+                self.begin_user_turn()
             } else {
                 self.ensure_turn()
             };
@@ -3165,55 +3143,6 @@ mod tests {
             "first.txt"
         );
         assert!(timeline.turns[1].changes.is_none());
-    }
-
-    #[test]
-    fn fold_marks_only_mid_turn_user_messages_as_steered() {
-        let events = vec![
-            user_msg("user-a", "A"),
-            AgentEvent::TurnStarted {
-                turn_id: "t1".into(),
-            },
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "assistant-a".into(),
-                parent_item_id: None,
-                content: ItemContent::AssistantMessage {
-                    text: "working".into(),
-                    summarized: false,
-                },
-            }),
-            user_msg("user-b", "B"),
-            AgentEvent::TurnCompleted {
-                turn_id: "t1".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            user_msg("user-c", "C"),
-            AgentEvent::TurnStarted {
-                turn_id: "t2".into(),
-            },
-        ];
-        let timeline = Timeline::fold_events(events);
-        let users: Vec<(&str, Option<SteeringStatus>)> = timeline
-            .entries
-            .iter()
-            .filter_map(|entry| match &entry.content {
-                EntryContent::Item(ItemContent::UserMessage { text, .. }) => {
-                    Some((text.as_str(), None))
-                }
-                EntryContent::Steer { text, status, .. } => Some((text.as_str(), Some(*status))),
-                _ => None,
-            })
-            .collect();
-
-        assert_eq!(
-            users,
-            vec![
-                ("A", None),
-                ("B", Some(SteeringStatus::Accepted)),
-                ("C", None),
-            ]
-        );
     }
 
     #[test]
