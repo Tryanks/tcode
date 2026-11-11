@@ -326,7 +326,7 @@ mod tests {
         };
         let trouble = |snapshot: ProviderSnapshot| {
             row_summary(
-                &HarnessDescription::native(ProviderKind::Codex),
+                &HarnessId::Native(ProviderKind::Codex),
                 &[(profile.clone(), Some(snapshot))],
                 true,
             )
