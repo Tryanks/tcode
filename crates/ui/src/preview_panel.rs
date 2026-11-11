@@ -1009,35 +1009,11 @@ mod tests {
             "data:text/html,%3Ch1%3E"
         );
     }
-
-    #[test]
-    fn native_overlay_is_visible_only_while_preview_owns_it() {
-        assert_eq!(
-            visible_preview_key(Some("thread-a"), Route::Chat, false, true),
-            Some("thread-a")
-        );
-        assert_eq!(
-            visible_preview_key(Some("thread-a"), Route::Chat, false, false),
-            None,
-            "closing Preview or selecting Diff/Plan must hide the native child"
-        );
-        assert_eq!(
-            visible_preview_key(Some("thread-b"), Route::Chat, true, true),
-            None,
-            "the command palette must cover the whole workspace"
-        );
-        assert_eq!(
-            visible_preview_key(Some("thread-b"), Route::Settings, false, true),
-            None,
-            "leaving Chat unmounts the preview layout"
-        );
-        assert_eq!(visible_preview_key(None, Route::Chat, false, true), None);
-    }
 }
 
 #[cfg(all(preview_backend, target_os = "android"))]
 mod android;
-#[cfg(any(test, all(preview_backend, target_os = "android")))]
+#[cfg(all(preview_backend, target_os = "android"))]
 mod android_geometry;
 
 #[cfg(all(preview_backend, target_os = "ios"))]

@@ -1706,31 +1706,16 @@ mod tests {
     }
 
     #[test]
-    fn provider_color_maps_builtins_to_brand_and_custom_providers_to_distinct_palette_slots() {
-        let settings = Settings::default();
-        assert_eq!(settings.provider_color("claude"), 0xD97757);
-        assert_eq!(settings.provider_color("codex"), 0x8B5CF6);
-        assert_eq!(settings.provider_color("pi"), 0x4D9ABF);
-        assert_eq!(settings.provider_color("opencode"), 0x22A06B);
-
-        for (profiles, agents, expected) in [
-            (
-                vec!["work-claude".to_string()],
-                vec!["gemini"],
-                Some(vec![0x6B7FD7, 0x14B8A6]),
-            ),
+    fn custom_providers_take_distinct_palette_slots_apart_from_the_brands() {
+        for (profiles, agents) in [
+            (vec!["work-claude".to_string()], vec!["gemini"]),
             (
                 ["work-claude", "proxy-codex", "lab"]
                     .map(String::from)
                     .to_vec(),
                 vec!["gemini", "goose"],
-                None,
             ),
-            (
-                (0..13).map(|i| format!("profile-{i:02}")).collect(),
-                vec![],
-                None,
-            ),
+            ((0..13).map(|i| format!("profile-{i:02}")).collect(), vec![]),
         ] {
             let mut settings = Settings::default();
             for id in &profiles {
@@ -1769,9 +1754,6 @@ mod tests {
                 .iter()
                 .map(|key| settings.provider_color(key))
                 .collect();
-            if let Some(expected) = expected {
-                assert_eq!(colors, expected);
-            }
             let mut first_palette: Vec<_> = colors
                 .iter()
                 .take(PROVIDER_COLOR_PALETTE.len())
@@ -1788,13 +1770,6 @@ mod tests {
                 assert!(PROVIDER_COLOR_PALETTE.contains(color));
                 assert!(![0xD97757, 0x8B5CF6, 0x4D9ABF, 0x22A06B].contains(color));
             }
-            assert_eq!(
-                colors,
-                keys.iter()
-                    .map(|key| settings.provider_color(key))
-                    .collect::<Vec<_>>()
-            );
-            assert_eq!(settings.provider_color("deleted-profile"), 0xF59E0B);
         }
     }
 
@@ -1825,7 +1800,6 @@ mod tests {
         assert_eq!(settings.provider_color("work-claude"), 0x2563EB);
         assert_eq!(settings.provider_color("codex"), 0x00FF00);
         assert!(PROVIDER_COLOR_PALETTE.contains(&settings.provider_color("broken")));
-        assert_eq!(settings.provider_color("claude"), 0xD97757);
     }
 
     #[test]

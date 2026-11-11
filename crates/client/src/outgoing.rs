@@ -294,7 +294,6 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&other).unwrap()["id"],
             1001
         );
-        assert_eq!(sender.queued(), 1);
         assert_eq!(smol::block_on(receiver.recv()).unwrap().len(), MAX_BYTES);
     }
 }

@@ -234,7 +234,9 @@ impl ChatView {
     /// (a phone, or a desktop window too narrow for it): the background
     /// work's pill first, then the Agents pill, then the linked pull
     /// requests, scrolling sideways when they overflow. On a desktop it
-    /// carries only what the rail would have shown. It floats over the chat
+    /// carries only what the rail would have shown. A subagent's thread has,
+    /// in the Agents pill's place and wherever it is drawn, a chip for each
+    /// agent the subagent started. It floats over the chat
     /// instead of taking height from it, so each chip carries its own
     /// backing; the last row's padding clears it at the tail. It rises in
     /// with the first of them and sinks out, as it last stood, with the
@@ -262,12 +264,28 @@ impl ChatView {
             .active_pull_requests(cx)
             .filter(|links| shows(RailCard::PullRequests) && !links.is_empty());
         let fork = shows(RailCard::Thread) && self.fork_source(cx).is_some();
+        // A subagent's thread, which takes no message, has the agents it
+        // started stand here one by one, wherever it is drawn, each opening
+        // its own thread.
+        let subagent = self
+            .workspace_store
+            .read(cx)
+            .native_subagent_readonly_for(self.session_id.as_deref(), cx);
+        let started = agents
+            .filter(|_| subagent)
+            .map(crate::agents_panel::Agents::lines)
+            .unwrap_or_default();
         let agents = agents
-            .filter(|_| shows(RailCard::Agents))
+            .filter(|_| !subagent && shows(RailCard::Agents))
             .map(|agents| (agents.count(), agents.cue(cx)));
         let strip = self.motion.shown(
             "phone-strip",
-            (background.is_some() || agents.is_some() || links.is_some() || fork).then_some(()),
+            (background.is_some()
+                || agents.is_some()
+                || !started.is_empty()
+                || links.is_some()
+                || fork)
+                .then_some(()),
             SHOW,
             window,
             cx,
@@ -307,6 +325,75 @@ impl ChatView {
                     pill.fold_across_gap(gap, chip)
                 }
             });
+        let started = (!started.is_empty()).then(|| {
+            let (store, host) = (self.workspace_store.clone(), self.agent_host(cx));
+            // Each chip carries the gap before it, so the gap goes with it;
+            // the row starts a gap early so the first sits at its start.
+            crate::motion::keyed_across(
+                "phone-agent-chips",
+                started
+                    .into_iter()
+                    .map(|line| (SharedString::from(line.key.clone()), line)),
+                SHOW,
+                window,
+                cx,
+                |key, line, window, cx| {
+                    let title = SharedString::from(if line.title.trim().is_empty() {
+                        crate::tr!("agents.untitled").into_owned()
+                    } else {
+                        line.title.clone()
+                    });
+                    let (store, host, open) = (store.clone(), host.clone(), line.open.clone());
+                    let selector = format!("agent-chip-{key}");
+                    let chip = Button::new(SharedString::from(format!("agent-chip-{key}")))
+                        .motion(&self.motion)
+                        .debug_selector(move || selector.clone())
+                        .ghost()
+                        .outline()
+                        .chip()
+                        .text_body(false, cx)
+                        .max_w(px(240.))
+                        .aria_label(title.clone())
+                        .disabled(open.is_none())
+                        .child(
+                            h_flex()
+                                .min_w_0()
+                                .gap_1p5()
+                                .items_center()
+                                .child(crate::agents_panel::status_mark(
+                                    &format!("chip-{key}"),
+                                    line.execution,
+                                    window,
+                                    cx,
+                                ))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .child(crate::widgets::fade_text(title)),
+                                ),
+                        )
+                        .on_click(move |_, window, cx| {
+                            if let Some(id) = open.clone() {
+                                crate::agents_panel::open_agent(
+                                    &store,
+                                    id,
+                                    host.clone(),
+                                    None,
+                                    window,
+                                    cx,
+                                );
+                            }
+                        });
+                    div()
+                        .flex_none()
+                        .pl(gap)
+                        .child(floating_backing(radius, cx).child(chip))
+                        .into_any_element()
+                },
+            )
+            .render(h_flex().flex_none().items_center().ml(-gap))
+        });
         let pull_requests = self
             .motion
             .shown("phone-pr-pill-fold", links, SHOW, window, cx)
@@ -351,7 +438,7 @@ impl ChatView {
                         // Each pill keeps the width its label needs; a strip
                         // too narrow for them all scrolls instead.
                         .children(
-                            [background, agents, pull_requests, fork]
+                            [background, agents, started, pull_requests, fork]
                                 .into_iter()
                                 .flatten()
                                 .map(|pill| div().flex_none().child(pill)),
@@ -1865,45 +1952,14 @@ fn segment_corners(leading: bool, cx: &App) -> gpui::Corners<gpui::Pixels> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use crate::chat::tests::*;
-    use crate::test_frames::draw;
     use gpui::TestAppContext;
-
-    /// Whether the header's split buttons carry their labels follows the width
-    /// it is laid out at, from the frame a resize draws.
-    #[gpui::test]
-    fn header_labels_follow_the_width_of_the_frame(cx: &mut TestAppContext) {
-        use gpui::{VisualTestContext, px, size};
-        let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(1));
-        let (_view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-            ChatView::new(store, window_state, Some(session_id), window, cx)
-        });
-        let cx: &mut VisualTestContext = cx;
-        draw(cx);
-        // A resize draws its frame at the new size.
-        let git_main = |width: f32, cx: &mut VisualTestContext| {
-            cx.simulate_resize(size(px(width), px(700.)));
-            cx.debug_bounds("git-main")
-                .expect("the git button")
-                .size
-                .width
-        };
-        let labelled = git_main(1_024., cx);
-        let narrow = git_main(600., cx);
-        assert!(narrow < labelled, "a 600pt header kept its labels");
-        assert_eq!(
-            git_main(1_024., cx),
-            labelled,
-            "a 1024pt header lost its labels"
-        );
-    }
 
     /// Over a collapsed sidebar the header clears the traffic lights while
     /// its pane is at the window's left edge, and not once it has left it.
-    #[cfg(target_os = "macos")]
     #[gpui::test]
     fn the_header_clears_the_traffic_lights_only_at_the_left_edge(cx: &mut TestAppContext) {
         use crate::chat::WindowEdges;

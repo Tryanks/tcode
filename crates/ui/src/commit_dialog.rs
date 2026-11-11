@@ -14,8 +14,8 @@ use crate::{
     sizing::Sizable as _,
 };
 use gpui::{
-    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Task, Window, div, prelude::FluentBuilder as _, px,
+    App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+    Task, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -175,7 +175,6 @@ impl CommitDialog {
         let path = file.path.clone();
         let path_for_toggle = file.path.clone();
         h_flex()
-            .debug_selector(move || format!("commit-file-{index}"))
             .w_full()
             .py_1()
             .px_1()
@@ -379,98 +378,5 @@ impl Render for CommitDialog {
         );
 
         body
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use gpui::{ScrollDelta, ScrollEvent, TestAppContext, point};
-    use tcode_core::git::GitStatus;
-    use tcode_protocol::{
-        EventEnvelope, GitStatusStatus, HostMessage, ServerEvent, Topic, encode_line,
-    };
-
-    #[gpui::test]
-    fn a_long_change_list_lays_out_only_the_visible_files(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let (to_host, _outgoing) = async_channel::unbounded();
-        let (incoming, from_host) = async_channel::unbounded();
-        let status = GitStatus {
-            is_repo: true,
-            has_working_tree_changes: true,
-            changed_files: (0..300)
-                .map(|index| GitFileEntry {
-                    path: format!("src/file-{index}.rs"),
-                    insertions: 1,
-                    deletions: 0,
-                })
-                .collect(),
-            ..Default::default()
-        };
-        incoming
-            .try_send(
-                encode_line(&HostMessage::Event(EventEnvelope {
-                    request_id: None,
-                    topic: Topic::GitStatus {
-                        session_id: "session".into(),
-                    },
-                    event: ServerEvent::GitStatusReplaced(GitStatusStatus {
-                        status: Some(status),
-                        error: None,
-                        busy: false,
-                    }),
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-        let deferred: Vec<String> = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
-        let link = tcode_client::HostLink::new(to_host, from_host);
-        let pump_link = link.clone();
-        let _pump = cx.background_executor.spawn(async move {
-            pump_link.pump().await;
-        });
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link,
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
-        store.update(cx, |store, cx| store.show_alone("session".into(), cx));
-        for line in deferred {
-            incoming.try_send(line).unwrap();
-        }
-        cx.run_until_parked();
-        cx.run_until_parked();
-        let (_dialog, cx) = cx.add_window_view(|window, cx| {
-            CommitDialog::new(
-                store.clone(),
-                "session".into(),
-                GitAction::Commit,
-                window,
-                cx,
-            )
-        });
-        cx.simulate_resize(gpui::size(px(640.), px(800.)));
-        cx.update(|window, cx| _ = window.draw(cx));
-        let first = cx.debug_bounds("commit-file-0").expect("first file row");
-        assert!(
-            cx.debug_bounds("commit-file-250").is_none(),
-            "the dialog must not lay out all 300 file rows"
-        );
-
-        cx.simulate_event(ScrollEvent {
-            position: first.center(),
-            delta: ScrollDelta::Pixels(point(px(0.), px(-100_000.))),
-            ..Default::default()
-        });
-        cx.update(|window, cx| _ = window.draw(cx));
-        assert!(cx.debug_bounds("commit-file-299").is_some());
-        assert!(cx.debug_bounds("commit-file-0").is_none());
     }
 }

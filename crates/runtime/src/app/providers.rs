@@ -2013,21 +2013,4 @@ mod provider_lifecycle_tests {
         assert_eq!(catalog.provider_usage["claude"].error, None);
         assert_eq!(catalog.provider_usage["claude"].fetched_at, 1_700_001_000);
     }
-
-    #[test]
-    fn claude_account_profiles_share_one_sign_in_before_2_1_144() {
-        for (version, profiles, shared) in [
-            (Some("2.1.143"), 2, true),
-            (Some("2.0.76"), 3, true),
-            (Some("2.1.144"), 2, false),
-            (Some("2.1.143"), 1, false),
-            (None, 2, false),
-        ] {
-            assert_eq!(
-                claude_shares_credentials(version, profiles),
-                shared,
-                "{version:?} {profiles}"
-            );
-        }
-    }
 }

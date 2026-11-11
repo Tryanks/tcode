@@ -1,9 +1,10 @@
 //! The thread's background work: each piece its harness runs in the
 //! background with how long it has run, how it stands and a stop where the
 //! harness has one. On a wide window each piece is a row of the rail card
-//! that lists its kind (a command in Commands, a subagent in Agents); without
-//! the rail a pill opens them all as one list over the timeline, or in a
-//! sheet on a phone.
+//! that lists its kind (a command in Commands, the thread's own agent in
+//! Agents; an agent one of its subagents started stands over the foot of
+//! that subagent's thread instead); without the rail a pill opens them all as
+//! one list over the timeline, or in a sheet on a phone.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -589,11 +590,7 @@ fn row(
 /// The thread of the subagent the call `item` started, anywhere under
 /// `lead`: Claude Code lists an agent one of its subagents starts among the
 /// lead's own background work, while the call is that subagent's.
-pub(in crate::chat) fn transcript(
-    store: &WorkspaceStore,
-    lead: &str,
-    item: &str,
-) -> Option<String> {
+fn transcript(store: &WorkspaceStore, lead: &str, item: &str) -> Option<String> {
     let sessions = store.sidebar_sessions();
     let under_lead = |meta: &tcode_core::project::SessionMeta| {
         let mut parent = meta.parent_session_id.as_deref();

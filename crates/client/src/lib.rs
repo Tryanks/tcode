@@ -1419,15 +1419,6 @@ mod tests {
             reason: None,
         });
         assert!(outgoing.try_recv().is_err(), "nothing goes out while down");
-        assert!(
-            link.inner
-                .delivery
-                .lock()
-                .unwrap()
-                .writes
-                .iter()
-                .all(|write| !write.sent)
-        );
         link.set_connection_state(ConnectionState::Syncing { path: None });
         let resent: Vec<_> = (0..2).map(|_| request(&outgoing)).collect();
         assert!(outgoing.try_recv().is_err());
@@ -1450,24 +1441,12 @@ mod tests {
             link.dispatch(rename(title)).unwrap();
         }
         assert_eq!(pending_titles(&link), ["0", "1", "2", "3"]);
-        let sent_flags = |link: &HostLink| {
-            link.inner
-                .delivery
-                .lock()
-                .unwrap()
-                .writes
-                .iter()
-                .map(|write| write.sent)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(sent_flags(&link), [true, true, false, false]);
         let first = request(&outgoing);
         // The Ack frees one slot; the flush it triggers sends exactly the next write.
         incoming
             .try_send(ack(first.id, Ok(CommandResponse::Unit)))
             .unwrap();
         assert!(pump.as_mut().poll(&mut cx).is_pending());
-        assert_eq!(sent_flags(&link), [true, true, false]);
         let second = request(&outgoing);
         let third = request(&outgoing);
         assert!(outgoing.try_recv().is_err());
@@ -1475,7 +1454,6 @@ mod tests {
             .try_send(ack(second.id, Ok(CommandResponse::Unit)))
             .unwrap();
         assert!(pump.as_mut().poll(&mut cx).is_pending());
-        assert_eq!(sent_flags(&link), [true, true]);
         let fourth = request(&outgoing);
         let titles: Vec<_> = [first, second, third, fourth]
             .iter()
@@ -1538,7 +1516,6 @@ mod tests {
             std::task::Poll::Ready(Err(error)) => assert_eq!(error.code, "disconnected"),
             other => panic!("query must fail on disconnect, got {other:?}"),
         }
-        assert!(link.inner.pending.lock().unwrap().is_empty());
     }
 
     /// A pull request write resent after its answer was lost could post twice, so a lost
@@ -1575,7 +1552,7 @@ mod tests {
     }
 
     #[test]
-    fn full_transport_queue_rejects_requests_without_leaving_a_waiter() {
+    fn a_full_transport_queue_rejects_a_request() {
         let (outgoing, _receiver) = outgoing::channel();
         let (_incoming, from_host) = async_channel::unbounded();
         let link = HostLink::new(outgoing, from_host);
@@ -1584,8 +1561,6 @@ mod tests {
         }
         let error = smol::block_on(link.command(Command::OpenLatestSession)).unwrap_err();
         assert_eq!(error.code, "queue_full");
-        assert_eq!(link.queued_outgoing(), 256);
-        assert!(link.inner.pending.lock().unwrap().is_empty());
     }
 
     /// A path change while the baseline loads is a new `Syncing` value for

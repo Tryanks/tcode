@@ -213,6 +213,76 @@ Each was found in one lane and is likely elsewhere.
 - **A name that promises more than the assertions deliver.**
 - **A test with no fixed binary path** may launch the real CLI found on PATH.
 
+From the rounds over the UI and across the layers:
+
+- **A second gate**: a menu already left an action out by some state, and the
+  handler checks the same state again.
+- **A shadow of the host's rule**: the UI keeps its own, differing copies of
+  a judgment the host owns. Whether a thread could be settled was decided in
+  five places, none of them the host's.
+- **Rebuilt by kind**: the client fills in, from a table keyed by provider
+  kind, something the host already sends.
+- **Written, then split again**: one layer joins meaning into a sentence and
+  another cuts it apart to translate it. Codex's permission description, a
+  profile's display name.
+- **An empty id for a missing one**: `unwrap_or_default()` on a thread id,
+  sent to the host.
+- **Not answered yet, shown as none**: a list drawn empty, or a switch drawn
+  off, before the host has said anything.
+- **Failed, shown as empty**: a query's error turned into no rows, a count of
+  zero, "no matches".
+- **The log as the report**: a fallible read drops its error into a log line
+  and hands on an empty value, so no layer above can say what happened.
+- **A door in place of a permission**: the client holds a command back while
+  some state is unknown, in place of the host's own authorization, and the
+  user's action vanishes.
+- **A layout taken for a capability**: a compact window turned off sending
+  while reconnecting, pasting a picture, dropping a file.
+- **A guessed layout value written to shared state**: a phone's estimate of
+  its terminal height sent to the host as the thread's.
+- **A second owner of one timing**: a timer run beside the one that already
+  counts the same thing down.
+- **A catch for panics nothing showed**, written with the feature.
+- **A gap comment whose reason does not hold**: a local primitive justified
+  by a cost the dependency does not have.
+- **A builder option nothing sets**, and the branch behind its default.
+- **A version gate as a capability switch**, with an unread version taken
+  for an old one.
+- **A limit that outlived its timer**: a number kept from a timeout that was
+  removed, on a path where it no longer means anything.
+- **Production turning off its own loop for tests** behind `cfg(not(test))`,
+  with a hand pump beside it, so the test drives something the app never
+  runs.
+- **A fixture that contradicts itself**: a notice saying 35 lines over 25.
+- **A Debug string of a map compared**: it fails by iteration order.
+- **A test clock borrowed from another module's duration**, equal by
+  accident.
+- **Queued in the order work finished**, not the order the user gave.
+
+## What the audit did wrong
+
+- **It reported in place of verifying.** Four rounds merged with every
+  visual change marked "not looked at in the running app". Saying so each
+  time did not make it looked at.
+- **It took a lane's word.** Twice in one hour a fix was called done before
+  its result was read; one edit had not applied, the other fixed the wrong
+  thing.
+- **It let the tests pass by.** The brief for the UI round said the tests had
+  been cleaned already. Two hundred and thirty-three of them were two thirds
+  of the suite's time, and a third to a half tested primitives.
+- **It did not say what its building cost.** The fourth round came out three
+  thousand lines longer. The maintainer's answer was that building is not a
+  problem: whatever leaves the codebase better is wanted, whatever harms it
+  is not. What was missing was the account. The largest part was adapters
+  reading the text layout of harness output, where a guess had moved rather
+  than gone, and nobody had checked that a layout an adapter does not
+  recognise is still shown as the harness wrote it.
+- **Removing a bound made a hang last.** With the in-test limits gone a wait
+  that never ends is held only by the runner, and the first one met cost a
+  platform five minutes before Principle 10 could be applied to it.
+- **It answered a measured question from memory.** "Compilation is most of
+  CI" was said before any log was read; test execution was half.
+
 ## Families beyond the defence
 
 Named by the maintainer, not yet inventoried:
@@ -352,6 +422,15 @@ next round, not a reason to keep the timeouts for good.
 - On agents following the code they find: "That is what is wrong with the
   codebase as it stands: you carry on its old inertia without telling good
   from bad, and the old bad inertia is exactly what I want gone."
+
+On tests kept because a defect was once fixed, and on a test said to hold the
+motion the maintainer chose out of three prototypes:
+
+> A bug is fixed, not fixed and then given a regression test. As long as the
+> motion is right, and after several rounds it is, there is no need for a
+> test to guard it. I did choose one of three. So what? What has that to do
+> with a test? It cannot be there to make sure the animation is the one I
+> chose and not one of two that do not exist. — the maintainer
 
 ## Defects met on the way
 

@@ -1,6 +1,15 @@
 use super::*;
 use tcode_services::user_files::UserDirectories;
 
+/// The host's time in these tests: it stands still, so a run never crosses
+/// midnight.
+fn clock() -> crate::clock::HostClock {
+    crate::clock::ManualClock::starting_at(
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_780_000_000),
+    )
+    .host_clock()
+}
+
 fn fixture(documents: bool) -> (SpawnedHost, std::path::PathBuf) {
     let root =
         std::env::temp_dir().join(format!("tcode-project-creation-{}", uuid::Uuid::new_v4()));
@@ -12,6 +21,7 @@ fn fixture(documents: bool) -> (SpawnedHost, std::path::PathBuf) {
                 home: Some(root.join("home")),
                 documents: documents.then(|| root.join("documents")),
             },
+            clock: clock(),
             ..HostServices::default()
         },
     )
@@ -156,7 +166,6 @@ fn scratch_draft_uses_todays_host_documents_directory_and_reuses_the_draft() {
         super::tests::next_event(&events, |event| {
             matches!(&event.event, ServerEvent::IndexSnapshot(_))
         });
-        let started = chrono::Local::now().date_naive();
         let CommandResponse::SessionId(Some(id)) =
             link.command_blocking(Command::StartScratchDraft).unwrap()
         else {
@@ -196,13 +205,11 @@ fn scratch_draft_uses_todays_host_documents_directory_and_reuses_the_draft() {
         let ServerEvent::SessionStatusReplaced(status) = session.event else {
             unreachable!()
         };
-        let repeated = link.command_blocking(Command::StartScratchDraft).unwrap();
-        // A run that crosses midnight legitimately lands on two dated
-        // directories; only a same-day run can assert the exact path and reuse.
-        if chrono::Local::now().date_naive() == started {
-            assert_eq!(status.cwd, project_root.join(started.to_string()));
-            assert_eq!(repeated, CommandResponse::SessionId(Some(id)));
-        }
+        assert_eq!(status.cwd, project_root.join(clock().today().to_string()));
+        assert_eq!(
+            link.command_blocking(Command::StartScratchDraft).unwrap(),
+            CommandResponse::SessionId(Some(id))
+        );
         assert!(status.cwd.is_dir());
         assert!(status.draft);
         assert_eq!(status.project_id.as_deref(), Some(project.id.as_str()));
@@ -237,7 +244,7 @@ fn uploads_land_in_the_scratch_directory_and_leave_with_their_thread() {
     };
     let today = root
         .join("documents/Tcode")
-        .join(chrono::Local::now().date_naive().to_string());
+        .join(clock().today().to_string());
 
     let path = begin("../../notes.txt");
     assert!(path.starts_with(today.join("uploads").join(&session_id)));

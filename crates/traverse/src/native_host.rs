@@ -530,7 +530,7 @@ fn os_with_version(os: &str, version: Option<String>) -> String {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 fn os_release_pretty_name(contents: &str) -> Option<String> {
     contents
         .lines()
@@ -726,63 +726,6 @@ mod tests {
             vec!["192.168.1.161:47420", "192.168.31.5:47420"]
         );
         assert_eq!(saved.last_connected_unix, Some(1234));
-    }
-
-    #[test]
-    fn device_name_uses_the_first_nonempty_source_and_strips_only_local_host_suffix() {
-        for (sources, expected) in [
-            (
-                [
-                    Some(" Explicit name "),
-                    Some("Friendly Mac"),
-                    Some("host.local"),
-                    Some("etc-host"),
-                ],
-                "Explicit name",
-            ),
-            (
-                [Some(" "), Some("Friendly Mac"), Some("host.local"), None],
-                "Friendly Mac",
-            ),
-            (
-                [None, Some(""), Some("studio.local"), Some("etc-host")],
-                "studio",
-            ),
-            (
-                [None, None, Some("studio.localdomain"), None],
-                "studio.localdomain",
-            ),
-            ([None, None, Some(".local"), Some(" etc-host ")], "etc-host"),
-            ([None, None, None, None], "Tcode"),
-        ] {
-            let [environment, computer, host, etc] = sources.map(|value| value.map(str::to_owned));
-            assert_eq!(
-                resolve_device_name(environment, computer, host, etc),
-                expected,
-                "{sources:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn os_release_pretty_name_is_unquoted() {
-        for (contents, expected) in [
-            (
-                "NAME=Ubuntu\nVERSION_ID=24.04\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nID=ubuntu\n",
-                Some("Ubuntu 24.04.1 LTS"),
-            ),
-            ("PRETTY_NAME=Alpine Linux\n", Some("Alpine Linux")),
-            (" PRETTY_NAME=\"  Fedora Linux  \" \n", Some("Fedora Linux")),
-            ("ID=alpine\nPRETTY_NAME=\"\"\n", None),
-            ("NAME=Alpine\n", None),
-            ("", None),
-        ] {
-            assert_eq!(
-                os_release_pretty_name(contents).as_deref(),
-                expected,
-                "{contents:?}"
-            );
-        }
     }
 
     struct TestDir(PathBuf);

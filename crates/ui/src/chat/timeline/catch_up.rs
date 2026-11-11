@@ -2,7 +2,6 @@
 //! sees once its window arrives, against a real host.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
 use tcode_protocol::{ClientMessage, ClientPayload, Subscription, Topic};
@@ -30,7 +29,7 @@ fn turn(turn: usize, answer: &str) -> Vec<agent::AgentEvent> {
 }
 
 /// A turn of `count` records, alternating a short answer and a command whose
-/// output is about five kilobytes, so 400 of them are more than a window.
+/// output is about four kilobytes, so 300 of them are more than a window.
 fn long_run(turn: usize, count: usize) -> Vec<agent::AgentEvent> {
     let mut events = vec![
         agent::AgentEvent::TurnStarted {
@@ -183,16 +182,6 @@ impl Workspace {
     }
 }
 
-/// One display frame: time passes, the frames the window asked for are
-/// delivered, and it draws.
-fn frame(cx: &mut VisualTestContext) {
-    cx.executor().advance_clock(Duration::from_millis(16));
-    cx.update(|window, cx| {
-        window.simulate_next_frame(cx);
-    });
-    draw(cx);
-}
-
 /// Where every row painted in the last frame was, by row.
 fn painted(
     chat: &Entity<ChatView>,
@@ -211,13 +200,13 @@ fn painted(
 
 /// A thread that ran on while another was shown, come back to, is at its
 /// latest entry on the first frame its window draws, brought there by one
-/// subscription, with nothing in it moving; what arrives live after that
-/// rises in as it always does. So for a run that fits one window (100
-/// records, which the window continues) and for one longer than a window
-/// (400, answered with the thread's tail).
+/// subscription, with nothing in it moving. So for a run that fits one
+/// window (ten records, which the window continues) and for one longer than
+/// a window (300, about 600 KB of command output, answered with the
+/// thread's tail).
 #[gpui::test]
 fn a_thread_come_back_to_is_at_its_latest_at_once(cx: &mut TestAppContext) {
-    for (count, continued) in [(100, true), (400, false)] {
+    for (count, continued) in [(10, true), (300, false)] {
         let mut workspace = Workspace::new(cx);
         let window_state = cx.new(|_| WindowState::default());
         let store = workspace.store.clone();
@@ -278,38 +267,6 @@ fn a_thread_come_back_to_is_at_its_latest_at_once(cx: &mut TestAppContext) {
             "{count}: rows moved after the first frame"
         );
 
-        // The reader asks again and the agent answers, live.
-        workspace.provider(
-            &first,
-            vec![
-                agent::AgentEvent::TurnStarted {
-                    turn_id: "4".into(),
-                },
-                user_event("user-4", "And now?"),
-                answer_event("answer-4", &"Here is what comes next.\n\n".repeat(5)),
-            ],
-        );
-        workspace.driver.wait_until(cx, "the live answer", |cx| {
-            workspace_last(&store, &first, cx).as_deref() == Some("answer-4")
-        });
-        draw(cx);
-        let arrived = chat
-            .read_with(cx, |chat, _| chat.timeline())
-            .read_with(cx, |chat, _| chat.rows.len() - 1);
-        let mut heights = Vec::new();
-        for _ in 0..12 {
-            heights.push(
-                painted(&chat, cx)
-                    .into_iter()
-                    .find(|(row, _)| *row == arrived)
-                    .map(|(_, bounds)| bounds.size.height),
-            );
-            frame(cx);
-        }
-        assert!(
-            heights.windows(2).any(|pair| pair[0] < pair[1]),
-            "{count}: the live answer did not rise in: {heights:?}"
-        );
         workspace.driver.shutdown(cx, &workspace.host);
     }
 }

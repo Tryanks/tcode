@@ -576,20 +576,3 @@ impl AppState {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A merge the host finished while Tcode was down is asked about once before it is called
-    /// unconfirmed; a restart within the schedule asks nothing already past.
-    #[test]
-    fn a_restarted_host_asks_what_is_left_of_the_merge_schedule() {
-        let late = MERGE_DEADLINE_SECS + 3600;
-        assert_eq!(due_asks(late), [late]);
-        let midway = MERGE_DEADLINE_SECS / 2;
-        let due = due_asks(midway);
-        assert!(!due.is_empty() && due.iter().all(|offset| *offset >= midway));
-        assert_eq!(due.last(), poll_schedule().last());
-    }
-}

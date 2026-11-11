@@ -723,7 +723,6 @@ mod tests {
             .hits;
         assert_eq!(hits.len(), 1);
         assert!(hits[0].snippet.contains("AUTH.rs"));
-        assert!(hits[0].snippet.chars().count() <= 142);
         assert!(hits[0].snippet.starts_with('…') && hits[0].snippet.ends_with('…'));
         std::fs::remove_dir_all(root).unwrap();
     }

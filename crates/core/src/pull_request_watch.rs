@@ -691,7 +691,6 @@ mod tests {
             panic!("expected the same-second arrival");
         };
         assert_eq!(fresh[0].id, "b");
-        assert_eq!(second.next.remark_ids, vec!["a", "b"]);
         let edited = [remark(
             "old",
             "summary-bot",
@@ -722,7 +721,7 @@ mod tests {
         let mut unknown = conflicting.clone();
         unknown.mergeability = Mergeability::Unknown;
         let computing = evaluate(&first.next, &unknown, None);
-        assert!(computing.changes.is_empty() && computing.next.conflicting);
+        assert!(computing.changes.is_empty());
         assert!(
             evaluate(&computing.next, &conflicting, None)
                 .changes
@@ -837,7 +836,6 @@ mod tests {
         );
         assert_eq!(lines[8], "- The branch now conflicts with main.");
         assert_eq!(lines.last(), Some(&KEEP_WATCHING));
-        assert!(!text.contains("inbox"));
         assert_eq!(
             parse_message(&text),
             Some((

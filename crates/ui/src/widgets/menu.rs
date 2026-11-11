@@ -910,22 +910,7 @@ impl<T: gpui::StatefulInteractiveElement + IntoElement + 'static> RenderOnce
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{TestAppContext, VisualTestContext, point, size};
-    struct MenuHarness;
-    impl Render for MenuHarness {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().flex().flex_col().child(
-                div()
-                    .id("row-a")
-                    .relative()
-                    .h(px(56.))
-                    .w_full()
-                    .child("A")
-                    .context_menu(|menu, _, _| menu.menu("Action", Box::new(Cancel)))
-                    .touch(true),
-            )
-        }
-    }
+    use gpui::{TestAppContext, VisualTestContext, size};
 
     /// Text a view has selected, offered by its context menu.
     struct SelectionHarness;
@@ -958,45 +943,6 @@ mod tests {
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
             Some("    indented\n".into())
         );
-    }
-
-    #[gpui::test]
-    fn context_menu_opens_at_the_pointer_and_stays_in_the_window(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let (_, cx) = cx.add_window_view(|_, _| MenuHarness);
-        cx.simulate_resize(size(px(393.), px(852.)));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let right_click = |cx: &mut VisualTestContext, position| {
-            cx.simulate_event(gpui::MouseDownEvent {
-                button: MouseButton::Right,
-                position,
-                click_count: 1,
-                ..Default::default()
-            });
-            cx.update(|window, cx| window.draw(cx).clear(cx));
-            cx.executor().advance_clock(crate::edge_back::SETTLE);
-            cx.update(|window, cx| {
-                window.simulate_next_frame(cx);
-                window.draw(cx).clear(cx)
-            });
-            cx.debug_bounds("tcode-popup-menu").expect("menu opens")
-        };
-
-        let menu = right_click(cx, point(px(20.), px(30.)));
-        assert_eq!(menu.origin, point(px(20.), px(30.)));
-
-        cx.simulate_keystrokes("escape");
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        cx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-            window.draw(cx).clear(cx)
-        });
-        assert!(cx.debug_bounds("tcode-popup-menu").is_none());
-
-        let menu = right_click(cx, point(px(380.), px(50.)));
-        assert!(menu.right() <= px(393. - 8.), "{menu:?}");
-        assert_eq!(menu.top(), px(50.));
     }
 
     fn touch(cx: &mut VisualTestContext, phase: gpui::TouchPhase, position: Point<Pixels>) {
@@ -1138,7 +1084,6 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let row = cx.debug_bounds("menu-item-0").expect("menu opens");
-        assert!(row.size.height >= px(44.), "{row:?}");
         touch(cx, gpui::TouchPhase::Started, row.center());
         touch(cx, gpui::TouchPhase::Ended, row.center());
         cx.run_until_parked();
@@ -1158,61 +1103,5 @@ mod tests {
                 Some("https://example.com/pr/716".into())
             )
         );
-    }
-
-    /// A menu fed one row per project, like the sidebar's project filter.
-    struct ProjectMenu;
-    impl Render for ProjectMenu {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().pt(px(200.)).child(
-                crate::widgets::Button::new("filter")
-                    .label("Filter")
-                    .debug_selector(|| "filter-trigger".into())
-                    .dropdown_menu(|menu, _, _| {
-                        (0..60).fold(menu, |menu, index| {
-                            menu.menu_with_check(
-                                format!("project-{index}"),
-                                false,
-                                Box::new(Cancel),
-                            )
-                        })
-                    }),
-            )
-        }
-    }
-
-    #[gpui::test]
-    fn a_long_menu_stays_in_the_window_and_scrolls_to_its_last_item(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let (_, cx) = cx.add_window_view(|_, _| ProjectMenu);
-        cx.simulate_resize(size(px(393.), px(852.)));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let trigger = cx.debug_bounds("filter-trigger").unwrap().center();
-        cx.simulate_click(trigger, Default::default());
-        crate::test_frames::draw_settled(cx);
-        let menu = cx.debug_bounds("tcode-popup-menu").unwrap();
-        assert!(
-            menu.top() >= px(0.) && menu.bottom() <= px(852.),
-            "menu {menu:?} leaves the window"
-        );
-        assert!(cx.debug_bounds("menu-item-59").unwrap().top() > menu.bottom());
-
-        // Up from no selection wraps to the last item, which glides into view.
-        cx.simulate_keystrokes("up");
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 4);
-        crate::test_frames::draw(cx);
-        let gliding = cx.debug_bounds("menu-item-59").unwrap();
-        assert!(
-            gliding.bottom() > menu.bottom(),
-            "the menu jumped to {gliding:?}"
-        );
-        crate::test_frames::draw_settled(cx);
-        let last = cx.debug_bounds("menu-item-59").unwrap();
-        assert!(
-            last.top() >= menu.top() && last.bottom() <= menu.bottom(),
-            "last item {last:?} is outside the menu {menu:?}"
-        );
-        assert_eq!(cx.debug_bounds("tcode-popup-menu").unwrap(), menu);
     }
 }

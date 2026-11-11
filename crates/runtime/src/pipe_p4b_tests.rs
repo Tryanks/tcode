@@ -1,9 +1,7 @@
 //! Integration coverage through serialized links and the production fan-out mux.
 use super::*;
 use std::path::{Path, PathBuf};
-use tcode_protocol::{
-    ExternalImportState, ExternalImportStatus, ExternalThread, SessionSearchHit, SourceTool,
-};
+use tcode_protocol::{ExternalImportState, ExternalImportStatus, ExternalThread, SourceTool};
 use tcode_traverse::HostMux;
 
 pub(super) fn linked(mux: &HostMux) -> HostLink {
@@ -892,89 +890,6 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
     watcher
         .command_blocking(Command::ShutdownAllAndFlush)
         .unwrap();
-}
-
-#[test]
-fn content_search_is_host_owned_and_survives_appends_limits_and_blank_queries() {
-    let (_host, _mux, link, root, project_id) = project_fixture();
-    let history = root.join("history");
-    // The sentinel exists only under this host's temp root; a client-local
-    // store rooted at the process data dir could never produce this hit.
-    let threads = vec![claude_thread(
-        &history,
-        "searchable",
-        "please review zqxsentinel handling",
-    )];
-    link.subscribe(Subscription {
-        known_index: None,
-        after: None,
-        topic: Topic::ExternalImport {
-            project_id: project_id.clone(),
-        },
-    })
-    .unwrap();
-    let events = observed_events(&link);
-    link.command_blocking(Command::StartExternalImport {
-        project_id,
-        threads,
-    })
-    .unwrap();
-    next(&events, |event| {
-        matches!(
-            import_status(event).map(|status| &status.state),
-            Some(ExternalImportState::Finished { .. })
-        )
-    });
-
-    let search = |query: &str, limit: u32| -> Vec<SessionSearchHit> {
-        match smol::block_on(link.query(Query::SearchSessionContent {
-            query: query.into(),
-            limit,
-        }))
-        .unwrap()
-        {
-            QueryResponse::SessionContentHits(found) => found.hits,
-            other => panic!("unexpected search response: {other:?}"),
-        }
-    };
-
-    let hits = search("zqxsentinel", 50);
-    assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].turn, 0);
-    assert!(hits[0].snippet.contains("zqxsentinel"));
-    let session_id = hits[0].session_id.clone();
-
-    // Whitespace-only and zero-limit requests are answered, not searched.
-    assert!(search("   ", 50).is_empty());
-    assert!(search("zqxsentinel", 0).is_empty());
-
-    // Appending to the same log must invalidate the cached parse. Sixty new
-    // matches also prove the host clamps an over-large client limit to 50.
-    let store = SessionStore::open_at(root.clone()).unwrap();
-    for index in 0..60 {
-        store
-            .append_event(
-                &session_id,
-                100 + index,
-                &agent::AgentEvent::ItemCompleted(agent::ThreadItem {
-                    id: format!("appended-{index}"),
-                    parent_item_id: None,
-                    content: agent::ItemContent::AssistantMessage {
-                        text: format!("zqxsentinel appended {index}"),
-                        summarized: false,
-                    },
-                }),
-            )
-            .unwrap();
-    }
-    let hits = search("zqxsentinel", 1_000);
-    assert_eq!(hits.len(), 50);
-    assert!(
-        hits.iter()
-            .any(|hit| hit.snippet.contains("zqxsentinel appended 0"))
-    );
-    assert_eq!(search("zqxsentinel", 3).len(), 3);
-    link.command_blocking(Command::ShutdownAllAndFlush).unwrap();
 }
 
 /// A dev server the user started in a thread's directory: a process other

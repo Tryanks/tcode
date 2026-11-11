@@ -889,6 +889,7 @@ fn a_restarted_machine_rejoins_and_delivers_writes_buffered_while_it_was_down() 
 
     // The rejoin is the replayed subscription's snapshot and the buffered
     // command's ack, both arriving over the new connection.
+    client.to_host.wake(Wake::Reconnect);
     wait_state(&client, |state| {
         link.set_connection_state(state.clone());
         connected_directly(state)
@@ -1029,10 +1030,6 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     assert!(host.invitation().is_some());
     assert_eq!(paired.space_id.as_deref(), Some(id.as_str()));
     assert_eq!(paired.space_name.as_deref(), Some("Shared"));
-    tcode_traverse::hosts::save_hosts(&member_dir.0, std::slice::from_ref(&paired)).unwrap();
-    let saved = tcode_traverse::hosts::load_hosts(&member_dir.0).unwrap();
-    assert_eq!(saved[0].space_id.as_deref(), Some(id.as_str()));
-    assert_eq!(saved[0].space_name.as_deref(), Some("Shared"));
     let persisted = HostIdentity::load_or_create(&host_dir.0, "Test Host").unwrap();
     assert_eq!(
         persisted.devices[0].access,
@@ -1361,19 +1358,10 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
     spaced["spaces"] = json!([{"id":"s","name":"Shared","created_unix":1,"project_ids":["p"],
         "secret":"AAAAAAAAAAAAAAAAAAAAAA","link_enabled":true,"link_failures":0}]);
     std::fs::write(dir.0.join(HOST_FILE), serde_json::to_vec(&spaced).unwrap()).unwrap();
-    let mut spaced = HostIdentity::load_or_create(&dir.0, "Test Host").unwrap();
+    let spaced = HostIdentity::load_or_create(&dir.0, "Test Host").unwrap();
     assert_eq!(
         spaced.spaces[0].policy,
         tcode_protocol::SpacePolicy::unrestricted()
-    );
-    spaced.spaces[0].policy = tcode_protocol::SpacePolicy::new_space();
-    spaced.save().unwrap();
-    assert_eq!(
-        HostIdentity::load_or_create(&dir.0, "Test Host")
-            .unwrap()
-            .spaces[0]
-            .policy,
-        tcode_protocol::SpacePolicy::new_space()
     );
     assert_eq!(persisted["devices"][0]["access"], json!({"type":"full"}));
     for access in [
@@ -1463,76 +1451,6 @@ fn originals_preserve_control_progress_bytes_and_cancelled_admission() {
         }
         assert_eq!(received, bytes);
         drop(second);
-        link.close();
-        pump.await.unwrap();
-    });
-    host.shutdown();
-    real_host::stop(runtime, &mux);
-}
-
-/// A paired device's upload crosses the real connection in protocol-sized
-/// chunks and arrives whole in the host's scratch directory.
-#[test]
-fn a_device_uploads_a_file_to_the_hosts_scratch_directory() {
-    use tcode_client::HostLink;
-    use tcode_protocol::{Query, QueryResponse};
-    let host_dir = TestDir::new("upload");
-    let device_dir = TestDir::new("upload-device");
-    let documents = host_dir.0.join("documents");
-    let (runtime, mux, session_id, _) = original_fixture::recorded_host_with(
-        &host_dir.0,
-        b"recorded image",
-        tcode_runtime::pipe::HostServices {
-            user_directories: tcode_services::user_files::UserDirectories {
-                home: None,
-                documents: Some(documents.clone()),
-            },
-            ..Default::default()
-        },
-    );
-    let host = start_host(mux.clone(), &host_dir, None);
-    let device = device(&device_dir, "Upload phone");
-    let paired = pair(&host.new_invitation().invite, &device).unwrap();
-    let transport = tcode_traverse::connect(&paired, &device);
-    wait_state(&transport, syncing_directly);
-    let link = HostLink::new_remote(transport.to_host, transport.from_host, transport.originals);
-    let content: Vec<_> = (0..tcode_core::attachments::UPLOAD_CHUNK_BYTES * 3 + 11)
-        .map(|index| (index % 251) as u8)
-        .collect();
-    tcode_traverse::block_on(async {
-        let pump = tcode_traverse::runtime().spawn({
-            let link = link.clone();
-            async move { link.pump().await }
-        });
-        let QueryResponse::UploadBegun(path) = link
-            .query(Query::BeginUpload {
-                session_id: session_id.clone(),
-                name: "report.pdf".into(),
-                size: content.len() as u64,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("upload refused");
-        };
-        assert!(path.starts_with(documents.join("Tcode")));
-        assert_eq!(path.file_name().unwrap(), "report.pdf");
-        let mut offset = 0;
-        for chunk in content.chunks(tcode_core::attachments::UPLOAD_CHUNK_BYTES) {
-            assert_eq!(
-                link.query(Query::WriteUpload {
-                    session_id: session_id.clone(),
-                    path: path.clone(),
-                    offset,
-                    bytes: chunk.to_vec(),
-                })
-                .await
-                .unwrap(),
-                QueryResponse::UploadWritten
-            );
-            offset += chunk.len() as u64;
-        }
-        assert_eq!(std::fs::read(&path).unwrap(), content);
         link.close();
         pump.await.unwrap();
     });

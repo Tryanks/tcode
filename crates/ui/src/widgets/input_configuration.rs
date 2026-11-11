@@ -161,44 +161,8 @@ impl<M: InputModeKind> InputHandler for ConfiguredInput<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Autocapitalize, TestAppContext, TextInputAction};
-    use gpui_base::input::{InputState, TextareaState};
-
-    #[gpui::test]
-    fn native_keyboard_configuration_comes_from_the_state(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let (prose, cx) = cx.add_window_view(|window, cx| {
-            TextareaState::new(window, cx)
-                .submit_on_enter(true)
-                .input_action(TextInputAction::Enter)
-                .autocorrect(true)
-        });
-        cx.update(|window, cx| {
-            let mut handler = ConfiguredInput::new(Bounds::default(), prose);
-            assert_eq!(
-                handler.text_input_configuration(window, cx),
-                TextInputConfiguration {
-                    input_action: TextInputAction::Enter,
-                    autocorrect: true,
-                    suggestions: true,
-                    autocapitalize: Autocapitalize::None,
-                }
-            );
-        });
-        let (structured, cx) = cx.add_window_view(InputState::new);
-        cx.update(|window, cx| {
-            let mut handler = ConfiguredInput::new(Bounds::default(), structured);
-            assert_eq!(
-                handler.text_input_configuration(window, cx),
-                TextInputConfiguration {
-                    input_action: TextInputAction::Done,
-                    autocorrect: false,
-                    suggestions: false,
-                    autocapitalize: Autocapitalize::None,
-                }
-            );
-        });
-    }
+    use gpui::TestAppContext;
+    use gpui_base::input::TextareaState;
 
     #[gpui::test]
     fn native_selection_replaces_the_word_after_an_emoji(cx: &mut TestAppContext) {

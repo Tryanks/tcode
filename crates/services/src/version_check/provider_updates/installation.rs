@@ -1209,9 +1209,6 @@ fn claude_channel(context: &Context<'_>, home: &Path) -> Option<LatestQuery> {
 mod tests {
     use super::*;
 
-    /// npm 12.2.2 and pnpm 10.34.9 answer `view <package>@latest version
-    /// --json` with a one-element array, bun 1.4.4's `info` with the bare
-    /// string; the version is invented.
     /// `brew info --json=v2` as Homebrew 7.0.13 builds it (`cmd/info.rb`
     /// wraps `Formula#to_hash` and `Cask#to_h`); names and versions invented.
     #[test]
@@ -1240,6 +1237,9 @@ mod tests {
         );
     }
 
+    /// npm 12.2.2 and pnpm 10.34.9 answer `view <package>@latest version
+    /// --json` with a one-element array, bun 1.4.4's `info` with the bare
+    /// string; the version is invented.
     #[test]
     fn a_package_managers_latest_version_is_read_in_its_own_shape() {
         assert_eq!(

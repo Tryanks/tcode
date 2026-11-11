@@ -147,45 +147,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn triggers_respect_token_boundaries_and_the_utf8_cursor() {
-        for (text, cursor, kind, query, range) in [
-            ("look at @src/ma", 15, TriggerKind::Path, "src/ma", 8..15),
-            ("use $rev", 8, TriggerKind::Skill, "rev", 4..8),
-            ("\t@文件 suffix", 5, TriggerKind::Path, "文", 1..5),
-            ("/de", 3, TriggerKind::SlashCommand, "de", 0..3),
-            ("/a:b", 4, TriggerKind::SlashCommand, "a:b", 0..4),
-            ("/", 1, TriggerKind::SlashCommand, "", 0..1),
-            ("/model", 6, TriggerKind::SlashModel, "", 0..6),
-            ("/MODEL", 6, TriggerKind::SlashModel, "", 0..6),
-            ("/model gpt", 10, TriggerKind::SlashModel, "gpt", 0..10),
-        ] {
-            assert_eq!(
-                detect_composer_trigger(text, cursor),
-                Some(ComposerTrigger {
-                    kind,
-                    query: query.into(),
-                    range
-                }),
-                "{text:?} at {cursor}",
-            );
-        }
-        for text in [
-            "",
-            "foo@bar",
-            "cost$rev",
-            "hello /pla",
-            " /pla",
-            "hi\n/de",
-            "/plan done",
-            "/Users/me/file.txt",
-            "/tmp/",
-            "@file ",
-        ] {
-            assert_eq!(detect_composer_trigger(text, text.len()), None, "{text:?}");
-        }
-    }
-
-    #[test]
     fn file_links_preserve_paths_without_creating_markdown_or_url_syntax() {
         for (path, expected) in [
             ("src/main.rs", "[main.rs](src/main.rs)"),

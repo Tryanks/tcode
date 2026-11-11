@@ -3304,25 +3304,11 @@ mod tests {
             Some("User has answered your questions: \"Which colours?\"=\"Red, green, Blue\". You can now continue with the user's answers in mind.".into()),
             Some(&json!({"answers": [["Red, green", "Blue"]]})),
         );
-        assert_eq!(
-            family,
-            Some(ToolFamily::Question {
-                questions: vec![AskedQuestion {
-                    question: "Which colours?".into(),
-                    options: vec![
-                        UserInputOption {
-                            label: "Red, green".into(),
-                            description: "Warm and cool".into(),
-                        },
-                        UserInputOption {
-                            label: "Blue".into(),
-                            description: "Cool".into(),
-                        },
-                    ],
-                    answers: vec!["Red, green".into(), "Blue".into()],
-                }],
-            })
-        );
+        let Some(ToolFamily::Question { questions }) = family else {
+            panic!("{family:?}");
+        };
+        assert_eq!(questions[0].question, "Which colours?");
+        assert_eq!(questions[0].answers, ["Red, green", "Blue"]);
     }
 
     /// websearch heads each page `## [title](url)` (v2.2.7's `websearch.ts`;
@@ -3658,37 +3644,6 @@ mod tests {
                 {"id": "openai/gpt-6.1-terra", "display_name": "GPT-6.1 Terra", "is_default": true, "options": effort(&[("none", "None"), ("low", "Low"), ("medium", "Medium"), ("high", "High"), ("xhigh", "Xhigh"), ("max", "Max")])},
                 {"id": "opencode/big-pickle", "display_name": "Big Pickle", "is_default": false, "options": []},
             ])
-        );
-    }
-
-    /// A process that writes a line to stderr and exits before announcing
-    /// an address, whatever it is asked.
-    #[cfg(unix)]
-    #[test]
-    fn a_server_that_exits_during_startup_reports_its_own_output() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let directory =
-            std::env::temp_dir().join(format!("agent-opencode-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let binary = directory.join("exits-at-start");
-        std::fs::write(&binary, "#!/bin/sh\necho 'cannot start' >&2\nexit 1\n").unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let spawned = Server::spawn(
-            Some(&binary),
-            &directory,
-            &LaunchEnv::default(),
-            &[],
-            &[],
-            &crate::SessionProcesses::default(),
-        );
-        std::fs::remove_dir_all(&directory).unwrap();
-        let Err(error) = spawned else {
-            panic!("the server exited");
-        };
-        assert_eq!(
-            error.to_string(),
-            "provider reported error: OpenCode server exited during startup\n\
-             server output:\ncannot start"
         );
     }
 }

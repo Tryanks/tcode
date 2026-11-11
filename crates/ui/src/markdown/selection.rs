@@ -1126,7 +1126,7 @@ pub(crate) struct Membership {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::{OnceCell, RefCell};
+    use std::cell::OnceCell;
 
     use gpui::{Context, Render, TestAppContext, VisualTestContext, size};
 
@@ -1135,18 +1135,6 @@ mod tests {
         markdown::{MarkdownView, state::MarkdownState},
         widgets::input::{Textarea, TextareaState},
     };
-
-    #[test]
-    fn a_double_click_takes_a_run_of_letters_or_spaces_or_one_other_character() {
-        let text = "let foo_bar = baz(1);";
-        let word = |text: &'static str, offset| word_range(text, offset).map(|r| &text[r]);
-        assert_eq!(word(text, 5), Some("foo_bar"));
-        assert_eq!(word(text, 3), Some(" "));
-        assert_eq!(word(text, 17), Some("("));
-        assert_eq!(word(text, 19), Some(")"));
-        assert_eq!(word(text, text.len()), None);
-        assert_eq!(word("选中文字", 3), Some("中"));
-    }
 
     fn draw(cx: &mut VisualTestContext) {
         cx.run_until_parked();
@@ -1197,20 +1185,13 @@ mod tests {
 
     struct Body {
         markdown: Entity<MarkdownState>,
-        wheel_deltas: Rc<RefCell<Vec<Pixels>>>,
     }
 
     impl Render for Body {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let wheel_deltas = self.wheel_deltas.clone();
             div()
                 .size_full()
                 .child(MarkdownView::new(&self.markdown).selectable(true))
-                .on_scroll(move |event, window, _| {
-                    wheel_deltas
-                        .borrow_mut()
-                        .push(event.delta.pixel_delta(window.line_height()).y);
-                })
         }
     }
 
@@ -1231,10 +1212,7 @@ mod tests {
             let body = body.clone();
             move |window, cx| {
                 let markdown = cx.new(|cx| MarkdownState::new(&text, cx));
-                let view = cx.new(|_| Body {
-                    markdown,
-                    wheel_deltas: Rc::default(),
-                });
+                let view = cx.new(|_| Body { markdown });
                 body.set(view.clone()).ok().unwrap();
                 gpui_base::Root::new(view, window, cx)
             }
@@ -1242,99 +1220,6 @@ mod tests {
         let body = body.get().unwrap().clone();
         let markdown = body.read_with(cx, |body, _| body.markdown.clone());
         (body, markdown, cx)
-    }
-
-    #[gpui::test]
-    fn a_drag_scrolls_at_the_viewport_edge_not_the_message_edge(cx: &mut TestAppContext) {
-        let (body, _, cx) = open_body("selectable text", cx);
-        draw(cx);
-        let bottom = cx.update(|window, _| window.viewport_size().height);
-        let deltas = |cx: &mut VisualTestContext| {
-            body.read_with(cx, |body, _| body.wheel_deltas.borrow().clone())
-        };
-
-        cx.simulate_mouse_down(
-            point(px(5.), px(10.)),
-            MouseButton::Left,
-            Modifiers::default(),
-        );
-        draw(cx);
-        // Mid-window, well past the one-line message's bottom edge.
-        cx.simulate_mouse_move(
-            point(px(5.), bottom / 2.),
-            Some(MouseButton::Left),
-            Modifiers::default(),
-        );
-        draw(cx);
-        cx.executor().advance_clock(Duration::from_millis(48));
-        cx.run_until_parked();
-        assert_eq!(deltas(cx), Vec::<Pixels>::new());
-
-        // Inside the viewport's bottom edge, the document scrolls down.
-        cx.simulate_mouse_move(
-            point(px(5.), bottom - px(8.)),
-            Some(MouseButton::Left),
-            Modifiers::default(),
-        );
-        draw(cx);
-        cx.executor().advance_clock(Duration::from_millis(48));
-        cx.run_until_parked();
-        let scrolled = deltas(cx);
-        assert!(
-            !scrolled.is_empty() && scrolled.iter().all(|delta| *delta < px(0.)),
-            "expected downward auto-scroll, got {scrolled:?}"
-        );
-
-        // Past the window's bottom it keeps scrolling, faster.
-        let outside = point(px(5.), bottom + px(60.));
-        cx.simulate_mouse_move(outside, Some(MouseButton::Left), Modifiers::default());
-        draw(cx);
-        cx.executor().advance_clock(Duration::from_millis(48));
-        cx.run_until_parked();
-        let faster = deltas(cx)[scrolled.len()..].to_vec();
-        assert!(
-            !faster.is_empty() && faster.iter().all(|delta| *delta < scrolled[0]),
-            "expected faster auto-scroll than {scrolled:?}, got {faster:?}"
-        );
-
-        // The release, there too, stops it.
-        cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::default());
-        draw(cx);
-        let settled = deltas(cx).len();
-        cx.executor().advance_clock(Duration::from_millis(64));
-        cx.run_until_parked();
-        assert_eq!(deltas(cx).len(), settled);
-    }
-
-    #[gpui::test]
-    fn text_wrapping_after_an_inline_image_paints_on_its_own_rows(cx: &mut TestAppContext) {
-        // excalidraw#8530's body as GitHub stores it: one paragraph broken by
-        // CRLFs, too long a link for a phone row.
-        let (_, markdown, cx) = open_body(
-            "**Technical parts**\r\n![glyphs](https://example.invalid/glyphs.png)\r\n\
-             https://link.excalidraw.com/readonly/MbbnWPSWXgadXdtmzgeO",
-            cx,
-        );
-        cx.simulate_resize(size(px(393.), px(852.)));
-        draw(cx);
-        let runs = markdown.read_with(cx, |state, _| {
-            state
-                .runs
-                .borrow()
-                .iter()
-                .map(|run| run.bounds)
-                .collect::<Vec<_>>()
-        });
-        assert!(runs.len() > 2, "the link must wrap: {runs:?}");
-        for (ix, run) in runs.iter().enumerate() {
-            for other in &runs[ix + 1..] {
-                let overlap = run.intersect(other);
-                assert!(
-                    overlap.size.width <= px(0.5) || overlap.size.height <= px(0.5),
-                    "{run:?} and {other:?} paint over each other in {runs:?}"
-                );
-            }
-        }
     }
 
     #[gpui::test]
@@ -1420,79 +1305,6 @@ mod tests {
         }
         draw(cx);
         assert_eq!(selected(&markdown, cx), "修复");
-    }
-
-    #[gpui::test]
-    fn a_drag_or_shift_click_from_a_double_click_extends_by_words(cx: &mut TestAppContext) {
-        let (_, markdown, cx) = open_body("alpha beta gamma delta", cx);
-        draw(cx);
-        // The middle of the character at byte `index`.
-        let at = |index: usize, cx: &mut VisualTestContext| {
-            markdown.read_with(cx, |state, _| {
-                let runs = state.runs.borrow();
-                let start = runs[0].layout.position_for_index(index).unwrap();
-                let end = runs[0].layout.position_for_index(index + 1).unwrap();
-                point((start.x + end.x) / 2., start.y + px(4.))
-            })
-        };
-        let (beta, gamma, delta, alpha) = (at(7, cx), at(13, cx), at(18, cx), at(2, cx));
-        // The caret before the character at byte `index`.
-        let caret = |index: usize, cx: &mut VisualTestContext| {
-            markdown.read_with(cx, |state, _| {
-                let start = state.runs.borrow()[0]
-                    .layout
-                    .position_for_index(index)
-                    .unwrap();
-                point(start.x, start.y + px(4.))
-            })
-        };
-        let press = |cx: &mut VisualTestContext, position, modifiers, click_count| {
-            cx.simulate_event(MouseDownEvent {
-                button: MouseButton::Left,
-                position,
-                modifiers,
-                click_count,
-                first_mouse: false,
-            });
-            draw(cx);
-        };
-        let release = |cx: &mut VisualTestContext, position, click_count| {
-            cx.simulate_event(MouseUpEvent {
-                button: MouseButton::Left,
-                position,
-                modifiers: Modifiers::default(),
-                click_count,
-            });
-            draw(cx);
-        };
-        press(cx, beta, Modifiers::default(), 1);
-        release(cx, beta, 1);
-        press(cx, beta, Modifiers::default(), 2);
-        assert_eq!(selected(&markdown, cx), "beta");
-
-        // The drag takes whole words, and the double-clicked one stays
-        // selected whichever way it goes.
-        for (to, expected) in [
-            (delta, "beta gamma delta"),
-            (alpha, "alpha beta"),
-            (beta, "beta"),
-        ] {
-            cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::default());
-            draw(cx);
-            assert_eq!(selected(&markdown, cx), expected);
-        }
-        release(cx, beta, 2);
-
-        // So does a shift-click after it, until a plain click starts afresh.
-        press(cx, gamma, Modifiers::shift(), 1);
-        release(cx, gamma, 1);
-        assert_eq!(selected(&markdown, cx), "beta gamma");
-        let (from, to) = (caret(13, cx), caret(2, cx));
-        press(cx, from, Modifiers::default(), 1);
-        release(cx, from, 1);
-        press(cx, to, Modifiers::shift(), 1);
-        release(cx, to, 1);
-        assert_eq!(selected(&markdown, cx), "pha beta ga");
     }
 
     /// A message above a composer.

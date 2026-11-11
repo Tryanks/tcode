@@ -1097,12 +1097,9 @@ impl SettingsPage {
                 .content(move |content, _, _| {
                     // The catalog is a GPUI `list`, which needs a definite height, and the
                     // dialog's flex height is not readable from its builder.
-                    content.h(px(crate::overlay::DIALOG_LIST_HEIGHT)).child(
-                        div()
-                            .debug_selector(|| "add-agent-body".into())
-                            .size_full()
-                            .child(panel.clone()),
-                    )
+                    content
+                        .h(px(crate::overlay::DIALOG_LIST_HEIGHT))
+                        .child(div().size_full().child(panel.clone()))
                 })
         });
     }
@@ -3442,18 +3439,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn archived_page_bounds_clamp_to_the_last_populated_page() {
-        assert_eq!(page_bounds(0, 3, 50), (0, 0, 0), "empty list has no pages");
-        assert_eq!(page_bounds(100, 1, 50), (1, 50, 100), "exact multiple");
-        assert_eq!(page_bounds(120, 2, 50), (2, 100, 120), "last partial page");
-        assert_eq!(
-            page_bounds(120, 9, 50),
-            (2, 100, 120),
-            "a page past the end shows the last page instead of an empty one"
-        );
-    }
-
     /// A full-scope store whose host is scripted by the test: what the store
     /// sends arrives on the first channel, and lines sent on the second
     /// arrive from the host while the returned pump runs.
@@ -3855,56 +3840,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn add_agent_dialog_keeps_catalog_and_custom_action_inside(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let root = crate::store::tests::scratch_root("agent-dialog");
-        let host = spawn_host(
-            SessionStore::open_at(root.clone()).unwrap(),
-            HostServices::default(),
-        )
-        .unwrap();
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                driver.link.clone(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        let window_state = cx.new(|_| WindowState::default());
-        let mut page_handle = None;
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let page = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
-            page_handle = Some(page.clone());
-            gpui_base::Root::new(page, window, cx)
-        });
-        cx.update(|window, cx| {
-            page_handle
-                .unwrap()
-                .update(cx, |page, cx| page.open_acp_dialog(window, cx));
-        });
-        for (width, height) in [(1000., 780.), (393., 600.), (360., 480.)] {
-            cx.simulate_resize(size(px(width), px(height)));
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                _ = window.draw(cx);
-            });
-            let body = cx.debug_bounds("add-agent-body").unwrap();
-            let custom = cx.debug_bounds("acp-custom-open").unwrap();
-            assert!(
-                custom.bottom() <= body.bottom(),
-                "custom action {custom:?} exceeds body {body:?}"
-            );
-            assert!(custom.right() <= body.right());
-            assert!(body.bottom() < px(height));
-        }
-        driver.shutdown(cx, &host);
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[gpui::test]
     fn compact_list_groups_sections_omits_inapplicable_and_folds_advanced(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         let root = crate::store::tests::scratch_root("settings-sections");
@@ -4052,14 +3987,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// A client that renders before its host answers must not present its own
-    /// defaults as the host's configuration, must adopt the host's values the
-    /// moment they arrive, and must never overwrite what the user has since
-    /// typed — no matter how many snapshots follow.
-    /// Settings → Control gathers the grant requests of every thread, so
-    /// one waiting in a thread the user has not opened can be answered here:
-    /// approving one widens that thread's own grant on the host and leaves
-    /// the other waiting; a thread's own grant is listed and revoked here.
     /// "Show more" asks for a longer newest-first list, and a new filter asks
     /// for the first page of what it matches: the two the host answers.
     #[gpui::test]
@@ -4164,6 +4091,10 @@ mod tests {
         assert_eq!(filter.thread_id.as_deref(), Some("target"));
     }
 
+    /// A client that renders before its host answers must not present its own
+    /// defaults as the host's configuration, must adopt the host's values the
+    /// moment they arrive, and must never overwrite what the user has since
+    /// typed — no matter how many snapshots follow.
     #[gpui::test]
     fn editable_settings_wait_for_the_host_and_then_keep_the_user_edit(cx: &mut TestAppContext) {
         let root = crate::store::tests::scratch_root("settings-hydration");

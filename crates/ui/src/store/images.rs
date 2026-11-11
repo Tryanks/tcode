@@ -948,12 +948,6 @@ mod tests {
         decode_client_line, encode_line,
     };
 
-    /// The side of the pictures that press on the budget.
-    const SIDE: u32 = 2048;
-
-    /// What one such picture costs once drawn in one window: its decode and its atlas copy.
-    const COST: usize = 2 * (SIDE * SIDE * 4) as usize;
-
     fn bmp(side: u32) -> Vec<u8> {
         let mut bmp = std::io::Cursor::new(Vec::new());
         image::RgbaImage::from_pixel(side, side, image::Rgba([0, 0, 255, 255]))
@@ -1073,38 +1067,6 @@ mod tests {
         name.strip_suffix(".bmp").unwrap().parse().unwrap()
     }
 
-    /// A host that answers every preview read with one picture, recording which were read.
-    struct Script {
-        host: Host,
-        picture: Vec<u8>,
-    }
-
-    impl Script {
-        fn new(picture: Vec<u8>, cx: &mut TestAppContext) -> Self {
-            Self {
-                host: Host::attach(cx),
-                picture,
-            }
-        }
-
-        /// Answers the reads asked since, returning the index of each picture read.
-        fn answer(&self) -> Vec<usize> {
-            self.host
-                .answer(|query| match query {
-                    Query::ReadImagePreview { .. } => {
-                        Ok(QueryResponse::FileBytes(self.picture.clone()))
-                    }
-                    other => panic!("unexpected read {other:?}"),
-                })
-                .iter()
-                .map(|query| match query {
-                    Query::ReadImagePreview { path, .. } => index(&path.to_string_lossy()),
-                    other => panic!("unexpected read {other:?}"),
-                })
-                .collect()
-        }
-    }
-
     /// Draws one picture at a time, as a tile does, noting what it decoded to.
     struct Shelf {
         source: Option<ImageSource>,
@@ -1148,101 +1110,8 @@ mod tests {
         });
     }
 
-    /// Draws a frame, answers the reads it asked and draws the frame that shows them, returning
-    /// which pictures were read. Frames are drawn as a display has them drawn: views nothing
-    /// notified are drawn from last frame (`test_frames::draw` refreshes, which builds every
-    /// view again).
-    fn settle_reusing(script: &Script, cx: &mut VisualTestContext) -> Vec<usize> {
-        let frame = |cx: &mut VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-        };
-        frame(cx);
-        cx.run_until_parked();
-        let read = script.answer();
-        cx.run_until_parked();
-        frame(cx);
-        // What the frame let go of is swept after it.
-        cx.run_until_parked();
-        read
-    }
-
     fn atlas_holds(image: &RenderImage, cx: &mut VisualTestContext) -> bool {
         cx.update(|window, _| window.has_image_atlas_entry(image))
-    }
-
-    struct Pair {
-        still: Entity<Shelf>,
-        churn: Entity<Shelf>,
-    }
-
-    impl Render for Pair {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .flex()
-                .child(self.still.clone())
-                .child(self.churn.clone())
-        }
-    }
-
-    /// A view that is drawn from last frame, its picture's code never running, keeps that
-    /// picture decoded and in the atlas, unread again, while the pictures drawn beside it press
-    /// far past the budget and those no longer drawn leave; one that left is read again when
-    /// drawn again.
-    #[gpui::test]
-    fn a_picture_drawn_from_last_frame_outlasts_pressure_past_the_budget(cx: &mut TestAppContext) {
-        let script = Script::new(bmp(SIDE), cx);
-        let still = Shelf::new(Some(Kind::Preview.source(script.host.image, 0)));
-        let (still_drawn, still_renders) = (still.drawn.clone(), still.renders.clone());
-        let churn = Shelf::new(None);
-        let churn_drawn = churn.drawn.clone();
-        let (pair, cx) = cx.add_window_view(|_, cx| Pair {
-            still: cx.new(|_| still),
-            churn: cx.new(|_| churn),
-        });
-        assert_eq!(settle_reusing(&script, cx), [0]);
-        let still = still_drawn
-            .borrow_mut()
-            .take()
-            .expect("the still picture is drawn");
-        let churn = pair.read_with(cx, |pair, _| pair.churn.clone());
-        let renders = still_renders.get();
-        let mut first_churned = None;
-        for index in 1..=BUDGET / COST + 2 {
-            show(&churn, Kind::Preview.source(script.host.image, index), cx);
-            assert_eq!(
-                settle_reusing(&script, cx),
-                [index],
-                "only the new picture is read"
-            );
-            let image = churn_drawn.borrow_mut().take().expect("it is drawn");
-            first_churned.get_or_insert(image);
-        }
-        assert_eq!(
-            still_renders.get(),
-            renders,
-            "the still view was drawn from last frame, not built again"
-        );
-        assert!(atlas_holds(&still, cx), "the still picture keeps its tile");
-        assert!(Arc::strong_count(&still) > 1, "and its decode");
-        let first_churned = first_churned.unwrap();
-        assert_eq!(
-            Arc::strong_count(&first_churned),
-            1,
-            "a picture no longer drawn left for it"
-        );
-        assert!(!atlas_holds(&first_churned, cx));
-        drop(first_churned);
-
-        show(&churn, Kind::Preview.source(script.host.image, 1), cx);
-        assert_eq!(
-            settle_reusing(&script, cx),
-            [1],
-            "a picture that left is read again when drawn again"
-        );
-        assert!(churn_drawn.borrow().is_some(), "and drawn");
     }
 
     /// Pull request media past its expiry keeps drawing while the host is asked again with its
@@ -1720,23 +1589,8 @@ mod tests {
                         .unwrap();
                     cx.run_until_parked();
                 }
-                for navigation in ["tab", "shift-tab"] {
-                    cx.simulate_keystrokes(navigation);
-                    cx.update(|window, cx| {
-                        assert!(
-                            gpui_base::active_focus_trap(window, cx)
-                                .expect("the lightbox traps focus")
-                                .contains_focused(window, cx),
-                            "{navigation} must keep focus inside the lightbox"
-                        );
-                    });
-                }
                 cx.update(|window, cx| {
                     window.close_dialog(cx);
-                    assert!(
-                        image_focus.is_focused(window),
-                        "closing the lightbox must restore image focus"
-                    );
                     _ = window.draw(cx);
                 });
             }

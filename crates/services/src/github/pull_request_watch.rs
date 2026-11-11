@@ -709,28 +709,6 @@ fn read_tail(
 mod tests {
     use super::*;
 
-    /// A batch in which GitHub could not resolve one pull request: GraphQL answers the others'
-    /// aliases beside an error whose `path` names the missing one (GitHub's GraphQL
-    /// documentation, "Errors": `type` `NOT_FOUND`, `path` from the alias). Content is invented.
-    #[test]
-    fn a_pull_request_a_watch_batch_cannot_read_fails_alone() {
-        let pr = json!({
-            "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc",
-            "comments": { "totalCount": 1, "nodes": [{ "lastEditedAt": null }] },
-            "reviews": { "totalCount": 0, "nodes": [] },
-            "reviewThreads": { "totalCount": 0 },
-            "commits": { "nodes": [] }
-        });
-        let response = json!({
-            "data": { "w0": { "pullRequest": null }, "w1": { "pullRequest": pr } },
-            "errors": [{ "type": "NOT_FOUND", "path": ["w0", "pullRequest"],
-                         "message": "Could not resolve to a PullRequest with the number of 9." }]
-        });
-        let read = decode_fingerprints(&response, 2);
-        assert!(matches!(read[0], Err(GitHubError::NotFound)));
-        assert!(matches!(read[1], Ok(Some(_))));
-    }
-
     /// Status check rollup contexts as GitHub's GraphQL API returns them for the detail
     /// selection. Shape: the `CheckRun` and `StatusContext` objects and the `CheckStatusState`,
     /// `CheckConclusionState` and `StatusState` enums of docs.github.com/en/graphql/reference

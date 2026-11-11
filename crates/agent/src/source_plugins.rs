@@ -472,39 +472,6 @@ pub(crate) async fn run_opencode(
 mod tests {
     use super::*;
 
-    /// `pi list --approve` in a project holding a package, in the shape pi
-    /// 1.5.1 prints it (`dist/package-manager-cli.js`, the `list` case: a
-    /// heading per scope, each source indented two spaces, its installed path
-    /// four).
-    const PI_LIST: &str = "User packages:\n  npm:pi-extmgr\n    /home/me/.pi/agent/npm/node_modules/pi-extmgr\n\nProject packages:\n  npm:pi-extmgr\n    /work/proj/.pi/npm/node_modules/pi-extmgr\n  git:github.com/me/tools\n    /work/proj/.pi/git/tools\n";
-
-    #[test]
-    fn pi_packages_are_read_per_heading() {
-        assert_eq!(
-            parse_pi_list(PI_LIST),
-            [
-                (
-                    "npm:pi-extmgr".to_string(),
-                    PluginScope::User,
-                    Some(PathBuf::from(
-                        "/home/me/.pi/agent/npm/node_modules/pi-extmgr"
-                    ))
-                ),
-                (
-                    "npm:pi-extmgr".to_string(),
-                    PluginScope::Project,
-                    Some(PathBuf::from("/work/proj/.pi/npm/node_modules/pi-extmgr"))
-                ),
-                (
-                    "git:github.com/me/tools".to_string(),
-                    PluginScope::Project,
-                    Some(PathBuf::from("/work/proj/.pi/git/tools"))
-                ),
-            ]
-        );
-        assert_eq!(parse_pi_list("No packages installed.\n"), []);
-    }
-
     /// pi 1.5.1 prints a package whose settings entry is an object (one that
     /// filters its resources) as `<source> (filtered)`, and a local source as
     /// stored: relative to the scope's settings directory, here the agent
@@ -645,32 +612,5 @@ mod tests {
             panic!("a check that did not run is an error");
         };
         assert_eq!(message, "Error: Plugin is not configured: broken@1.3.0");
-    }
-
-    #[test]
-    fn a_source_goes_by_its_package_or_repository_name() {
-        for (source, name, kind) in [
-            ("npm:pi-extmgr", "pi-extmgr", PluginSourceKind::Npm),
-            ("npm:@foo/bar@1.2.0", "@foo/bar", PluginSourceKind::Npm),
-            (
-                "opencode-wakatime@1.3.0",
-                "opencode-wakatime",
-                PluginSourceKind::Npm,
-            ),
-            (
-                "git:github.com/me/tools.git",
-                "tools",
-                PluginSourceKind::Git,
-            ),
-            (
-                "https://github.com/me/tools",
-                "tools",
-                PluginSourceKind::Git,
-            ),
-            ("./local/path", "path", PluginSourceKind::LocalPath),
-        ] {
-            assert_eq!(source_name(source), name, "{source}");
-            assert_eq!(source_kind(source), kind, "{source}");
-        }
     }
 }

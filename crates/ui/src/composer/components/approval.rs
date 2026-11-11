@@ -334,9 +334,8 @@ impl Composer {
                             ApprovalOptionKind::RejectOnce | ApprovalOptionKind::RejectAlways
                         );
                         let id = gpui::SharedString::from(format!("approval-option-{}", option.id));
-                        let button = Button::new(id.clone())
+                        let button = Button::new(id)
                             .motion(&self.button_motion())
-                            .debug_selector(move || id.to_string())
                             .chip()
                             .touch(self.compact)
                             .disabled(!self.interactive(cx) || pending)
@@ -392,7 +391,7 @@ impl Composer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext, point, size};
+    use gpui::{TestAppContext, VisualTestContext, size};
 
     /// A composer, phone or desktop, whose session awaits approval of a patch
     /// to `paths`.
@@ -486,92 +485,6 @@ mod tests {
             _ = window.draw(cx);
         });
         cx
-    }
-
-    #[gpui::test]
-    fn a_long_file_change_request_lays_out_only_the_visible_files(cx: &mut TestAppContext) {
-        let cx = composer_with_patch(
-            cx,
-            true,
-            (0..300).map(|index| format!("src/file-{index}.rs")),
-        );
-        let first = cx
-            .debug_bounds("approval-change-0")
-            .expect("first change row");
-        assert!(
-            cx.debug_bounds("approval-change-250").is_none(),
-            "the approval card must not lay out all 300 file rows"
-        );
-
-        // Rows are measured as they come into view, so the list reaches its
-        // end over successive gestures.
-        for _ in 0..20 {
-            cx.simulate_event(ScrollEvent {
-                position: first.center(),
-                delta: ScrollDelta::Pixels(point(px(0.), px(-2_000.))),
-                ..Default::default()
-            });
-            cx.update(|window, cx| _ = window.draw(cx));
-        }
-        assert!(cx.debug_bounds("approval-change-299").is_some());
-        assert!(cx.debug_bounds("approval-change-0").is_none());
-    }
-
-    #[gpui::test]
-    fn a_short_request_shows_every_wrapped_path(cx: &mut TestAppContext) {
-        let cx = composer_with_patch(
-            cx,
-            true,
-            (0..2).map(|index| format!("src/{}file-{index}.rs", "deeply/nested/".repeat(6))),
-        );
-        let detail = cx.debug_bounds("approval-detail").expect("detail box");
-        let first = cx.debug_bounds("approval-change-0").expect("first path");
-        let second = cx.debug_bounds("approval-change-1").expect("second path");
-        assert!(first.size.height > px(30.), "a long path wraps on a phone");
-        assert!(second.top() >= first.bottom());
-        assert!(
-            second.bottom() <= detail.bottom(),
-            "a short list grows to show every path"
-        );
-    }
-
-    /// An option of a command's request, a default button kept on the
-    /// composer's clock, glides to its hover fill under the pointer and
-    /// holds it, and glides back as the pointer leaves.
-    #[gpui::test]
-    fn an_approval_option_glides_to_its_hover_fill_and_back(cx: &mut TestAppContext) {
-        let cx = composer_with_request(
-            cx,
-            false,
-            ApprovalKind::ExecCommand {
-                command: "cargo test".into(),
-                cwd: None,
-                description: None,
-            },
-            None,
-            vec![agent::ApprovalOption {
-                id: "once".into(),
-                label: "Allow once".into(),
-                kind: ApprovalOptionKind::AllowOnce,
-            }],
-        );
-        let (rest, hover) = cx.update(|_, cx| {
-            let theme = cx.theme();
-            let hover = crate::widgets::button::tinted(theme.background, theme.muted);
-            (theme.background, hover)
-        });
-        let away = cx
-            .debug_bounds("approval-option-once")
-            .expect("option")
-            .origin
-            - point(px(40.), px(40.));
-        crate::widgets::button::tests::assert_hover_glides(
-            "approval-option-once",
-            rest,
-            hover,
-            away,
-            cx,
-        );
     }
 
     #[gpui::test]

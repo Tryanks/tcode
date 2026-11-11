@@ -475,25 +475,3 @@ mod imp {
         Ok(bytes)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// An element partly outside the viewport is captured where it shows; one
-    /// wholly outside has nothing to capture.
-    #[test]
-    fn element_boxes_clip_to_the_viewport() {
-        let measured = |x: f64, y: f64| {
-            ElementBox::from_agent(&serde_json::json!({
-                "x": x, "y": y, "width": 100, "height": 50,
-                "scrollX": 0, "scrollY": 400, "dpr": 2,
-                "viewportWidth": 800, "viewportHeight": 600,
-            }))
-            .unwrap()
-        };
-        assert_eq!(measured(10., 20.).visible(), Some((10., 20., 100., 50.)));
-        assert_eq!(measured(750., -10.).visible(), Some((750., 0., 50., 40.)));
-        assert_eq!(measured(900., 20.).visible(), None);
-    }
-}

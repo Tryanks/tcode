@@ -39,18 +39,26 @@ fn real_git_checkouts_resolve_the_gh_default_remote() {
     let subdirectory = cwd.join("nested");
     std::fs::create_dir(&subdirectory).unwrap();
     assert_eq!(
-        repository::resolve(&tcode_services::forge::Checkout::new(&subdirectory), &[])
-            .unwrap()
-            .owner,
+        repository::resolve(
+            &tcode_services::forge::Checkout::new(&subdirectory),
+            &[],
+            |_| None
+        )
+        .unwrap()
+        .owner,
         "sample"
     );
     // gh honours the mark over its ranking of remote names, whatever else the checkout has.
     git(&["config", "--unset", "remote.upstream.gh-resolved"]);
     git(&["config", "remote.origin.gh-resolved", "base"]);
     assert_eq!(
-        repository::resolve(&tcode_services::forge::Checkout::new(&subdirectory), &[])
-            .unwrap()
-            .owner,
+        repository::resolve(
+            &tcode_services::forge::Checkout::new(&subdirectory),
+            &[],
+            |_| None
+        )
+        .unwrap()
+        .owner,
         "forkowner"
     );
     let _ = std::fs::remove_dir_all(root);

@@ -163,10 +163,6 @@ impl MetaChip {
                 description,
             } => h_flex()
                 .id(SharedString::from(format!("pr-label-{name}")))
-                .debug_selector({
-                    let name = name.clone();
-                    move || format!("pr-label-{name}")
-                })
                 .px(cx.theme().tokens.spacing.sm)
                 .gap_1()
                 .items_center()

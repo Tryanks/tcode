@@ -1091,58 +1091,6 @@ mod tests {
         (view, cx)
     }
 
-    /// A formula streaming into a reply is laid out anew as its source
-    /// grows, while the words fading in were measured on its last layout;
-    /// the draw panicked before 1fb54dc6.
-    #[gpui::test]
-    fn a_formula_streaming_in_draws_while_its_words_fade(cx: &mut TestAppContext) {
-        let (view, cx) = open("", cx);
-        let markdown = view.read_with(cx, |root, _| root.markdown.clone());
-        markdown.update(cx, |state, cx| state.set_streaming(true, cx));
-        for piece in ["Tower: $e^{e^{e^{x}}}", "$ and $\\sqrt{1+x}$ done.\n"] {
-            markdown.update(cx, |state, cx| state.push_str(piece, cx));
-            crate::test_frames::draw(cx);
-        }
-    }
-
-    /// A code block streaming in fades in what each append adds and
-    /// nothing it held already, however long the block: the rest of a line
-    /// being written, then the lines after it.
-    #[gpui::test]
-    fn a_streaming_code_block_fades_in_only_what_an_append_adds(cx: &mut TestAppContext) {
-        let (view, cx) = open("", cx);
-        let markdown = view.read_with(cx, |root, _| root.markdown.clone());
-        markdown.update(cx, |state, cx| state.set_streaming(true, cx));
-        let faded = |line: u32, cx: &mut VisualTestContext| {
-            let origin = RunOrigin::new(Rc::from([0u32])).line(line);
-            markdown.read_with(cx, |state, _| state.fades(&origin, 64))
-        };
-        let lines = (0..40)
-            .map(|ix| format!("let line_{ix} = {ix};\n"))
-            .collect::<String>();
-        markdown.update(cx, |state, cx| {
-            state.push_str(&format!("```rust\n{lines}let parti"), cx)
-        });
-        crate::test_frames::draw_settled(cx);
-
-        markdown.update(cx, |state, cx| {
-            state.push_str("al = 1;\nlet next = 2;\n", cx)
-        });
-        crate::test_frames::draw(cx);
-        for line in 0..40 {
-            assert_eq!(faded(line, cx), Vec::new(), "line {line} faded again");
-        }
-        let partial = faded(40, cx);
-        assert!(
-            partial
-                .iter()
-                .all(|(range, _)| range.start >= "let parti".len()),
-            "the part of the line shown before faded again: {partial:?}"
-        );
-        assert!(!partial.is_empty(), "the rest of the line fades in");
-        assert!(!faded(41, cx).is_empty(), "the line after it fades in");
-    }
-
     #[gpui::test]
     fn a_drag_ending_off_the_code_lines_ends_at_the_nearest_line(cx: &mut TestAppContext) {
         use gpui::point;

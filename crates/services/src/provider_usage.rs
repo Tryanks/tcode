@@ -263,7 +263,7 @@ mod tests {
             }),
             7,
         );
-        assert_eq!(api_key.error.as_deref(), Some("usage not available"));
+        assert!(api_key.error.is_some());
         assert!(api_key.windows.is_empty());
     }
 

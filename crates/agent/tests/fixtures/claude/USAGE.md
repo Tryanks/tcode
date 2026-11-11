@@ -22,19 +22,12 @@ post-tokens, 16,607 cumulative dropped tokens and 24,455 ms duration. Transcript
 UUIDs in preserved-segment metadata were omitted. Post-tokens describe the
 compaction result; they are not a fresh request context observation.
 
-`usage_scope.jsonl` and `usage_resume.jsonl` are constructed protocol fixtures,
-not live captures. They protect >capacity turn traffic, output-only deltas,
-repeated message/result IDs, main/subagent routing, a fresh process on an existing
-timeline, compaction and interrupted completion. Their expected counts are
-literal assertions in the production adapter → timeline → composer replay.
-
 Contract references:
 - https://code.claude.com/docs/en/agent-sdk/cost-tracking
 - https://platform.claude.com/docs/en/build-with-claude/streaming
 - https://code.claude.com/docs/en/statusline#context-window-fields
 
 The exact reporter's 2.5M/4.1M run and automatic compaction were not captured.
-The fixtures deliberately distinguish observed evidence from constructed cases.
 
 A separate read-only native account probe ran the existing ignored
 `provider_usage::tests::live_provider_usage` test explicitly. Both Codex and

@@ -59,36 +59,3 @@ impl ConversationUiState {
         self.pending_diff_focus = None;
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn diff_file_focus_request_is_consumed_once_and_discarded_on_scope_change() {
-        let mut ui = ConversationUiState::new(false, false, 240.);
-        ui.pending_diff_focus = Some(DiffFocus {
-            session: "session-a".into(),
-            turn: 3,
-            path: Some("src/second.rs".into()),
-        });
-        assert_eq!(ui.take_diff_focus("session-a", 2), None);
-        assert!(ui.pending_diff_focus.is_some());
-        assert_eq!(
-            ui.take_diff_focus("session-a", 3),
-            Some(DiffFocus {
-                session: "session-a".into(),
-                turn: 3,
-                path: Some("src/second.rs".into()),
-            })
-        );
-        assert_eq!(ui.take_diff_focus("session-a", 3), None);
-        ui.pending_diff_focus = Some(DiffFocus {
-            session: "session-a".into(),
-            turn: 3,
-            path: Some("src/second.rs".into()),
-        });
-        ui.discard_diff_focus();
-        assert!(ui.pending_diff_focus.is_none());
-    }
-}

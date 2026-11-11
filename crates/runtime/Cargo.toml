@@ -10,6 +10,7 @@ test-support = []
 agent = { path = "../agent" }
 async-channel = "2"
 base64 = "0.23"
+chrono = "0.4"
 computer-use-mcp = { path = "../computer-use-mcp" }
 control-mcp = { path = "../control-mcp" }
 log = "0.4"
@@ -28,7 +29,6 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 ureq = { version = "2", default-features = false, features = ["tls"] }
-chrono = "0.4"
 filetime = "0.2"
 tcode-traverse = { path = "../traverse", default-features = false }
 

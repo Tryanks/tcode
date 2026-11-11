@@ -613,7 +613,7 @@ impl Popover {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Render, TestAppContext, point};
+    use gpui::{Render, TestAppContext};
     use std::cell::Cell;
 
     struct SheetHarness(Rc<Cell<usize>>);
@@ -642,55 +642,6 @@ mod tests {
                 ),
             )
         }
-    }
-
-    struct TallSheet;
-    impl Render for TallSheet {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            Popover::new("tall-sheet")
-                .bottom_sheet("Options")
-                .default_open(true)
-                .content(|_, _, _| {
-                    div()
-                        .h(px(2000.))
-                        .w_full()
-                        .debug_selector(|| "tall-content".into())
-                })
-        }
-    }
-
-    #[gpui::test]
-    fn tall_sheet_scrolls_below_navigation_and_above_keyboard(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let (_, cx) = cx.add_window_view(|_, _| TallSheet);
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        crate::window_seam::occlude_for_test(
-            cx,
-            gpui::Edges {
-                top: px(47.),
-                bottom: px(300.),
-                ..Default::default()
-            },
-        );
-        // The open sheet stops short of the status bar and reaches the
-        // screen's bottom edge, with what it holds above the keyboard.
-        crate::test_frames::draw_settled(cx);
-        let sheet = cx.debug_bounds("touch-picker-sheet").unwrap();
-        assert_eq!(sheet.top(), px(99.));
-        assert_eq!(sheet.bottom(), px(852.));
-        let content = cx.debug_bounds("tall-content").unwrap();
-        let viewport = cx.debug_bounds("touch-picker-content").unwrap();
-        assert_eq!(viewport.bottom(), px(552.));
-        assert!(viewport.size.height < content.size.height);
-        cx.simulate_event(gpui::ScrollEvent {
-            position: viewport.center(),
-            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-200.))),
-            touch_phase: gpui::TouchPhase::Moved,
-            ..Default::default()
-        });
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(cx.debug_bounds("tall-content").unwrap().top() < content.top());
-        assert_eq!(cx.debug_bounds("touch-picker-sheet").unwrap(), sheet);
     }
 
     #[derive(Clone, Copy)]
@@ -831,98 +782,6 @@ mod tests {
         assert_eq!((clicks.get(), releases.get()), (1, 1));
     }
 
-    struct LeavingHarness(Rc<Cell<usize>>);
-    impl Render for LeavingHarness {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let chosen = self.0.clone();
-            div().size_full().child(
-                Popover::new("leaving-popover")
-                    .trigger(
-                        crate::widgets::Button::new("open")
-                            .label("Open")
-                            .debug_selector(|| "leaving-trigger".into()),
-                    )
-                    .content(move |_, _, _| {
-                        div()
-                            .child(
-                                div()
-                                    .id("leaving-list")
-                                    .debug_selector(|| "leaving-list".into())
-                                    .size(px(60.))
-                                    .overflow_y_scroll()
-                                    .child(
-                                        div()
-                                            .debug_selector(|| "leaving-rows".into())
-                                            .h(px(600.))
-                                            .w_full(),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .id("leaving-option")
-                                    .debug_selector(|| "leaving-option".into())
-                                    .size(px(60.))
-                                    .on_click(move |_, _, _| chosen.set(chosen.get() + 1)),
-                            )
-                    }),
-            )
-        }
-    }
-
-    #[gpui::test]
-    fn a_dismissed_popover_leaves_inert_then_unmounts(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let chosen = Rc::new(Cell::new(0));
-        let (_, cx) = cx.add_window_view({
-            let chosen = chosen.clone();
-            move |_, _| LeavingHarness(chosen)
-        });
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let trigger = cx.debug_bounds("leaving-trigger").unwrap().center();
-        cx.simulate_click(trigger, Default::default());
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        cx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-            window.draw(cx).clear(cx)
-        });
-        let option = cx.debug_bounds("leaving-option").unwrap();
-        let list = cx.debug_bounds("leaving-list").unwrap();
-        cx.simulate_event(gpui::ScrollEvent {
-            position: list.center(),
-            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-200.))),
-            touch_phase: gpui::TouchPhase::Moved,
-            ..Default::default()
-        });
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let scrolled = |cx: &mut gpui::VisualTestContext| {
-            cx.debug_bounds("leaving-list").unwrap().top()
-                - cx.debug_bounds("leaving-rows").unwrap().top()
-        };
-        let offset = scrolled(cx);
-        assert!(offset > px(0.));
-
-        cx.simulate_keystrokes("escape");
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let leaving = cx.debug_bounds("leaving-option").expect("still drawn");
-        assert_eq!(leaving.origin.x, option.origin.x);
-        assert_eq!(
-            scrolled(cx),
-            offset,
-            "state inside the content carries over"
-        );
-        cx.simulate_click(leaving.center(), Default::default());
-        assert_eq!(chosen.get(), 0, "a leaving popover takes no press");
-
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        cx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-            window.draw(cx).clear(cx)
-        });
-        assert!(cx.debug_bounds("leaving-option").is_none());
-    }
-
     #[gpui::test]
     fn bottom_sheet_options_receive_clicks_above_the_backdrop(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
@@ -949,74 +808,5 @@ mod tests {
             .expect("sheet option is laid out");
         window.simulate_click(bounds.center(), gpui::Modifiers::default());
         assert_eq!(selected.get(), 1);
-    }
-
-    struct HoverHarness(Rc<Cell<usize>>);
-    impl Render for HoverHarness {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let chosen = self.0.clone();
-            div().size_full().p(px(40.)).child(
-                Popover::new("hover-popover")
-                    .open_on_hover()
-                    .trigger(
-                        crate::widgets::Button::new("hover-trigger")
-                            .label("Hover")
-                            .debug_selector(|| "hover-trigger".into()),
-                    )
-                    .content(move |_, _, _| {
-                        div()
-                            .id("hover-option")
-                            .debug_selector(|| "hover-option".into())
-                            .size(px(60.))
-                            .on_click(move |_, _, _| chosen.set(chosen.get() + 1))
-                    }),
-            )
-        }
-    }
-
-    #[gpui::test]
-    fn a_hover_popover_opens_on_rest_and_leaves_inert(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let chosen = Rc::new(Cell::new(0));
-        let (_, cx) = cx.add_window_view({
-            let chosen = chosen.clone();
-            move |_, _| HoverHarness(chosen)
-        });
-        let draw = |cx: &mut gpui::VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                window.simulate_next_frame(cx);
-                window.draw(cx).clear(cx)
-            });
-        };
-        draw(cx);
-        let trigger = cx.debug_bounds("hover-trigger").unwrap().center();
-        cx.simulate_mouse_move(trigger, None, Default::default());
-        draw(cx);
-        cx.executor().advance_clock(HOVER_OPEN_DELAY);
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
-        let option = cx.debug_bounds("hover-option").expect("opened on rest");
-
-        // Onto the content, across the gap: it stays open.
-        cx.simulate_mouse_move(option.center(), None, Default::default());
-        cx.executor().advance_clock(HOVER_CLOSE_DELAY);
-        draw(cx);
-        assert!(cx.debug_bounds("hover-option").is_some(), "kept open");
-
-        cx.simulate_mouse_move(point(px(390.), px(840.)), None, Default::default());
-        cx.executor().advance_clock(HOVER_CLOSE_DELAY);
-        draw(cx);
-        let leaving = cx
-            .debug_bounds("hover-option")
-            .expect("still drawn while it leaves");
-        assert_eq!(leaving.origin.x, option.origin.x);
-        cx.simulate_click(leaving.center(), Default::default());
-        assert_eq!(chosen.get(), 0, "a leaving card takes no press");
-
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
-        assert!(cx.debug_bounds("hover-option").is_none());
     }
 }

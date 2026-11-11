@@ -19,7 +19,6 @@ use rio_vt::{
         square::{ContentTag, Square, Wide},
         style::Style,
     },
-    event::TerminalDamage,
 };
 
 mod grid_emulator;
@@ -143,7 +142,6 @@ pub struct TermSnapshot {
     /// first. Empty for the plain [`GridEmulator::snapshot`].
     pub history_rows: Vec<Row<Square>>,
     pub row_damage: Vec<bool>,
-    pub damage: TerminalDamage,
     pub cursor_state: CursorState,
     pub cursor: Option<(usize, usize)>,
     pub cursor_blinking: bool,

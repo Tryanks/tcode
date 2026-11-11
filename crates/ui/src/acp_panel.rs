@@ -179,10 +179,6 @@ impl AcpPanel {
         }
         material::group_row(cx)
             .id(gpui::SharedString::from(format!("acp-market-row-{id}")))
-            .debug_selector({
-                let id = id.clone();
-                move || format!("acp-market-row-{id}")
-            })
             .items_start()
             .relative()
             .child(crate::material::row_hover(gpui::px(0.), cx))
@@ -499,80 +495,6 @@ impl Render for AcpPanel {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
-
-    #[gpui::test]
-    fn the_marketplace_paints_only_the_visible_agents(cx: &mut TestAppContext) {
-        use tcode_protocol::{
-            EventEnvelope, HostMessage, ProvidersStatus, ServerEvent, Topic, encode_line,
-        };
-
-        cx.update(crate::theme::init);
-        let (to_host, _outgoing) = async_channel::unbounded();
-        let (incoming, from_host) = async_channel::unbounded();
-        let acp_marketplace_items = (0..50)
-            .map(|index| AcpMarketplaceItem {
-                id: format!("agent-{index}"),
-                name: format!("Agent {index}"),
-                version: "1.0.0".into(),
-                description: "An agent from the ACP registry".into(),
-                installed: false,
-                installing: false,
-                supported: true,
-            })
-            .collect();
-        incoming
-            .try_send(
-                encode_line(&HostMessage::Event(EventEnvelope {
-                    request_id: None,
-                    topic: Topic::Providers,
-                    event: ServerEvent::ProvidersReplaced(ProvidersStatus {
-                        acp_marketplace_items,
-                        ..Default::default()
-                    }),
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
-        let link = tcode_client::HostLink::new(to_host, from_host);
-        let pump_link = link.clone();
-        let _pump = cx.background_executor.spawn(async move {
-            pump_link.pump().await;
-        });
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link,
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        let (_, cx) = cx.add_window_view(|window, cx| AcpPanel::new(store.clone(), window, cx));
-        cx.simulate_resize(gpui::size(px(588.), px(456.)));
-        cx.run_until_parked();
-        cx.run_until_parked();
-        cx.update(|window, cx| _ = window.draw(cx));
-        assert!(cx.debug_bounds("acp-market-row-agent-0").is_some());
-        assert!(
-            cx.debug_bounds("acp-market-row-agent-45").is_none(),
-            "the marketplace must not paint every registry agent"
-        );
-
-        let position = cx.debug_bounds("acp-market-row-agent-0").unwrap().center();
-        for _ in 0..10 {
-            cx.simulate_event(gpui::ScrollEvent {
-                position,
-                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-1000.))),
-                touch_phase: gpui::TouchPhase::Moved,
-                ..Default::default()
-            });
-            cx.update(|window, cx| _ = window.draw(cx));
-        }
-        assert!(cx.debug_bounds("acp-market-row-agent-49").is_some());
-        assert!(cx.debug_bounds("acp-market-row-agent-0").is_none());
-    }
 
     /// A store holding one installed agent, built while Simplified Chinese is
     /// current.

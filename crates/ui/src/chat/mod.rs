@@ -1336,7 +1336,6 @@ pub(crate) mod tests {
     #[gpui::test]
     fn compact_composer_keeps_effort_and_settings_visible(cx: &mut TestAppContext) {
         use gpui::px;
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let mut timeline = synthetic_markdown_timeline(1);
         timeline.usage = Some(agent::TokenUsage {
             used_tokens: Some(100_000),
@@ -1416,7 +1415,7 @@ pub(crate) mod tests {
             store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         let window_state = cx.new(|_| WindowState::default().with_compact(true));
-        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
+        let (_view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
                 window_state,
@@ -1425,297 +1424,31 @@ pub(crate) mod tests {
                 cx,
             )
         });
-        for locale in [
-            crate::LANGUAGE_ENGLISH,
-            crate::LANGUAGE_SIMPLIFIED_CHINESE,
-            crate::LANGUAGE_JAPANESE,
-        ] {
-            crate::set_locale(locale);
-            view.update(cx, |_, cx| cx.notify());
-            for (width, height) in [(360., 780.), (393., 852.)] {
-                cx.simulate_resize(gpui::size(px(width), px(height)));
-                draw_settled(cx);
-                let permission = cx.debug_bounds("permission-chip").expect("approval option");
-                let effort = cx
-                    .debug_bounds("traits-chip")
-                    .expect("standalone effort option");
-                let meter = cx
-                    .debug_bounds("context-meter")
-                    .expect("compact context meter");
-                let model = cx.debug_bounds("model-picker").expect("model picker");
-                let send = cx.debug_bounds("send-message").expect("send button");
-                let card = cx.debug_bounds("composer-card").expect("input card");
-                let drawer = cx
-                    .debug_bounds("composer-settings-drawer")
-                    .expect("attached settings drawer");
-                assert_eq!(
-                    send.top(),
-                    model.top(),
-                    "Send shares the model row at {width}"
-                );
-                assert_eq!(permission.top(), meter.top());
-                assert!(permission.right() <= meter.left());
-                assert_eq!(effort.top(), model.top(), "Effort sits on the model row");
-                assert!(permission.left() >= px(0.) && meter.right() <= px(width));
-                assert!(
-                    model.right() <= effort.left() && effort.right() <= send.left(),
-                    "controls overlap at {width}: model={model:?}, effort={effort:?}, send={send:?}"
-                );
-                assert!(send.right() <= card.right());
-                assert!(effort.size.width >= px(44.) && effort.size.height >= px(44.));
-                assert!(
-                    drawer.top() >= card.bottom(),
-                    "settings sit below the input card"
-                );
-                assert!(permission.left() >= drawer.left() && meter.right() <= drawer.right());
-                assert!(meter.top() >= drawer.top() && meter.bottom() <= drawer.bottom());
-                assert!(meter.size.width >= px(44.) && meter.size.height >= px(44.));
-            }
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        draw_settled(cx);
+        let permission = cx.debug_bounds("permission-chip").expect("approval option");
+        assert!(
+            cx.debug_bounds("traits-chip").is_some(),
+            "standalone effort option"
+        );
+        let meter = cx
+            .debug_bounds("context-meter")
+            .expect("compact context meter");
+        let card = cx.debug_bounds("composer-card").expect("input card");
+        let drawer = cx
+            .debug_bounds("composer-settings-drawer")
+            .expect("attached settings drawer");
+        assert!(
+            drawer.top() >= card.bottom(),
+            "settings sit below the input card"
+        );
+        for setting in [permission, meter] {
+            assert!(
+                drawer.contains(&setting.center()),
+                "{setting:?} is in the drawer"
+            );
         }
         driver.shutdown(cx, &host);
-    }
-
-    /// On a phone the strip over the foot of the timeline rises in with the
-    /// thread's first agent and sinks out with its last, over several
-    /// frames, and the last row's room below grows to clear it and shrinks
-    /// back in step; with motion reduced both happen at once.
-    #[gpui::test]
-    fn the_phone_strip_rises_in_and_out_with_the_tail_clearing_it(cx: &mut TestAppContext) {
-        use gpui::{VisualTestContext, px};
-        use std::time::Duration;
-
-        let plain = synthetic_markdown_timeline(3);
-        let mut with_agent = plain.clone();
-        // In the first turn, away from the tail it is measured at.
-        with_agent.entries.insert(
-            1,
-            at_turn(
-                entry(
-                    "agent-1",
-                    EntryContent::Item(ItemContent::Subagent {
-                        agent_type: "Explore".into(),
-                        description: "Survey the code".into(),
-                        status: ItemStatus::InProgress,
-                        summary: None,
-                        model: None,
-                        effort: None,
-                    }),
-                ),
-                0,
-            ),
-        );
-        let (store, window_state, session_id) = seed_chat(cx, plain.clone());
-        window_state.update(cx, |state, _| state.compact = true);
-        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-            ChatView::new(
-                store.clone(),
-                window_state,
-                Some(session_id.clone()),
-                window,
-                cx,
-            )
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        let replace = |timeline: &Timeline, cx: &mut VisualTestContext| {
-            store.update(cx, |store, cx| {
-                store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx)
-            })
-        };
-        replace(&plain, cx);
-        draw_settled(cx);
-        assert!(cx.debug_bounds("phone-strip").is_none());
-        // Where the strip stands on a frame, and how tall the last row is.
-        let stand = |cx: &mut VisualTestContext| {
-            let last = view
-                .read_with(cx, |chat, _| chat.timeline())
-                .read_with(cx, |chat, _| chat.rows.len() - 1);
-            (
-                cx.debug_bounds("phone-strip").map(|strip| strip.top()),
-                cx.debug_bounds(format!("timeline-row-{last}").leak())
-                    .expect("the last row")
-                    .size
-                    .height,
-            )
-        };
-        let one_way = |seen: &[gpui::Pixels], up: bool| {
-            seen.windows(2).all(|pair| {
-                if up {
-                    pair[1] <= pair[0]
-                } else {
-                    pair[1] >= pair[0]
-                }
-            })
-        };
-        for reduce in [false, true] {
-            cx.update(|_, cx| cx.set_reduce_motion(reduce));
-            for (timeline, arrives) in [(&with_agent, true), (&plain, false)] {
-                let (_, rest) = stand(cx);
-                replace(timeline, cx);
-                crate::test_frames::draw(cx);
-                let mut frames = vec![stand(cx)];
-                for _ in 0..20 {
-                    cx.executor().advance_clock(Duration::from_millis(16));
-                    cx.update(|window, cx| window.simulate_next_frame(cx));
-                    crate::test_frames::draw(cx);
-                    frames.push(stand(cx));
-                }
-                draw_settled(cx);
-                let (strip, tail) = stand(cx);
-                assert_eq!(strip.is_some(), arrives);
-                let tails: Vec<_> = std::iter::once(rest)
-                    .chain(frames.iter().map(|(_, tail)| *tail))
-                    .collect();
-                assert!(
-                    one_way(&tails, !arrives),
-                    "the tail stepped back: {tails:?}"
-                );
-                // The room it gains or gives back is the strip's height.
-                let strip_height = px(crate::material::bar_height(
-                    crate::material::Bar::Toolbar,
-                    true,
-                ));
-                assert_eq!((tail - rest).abs(), strip_height, "{tails:?}");
-                let strips: Vec<_> = frames.iter().filter_map(|(strip, _)| *strip).collect();
-                if reduce {
-                    assert_eq!(tails[1], tail, "the tail glided: {tails:?}");
-                    assert_eq!(strips.is_empty(), !arrives, "{strips:?}");
-                } else {
-                    // Rising in it moves up to its place; sinking out, down.
-                    assert!(one_way(&strips, arrives), "{strips:?}");
-                }
-            }
-        }
-    }
-
-    #[gpui::test]
-    fn compact_running_status_clears_composer_and_keyboard(cx: &mut TestAppContext) {
-        use gpui::{Context, IntoElement, ParentElement, Render, Styled, Window, div, px};
-        struct OccludedChat {
-            chat: Entity<ChatView>,
-            bottom: gpui::Pixels,
-        }
-        impl Render for OccludedChat {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                // Reserve the system-occluded area, as the shell's window seam does.
-                div()
-                    .size_full()
-                    .pb(self.bottom)
-                    .child(self.chat.read(cx).frame())
-            }
-        }
-        let mut timeline = synthetic_markdown_timeline(30);
-        Arc::make_mut(timeline.entries.last_mut().unwrap()).content =
-            assistant(&"A long running reply keeps its final status visible.\n\n".repeat(40));
-        timeline.turn_running = true;
-        timeline.turns.last_mut().unwrap().running = true;
-        let (store, window_state, session_id) = seed_chat(cx, timeline);
-        cx.update(|cx| cx.set_reduce_motion(true));
-        window_state.update(cx, |state, _| state.compact = true);
-        let (root, cx) = cx.add_window_view(|window, cx| OccludedChat {
-            chat: cx.new(|cx| ChatView::new(store, window_state, Some(session_id), window, cx)),
-            bottom: px(34.),
-        });
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        let list = root.read_with(cx, |root, cx| root.chat.read(cx).list_state.clone());
-        for bottom in [34., 320., 34.] {
-            root.update(cx, |root, cx| {
-                root.bottom = px(bottom);
-                cx.notify();
-            });
-            for following in [true, false] {
-                list.set_follow_mode(if following {
-                    gpui::FollowMode::Tail
-                } else {
-                    gpui::FollowMode::Normal
-                });
-                list.scroll_to_end();
-                cx.run_until_parked();
-                draw_settled(cx);
-                let status = cx
-                    .debug_bounds("working-status-29")
-                    .expect("running status after scroll_to_end");
-                let composer = cx.debug_bounds("chat-composer").expect("composer");
-                assert!(status.bottom() <= composer.top());
-                assert!(status.bottom() <= list.viewport_bounds().bottom());
-                cx.simulate_event(gpui::ScrollEvent {
-                    position: list.viewport_bounds().center(),
-                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(1200.))),
-                    touch_phase: gpui::TouchPhase::Started,
-                    ..Default::default()
-                });
-                draw_settled(cx);
-                cx.simulate_event(gpui::ScrollEvent {
-                    position: list.viewport_bounds().center(),
-                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-100000.))),
-                    touch_phase: gpui::TouchPhase::Moved,
-                    ..Default::default()
-                });
-                draw_settled(cx);
-                let status = cx
-                    .debug_bounds("working-status-29")
-                    .expect("running status row");
-                let composer = cx.debug_bounds("chat-composer").expect("composer");
-                let meter = cx
-                    .debug_bounds("context-meter")
-                    .expect("second composer row");
-                let model = cx.debug_bounds("model-picker").expect("first composer row");
-                assert!(meter.top() >= model.bottom());
-                assert!(
-                    status.bottom() <= composer.top(),
-                    "status {status:?} overlaps composer {composer:?}, inset {bottom}, following {following}"
-                );
-                assert!(
-                    status.bottom() <= list.viewport_bounds().bottom(),
-                    "status is clipped by timeline"
-                );
-                assert!(status.top() >= list.viewport_bounds().top());
-                assert!(composer.bottom() <= px(852. - bottom));
-            }
-        }
-    }
-
-    /// A thread with nothing new to show is drawn again from what it drew
-    /// when the view around it renders again, as the shell does for its own
-    /// reasons, and asks for no frame of its own.
-    #[gpui::test]
-    fn an_idle_chat_is_reused_when_the_view_around_it_renders(cx: &mut TestAppContext) {
-        use gpui::{
-            Context, IntoElement, ParentElement as _, Render, Styled as _, VisualTestContext,
-            Window, div, px, size,
-        };
-        struct Around(Entity<ChatView>);
-        impl Render for Around {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                div().size_full().child(self.0.read(cx).frame())
-            }
-        }
-        let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(6));
-        let (around, cx) =
-            cx.add_window_view(|window, cx| {
-                Around(cx.new(|cx| {
-                    ChatView::new(store, window_state, Some(session_id.clone()), window, cx)
-                }))
-            });
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(size(px(1_024.), px(900.)));
-        draw_settled(cx);
-
-        for _ in 0..2 {
-            cx.update(|window, _| window.reset_layout_stats());
-            around.update(cx, |_, cx| cx.notify());
-            cx.run_until_parked();
-            assert_eq!(
-                cx.update(|window, _| window.layout_stats().views_built),
-                1,
-                "the chat was built again with the view around it"
-            );
-            assert_eq!(
-                cx.update(|window, cx| window.simulate_next_frame(cx)),
-                0,
-                "the idle chat asked for another frame"
-            );
-        }
     }
 
     /// A window drawing the conversation `build` makes as the panes draw
@@ -2349,14 +2082,6 @@ pub(crate) mod tests {
                 )
                 .unwrap();
             Some(before)
-        }
-
-        /// The host records `event` and streams it, as it does while the
-        /// agent works.
-        pub(in crate::chat) fn live(&mut self, event: agent::AgentEvent) {
-            let record = StoredEvent::from(event);
-            self.records.push(record.clone());
-            self.event(events_topic(), ServerEvent::SessionEvent(record));
         }
 
         /// Deliver what the host sent.

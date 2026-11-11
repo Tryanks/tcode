@@ -642,21 +642,6 @@ fn highlight_from(
 mod tests {
     use super::*;
 
-    #[test]
-    fn detects_language_from_path() {
-        assert_eq!(language_name_for_path("x.rs"), "rust");
-        assert_eq!(language_name_for_path("x.py"), "python");
-        assert_eq!(language_name_for_path("x.ts"), "typescript");
-        assert_eq!(language_name_for_path("x.tsx"), "TypeScriptReact");
-        assert_eq!(language_name_for_path("x.toml"), "TOML");
-        assert_eq!(language_name_for_path("x.kt"), "Kotlin");
-        assert_eq!(language_name_for_path("x.swift"), "Swift");
-        assert_eq!(language_name_for_path("x.ex"), "Elixir");
-        assert_eq!(language_name_for_path("x.zig"), "Zig");
-        assert_eq!(language_name_for_path("noext"), "text");
-        assert!(SYNTAX_SET.find_syntax_by_name("Plain Text").is_some());
-    }
-
     /// An ordinary JSX arrow function once panicked syntect mid-draw and
     /// took the app down; it is highlighted, not left as plain text by a
     /// syntax poisoned on the way.

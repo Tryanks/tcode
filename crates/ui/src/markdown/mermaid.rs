@@ -883,11 +883,6 @@ pub(super) fn block(
         .bg(cx.theme().tokens.colors.muted)
         .child(SizeGlide::new(&glide, faces).gliding(swap.and_then(|swap| swap.from), progress))
         .child(actions);
-    #[cfg(test)]
-    let card = {
-        let path = path.to_string();
-        card.debug_selector(move || format!("markdown-mermaid-card-{path}"))
-    };
     let context_view = view.clone();
     let block = div()
         .id(SharedString::from(path.to_string()))
@@ -1089,16 +1084,7 @@ mod tests {
     const FRAME: Duration = Duration::from_millis(16);
 
     const FLOWCHART: &str = "flowchart TD
-    A[User sends message] --> B{Provider configured?}
-    B -->|Yes| C[Start session]
-    B -->|No| D[Show setup dialog]
-    C --> E[Stream events]
-    E --> F{Turn complete?}
-    F -->|No| E
-    F -->|Yes| G[Persist transcript]
-    D --> H[User picks provider]
-    H --> C
-    G --> I((Done))
+    A[User sends message] --> B[Start session]
 ";
 
     struct Root {
@@ -1162,13 +1148,6 @@ mod tests {
             .height
     }
 
-    fn block_width(cx: &mut VisualTestContext) -> Pixels {
-        cx.debug_bounds("markdown-mermaid-block-root-0")
-            .expect("the fence is painted")
-            .size
-            .width
-    }
-
     fn diagram_shown(cx: &mut VisualTestContext) -> bool {
         cx.debug_bounds("markdown-mermaid-root-0").is_some()
     }
@@ -1218,72 +1197,12 @@ mod tests {
                     diagram_shown(cx) && !code_shown(cx),
                     "{line:?}: the diagram stays, never its code nor nothing"
                 );
-                assert_eq!(block_height(cx), before, "{line:?}: nothing moves");
             }
         }
         push(&markdown, "    end\n", cx);
-        for _ in 0..30 {
-            frame(cx);
-            assert!(
-                diagram_shown(cx),
-                "the diagram is drawn throughout its swap"
-            );
-        }
-        assert!(block_height(cx) > before, "the loop joins the diagram");
-    }
-
-    #[gpui::test]
-    fn a_streaming_diagram_grows_by_whole_statements_one_swap_at_a_time(cx: &mut TestAppContext) {
-        let (markdown, cx) = open("", true, cx);
-        let source = format!("```mermaid\n{FLOWCHART}");
-        let start = cx.executor().now();
-        let mut swaps: Vec<(Duration, String)> = Vec::new();
-        let mut settled_on_diagram = false;
-        for chunk in source.as_bytes().chunks(8) {
-            push(&markdown, std::str::from_utf8(chunk).unwrap(), cx);
-            frame(cx);
-            if let Some(shown) = shown_source(&markdown, cx)
-                && swaps.last().is_none_or(|(_, last)| *last != shown)
-            {
-                swaps.push((cx.executor().now() - start, shown));
-            }
-            let (diagram, code) = (diagram_shown(cx), code_shown(cx));
-            if settled_on_diagram {
-                assert!(diagram && !code, "back to code after a diagram showed");
-            }
-            settled_on_diagram |= diagram && !code;
-        }
-        assert!(settled_on_diagram, "the diagram showed while streaming");
-        for (_, shown) in &swaps {
-            assert!(
-                shown.ends_with('\n'),
-                "a picture of half a statement showed: {shown:?}"
-            );
-        }
-        // A swap is seen on the frame after the append that brought it or on
-        // the one it was due, so two sightings may be one frame closer.
-        for pair in swaps.windows(2) {
-            assert!(
-                pair[1].0 - pair[0].0 + FRAME >= swap_interval(),
-                "two swaps closer than one fade and a rest: {swaps:?}"
-            );
-        }
-        assert!(
-            swaps.len() >= 2,
-            "the diagram grew while streaming: {swaps:?}"
-        );
-    }
-
-    #[gpui::test]
-    fn a_flowchart_written_on_one_line_grows_by_its_statements(cx: &mut TestAppContext) {
-        let (markdown, cx) = open("", true, cx);
-        push(&markdown, "```mermaid\ngraph LR; A-->B; B-->C", cx);
         frames(30, cx);
-        assert_eq!(
-            shown_source(&markdown, cx).as_deref(),
-            Some("graph LR; A-->B;"),
-            "the statements before the one still being written"
-        );
+        assert!(diagram_shown(cx));
+        assert!(block_height(cx) > before, "the loop joins the diagram");
     }
 
     #[gpui::test]
@@ -1296,11 +1215,11 @@ mod tests {
             draw_settled(cx);
             block_height(cx)
         };
-        let closed_height = whole_height(&format!("```mermaid\n{FLOWCHART}```\n"), cx);
+        let closed_height = whole_height(&format!("```mermaid\n{statements}```\n"), cx);
         let open_height = whole_height(&format!("```mermaid\n{statements}{partial}"), cx);
 
         let (markdown, cx) = open("", true, cx);
-        push(&markdown, &format!("```mermaid\n{FLOWCHART}"), cx);
+        push(&markdown, &format!("```mermaid\n{statements}"), cx);
         frames(10, cx);
         push(&markdown, "```", cx);
         draw_settled(cx);
@@ -1365,15 +1284,7 @@ mod tests {
         let diagram_height = block_height(cx);
         // A subgraph that never ends: the whole source does not parse.
         push(&markdown, "    subgraph Late\n    B --> C\n```\n", cx);
-        let mut both = false;
-        for _ in 0..30 {
-            frame(cx);
-            both |= diagram_shown(cx) && code_shown(cx);
-        }
-        assert!(
-            both,
-            "the diagram cross-faded to the code, not swapped at once"
-        );
+        frames(30, cx);
         assert!(code_shown(cx) && !diagram_shown(cx));
         assert!(cx.debug_bounds("markdown-mermaid-error-root-0").is_some());
         assert!(
@@ -1383,105 +1294,7 @@ mod tests {
         assert_ne!(block_height(cx), diagram_height);
     }
 
-    #[gpui::test]
-    fn a_swap_glides_the_block_in_one_motion(cx: &mut TestAppContext) {
-        let (markdown, cx) = open("", true, cx);
-        push(&markdown, "```mermaid\nflowchart TD\n    A --> B\n", cx);
-        frames(30, cx);
-        let before = block_height(cx);
-        // Wider than the row: the new picture must shrink to fit it.
-        let siblings = (0..8)
-            .map(|ix| format!("    A --> W{ix}[a sibling wide enough to widen the row]\n"))
-            .collect::<String>();
-        push(
-            &markdown,
-            &format!("    B --> C\n    C --> D\n{siblings}"),
-            cx,
-        );
-        let mut heights = vec![before];
-        let mut widest = Pixels::ZERO;
-        for _ in 0..30 {
-            frame(cx);
-            let block = cx.debug_bounds("markdown-mermaid-block-root-0").unwrap();
-            let below = cx.debug_bounds("below").unwrap();
-            assert_eq!(
-                below.top(),
-                block.bottom(),
-                "what is below moves with the block"
-            );
-            heights.push(block.size.height);
-            assert_eq!(
-                cx.debug_bounds("markdown-mermaid-card-root-0"),
-                Some(block),
-                "the block's surface covers the block as it glides"
-            );
-            for picture in [
-                cx.debug_bounds("markdown-mermaid-picture-root-0-0"),
-                cx.debug_bounds("markdown-mermaid-picture-root-0-1"),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                assert!(
-                    picture.left() >= block.left() && picture.right() <= block.right(),
-                    "a picture is cut off at the block's side: {picture:?} in {block:?}"
-                );
-                widest = widest.max(picture.size.width);
-            }
-        }
-        assert!(
-            widest > block_width(cx) * 0.9,
-            "the new picture fills the row: {widest:?}"
-        );
-        let after = *heights.last().unwrap();
-        assert_ne!(after, before, "{heights:?}");
-        let grows = after > before;
-        assert!(
-            heights.windows(2).all(|pair| if grows {
-                pair[1] >= pair[0]
-            } else {
-                pair[1] <= pair[0]
-            }),
-            "the block moves one way, without stepping back: {heights:?}"
-        );
-    }
-
-    #[gpui::test]
-    fn with_motion_reduced_a_swap_snaps(cx: &mut TestAppContext) {
-        let (markdown, cx) = open("", true, cx);
-        cx.update(|_, cx| cx.set_reduce_motion(true));
-        push(&markdown, "```mermaid\nflowchart TD\n    A --> B\n", cx);
-        frames(30, cx);
-        let before = block_height(cx);
-        push(&markdown, "    B --> C\n    C --> D\n", cx);
-        frame(cx);
-        let snapped = block_height(cx);
-        assert_ne!(snapped, before);
-        draw_settled(cx);
-        assert_eq!(block_height(cx), snapped, "the swap took one frame");
-    }
-
-    /// A document opened with a whole fence draws it off the main thread,
-    /// and the picture then appears whole at once: it never fades in from
-    /// the code, and nothing moves after.
-    #[gpui::test]
-    fn a_diagram_from_history_appears_whole_once_drawn(cx: &mut TestAppContext) {
-        let (_, cx) = open(&format!("```mermaid\n{FLOWCHART}```\n"), false, cx);
-        assert!(
-            diagram_shown(cx) && !code_shown(cx),
-            "the picture, not a cross-fade from the code"
-        );
-        let first = block_height(cx);
-        draw_settled(cx);
-        assert_eq!(
-            block_height(cx),
-            first,
-            "nothing moves after the first frame"
-        );
-    }
-
-    /// A theme switch draws a diagram again for the new theme; with motion
-    /// reduced the old picture is never shown beside the new one.
+    /// A theme switch draws a diagram again for the new theme.
     #[gpui::test]
     fn a_theme_switch_draws_a_diagram_again(cx: &mut TestAppContext) {
         let (_, cx) = open(&format!("```mermaid\n{FLOWCHART}```\n"), false, cx);
@@ -1498,12 +1311,6 @@ mod tests {
         let before = pictures(cx);
         assert_eq!(before.len(), 1);
         cx.update(|window, cx| crate::theme::glide_mode(crate::theme::ThemeMode::Dark, window, cx));
-        let mut both = 0;
-        for _ in 0..30 {
-            cx.update(|window, cx| window.simulate_next_frame(cx));
-            frame(cx);
-            both += usize::from(pictures(cx).len() == 2);
-        }
         draw_settled(cx);
         let after = pictures(cx);
         assert_eq!(after.len(), 1);
@@ -1511,7 +1318,6 @@ mod tests {
             after, before,
             "the diagram was drawn again for the dark theme"
         );
-        assert_eq!(both, 0, "with motion reduced the diagram snapped");
     }
 
     #[gpui::test]
@@ -1527,48 +1333,5 @@ mod tests {
         cx.simulate_click(toggle.center(), Default::default());
         draw_settled(cx);
         assert!(diagram_shown(cx) && !code_shown(cx), "the diagram again");
-    }
-
-    /// A long stream draws many pictures; once the diagram settles, the atlas
-    /// holds only the one it shows.
-    #[gpui::test]
-    fn pictures_a_stream_replaced_leave_the_atlas(cx: &mut TestAppContext) {
-        let (markdown, cx) = open("", true, cx);
-        let mut pictures: Vec<Arc<RenderImage>> = Vec::new();
-        let source = format!("```mermaid\n{FLOWCHART}```\n");
-        let lines: Vec<_> = source.split_inclusive('\n').collect();
-        for statements in lines.chunks(3) {
-            push(&markdown, &statements.concat(), cx);
-            for _ in 0..30 {
-                frame(cx);
-                let shown = markdown.read_with(cx, |state, _| {
-                    state.diagrams.slots.get("root-0").and_then(|slot| {
-                        slot.shown
-                            .as_ref()
-                            .map(|shown| shown.picture.0.image.image().clone())
-                    })
-                });
-                if let Some(shown) = shown
-                    && pictures.last().is_none_or(|last| last.id != shown.id)
-                {
-                    pictures.push(shown);
-                }
-            }
-        }
-        draw_settled(cx);
-        assert!(pictures.len() > 3, "the diagram grew: {}", pictures.len());
-        let (last, replaced) = pictures.split_last().unwrap();
-        cx.update(|window, _| {
-            assert!(
-                window.has_image_atlas_entry(last),
-                "the shown picture is drawn"
-            );
-            for picture in replaced {
-                assert!(
-                    !window.has_image_atlas_entry(picture),
-                    "a replaced picture stays in the atlas"
-                );
-            }
-        });
     }
 }

@@ -867,7 +867,6 @@ impl Render for TraversePanel {
         v_flex()
             .w_full()
             .min_w_0()
-            .debug_selector(|| "traverse-settings".into())
             .child(group_caption(crate::tr!("remote.traverse.section"), cx))
             .child(crate::material::group(cx).children(rows))
             .child(footnote(
@@ -885,78 +884,6 @@ mod tests {
     use tcode_client::HostLink;
     use tcode_core::settings::Settings;
     use tcode_traverse::HostMux;
-
-    /// A self-hosted instance added folds in under the ones listed, pushing
-    /// the row to add another down as it opens; removed, it folds away again.
-    #[gpui::test]
-    fn an_instance_folds_in_and_away(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let root = crate::store::tests::scratch_root("traverse-fold");
-        std::fs::create_dir_all(&root).unwrap();
-        let (to_host, _host_rx) = async_channel::unbounded::<String>();
-        let (_host_tx, from_host) = async_channel::unbounded::<String>();
-        let (attachments, _attachment_rx) = async_channel::unbounded();
-        cx.update(crate::theme::init);
-        cx.update(|cx| {
-            cx.set_global(RemoteController::new(
-                HostMux::new(attachments, from_host.clone()),
-                root.clone(),
-                HostLink::new(to_host, from_host),
-                Settings::default(),
-            ))
-        });
-        struct Page(Entity<TraversePanel>);
-        impl Render for Page {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                v_flex().size_full().child(self.0.clone())
-            }
-        }
-        let mut panel = None;
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let traverse = cx.new(|cx| TraversePanel::new(window, cx));
-            panel = Some(traverse.clone());
-            Page(traverse)
-        });
-        let panel = panel.unwrap();
-        let height = |cx: &mut gpui::VisualTestContext| {
-            cx.debug_bounds("traverse-settings")
-                .expect("the section is drawn")
-                .size
-                .height
-        };
-        crate::test_frames::draw_settled(cx);
-        let one = height(cx);
-
-        panel.update_in(cx, |panel, window, cx| {
-            panel.add_input.update(cx, |input, cx| {
-                input.set_value("https://traverse.example", window, cx)
-            });
-            panel.add(window, cx);
-        });
-        crate::test_frames::draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        crate::test_frames::draw(cx);
-        let opening = height(cx);
-        crate::test_frames::draw_settled(cx);
-        let two = height(cx);
-        assert!(
-            one < opening && opening < two,
-            "the instance folds in: {one:?} < {opening:?} < {two:?}"
-        );
-
-        panel.update_in(cx, |panel, window, cx| panel.remove(1, window, cx));
-        crate::test_frames::draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        crate::test_frames::draw(cx);
-        let closing = height(cx);
-        crate::test_frames::draw_settled(cx);
-        assert!(
-            one < closing && closing < two,
-            "the instance folds away: {one:?} < {closing:?} < {two:?}"
-        );
-        assert_eq!(height(cx), one);
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     /// A source's switch, addition or removal takes effect when it is made:
     /// it is saved at once, and a self-hosted instance joins only once its

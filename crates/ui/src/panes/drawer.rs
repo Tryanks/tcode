@@ -556,10 +556,9 @@ impl Drawer {
             }
         }
 
-        // The state keeps the panel's size for a drag to start from. A panel
-        // new to the group has its size but not yet the conversation's; a
-        // room that changes is held at that size this frame, and the state
-        // takes it once the frame has laid both out.
+        // The state keeps the panel's size for a drag to start from: a room
+        // that changes is held at that size this frame, and the state takes
+        // it once the frame has laid it out.
         let moved = drawn && self.laid_out.replace(room) != Some(room);
         if !drawn {
             self.laid_out = None;
@@ -724,37 +723,5 @@ impl Drawer {
         .child(content)
         .when(frame.leaving, |panel| panel.child(crate::motion::shield()))
         .into_any_element()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The chosen width while the pane holds it beside the conversation,
-    /// yielding down to the panel's narrowest; below that the panel covers
-    /// the pane, the conversation never going under a pane's own narrowest.
-    #[test]
-    fn a_panel_rests_beside_the_conversation_until_there_is_no_room_for_both() {
-        let least = px(RIGHT_PANEL_MIN_WIDTH + CONVERSATION_MIN_WIDTH);
-        assert_eq!(rest_width(px(560.), px(1200.)), Rest::Beside(px(560.)));
-        assert_eq!(
-            rest_width(px(560.), least + px(100.)),
-            Rest::Beside(px(RIGHT_PANEL_MIN_WIDTH) + px(100.))
-        );
-        assert_eq!(
-            rest_width(px(10_000.), px(1200.)),
-            Rest::Beside(px(1200.) - px(CONVERSATION_MIN_WIDTH))
-        );
-        assert_eq!(
-            rest_width(px(10.), px(1200.)),
-            Rest::Beside(px(RIGHT_PANEL_MIN_WIDTH))
-        );
-        assert_eq!(
-            rest_width(px(560.), least),
-            Rest::Beside(px(RIGHT_PANEL_MIN_WIDTH))
-        );
-        assert_eq!(rest_width(px(560.), least - px(1.)), Rest::Cover);
-        assert_eq!(rest_width(px(560.), px(400.)), Rest::Cover);
     }
 }

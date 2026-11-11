@@ -38,10 +38,12 @@ independently guards. A test that would break under behavior-preserving
 refactoring is asserting implementation, not behavior; rewrite it at the
 owning boundary before landing it.
 
-Bug regression tests must fail on the pre-fix code for the intended reason and
-pass after the owner-boundary repair. A regression test that never demonstrably
-failed proves the mock, not the fix. One regression at the owner boundary
-covers the bug; do not replay the same scenario at every layer it crosses.
+Fixing a bug does not call for a test. Fix it, and add a test only when the
+fix shows that a decision Tcode makes had no test at all; then the test is of
+that decision, at its owner boundary, once, and it fails on the code before
+the fix. A test that pins how an animation moves or where a pixel lands, kept
+because a defect was once fixed there, guards nothing the maintainer has not
+already seen for themselves.
 
 ## Junk patterns
 

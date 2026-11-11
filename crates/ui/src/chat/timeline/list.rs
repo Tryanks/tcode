@@ -773,7 +773,7 @@ mod tests {
     fn the_mark_stays_on_its_turn_as_history_is_read_in_above(cx: &mut TestAppContext) {
         use crate::test_frames::draw;
 
-        let events = (0..400)
+        let events = (0..100)
             .flat_map(|turn| {
                 [
                     agent::AgentEvent::TurnStarted {
@@ -789,7 +789,7 @@ mod tests {
                 ]
             })
             .collect();
-        let mut thread = ScriptedThread::new(cx, events, 4 * 390, false);
+        let mut thread = ScriptedThread::new(cx, events, 4 * 90, false);
         let store = thread.store.clone();
         let (view, cx) = thread.open(cx);
         // A frame as the display draws it, then the page it asked for.

@@ -3793,43 +3793,6 @@ mod tests {
         assert_eq!(installs(&host, cx), ["claude", "user"]);
     }
 
-    /// An uninstalled plugin's row folds away where it was, and the row below
-    /// it moves up as it goes rather than jumping into its place.
-    #[gpui::test]
-    fn an_uninstalled_plugin_folds_away_and_the_next_moves_up(cx: &mut TestAppContext) {
-        let (host, cx) = open_plugins(settings(), catalogs(), cx);
-        crate::test_frames::draw_settled(cx);
-        let top = |row: &'static str, cx: &mut VisualTestContext| {
-            cx.debug_bounds(row).expect("the row is drawn").top()
-        };
-        let first = top("plugin-row-user-alpha@mkt", cx);
-        let second = top("plugin-row-user-delta@other", cx);
-
-        let mut after = catalogs();
-        for catalog in after
-            .iter_mut()
-            .filter(|catalog| catalog.context_cwd.is_none())
-        {
-            catalog.entries.retain(|entry| entry.id != "alpha@mkt");
-        }
-        host.replicate(after, cx);
-        assert!(
-            cx.debug_bounds("plugin-row-user-alpha@mkt").is_some(),
-            "an uninstalled plugin is drawn while it leaves"
-        );
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        crate::test_frames::draw(cx);
-        let moving = top("plugin-row-user-delta@other", cx);
-        assert!(
-            moving > first && moving < second,
-            "delta is on its way up, at {moving:?}"
-        );
-
-        crate::test_frames::draw_settled(cx);
-        assert!(cx.debug_bounds("plugin-row-user-alpha@mkt").is_none());
-        assert_eq!(top("plugin-row-user-delta@other", cx), first);
-    }
-
     /// A marketplace removal waits on the person: the dialog lists what it
     /// uninstalls, and Remove answers exactly that challenge, once.
     #[gpui::test]

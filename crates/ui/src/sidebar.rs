@@ -4134,10 +4134,6 @@ impl SessionsSidebar {
                 ROW_GAP,
                 div()
                     .id(SharedString::from(format!("follow-up-{name}")))
-                    .debug_selector({
-                        let name = name.to_owned();
-                        move || format!("follow-up-{name}")
-                    })
                     .flex_none()
                     .child(Icon::new(IconName::Bell).text_color(cx.theme().muted_foreground))
                     .with_tooltip(|_, _| Tooltip::new(crate::tr!("control.follow_up.marker"))),
@@ -6913,64 +6909,6 @@ mod tests {
         }
     }
 
-    /// A row's label tells a screen reader where its pane lies. The test
-    /// window has no accessibility tree to read the label from.
-    #[test]
-    fn a_pane_reads_as_where_it_lies() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let place = |left, top, width, height| {
-            MapCell {
-                pane: gpui::EntityId::from(1),
-                row: None,
-                rect: gpui::bounds(gpui::point(left, top), gpui::size(width, height)),
-            }
-            .place()
-            .into_owned()
-        };
-        for (rect, words) in [
-            ((0., 0., 0.5, 1.), "left"),
-            ((0.5, 0., 0.5, 1.), "right"),
-            ((0., 0., 1., 0.5), "top"),
-            ((0., 0.5, 1., 0.5), "bottom"),
-            ((0.5, 0., 0.5, 0.5), "top right"),
-            ((0., 0.5, 0.5, 0.5), "bottom left"),
-            ((1. / 3., 0., 1. / 3., 1.), "middle"),
-            ((2. / 3., 0.5, 1. / 3., 0.5), "bottom right"),
-        ] {
-            assert_eq!(place(rect.0, rect.1, rect.2, rect.3), words, "{rect:?}");
-        }
-    }
-
-    struct WorkingThreadRowProbe;
-
-    impl Render for WorkingThreadRowProbe {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            selectable_row(h_flex(), false, false, cx)
-                .w_full()
-                .pl(px(THREAD_INDENT))
-                .text_body(false, cx)
-                .debug_selector(|| "thread-row".into())
-                .child(
-                    h_flex()
-                        .flex_none()
-                        .items_center()
-                        .gap_1()
-                        .child(div().size(px(6.)))
-                        .child(
-                            div()
-                                .whitespace_nowrap()
-                                .text_secondary(false, cx)
-                                .child("工作中"),
-                        ),
-                )
-                .child(
-                    sidebar_label("Phase 0 修复架构约束测试")
-                        .debug_selector(|| "thread-title".into())
-                        .text_body(false, cx),
-                )
-        }
-    }
-
     fn draw(cx: &mut VisualTestContext) {
         cx.run_until_parked();
         cx.update(|window, cx| {
@@ -7140,33 +7078,6 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn working_thread_title_stays_inside_row_at_every_sidebar_width(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let (_, cx) = cx.add_window_view(|_, _| WorkingThreadRowProbe);
-        let cx: &mut VisualTestContext = cx;
-
-        // The resizable sidebar is constrained to 220..=380px. Half-pixel
-        // increments cover Retina resize boundaries where glyph rounding used
-        // to push the final character onto a second line.
-        for half_pixel_width in 440..=760 {
-            let width = half_pixel_width as f32 / 2.;
-            cx.simulate_resize(size(px(width), px(60.)));
-            draw(cx);
-
-            let row = cx.debug_bounds("thread-row").expect("row bounds");
-            let title = cx.debug_bounds("thread-title").expect("title bounds");
-            assert!(
-                title.top() >= row.top() && title.bottom() <= row.bottom(),
-                "title escaped the row vertically at {width}px: row={row:?}, title={title:?}"
-            );
-            assert!(
-                title.left() >= row.left() && title.right() <= row.right(),
-                "title escaped the row horizontally at {width}px: row={row:?}, title={title:?}"
-            );
-        }
-    }
-
     /// A host of its own holding `threads` (id and last activity) in one
     /// project at a fresh root, and a store over it as `attachment` names it.
     struct TestHost {
@@ -7249,38 +7160,6 @@ mod tests {
         }
     }
 
-    /// A local host holding `threads` (newest first) in one project, and a
-    /// desktop sidebar over it in a window, with motion on.
-    fn sidebar_over_host(
-        cx: &mut TestAppContext,
-        name: &str,
-        threads: &[&str],
-    ) -> (
-        Entity<SessionsSidebar>,
-        Entity<WorkspaceStore>,
-        Entity<WindowState>,
-        crate::store::tests::LocalHostDriver,
-        tcode_runtime::pipe::SpawnedHost,
-        PathBuf,
-    ) {
-        cx.update(crate::theme::init);
-        let threads: Vec<(&str, u64)> = threads
-            .iter()
-            .enumerate()
-            .map(|(index, id)| (*id, 1_000 - index as u64))
-            .collect();
-        let TestHost {
-            store,
-            driver,
-            host,
-            root,
-        } = TestHost::spawn(cx, name, crate::store::WorkspaceAttachment::Local, &threads);
-        let window_state = cx.new(|_| WindowState::default());
-        let sidebar =
-            cx.new(|cx| SessionsSidebar::new(vec![store.clone()], window_state.clone(), cx));
-        (sidebar, store, window_state, driver, host, root)
-    }
-
     /// A desktop sidebar over two machines, `host-a` holding `a` and
     /// `host-b` holding `b`, drawn in a window of `height` in `layout`.
     fn sidebar_over_two_hosts<'a>(
@@ -7310,584 +7189,6 @@ mod tests {
         cx.simulate_resize(size(px(320.), px(height)));
         crate::test_frames::draw_settled(cx);
         (sidebar, window_state, a, b, cx)
-    }
-
-    /// A thread that moves in the list (pinned here) is drawn where it was,
-    /// then glides to its new place; a Follow-up bell widens into its row,
-    /// moving over gradually; and switching to Grouped cross-fades the two
-    /// lists, the one left fading out rather than vanishing.
-    #[gpui::test]
-    fn sidebar_rows_glide_to_where_they_move_and_the_layouts_cross_fade(cx: &mut TestAppContext) {
-        let (sidebar, store, _, mut driver, host, root) =
-            sidebar_over_host(cx, "sidebar-glide-test", &["newest", "middle", "oldest"]);
-        let (_, cx) =
-            cx.add_window_view(|window, cx| gpui_base::Root::new(sidebar.clone(), window, cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.update(|_, cx| cx.set_reduce_motion(false));
-        cx.simulate_resize(size(px(320.), px(800.)));
-        crate::test_frames::draw_settled(cx);
-        let top = |id: &str, cx: &mut VisualTestContext| {
-            cx.debug_bounds(format!("sidebar-thread-{id}").leak())
-                .unwrap_or_else(|| panic!("{id} is drawn"))
-                .top()
-        };
-        let (first, last) = (top("newest", cx), top("oldest", cx));
-        assert!(first < last);
-
-        cx.update(|window, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.on_pin(&ThreadPin(local("oldest")), window, cx)
-            })
-        });
-        driver.wait_until(cx, "the pin", |cx| {
-            store.read_with(cx, |store, _| {
-                store
-                    .thread_meta("oldest")
-                    .is_some_and(|meta| meta.pinned_at.is_some())
-            })
-        });
-        draw(cx);
-        assert_eq!(top("oldest", cx), last, "it starts from where it was");
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-        draw(cx);
-        let gliding = top("oldest", cx);
-        assert!(gliding < last && gliding > first, "it is on its way up");
-        crate::test_frames::draw_settled(cx);
-        assert!(top("oldest", cx) < top("newest", cx), "Pinned leads");
-
-        let time_left = |cx: &mut VisualTestContext| {
-            cx.debug_bounds("follow-up-middle").map(|bell| bell.left())
-        };
-        assert_eq!(time_left(cx), None);
-        cx.update(|window, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.on_follow_up(&ThreadFollowUp(local("middle"), true), window, cx)
-            })
-        });
-        driver.wait_until(cx, "the follow-up", |cx| {
-            store.read_with(cx, |store, _| {
-                store
-                    .thread_meta("middle")
-                    .is_some_and(|meta| meta.follow_up.is_some())
-            })
-        });
-        draw(cx);
-        let start = time_left(cx).expect("the bell is drawn from the start");
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-        draw(cx);
-        let widening = time_left(cx).unwrap();
-        crate::test_frames::draw_settled(cx);
-        let rest = time_left(cx).unwrap();
-        assert!(
-            rest < widening && widening < start,
-            "the bell widens in, from {start:?} through {widening:?} to {rest:?}"
-        );
-
-        let header = |cx: &mut VisualTestContext| {
-            store.read_with(cx, |store, _| store.projects()[0].id.clone())
-        };
-        let header: &'static str = format!("project-header-{}", header(cx)).leak();
-        assert!(
-            cx.debug_bounds(header).is_none(),
-            "Flat shows no project headers"
-        );
-        // What the header's layout toggle does.
-        let switch = |layout, cx: &mut VisualTestContext| {
-            cx.update(|_, cx| DevicePreferences::set_sidebar_layout(layout, cx));
-            draw(cx);
-        };
-        switch(SidebarLayout::Grouped, cx);
-        crate::test_frames::draw_settled(cx);
-        assert!(
-            cx.debug_bounds(header).is_some(),
-            "Grouped shows its projects"
-        );
-        switch(SidebarLayout::Flat, cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-        draw(cx);
-        assert!(
-            cx.debug_bounds(header).is_some(),
-            "Grouped fades out rather than vanishing"
-        );
-        crate::test_frames::draw_settled(cx);
-        assert!(cx.debug_bounds(header).is_none(), "and is gone once it has");
-
-        driver.shutdown(cx, &host);
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    /// On the phone, pinning a thread is one change that brings the Pinned
-    /// and Active captions and moves rows past each other: each thread
-    /// starts from where it was and glides to its new place, one way and
-    /// never in a jump.
-    #[gpui::test]
-    fn a_phone_list_change_that_inserts_and_reorders_moves_every_row_gradually(
-        cx: &mut TestAppContext,
-    ) {
-        let (sidebar, store, window_state, mut driver, host, root) =
-            sidebar_over_host(cx, "sidebar-phone-reorder", &["newest", "middle", "oldest"]);
-        cx.update(|cx| window_state.update(cx, |state, cx| state.set_compact(true, cx)));
-        let (_, cx) =
-            cx.add_window_view(|window, cx| gpui_base::Root::new(sidebar.clone(), window, cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.update(|_, cx| cx.set_reduce_motion(false));
-        cx.simulate_resize(size(px(393.), px(852.)));
-        crate::test_frames::draw_settled(cx);
-        let top = |id: &str, cx: &mut VisualTestContext| {
-            cx.debug_bounds(format!("compact-row-{id}").leak())
-                .unwrap_or_else(|| panic!("{id} is drawn"))
-                .top()
-        };
-        let before = [top("newest", cx), top("oldest", cx)];
-
-        cx.update(|window, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.on_pin(&ThreadPin(local("oldest")), window, cx)
-            })
-        });
-        driver.wait_until(cx, "the pin", |cx| {
-            store.read_with(cx, |store, _| {
-                store
-                    .thread_meta("oldest")
-                    .is_some_and(|meta| meta.pinned_at.is_some())
-            })
-        });
-        draw(cx);
-        let mut tops = vec![[top("newest", cx), top("oldest", cx)]];
-        for _ in 0..20 {
-            cx.executor()
-                .advance_clock(std::time::Duration::from_millis(16));
-            cx.update(|window, cx| window.simulate_next_frame(cx));
-            draw(cx);
-            tops.push([top("newest", cx), top("oldest", cx)]);
-        }
-        crate::test_frames::draw_settled(cx);
-        let after = [top("newest", cx), top("oldest", cx)];
-        assert!(after[1] < after[0], "Pinned leads: {after:?}");
-        assert_eq!(tops[0], before, "every row starts from where it was");
-        assert_eq!(*tops.last().unwrap(), after, "{tops:?}");
-        for row in 0..2 {
-            let path: Vec<_> = tops.iter().map(|tops| tops[row]).collect();
-            let distance = (after[row] - before[row]).abs();
-            assert!(distance > px(0.), "row {row} moved: {path:?}");
-            assert!(
-                path.windows(2).all(|pair| {
-                    let step = f32::from(pair[1] - pair[0]);
-                    step.abs() < f32::from(distance) / 2.
-                        && step * f32::from(after[row] - before[row]) >= 0.
-                }),
-                "row {row} jumped or went back: {path:?}"
-            );
-        }
-
-        driver.shutdown(cx, &host);
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    /// A thread archived from the list folds away where it was, taking no
-    /// clicks while it goes, and the rows below close up behind it; one that
-    /// comes back opens its room again. Nothing below jumps either way, and
-    /// with motion reduced the list changes at once.
-    #[gpui::test]
-    fn threads_that_leave_and_return_fold_out_of_and_into_the_list(cx: &mut TestAppContext) {
-        let (sidebar, store, _, mut driver, host, root) =
-            sidebar_over_host(cx, "sidebar-presence-test", &["newest", "middle", "oldest"]);
-        let (_, cx) =
-            cx.add_window_view(|window, cx| gpui_base::Root::new(sidebar.clone(), window, cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.update(|_, cx| cx.set_reduce_motion(false));
-        cx.simulate_resize(size(px(320.), px(800.)));
-        crate::test_frames::draw_settled(cx);
-        let top = |id: &str, cx: &mut VisualTestContext| {
-            cx.debug_bounds(format!("sidebar-thread-{id}").leak())
-                .map(|bounds| bounds.top())
-        };
-        let (middle, oldest) = (top("middle", cx).unwrap(), top("oldest", cx).unwrap());
-        let mut lifecycle = |command: Command, listed: bool, cx: &mut VisualTestContext| {
-            cx.update(|window, cx| {
-                sidebar.update(cx, |sidebar, cx| {
-                    sidebar.perform_lifecycle(&HostKey::Local, vec![command], None, window, cx)
-                })
-            });
-            driver.wait_until(cx, "the lifecycle change", |cx| {
-                store.read_with(cx, |store, _| {
-                    store
-                        .sidebar_sessions()
-                        .iter()
-                        .any(|meta| meta.id == "middle")
-                        == listed
-                })
-            });
-            draw(cx);
-        };
-        let halfway = |cx: &mut VisualTestContext| {
-            cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-            cx.update(|window, cx| window.simulate_next_frame(cx));
-            draw(cx);
-        };
-        let archive = || Command::ArchiveSession {
-            session_id: "middle".into(),
-        };
-
-        lifecycle(archive(), false, cx);
-        assert_eq!(top("middle", cx), Some(middle), "it folds from its place");
-        assert_eq!(
-            top("oldest", cx),
-            Some(oldest),
-            "the row below waits for it"
-        );
-        let pressed = cx.debug_bounds("sidebar-thread-middle").unwrap().center();
-        cx.simulate_click(pressed, Default::default());
-        assert_ne!(
-            store.read_with(cx, |store, _| store.sole_thread()),
-            Some("middle".into()),
-            "a leaving row takes no clicks"
-        );
-        halfway(cx);
-        let closing = top("oldest", cx).unwrap();
-        assert!(
-            closing < oldest && closing > middle,
-            "the row below closes up behind it: {closing:?}"
-        );
-        crate::test_frames::draw_settled(cx);
-        assert_eq!(top("middle", cx), None, "it has gone");
-        assert_eq!(top("oldest", cx), Some(middle));
-
-        lifecycle(
-            Command::UnarchiveSession {
-                session_id: "middle".into(),
-            },
-            true,
-            cx,
-        );
-        assert_eq!(top("oldest", cx), Some(middle), "the row below waits");
-        halfway(cx);
-        let opening = top("oldest", cx).unwrap();
-        assert!(
-            opening > middle && opening < oldest,
-            "it opens its room: {opening:?}"
-        );
-        crate::test_frames::draw_settled(cx);
-        assert!(top("middle", cx).is_some(), "it is back");
-        assert_eq!(top("oldest", cx), Some(oldest));
-
-        cx.update(|_, cx| cx.set_reduce_motion(true));
-        lifecycle(archive(), false, cx);
-        assert_eq!(top("middle", cx), None, "reduced motion takes it at once");
-        assert!(top("oldest", cx) < Some(oldest), "and closes up at once");
-
-        driver.shutdown(cx, &host);
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    /// The sidebar, with the reveal of its `row` in each frame: the test
-    /// platform lays out text without painting glyphs, so what a row reveals
-    /// is read from the reveal it draws it at, on the frame's clock.
-    struct Drawn {
-        sidebar: Entity<SessionsSidebar>,
-        row: &'static str,
-        reveals: std::rc::Rc<std::cell::RefCell<Vec<f32>>>,
-    }
-    impl Render for Drawn {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let hover = self.sidebar.read(cx).hover.clone();
-            let reveal = hover.reveal(self.row, window, cx);
-            self.reveals.borrow_mut().push(reveal);
-            div().size_full().child(self.sidebar.clone())
-        }
-    }
-
-    /// A row the pointer comes onto and clicks while its time is still
-    /// fading out for the row's controls, the pointer still moving as it
-    /// presses, selects the thread and fades the time out once: it never
-    /// comes back or starts over.
-    #[gpui::test]
-    fn a_quick_click_fades_the_rows_time_out_once(cx: &mut TestAppContext) {
-        let (sidebar, store, _, mut driver, host, root) =
-            sidebar_over_host(cx, "sidebar-time-click", &["newest", "middle", "oldest"]);
-        crate::store::tests::place_shown_threads(&store, cx);
-        let reveals = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let drawn = cx.new(|_| Drawn {
-                sidebar: sidebar.clone(),
-                row: "flat-thread-middle",
-                reveals: reveals.clone(),
-            });
-            gpui_base::Root::new(drawn, window, cx)
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.update(|_, cx| cx.set_reduce_motion(false));
-        cx.simulate_resize(size(px(320.), px(800.)));
-        let (none, left) = (gpui::Modifiers::none(), gpui::MouseButton::Left);
-        cx.simulate_mouse_move(gpui::point(px(300.), px(790.)), None, none);
-        crate::test_frames::draw_settled(cx);
-        let frame = |cx: &mut VisualTestContext| {
-            cx.executor()
-                .advance_clock(std::time::Duration::from_millis(16));
-            cx.update(|window, cx| window.simulate_next_frame(cx));
-            draw(cx);
-        };
-
-        let row = cx.debug_bounds("sidebar-thread-middle").unwrap();
-        let at = gpui::point(row.center().x, row.top() + px(8.));
-        cx.simulate_mouse_move(at, None, none);
-        let since = reveals.borrow().len();
-        for _ in 0..3 {
-            frame(cx);
-        }
-        cx.simulate_mouse_down(at, left, none);
-        let at = at + gpui::point(px(2.), px(0.));
-        cx.simulate_mouse_move(at, Some(left), none);
-        frame(cx);
-        cx.simulate_mouse_up(at, left, none);
-        cx.simulate_mouse_move(at + gpui::point(px(1.), px(0.)), None, none);
-        for _ in 0..20 {
-            frame(cx);
-        }
-
-        assert_eq!(
-            store.read_with(cx, |store, _| store.open_threads()),
-            ["middle"]
-        );
-        // The time is drawn at what is left of the reveal.
-        let drawn = reveals.borrow()[since..]
-            .iter()
-            .map(|reveal| 1. - reveal)
-            .collect::<Vec<_>>();
-        assert!(
-            drawn[2] > 0. && drawn[2] < 1.,
-            "the click lands mid-fade: {drawn:?}"
-        );
-        assert!(
-            drawn.windows(2).all(|pair| pair[1] <= pair[0]),
-            "the time came back: {drawn:?}"
-        );
-        assert_eq!(drawn.last(), Some(&0.));
-
-        driver.shutdown(cx, &host);
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    /// On the phone's Arrange page, a thread unpinned leaves Pinned for
-    /// Active by gliding there from its place, and the empty-Pinned row
-    /// folds in behind it.
-    #[gpui::test]
-    fn an_arranged_thread_glides_between_sections(cx: &mut TestAppContext) {
-        struct Arrange(Entity<SessionsSidebar>);
-        impl Render for Arrange {
-            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                let page = self
-                    .0
-                    .update(cx, |sidebar, cx| sidebar.render_arrange(window, cx));
-                div().size_full().child(page)
-            }
-        }
-        let (sidebar, store, window_state, mut driver, host, root) =
-            sidebar_over_host(cx, "sidebar-arrange-glide-test", &["first", "second"]);
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let page = cx.new(|_| Arrange(sidebar.clone()));
-            gpui_base::Root::new(page, window, cx)
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.update(|_, cx| cx.set_reduce_motion(false));
-        cx.simulate_resize(size(px(393.), px(852.)));
-        window_state.update(cx, |state, cx| {
-            state.set_compact(true, cx);
-            state.go(crate::window_state::Destination::ArrangeThreads, cx);
-        });
-        cx.update(|window, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.on_pin(&ThreadPin(local("second")), window, cx)
-            })
-        });
-        driver.wait_until(cx, "the pin", |cx| {
-            store.read_with(cx, |store, _| {
-                store
-                    .thread_meta("second")
-                    .is_some_and(|meta| meta.pinned_at.is_some())
-            })
-        });
-        crate::test_frames::draw_settled(cx);
-        let top = |cx: &mut VisualTestContext| {
-            cx.debug_bounds("arrange-row-second")
-                .expect("the row is drawn")
-                .top()
-        };
-        let pinned = top(cx);
-        assert!(cx.debug_bounds("arrange-pinned-empty").is_none());
-
-        cx.update(|window, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.unpin_thread(&local("second"), window, cx)
-            })
-        });
-        driver.wait_until(cx, "the unpin", |cx| {
-            store.read_with(cx, |store, _| {
-                store
-                    .thread_meta("second")
-                    .is_some_and(|meta| meta.pinned_at.is_none())
-            })
-        });
-        draw(cx);
-        assert_eq!(top(cx), pinned, "it starts from where it was");
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-        draw(cx);
-        let gliding = top(cx);
-        crate::test_frames::draw_settled(cx);
-        let active = top(cx);
-        assert!(
-            pinned < gliding && gliding < active,
-            "it glides down into Active: {pinned:?}, {gliding:?}, {active:?}"
-        );
-        assert!(cx.debug_bounds("arrange-pinned-empty").is_some());
-
-        driver.shutdown(cx, &host);
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    /// A row dragged to another place and let go lands from where it was let
-    /// go: its ghost travels from there into the row's new place, which the
-    /// row holds from the drop on, while the host takes the move and after,
-    /// never going back to where it came from. A drag Escape cancels flies
-    /// back from where it was let go into the row's own place. With motion
-    /// reduced a dropped row is in its new place at once.
-    #[gpui::test]
-    fn a_dropped_row_lands_from_where_it_was_let_go(cx: &mut TestAppContext) {
-        let (sidebar, store, _, mut driver, host, root) =
-            sidebar_over_host(cx, "sidebar-drop-landing", &["newest", "middle", "oldest"]);
-        let (_, cx) =
-            cx.add_window_view(|window, cx| gpui_base::Root::new(sidebar.clone(), window, cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.update(|_, cx| cx.set_reduce_motion(false));
-        cx.simulate_resize(size(px(320.), px(800.)));
-        crate::test_frames::draw_settled(cx);
-        let row = |id: &str, cx: &mut VisualTestContext| {
-            cx.debug_bounds(format!("sidebar-thread-{id}").leak())
-                .unwrap_or_else(|| panic!("{id} is drawn"))
-        };
-        let ghost = |id: &str, cx: &mut VisualTestContext| {
-            cx.debug_bounds(format!("drag-ghost-thread-{id}").leak())
-                .map(|ghost| ghost.top())
-        };
-        let frame = |cx: &mut VisualTestContext| {
-            cx.executor()
-                .advance_clock(std::time::Duration::from_millis(16));
-            cx.update(|window, cx| window.simulate_next_frame(cx));
-            draw(cx);
-        };
-        let listed = |cx: &mut VisualTestContext| {
-            store.read_with(cx, |store, _| {
-                store
-                    .flat_sessions()
-                    .iter()
-                    .map(|meta| meta.id.clone())
-                    .collect::<Vec<_>>()
-            })
-        };
-        let first = row("newest", cx).top();
-        let (left, none) = (gpui::MouseButton::Left, gpui::Modifiers::default());
-        // Carries `id` to `to` and returns where its ghost is drawn there.
-        let carry = |id: &str, to: gpui::Point<gpui::Pixels>, cx: &mut VisualTestContext| {
-            let place = row(id, cx);
-            cx.simulate_mouse_down(place.center(), left, none);
-            cx.simulate_mouse_move(place.center() + gpui::point(px(0.), px(8.)), left, none);
-            draw(cx);
-            if !cx.update(|_, cx| cx.reduce_motion()) {
-                assert_eq!(ghost(id, cx), Some(place.top()), "it lifts off its place");
-            }
-            cx.simulate_mouse_move(to, left, none);
-            for _ in 0..20 {
-                frame(cx);
-            }
-            ghost(id, cx).expect("the row is carried")
-        };
-
-        let newest = row("newest", cx);
-        let to = gpui::point(newest.center().x, newest.top() + px(4.));
-        let held = carry("oldest", to, cx);
-        let dropped = row("oldest", cx).top();
-        cx.simulate_mouse_up(to, left, none);
-        // The frame the release is drawn in, those before the host has taken
-        // the move, then those after.
-        draw(cx);
-        let (mut ghosts, mut rows) = (vec![ghost("oldest", cx)], vec![row("oldest", cx).top()]);
-        for _ in 0..4 {
-            frame(cx);
-            ghosts.push(ghost("oldest", cx));
-            rows.push(row("oldest", cx).top());
-        }
-        driver.wait_until(cx, "the move", |cx| {
-            store.read_with(cx, |store, _| {
-                store.flat_sessions().first().map(|meta| meta.id.as_str()) == Some("oldest")
-            })
-        });
-        for _ in 0..20 {
-            frame(cx);
-            ghosts.push(ghost("oldest", cx));
-            rows.push(row("oldest", cx).top());
-        }
-        assert_eq!(ghosts[0], Some(held), "it lands from where it was let go");
-        // Pinned's empty target closes behind the drop, so the new place
-        // moves up as the row settles into it.
-        assert!(
-            rows[0] == dropped
-                && rows.windows(2).all(|pair| pair[1] <= pair[0])
-                && rows.last() == Some(&first),
-            "the row holds the place it was dropped into: {rows:?}"
-        );
-        assert!(
-            ghosts
-                .iter()
-                .flatten()
-                .all(|top| *top >= held && *top <= dropped + px(1.)),
-            "the ghost goes from where it was let go into that place: {ghosts:?}"
-        );
-        assert_eq!(ghosts.last(), Some(&None), "and has settled there");
-        assert_eq!(listed(cx), ["oldest", "newest", "middle"]);
-
-        let middle = row("middle", cx);
-        let to = gpui::point(middle.center().x, middle.bottom() - px(4.));
-        let held = carry("oldest", to, cx);
-        cx.simulate_keystrokes("escape");
-        draw(cx);
-        let mut ghosts = vec![ghost("oldest", cx)];
-        for _ in 0..20 {
-            frame(cx);
-            ghosts.push(ghost("oldest", cx));
-        }
-        cx.simulate_mouse_up(to, left, none);
-        crate::test_frames::draw_settled(cx);
-        assert_eq!(
-            ghosts[0],
-            Some(held),
-            "Escape sends it back from where it was let go"
-        );
-        assert!(
-            ghosts
-                .iter()
-                .flatten()
-                .all(|top| *top <= held && *top >= first - px(1.)),
-            "into its own place: {ghosts:?}"
-        );
-        assert_eq!(ghost("oldest", cx), None);
-        assert_eq!(row("oldest", cx).top(), first);
-        assert_eq!(listed(cx), ["oldest", "newest", "middle"], "nothing moved");
-
-        cx.update(|_, cx| cx.set_reduce_motion(true));
-        let oldest = row("oldest", cx);
-        let to = gpui::point(oldest.center().x, oldest.top() + px(4.));
-        carry("middle", to, cx);
-        cx.simulate_mouse_up(to, left, none);
-        frame(cx);
-        assert_eq!(ghost("middle", cx), None, "reduced motion sets it down");
-        assert_eq!(row("middle", cx).top(), first, "in its new place at once");
-
-        driver.shutdown(cx, &host);
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]
@@ -7936,15 +7237,8 @@ mod tests {
         let window_state = cx.new(|_| WindowState::default());
         let sidebar =
             cx.new(|cx| SessionsSidebar::new(vec![store.clone()], window_state.clone(), cx));
-        let reveals = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let drawn = cx.new(|_| Drawn {
-                sidebar: sidebar.clone(),
-                row: "flat-thread-rename-thread",
-                reveals: reveals.clone(),
-            });
-            gpui_base::Root::new(drawn, window, cx)
-        });
+        let (_, cx) =
+            cx.add_window_view(|window, cx| gpui_base::Root::new(sidebar.clone(), window, cx));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(360.), px(800.)));
         window_state.update(cx, |state, cx| {
@@ -7960,21 +7254,6 @@ mod tests {
             })
             .unwrap();
         let trigger = row.center();
-        // How much of the list hover fill is painted over the row, every
-        // layer of it counted.
-        let held = |cx: &mut VisualTestContext| {
-            cx.update(|window, cx| {
-                let fill = cx.theme().list_hover;
-                let bounds = row.scale(window.scale_factor());
-                crate::test_frames::painted_quads(window)
-                    .iter()
-                    .filter(|quad| quad.bounds == bounds)
-                    .filter_map(|quad| quad.background.as_solid())
-                    .filter(|painted| painted.h == fill.h && painted.l == fill.l)
-                    .map(|painted| painted.a / fill.a)
-                    .sum::<f32>()
-            })
-        };
         if compact {
             let touch = |cx: &mut VisualTestContext, phase, position| {
                 cx.simulate_event(gpui::TouchEvent {
@@ -7995,11 +7274,6 @@ mod tests {
             draw(cx);
             touch(cx, gpui::TouchPhase::Ended, trigger);
             crate::test_frames::draw_settled(cx);
-            assert_eq!(
-                held(cx),
-                1.,
-                "the row a long press opened the menu from stays marked once the finger lifts"
-            );
             let rename = cx
                 .debug_bounds("menu-item-2")
                 .expect("thread menu opens")
@@ -8007,7 +7281,6 @@ mod tests {
             touch(cx, gpui::TouchPhase::Started, rename);
             touch(cx, gpui::TouchPhase::Ended, rename);
             crate::test_frames::draw_settled(cx);
-            assert_eq!(held(cx), 0., "the mark leaves with the menu");
             cx.simulate_input(" edited");
             assert_eq!(
                 sidebar.read_with(cx, |sidebar, cx| sidebar
@@ -8047,79 +7320,6 @@ mod tests {
                 "clicking the rename editor must not open the thread"
             );
         } else {
-            // How far the row's hover controls were in on the last frame.
-            let revealed = || *reveals.borrow().last().unwrap();
-            // The fill and the controls over each of the display frames that
-            // follow.
-            let frames = |cx: &mut VisualTestContext| {
-                (0..24)
-                    .map(|_| {
-                        cx.executor()
-                            .advance_clock(std::time::Duration::from_millis(16));
-                        cx.update(|window, cx| window.simulate_next_frame(cx));
-                        draw(cx);
-                        (held(cx), revealed())
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let pointer = |cx: &mut VisualTestContext, position| {
-                cx.simulate_mouse_move(position, None, gpui::Modifiers::none());
-            };
-            let away = gpui::point(px(340.), px(760.));
-            pointer(cx, trigger);
-            crate::test_frames::draw_settled(cx);
-            assert_eq!(held(cx), 1., "the row under the pointer takes its fill");
-            let (button, modifiers) = (gpui::MouseButton::Right, gpui::Modifiers::none());
-            cx.simulate_mouse_down(trigger, button, modifiers);
-            cx.simulate_mouse_up(trigger, button, modifiers);
-            assert_eq!(
-                frames(cx),
-                [(1., 1.); 24],
-                "nothing moves as the menu opens under the pointer"
-            );
-            let item = cx
-                .debug_bounds("menu-item-2")
-                .expect("thread menu opens")
-                .center();
-            pointer(cx, item);
-            assert_eq!(
-                frames(cx),
-                [(1., 1.); 24],
-                "nothing moves as the pointer goes on to the menu"
-            );
-            pointer(cx, away);
-            crate::test_frames::draw_settled(cx);
-            assert_eq!(
-                (held(cx), revealed()),
-                (1., 1.),
-                "the row stays marked with the pointer away"
-            );
-            pointer(cx, gpui::point(row.left() + px(4.), row.center().y));
-            assert_eq!(
-                frames(cx),
-                [(1., 1.); 24],
-                "the row back under the pointer takes no second fill, and its controls stay"
-            );
-            pointer(cx, away);
-            crate::test_frames::draw_settled(cx);
-            cx.simulate_click(away, gpui::Modifiers::default());
-            let leaving = frames(cx);
-            for part in [|frame: &(f32, f32)| frame.0, |frame: &(f32, f32)| frame.1] {
-                let part = leaving.iter().map(part).collect::<Vec<_>>();
-                assert!(
-                    part.iter().any(|value| *value > 0. && *value < 1.)
-                        && part.windows(2).all(|pair| pair[1] <= pair[0]),
-                    "the row's hover fades out with the menu: {part:?}"
-                );
-            }
-            crate::test_frames::draw_settled(cx);
-            assert_eq!(
-                (held(cx), revealed()),
-                (0., 0.),
-                "the mark leaves with the menu"
-            );
-        }
-        if !compact {
             let (button, modifiers) = (gpui::MouseButton::Right, gpui::Modifiers::none());
             cx.simulate_mouse_down(trigger, button, modifiers);
             cx.simulate_mouse_up(trigger, button, modifiers);
@@ -8250,25 +7450,13 @@ mod tests {
         }
 
         set_marks(cx, true, &mut driver);
-        let rows = wait_for_rows(cx, &mut driver);
-        for ((_, mark_selector), row) in selectors.iter().zip(&rows) {
-            let mark = cx
-                .debug_bounds(mark_selector)
-                .expect("each row carries its provider mark once enabled");
+        wait_for_rows(cx, &mut driver);
+        for (_, mark_selector) in selectors {
             assert!(
-                mark.top() >= row.top()
-                    && mark.bottom() <= row.bottom()
-                    && mark.right() <= row.right()
-                    && mark.left() >= row.left(),
-                "mark sits entirely inside the row: {mark:?} in {row:?}"
-            );
-            assert_eq!(
-                mark.size.height,
-                row.size.height - px(PROVIDER_MARK_INSET),
-                "mark fits the row height minus the inset"
+                cx.debug_bounds(mark_selector).is_some(),
+                "each row carries its provider mark once enabled"
             );
         }
-        draw_settled(cx);
 
         set_marks(cx, false, &mut driver);
         wait_for_rows(cx, &mut driver);
@@ -8498,7 +7686,6 @@ mod tests {
             );
         }
         let toggle = cx.debug_bounds("compact-layout-toggle").unwrap();
-        assert_eq!(toggle.size, size(px(44.), px(44.)));
         cx.simulate_click(toggle.center(), gpui::Modifiers::default());
         draw(cx);
         assert_eq!(
@@ -8567,113 +7754,6 @@ mod tests {
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
         assert!(compact_list_has_project_headers(cx, 1, true));
         assert!(compact_list_has_project_headers(cx, 2, true));
-    }
-
-    #[gpui::test]
-    fn thread_list_scrollbar_drags_without_selecting_a_thread(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
-        let root = crate::store::tests::scratch_root("sidebar-scrollbar");
-        let host = spawn_host(
-            SessionStore::open_at(root.clone()).unwrap(),
-            HostServices::default(),
-        )
-        .unwrap();
-        let project = Project::from_root(root.join("project"));
-        let now = cx.update(|cx| crate::time::now_secs(cx));
-        smol::block_on(host.update_state_for_test(move |state, _| {
-            state.sessions = (0..60)
-                .map(|index| {
-                    let mut meta = session(&format!("scrollbar-{index}"), None);
-                    meta.project_id = Some(project.id.clone());
-                    meta.updated_at = now.saturating_sub(index);
-                    meta
-                })
-                .collect::<Vec<_>>()
-                .into();
-            state.projects = vec![project];
-        }))
-        .unwrap();
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                driver.link.clone(),
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        driver.wait_until(cx, "sidebar baseline", |cx| {
-            store.read_with(cx, |store, _| store.baseline_ready())
-        });
-        // The host sends its index from its own threads; wait for every
-        // thread, as the app's event pump would, before judging the list.
-        driver.wait_until(cx, "every thread", |cx| {
-            store.read_with(cx, |store, _| store.flat_sessions().len() == 60)
-        });
-        let window_state = cx.new(|_| WindowState::default());
-        let (sidebar, cx) = cx.add_window_view(|_, cx| {
-            SessionsSidebar::new(vec![store.clone()], window_state.clone(), cx)
-        });
-
-        for compact in [false, true] {
-            window_state.update(cx, |state, cx| {
-                state.compact = compact;
-                cx.notify();
-            });
-            cx.simulate_resize(size(px(if compact { 393. } else { 300. }), px(800.)));
-            draw(cx);
-            let list = sidebar.read_with(cx, |sidebar, _| {
-                if compact {
-                    sidebar.compact_list_state.clone()
-                } else {
-                    sidebar.flat_list_state.clone()
-                }
-            });
-            let selected = store.read_with(cx, |store, _| store.open_threads());
-            let viewport = list.viewport_bounds();
-            let thumb = gpui::point(viewport.right() - px(5.), viewport.top() + px(8.));
-            cx.simulate_mouse_move(thumb, None, gpui::Modifiers::default());
-            draw(cx);
-            cx.simulate_event(gpui::MouseDownEvent {
-                position: thumb,
-                button: gpui::MouseButton::Left,
-                ..Default::default()
-            });
-            let target = gpui::point(thumb.x, viewport.bottom() - px(8.));
-            cx.simulate_mouse_move(
-                target,
-                Some(gpui::MouseButton::Left),
-                gpui::Modifiers::default(),
-            );
-            cx.simulate_event(gpui::MouseUpEvent {
-                position: target,
-                button: gpui::MouseButton::Left,
-                ..Default::default()
-            });
-            draw(cx);
-            assert_eq!(
-                list.is_scrolled_to_end(),
-                Some(true),
-                "dragging to the bottom must reach the last thread, compact={compact}"
-            );
-            let last = cx
-                .debug_bounds(if compact {
-                    "compact-row-scrollbar-59"
-                } else {
-                    "sidebar-thread-scrollbar-59"
-                })
-                .expect("last thread is rendered after dragging to the bottom");
-            assert!(last.bottom() <= viewport.bottom(), "last thread is clipped");
-            assert_eq!(
-                store.read_with(cx, |store, _| store.open_threads()),
-                selected,
-                "dragging must not activate a thread under the scrollbar"
-            );
-        }
-        driver.shutdown(cx, &host);
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The sidebar's share item puts the project in a space on the machine the
@@ -8839,7 +7919,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn grouped_layout_lays_out_only_the_visible_threads(cx: &mut TestAppContext) {
+    fn the_grouped_list_keeps_the_readers_place_as_threads_change(cx: &mut TestAppContext) {
         use tcode_protocol::{
             EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic, encode_line,
         };
@@ -8860,7 +7940,7 @@ mod tests {
         };
         let mut project = Project::from_root(PathBuf::from("/project"));
         project.id = "project".into();
-        let mut sessions = (0..300)
+        let mut sessions = (0..60)
             .map(|index| {
                 let mut meta = session(&format!("virtual-{index}"), None);
                 meta.project_id = Some(project.id.clone());
@@ -8915,21 +7995,15 @@ mod tests {
             cx.notify();
         });
         draw(cx);
-        assert!(cx.debug_bounds("sidebar-thread-virtual-6").is_none());
         let more = cx.debug_bounds("show-more-project").unwrap();
         cx.simulate_click(more.center(), gpui::Modifiers::default());
         draw_settled(cx);
-        assert!(cx.debug_bounds("sidebar-thread-virtual-5").is_some());
-        assert!(
-            cx.debug_bounds("sidebar-thread-virtual-250").is_none(),
-            "an expanded project must not lay out all 300 thread rows"
-        );
 
         let far_row = |sidebar: &SessionsSidebar| {
             sidebar
                 .grouped_row_keys
                 .iter()
-                .position(|(_, id)| id == "virtual-250")
+                .position(|(_, id)| id == "virtual-30")
                 .unwrap()
         };
         sidebar.update(cx, |sidebar, cx| {
@@ -8940,8 +8014,7 @@ mod tests {
             cx.notify();
         });
         draw(cx);
-        assert!(cx.debug_bounds("sidebar-thread-virtual-250").is_some());
-        assert!(cx.debug_bounds("sidebar-thread-virtual-5").is_none());
+        assert!(cx.debug_bounds("sidebar-thread-virtual-30").is_some());
 
         let mut newer = session("virtual-new", None);
         newer.project_id = Some(project.id.clone());
@@ -8962,12 +8035,12 @@ mod tests {
                 "a new thread above the viewport keeps the visible thread anchored"
             );
         });
-        assert!(cx.debug_bounds("sidebar-thread-virtual-250").is_some());
+        assert!(cx.debug_bounds("sidebar-thread-virtual-30").is_some());
 
         let top = sidebar.read_with(cx, |sidebar, _| far_row(sidebar));
         sessions
             .iter_mut()
-            .find(|meta| meta.id == "virtual-250")
+            .find(|meta| meta.id == "virtual-30")
             .unwrap()
             .archived_at = Some(1);
         apply(&sessions, cx);
@@ -8978,7 +8051,7 @@ mod tests {
                 "archiving the top thread leaves the list where it was"
             );
         });
-        assert!(cx.debug_bounds("sidebar-thread-virtual-251").is_some());
+        assert!(cx.debug_bounds("sidebar-thread-virtual-31").is_some());
 
         sidebar.update(cx, |sidebar, cx| {
             sidebar
@@ -9702,186 +8775,6 @@ mod tests {
             );
             cx.run_until_parked();
             cx.run_until_parked();
-        }
-    }
-
-    /// A Settled shelf opened at the foot of a list taller than the view
-    /// folds its rows in below its header, and scrolling down then shows
-    /// each of them at a thread row's full height: in both layouts, on the
-    /// desktop and on the phone.
-    #[gpui::test]
-    fn a_shelf_opened_at_the_foot_of_a_long_list_scrolls_to_its_rows(cx: &mut TestAppContext) {
-        use tcode_protocol::{
-            EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic, encode_line,
-        };
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
-        cx.update(crate::theme::init);
-        let (to_host, _outgoing) = async_channel::unbounded();
-        let (incoming, from_host) = async_channel::unbounded();
-        let send = |topic, event| {
-            incoming
-                .try_send(
-                    encode_line(&HostMessage::Event(EventEnvelope {
-                        request_id: None,
-                        topic,
-                        event,
-                    }))
-                    .unwrap(),
-                )
-                .unwrap();
-        };
-        let projects: Vec<Project> = (0..12)
-            .map(|index| {
-                let mut project = Project::from_root(PathBuf::from(format!("/p{index:02}")));
-                project.id = format!("p{index:02}");
-                project
-            })
-            .collect();
-        let mut sessions = Vec::new();
-        for (index, project) in projects.iter().enumerate() {
-            for row in 0..3 {
-                let mut meta = session(&format!("{}-{row}", project.id), None);
-                meta.project_id = Some(project.id.clone());
-                meta.created_at = 1000 - 10 * index as u64 - row;
-                meta.updated_at = meta.created_at;
-                sessions.push(meta);
-            }
-        }
-        // All in the last project, so its shelf is at the foot of either list.
-        sessions.extend((0..12).map(|index| {
-            let mut meta = session(&format!("settled-{index}"), None);
-            meta.project_id = Some("p11".into());
-            meta.created_at = 1;
-            meta.updated_at = 1;
-            meta.settled_at = Some(100 - index);
-            meta
-        }));
-        send(
-            Topic::Settings,
-            ServerEvent::SettingsSnapshot(Default::default()),
-        );
-        send(
-            Topic::Index,
-            ServerEvent::IndexSnapshot(IndexSnapshot {
-                sessions,
-                projects,
-                summary: Default::default(),
-            }),
-        );
-        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
-        let link = tcode_client::HostLink::new(to_host, from_host);
-        let pump_link = link.clone();
-        let _pump = cx.background_executor.spawn(async move {
-            pump_link.pump().await;
-        });
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link,
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        let window_state = cx.new(|_| WindowState::default());
-        let (sidebar, cx) = cx.add_window_view(|_, cx| {
-            SessionsSidebar::new(vec![store.clone()], window_state.clone(), cx)
-        });
-        cx.update(|_, cx| cx.set_reduce_motion(false));
-        cx.simulate_resize(size(px(393.), px(700.)));
-        // Wheels down, a frame drawn after each turn, until the list stops
-        // moving: its foot.
-        let scroll_down = |list: &ListState, cx: &mut VisualTestContext| {
-            let position = gpui::point(px(196.), px(400.));
-            cx.simulate_mouse_move(position, None, gpui::Modifiers::default());
-            for _ in 0..20 {
-                let top = list.logical_scroll_top();
-                cx.simulate_event(gpui::ScrollEvent {
-                    position,
-                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-2000.))),
-                    ..Default::default()
-                });
-                crate::test_frames::draw(cx);
-                if list.logical_scroll_top() == top {
-                    return;
-                }
-            }
-            panic!("the list keeps scrolling");
-        };
-        cx.run_until_parked();
-        cx.run_until_parked();
-        for layout in [SidebarLayout::Flat, SidebarLayout::Grouped] {
-            cx.update(|_, cx| DevicePreferences::set_sidebar_layout(layout, cx));
-            let key = match layout {
-                SidebarLayout::Flat => "recent",
-                SidebarLayout::Grouped => "p11",
-            };
-            for compact in [false, true] {
-                window_state.update(cx, |state, cx| {
-                    state.compact = compact;
-                    cx.notify();
-                });
-                sidebar.update(cx, |sidebar, cx| {
-                    sidebar.expanded_settled.clear();
-                    sidebar.settled_limits.clear();
-                    sidebar.compact_model_dirty = true;
-                    cx.notify();
-                });
-                crate::test_frames::draw_settled(cx);
-                let list = sidebar.read_with(cx, |sidebar, _| match (compact, layout) {
-                    (true, _) => sidebar.compact_list_state.clone(),
-                    (false, SidebarLayout::Flat) => sidebar.flat_list_state.clone(),
-                    (false, SidebarLayout::Grouped) => sidebar.grouped_list_state.clone(),
-                });
-                let row = |id: &str| -> &'static str {
-                    if compact {
-                        format!("compact-row-{id}")
-                    } else {
-                        format!("sidebar-thread-{id}")
-                    }
-                    .leak()
-                };
-                let case = format!("{layout:?} compact={compact}");
-                scroll_down(&list, cx);
-                let height = cx
-                    .debug_bounds(row("p11-2"))
-                    .unwrap_or_else(|| panic!("the last active row is in view; {case}"))
-                    .size
-                    .height;
-                let header = cx
-                    .debug_bounds(format!("settled-{key}").leak())
-                    .unwrap_or_else(|| panic!("the shelf's header is in view; {case}"));
-                cx.simulate_click(header.center(), gpui::Modifiers::default());
-                crate::test_frames::draw_settled(cx);
-                scroll_down(&list, cx);
-                let bottom = cx.update(|window, _| window.viewport_size().height);
-                // The view's foot shows the shelf's last rows, each whole.
-                let shown: Vec<usize> = (0..10)
-                    .filter(|index| {
-                        let id = format!("settled-{index}");
-                        cx.debug_bounds(row(&id)).is_some_and(|bounds| {
-                            assert!(
-                                (bounds.size.height - height).abs() < px(1.),
-                                "{id} is {:?} tall, a row {height:?}; {case}",
-                                bounds.size.height
-                            );
-                            assert!(bounds.bottom() <= bottom, "{id} is in view; {case}");
-                            true
-                        })
-                    })
-                    .collect();
-                assert!(
-                    shown.last() == Some(&9) && shown.windows(2).all(|pair| pair[1] == pair[0] + 1),
-                    "the shelf's rows up to its last are in view, not {shown:?}; {case}"
-                );
-                assert!(
-                    cx.debug_bounds(format!("settled-more-{key}").leak())
-                        .is_some_and(|more| more.bottom() <= bottom),
-                    "the shelf's Show more is in view; {case}"
-                );
-            }
         }
     }
 

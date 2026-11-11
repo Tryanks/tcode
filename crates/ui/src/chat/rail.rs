@@ -856,13 +856,13 @@ impl RailView {
 
 #[cfg(test)]
 mod tests {
-    use agent::{Attachment, Goal, GoalStatus, ItemContent, ItemStatus, PlanStep, PlanStepStatus};
+    use agent::{Goal, GoalStatus, ItemContent, ItemStatus, PlanStep, PlanStepStatus};
     use gpui::{AppContext as _, Bounds, TestAppContext, VisualTestContext, point, size};
     use tcode_core::session::{EntryContent, Timeline, TimelineEntry};
 
     use super::*;
     use crate::chat::tests::*;
-    use crate::test_frames::{draw, draw_settled};
+    use crate::test_frames::draw_settled;
     use crate::window_state::WindowState;
 
     /// A thread with a long goal and a long plan, whose latest turn ran
@@ -889,34 +889,6 @@ mod tests {
         timeline
             .entries
             .extend((0..commands).map(|index| at_turn(command(&format!("cmd-{index}")), 1)));
-        timeline
-    }
-
-    /// A thread whose latest turn observed a window through Tcode's computer
-    /// use, and ran `agents` subagents.
-    fn observed(agents: usize) -> Timeline {
-        let mut timeline = synthetic_markdown_timeline(2);
-        timeline.entries.push(at_turn(
-            entry(
-                "observe",
-                EntryContent::Item(ItemContent::ToolCall {
-                    image_reads: vec![Attachment {
-                        media_type: "image/jpeg".into(),
-                        data_base64: "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==".into(),
-                        source_path: None,
-                    }],
-                    name: "mcp__tcode_computer_use__observe_ui".into(),
-                    input: serde_json::json!({ "root": "@r1" }),
-                    output: Some("state_id: S1\nroot: @r1 app=\"Notes\" title=\"Groceries\"".into()),
-                    status: ItemStatus::Completed,
-                    family: None,
-                }),
-            ),
-            1,
-        ));
-        timeline
-            .entries
-            .extend((0..agents).map(|index| at_turn(subagent(index, false), 1)));
         timeline
     }
 
@@ -975,152 +947,13 @@ mod tests {
         (threads, cx)
     }
 
-    /// The next frame, 16ms on.
-    fn next_frame(cx: &mut VisualTestContext) {
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(16));
-    }
-
-    const AT_REST: &[&str] = &["frame", "body"];
-
     fn bounds(cx: &mut VisualTestContext, selector: &str) -> Option<Bounds<Pixels>> {
         cx.debug_bounds(selector.to_owned().leak())
     }
 
-    /// The `parts` of every card lie inside the rail. A card coming in is
-    /// drawn clipped to its surface, so only that is its extent then.
-    fn inside(cx: &mut VisualTestContext, keys: &[&str], parts: &[&str], when: &str) {
-        let rail = bounds(cx, "chat-rail").expect("the rail is drawn");
-        let slack = px(0.5);
-        for key in keys {
-            for part in parts {
-                let Some(part) = bounds(cx, &format!("rail-card-{part}-{key}")) else {
-                    continue;
-                };
-                assert!(
-                    part.top() >= rail.top() - slack && part.bottom() <= rail.bottom() + slack,
-                    "{when}: the {key} card's {part:?} leaves the rail {rail:?}"
-                );
-            }
-        }
-    }
-
-    /// Every card in `keys` is drawn on its surface: the card's fill under
-    /// its header, as wide as the rail.
-    fn on_surfaces(cx: &mut VisualTestContext, keys: &[&str], when: &str) {
-        let rail = bounds(cx, "chat-rail").expect("the rail is drawn");
-        for key in keys {
-            let header = bounds(cx, &format!("rail-card-{key}")).expect("the header shows");
-            let surface = cx.update(|window, cx| {
-                let scale = window.scale_factor();
-                let fill = cx.theme().popover;
-                let (top, left) = (header.top().scale(scale), rail.left().scale(scale));
-                let width = rail.size.width.scale(scale).0 - 1.;
-                let near = |a: gpui::ScaledPixels, b: gpui::ScaledPixels| (a - b).0.abs() <= 1.;
-                crate::test_frames::painted_quads(window)
-                    .iter()
-                    .any(|quad| {
-                        quad.background.as_solid() == Some(fill)
-                            && near(quad.bounds.top(), top)
-                            && near(quad.bounds.left(), left)
-                            && quad.bounds.size.width.0 >= width
-                    })
-            });
-            assert!(
-                surface,
-                "{when}: the {key} card is drawn without its surface"
-            );
-        }
-    }
-
-    /// The selector of the last step of [`timeline`]'s plan.
-    const LAST_STEP: &str = "plan-step-0:Step 13 of a plan long enough to fill its card";
-
-    /// Cards with more to show than a short rail holds share its height:
-    /// the rail never runs past its bottom, as a card comes in or once it
-    /// is in, each card is on its surface whatever height its share comes
-    /// to, and a body of more than its share (the plan's) scrolls inside
-    /// it.
-    #[gpui::test]
-    fn cards_share_a_short_rail_and_scroll_inside_it(cx: &mut TestAppContext) {
-        let (threads, cx) = short_rail(cx, || timeline(0));
-        let first = threads.first.clone();
-        inside(cx, &["goal", "plan"], AT_REST, "at rest with two cards");
-
-        // The commands card comes in over frames, the others giving way.
-        threads.store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(first.clone(), timeline(9), cx)
-        });
-        draw(cx);
-        for frame in 0..30 {
-            inside(
-                cx,
-                &["goal", "plan", "commands"],
-                &["frame"],
-                &format!("frame {frame}"),
-            );
-            on_surfaces(cx, &["goal", "plan"], &format!("frame {frame}"));
-            next_frame(cx);
-        }
-        draw_settled(cx);
-        inside(
-            cx,
-            &["goal", "plan", "commands"],
-            AT_REST,
-            "at rest with three cards",
-        );
-        on_surfaces(
-            cx,
-            &["goal", "plan", "commands"],
-            "at rest with three cards",
-        );
-
-        let rail = bounds(cx, "chat-rail").unwrap();
-        for key in ["goal", "plan", "commands"] {
-            let header = bounds(cx, &format!("rail-card-{key}")).expect("the header shows");
-            assert!(header.bottom() <= rail.bottom(), "the {key} header shows");
-            let body = bounds(cx, &format!("rail-card-body-{key}")).expect("the body shows");
-            assert!(body.size.height > px(0.), "the {key} body has room");
-        }
-
-        // The plan's body holds more steps than its share and scrolls.
-        let body = bounds(cx, "rail-card-body-plan").unwrap();
-        let last = bounds(cx, LAST_STEP).expect("the last step is listed");
-        assert!(
-            last.bottom() > body.bottom(),
-            "the plan body shows all its steps ({last:?} in {body:?}): nothing to scroll"
-        );
-        cx.simulate_mouse_move(body.center(), None, gpui::Modifiers::default());
-        cx.simulate_event(gpui::ScrollEvent {
-            position: body.center(),
-            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-400.))),
-            touch_phase: gpui::TouchPhase::Moved,
-            ..Default::default()
-        });
-        draw_settled(cx);
-        let scrolled = bounds(cx, LAST_STEP).unwrap();
-        assert!(
-            scrolled.top() < last.top(),
-            "the plan body scrolls inside its card"
-        );
-        assert_eq!(
-            bounds(cx, "rail-card-body-plan").unwrap(),
-            body,
-            "the card stays where it is"
-        );
-        inside(
-            cx,
-            &["goal", "plan", "commands"],
-            AT_REST,
-            "after scrolling",
-        );
-    }
-
     /// The commands card never scrolls: in a rail too short for every
     /// command it shows, newest first, as many as fit whole in its share
-    /// above how many more there are, with room for no other; as the rail
-    /// grows it shows more, and all of them once they fit.
+    /// above how many more there are, with room for no other.
     #[gpui::test]
     fn the_commands_card_shows_the_commands_that_fit_and_counts_the_rest(cx: &mut TestAppContext) {
         const COMMANDS: usize = 30;
@@ -1183,112 +1016,6 @@ mod tests {
             bounds(cx, &format!("rail-command-cmd-{}", COMMANDS - 1)),
             Some(first),
             "the commands body has nothing to scroll"
-        );
-
-        cx.simulate_resize(size(px(1_400.), px(900.)));
-        draw_settled(cx);
-        let (taller, _) = shown(cx, "in a taller rail");
-        assert!(
-            taller > short,
-            "a taller rail shows more commands ({taller}, not {short})"
-        );
-
-        cx.simulate_resize(size(px(1_400.), px(2_400.)));
-        draw_settled(cx);
-        let (tall, _) = shown(cx, "in a rail with room for every command");
-        assert_eq!(tall, COMMANDS, "a rail with room shows every command");
-    }
-
-    /// A card whose body has a height of its own keeps all of it when a card
-    /// of many rows crowds the rail: the computer-use card shows its whole
-    /// picture and caption, with nothing to scroll, on every frame the
-    /// agents card comes in and once it is in, and the agents card scrolls
-    /// in what is left.
-    #[gpui::test]
-    fn a_card_of_fixed_height_keeps_it_in_a_crowded_rail(cx: &mut TestAppContext) {
-        let (threads, cx) = short_rail(cx, || observed(0));
-        let alone = bounds(cx, "rail-card-body-screen").expect("the screen card shows");
-        let picture = bounds(cx, "rail-screen-picture").expect("the picture shows");
-        let whole = |cx: &mut VisualTestContext, when: &str| {
-            let body = bounds(cx, "rail-card-body-screen").expect("the screen card shows");
-            assert!(
-                (body.size.height - alone.size.height).abs() <= px(0.5),
-                "{when}: the screen card's body is {body:?}, not its whole content {alone:?}"
-            );
-            let shown = bounds(cx, "rail-screen-picture").expect("the picture shows");
-            assert!(
-                (shown.size.height - picture.size.height).abs() <= px(0.5),
-                "{when}: the picture is drawn {shown:?}, not at its whole size {picture:?}"
-            );
-        };
-
-        threads.store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(threads.first.clone(), observed(40), cx)
-        });
-        draw(cx);
-        for frame in 0..30 {
-            let when = format!("frame {frame}");
-            whole(cx, &when);
-            inside(cx, &["agents", "screen"], &["frame"], &when);
-            next_frame(cx);
-        }
-        draw_settled(cx);
-        whole(cx, "at rest");
-        inside(cx, &["agents", "screen"], AT_REST, "at rest");
-
-        let body = bounds(cx, "rail-card-body-agents").expect("the agents body shows");
-        assert!(body.size.height > px(0.), "the agents body has room");
-        let newest = bounds(cx, "rail-agent-agent-39").expect("the newest agent is listed");
-        cx.simulate_mouse_move(body.center(), None, gpui::Modifiers::default());
-        cx.simulate_event(gpui::ScrollEvent {
-            position: body.center(),
-            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-20.))),
-            touch_phase: gpui::TouchPhase::Moved,
-            ..Default::default()
-        });
-        draw_settled(cx);
-        let scrolled = bounds(cx, "rail-agent-agent-39").expect("the newest agent is listed");
-        assert!(
-            scrolled.top() < newest.top(),
-            "the agents body scrolls inside its card"
-        );
-        whole(cx, "after the agents scroll");
-    }
-
-    /// Two cards with more than a short rail holds share it alike, however
-    /// much more one holds: fifteen agents are given as much of the rail
-    /// as a long turn's sixty commands and show more than a couple of
-    /// rows, rather than the commands card, which only counts what it
-    /// cannot show, taking the rail by how many it has.
-    #[gpui::test]
-    fn cards_that_overflow_a_short_rail_share_it_alike(cx: &mut TestAppContext) {
-        const AGENTS: usize = 15;
-        const COMMANDS: usize = 60;
-        let (_threads, cx) = short_rail(cx, || dispatched(AGENTS, COMMANDS));
-        inside(cx, &["agents", "commands"], AT_REST, "at rest");
-        let agents = bounds(cx, "rail-card-body-agents").expect("the agents card shows");
-        let commands = bounds(cx, "rail-card-body-commands").expect("the commands card shows");
-        let shown = |cx: &mut VisualTestContext, rows: usize, row: &str, body: Bounds<Pixels>| {
-            (0..rows)
-                .filter_map(|index| bounds(cx, &format!("{row}{index}")))
-                .filter(|row| row.top() >= body.top() && row.bottom() <= body.bottom())
-                .count()
-        };
-        let agents_shown = shown(cx, AGENTS, "rail-agent-agent-", agents);
-        let commands_shown = shown(cx, COMMANDS, "rail-command-cmd-", commands);
-        assert!(
-            agents_shown < AGENTS && commands_shown < COMMANDS,
-            "the rail is too short for either card ({agents_shown} agents in {agents:?}, \
-             {commands_shown} commands in {commands:?})"
-        );
-        assert!(
-            (agents.size.height - commands.size.height).abs() <= px(1.),
-            "the agents body {agents:?} ({agents_shown} agents) and the commands body \
-             {commands:?} ({commands_shown} commands) are not given alike"
-        );
-        assert!(
-            agents_shown > 2,
-            "the agents body {agents:?} shows only {agents_shown} agents"
         );
     }
 

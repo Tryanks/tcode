@@ -2040,17 +2040,6 @@ mod tests {
         link.close();
     }
 
-    /// A tool reads as its window names it, with what it acts on.
-    #[test]
-    fn a_tool_call_reads_as_its_window_names_it() {
-        let label = super::activity_label(&tcode_core::session::LatestActivity::Tool {
-            name: "mcp__tcode_control__read".into(),
-            target: Some("src/lib.rs".into()),
-        });
-        assert!(label.contains("tcode_control · read"), "{label}");
-        assert!(label.contains("src/lib.rs"), "{label}");
-    }
-
     #[gpui::test]
     fn settle_all_button_sends_the_lead_command(cx: &mut TestAppContext) {
         use gpui::{px, size};

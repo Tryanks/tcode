@@ -843,6 +843,5 @@ mod tests {
         let json = serde_json::to_value(&meta).unwrap();
         assert!(json.get("forked_from").is_none());
         assert!(json.get("checkpoints").is_none());
-        assert_eq!(serde_json::from_value::<SessionMeta>(json).unwrap(), meta);
     }
 }

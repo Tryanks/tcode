@@ -671,12 +671,6 @@ mod tests {
         );
     }
 
-    /// The conflicts page is Bitbucket's one word on mergeability, taken at the first read
-    /// (#729): a path in it is a conflict, an empty page is clean.
-    ///
-    /// Shape: `paginated_file_conflicts`, the answer `/pullrequests/{id}/conflicts` redirects to
-    /// (Bitbucket Cloud OpenAPI, GET /repositories/{workspace}/{repo_slug}/file-conflicts/{spec},
-    /// whose documented example this follows). Content is invented.
     /// The destination branch's strategies as Bitbucket lists them (shape: Bitbucket Cloud
     /// OpenAPI, `pullrequest_endpoint.branch`'s `merge_strategies` and
     /// `default_merge_strategy`; content invented): the default comes first, and a strategy
@@ -712,6 +706,12 @@ mod tests {
         );
     }
 
+    /// The conflicts page is Bitbucket's one word on mergeability, taken at the first read
+    /// (#729): a path in it is a conflict, an empty page is clean.
+    ///
+    /// Shape: `paginated_file_conflicts`, the answer `/pullrequests/{id}/conflicts` redirects to
+    /// (Bitbucket Cloud OpenAPI, GET /repositories/{workspace}/{repo_slug}/file-conflicts/{spec},
+    /// whose documented example this follows). Content is invented.
     #[test]
     fn a_conflicts_page_with_a_path_is_a_conflict() {
         let conflicting = json!({
