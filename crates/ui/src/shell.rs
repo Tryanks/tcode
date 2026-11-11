@@ -8095,6 +8095,72 @@ pub(crate) mod tests {
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
     }
 
+    /// A host's answer to a search the user has since typed past is not
+    /// listed, even when it arrives after the answer to what they typed.
+    #[gpui::test]
+    fn a_search_answer_for_an_earlier_query_is_not_listed(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1200.);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
+        let host = &hosts[&HostKey::Remote("host-a".into())].host;
+        let asked = |text: &str| {
+            std::iter::from_fn(|| host.outgoing.try_recv().ok())
+                .map(|line| decode_client_line(&line).expect("client line"))
+                .filter(|line| {
+                    matches!(
+                        &line.payload,
+                        ClientPayload::Query(tcode_protocol::Query::SearchSessionContent {
+                            query,
+                            ..
+                        }) if query == text
+                    )
+                })
+                .map(|line| line.id)
+                .collect::<Vec<_>>()
+        };
+        let hits = |count: usize| {
+            Ok(tcode_protocol::QueryResponse::SessionContentHits(
+                tcode_protocol::SessionContentHits {
+                    hits: (0..count)
+                        .map(|index| tcode_protocol::SessionSearchHit {
+                            session_id: "thread-1".into(),
+                            session_title: "thread-1".into(),
+                            entry_id: format!("entry-{index}"),
+                            turn: 0,
+                            snippet: "a zebra".into(),
+                        })
+                        .collect(),
+                    unreadable: Vec::new(),
+                },
+            ))
+        };
+        search_palette(&shell, "zebra", cx);
+        cx.executor().advance_clock(Duration::from_millis(200));
+        draw(cx);
+        let [earlier] = asked("zebra")[..] else {
+            panic!("the first query is asked");
+        };
+        cx.simulate_input("s");
+        cx.executor().advance_clock(Duration::from_millis(200));
+        draw(cx);
+        let [later] = asked("zebras")[..] else {
+            panic!("the second query is asked");
+        };
+
+        answer_query(host, later, hits(1));
+        answer_query(host, earlier, hits(2));
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            cx.debug_bounds("palette-caption-Messages on host-a")
+                .is_some()
+        );
+        assert!(cx.debug_bounds("palette-row-0").is_some());
+        assert!(
+            cx.debug_bounds("palette-row-1").is_none(),
+            "the earlier query's two hits are not listed"
+        );
+    }
+
     /// Over two hosts a host's toast names it and its action goes to it
     /// alone, and an operation of one host is not taken for the other's
     /// of the same number.
