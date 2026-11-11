@@ -381,6 +381,8 @@ pub use wire::{
 // scopes, source_install, unmanaged} instead of a bool; it gains home_path.
 // The file_change item gains output, what the harness gave back for the
 // change: its tool's result, or why it failed.
+// QueryResponse::PullRequest carries fresh_for, the seconds the answer stays
+// current, instead of expires_at, a time by the host's clock.
 // QueryResponse::ActiveWorkspace carries a WorkspaceListing {entries,
 // truncated, unreadable}; ListActiveWorkspace lists a thread that is not
 // running too, and answers unknown_session or git's or the file system's error

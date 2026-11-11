@@ -3671,9 +3671,9 @@ impl WorkspaceStore {
             {
                 QueryResponse::PullRequest {
                     response,
-                    expires_at,
+                    fresh_for,
                 } => answer(*response)
-                    .map(|answer| (answer, expires_at))
+                    .map(|answer| (answer, fresh_for))
                     .ok_or_else(unexpected_pull_request_response),
                 _ => Err(unexpected_pull_request_response()),
             }

@@ -278,8 +278,10 @@ pub enum QueryResponse {
     ReviewRecords(Vec<tcode_core::control::ReviewRecord>),
     PullRequest {
         response: Box<crate::PullRequestReadResponse>,
-        /// Unix seconds after which the host answers this read afresh.
-        expires_at: u64,
+        /// Seconds from this answer until the host answers this read afresh:
+        /// a client counts them from when it got the answer, never against
+        /// its own clock's idea of the host's.
+        fresh_for: u64,
     },
 }
 

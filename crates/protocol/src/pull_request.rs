@@ -23,7 +23,7 @@ pub fn max_pull_request_media_bytes(mime: &str, validator: Option<&str>) -> usiz
                 validator: validator.map(str::to_owned),
                 expires_at: u64::MAX,
             })),
-            expires_at: u64::MAX,
+            fresh_for: u64::MAX,
         }),
     };
     let envelope = crate::encode_line(&empty).map_or(crate::MAX_LINE_BYTES, |line| line.len());
