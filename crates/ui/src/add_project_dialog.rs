@@ -1948,10 +1948,10 @@ mod tests {
             error.is_some_and(|error| error.contains(r"C:\Users\dev\src")),
             "the dialog must show the host's reason for refusing the path"
         );
+        driver.round_trip(cx);
         assert_eq!(
-            smol::block_on(host.update_state_for_test(|state, _| state.projects.len()))
-                .expect("read projects"),
-            0,
+            store.read_with(cx, |store, _| store.projects()),
+            Vec::new(),
             "a refused root must not create a project"
         );
 
@@ -1972,15 +1972,13 @@ mod tests {
         });
         assert_eq!(dialog.read_with(cx, |dialog, _| dialog.error.clone()), None);
         assert_eq!(
-            smol::block_on(host.update_state_for_test(|state, _| {
-                state
-                    .projects
-                    .iter()
-                    .map(|project| project.root.clone())
-                    .collect::<Vec<_>>()
-            }))
-            .expect("read projects"),
-            vec![workspace.clone()]
+            store.read_with(cx, |store, _| store
+                .projects()
+                .into_iter()
+                .map(|project| project.root)
+                .collect::<Vec<_>>()),
+            vec![workspace.clone()],
+            "the project is the host's directory, as the host wrote it down"
         );
 
         driver.shutdown(cx, &host);
