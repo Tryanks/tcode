@@ -57,6 +57,9 @@ question the maintainer asks out of curiosity is a question.
    through every crate it needs. A wire change goes in the note above
    `PROTOCOL_VERSION`; stored data a released version wrote still reads,
    with a test that says so.
+   Before the themes are cut, count the written-down items against the
+   code: some were done by a later lane and some never held. Each that is
+   still there gets one of three words: do, leave with the reason, or ask.
    Done when each written-down item is done, shown not to hold, or carried
    forward with what it waits on.
 
@@ -95,6 +98,9 @@ question the maintainer asks out of curiosity is a question.
   `cfg(any(test, …))` for its tests' sake.
 - **A defect met on the way** is fixed in its own commit, without a test
   for the fix.
+- **What only the real thing proves is run**: a path that reads a CLI's
+  output, a control that kills a process, a page nothing headless draws.
+  Say in the report that it was run and what it showed, or that it was not.
 - **What is new is judged by the definitions**, not by the code beside it.
 
 ## Dispatch
@@ -115,6 +121,12 @@ question the maintainer asks out of curiosity is a question.
   requests to the code host. Fetch a CI log once and keep it.
 - A lane stops what it started before it ends; stopping a lane does not
   stop its subagents or watchers.
+- A fix for something broken on the main branch goes up alone and first;
+  the rest of the round is stacked on it.
+- A round outlives a quota. Keep a note of what is merged, what is open,
+  which lanes stopped where and what comes next, where a session that
+  remembers nothing can read it; a stopped lane keeps its commits and its
+  working tree and is told to go on.
 - Build output is per worktree and per revision. Each lane cleans its
   target when it ends, and the main checkout's is pruned after each merge:
   a full disk stops every lane at once.

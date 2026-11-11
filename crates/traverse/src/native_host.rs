@@ -18,7 +18,7 @@ use crate::{
 };
 
 type QrScanner = dyn Fn() -> HostFuture<'static, Result<Option<String>, DeviceFailure>>;
-type ImagePicker = dyn Fn(usize) -> HostFuture<'static, Result<Vec<PickedFile>, DeviceFailure>>;
+type ImagePicker = dyn Fn() -> HostFuture<'static, Result<Vec<PickedFile>, DeviceFailure>>;
 type FilePicker = dyn Fn() -> HostFuture<'static, Result<Vec<PickedFile>, DeviceFailure>>;
 type EditorOpener = dyn Fn(&Path) -> Result<(), String>;
 type MulticastLock = dyn Fn(bool) + Send + Sync;
@@ -136,7 +136,7 @@ impl NativeClientHost {
     /// The platform's own media picker; see [`ClientHost::pick_images`].
     pub fn with_image_picker(
         mut self,
-        picker: impl Fn(usize) -> HostFuture<'static, Result<Vec<PickedFile>, DeviceFailure>> + 'static,
+        picker: impl Fn() -> HostFuture<'static, Result<Vec<PickedFile>, DeviceFailure>> + 'static,
     ) -> Self {
         self.image_picker = Some(Box::new(picker));
         self
@@ -431,10 +431,10 @@ impl ClientHost for NativeClientHost {
         self.image_picker.is_some()
     }
 
-    fn pick_images(&self, limit: usize) -> HostFuture<'_, Result<Vec<PickedFile>, DeviceFailure>> {
+    fn pick_images(&self) -> HostFuture<'_, Result<Vec<PickedFile>, DeviceFailure>> {
         self.image_picker.as_ref().map_or_else(
             || Box::pin(async { Err(DeviceFailure::Unsupported) }) as HostFuture<'_, _>,
-            |picker| picker(limit),
+            |picker| picker(),
         )
     }
 

@@ -1429,8 +1429,8 @@ notice:
   reference_boundary_crossed: "“%{thread}”中的模型引用了来自其他项目或其他 Harness 的“%{title}”：它从中读取的内容会发送给该模型的提供方"
 attach:
   unsupported_type: "无法将“%{name}”读取为图片。"
+  decode_failed: "无法将“%{name}”读取为图片：%{error}"
   too_large: "'%{name}' 超过了 10MB 的附件大小限制。"
-  too_many: "每条消息最多只能附加 8 张图片。"
   add: "添加"
   photo_library: "相册"
   pick_failed: "无法打开相册：%{error}"
@@ -1450,6 +1450,8 @@ attach:
   retry: "重试上传"
   remove_file: "移除文件"
   wait_for_files: "文件仍在上传或上传失败。请等待完成，或重试、移除后再发送。"
+  scaled: "已缩至 %{size}"
+  scaled_detail: "已从 %{from} 缩小到 %{to} 像素再发送，以符合模型服务商接受的图片尺寸。"
 image_viewer:
   cancelled: "已取消读取原图"
   progress: "%{received} / %{total} 字节"

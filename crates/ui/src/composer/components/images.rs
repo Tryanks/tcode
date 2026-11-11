@@ -5,7 +5,7 @@ use crate::widgets::menu::ContextMenuExt as _;
 use gpui::StyledImage as _;
 use image::GenericImageView as _;
 use std::cell::RefCell;
-use tcode_core::attachments::{AttachError, MAX_EDGE_PX, MAX_IMAGES, MAX_SOURCE_BYTES};
+use tcode_core::attachments::{AttachError, MAX_EDGE_PX};
 
 /// How long a row drawn here takes to fold in or out, or to move to a new place.
 const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
@@ -20,6 +20,23 @@ pub(in super::super) struct PendingImage {
     /// On-disk path of the persisted copy (also the thumbnail image source).
     pub(in super::super) path: PathBuf,
     pub(in super::super) name: String,
+    /// Set when fitting shrank the picture the user attached.
+    pub(in super::super) scaled: Option<Scaled>,
+}
+
+/// An image's size in pixels before and after fitting shrank it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in super::super) struct Scaled {
+    from: (u32, u32),
+    to: (u32, u32),
+}
+
+/// An image as the wire and the model take it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Fitted {
+    mime: String,
+    bytes: Vec<u8>,
+    scaled: Option<Scaled>,
 }
 
 /// One slot of the strip under the field.
@@ -37,6 +54,14 @@ pub(in super::super) enum PendingImageSource {
 
 pub(in super::super) enum AddImageError {
     Attachment(AttachError),
+    Read {
+        name: String,
+        error: std::io::Error,
+    },
+    Decode {
+        name: String,
+        error: image::ImageError,
+    },
     Persist(std::io::Error),
 }
 
@@ -45,6 +70,7 @@ struct PreparedImage {
     dir: PathBuf,
     bytes: Vec<u8>,
     ext: String,
+    scaled: Option<Scaled>,
 }
 
 /// Guess a file extension for a persisted attachment from its MIME type,
@@ -78,35 +104,47 @@ fn is_wire_ready_image(mime: &str) -> bool {
 /// provider accepts, no longer than [`MAX_EDGE_PX`] on either side. Bytes
 /// that already qualify pass through untouched so nothing is recompressed;
 /// GIFs always do, since re-encoding keeps only their first frame.
-pub(crate) fn fit_for_upload(mime: &str, bytes: Vec<u8>) -> image::ImageResult<(String, Vec<u8>)> {
+pub(crate) fn fit_for_upload(mime: &str, bytes: Vec<u8>) -> image::ImageResult<Fitted> {
+    let unchanged = |bytes| Fitted {
+        mime: mime.to_string(),
+        bytes,
+        scaled: None,
+    };
     if mime == "image/gif" {
-        return Ok((mime.to_string(), bytes));
+        return Ok(unchanged(bytes));
     }
     let decoded = image::load_from_memory(&bytes)?;
-    let (width, height) = decoded.dimensions();
-    let oversized = width.max(height) > MAX_EDGE_PX;
+    let from = decoded.dimensions();
+    let oversized = from.0.max(from.1) > MAX_EDGE_PX;
     if is_wire_ready_image(mime) && !oversized {
-        return Ok((mime.to_string(), bytes));
+        return Ok(unchanged(bytes));
     }
-    let image = if oversized {
-        decoded.resize(
+    let (image, scaled) = if oversized {
+        let image = decoded.resize(
             MAX_EDGE_PX,
             MAX_EDGE_PX,
             image::imageops::FilterType::Triangle,
-        )
+        );
+        let to = image.dimensions();
+        (image, Some(Scaled { from, to }))
     } else {
-        decoded
+        (decoded, None)
     };
     let mut out = std::io::Cursor::new(Vec::new());
     // Photos stay JPEG; anything else becomes PNG, which keeps transparency.
-    if mime == "image/jpeg" {
+    let mime = if mime == "image/jpeg" {
         let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
         image.to_rgb8().write_with_encoder(encoder)?;
-        Ok(("image/jpeg".to_string(), out.into_inner()))
+        "image/jpeg"
     } else {
         image.write_to(&mut out, image::ImageFormat::Png)?;
-        Ok(("image/png".to_string(), out.into_inner()))
-    }
+        "image/png"
+    };
+    Ok(Fitted {
+        mime: mime.to_string(),
+        bytes: out.into_inner(),
+        scaled,
+    })
 }
 
 /// Ask before sending `size` bytes across the internet. `proceed` runs on
@@ -187,10 +225,9 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> bool {
         self.sync_images_session(cx);
-        let current_count = self.pending_images.len() + self.pending_image_loads;
-        // Type and count are known now; the size is checked once the image is
+        // The type is known now; the size is checked once the image is
         // fitted, since a phone photo starts far larger than it is sent.
-        if let Err(err) = validate_attachment(&name, &mime, 0, current_count) {
+        if let Err(err) = validate_attachment(&name, &mime, 0) {
             window.push_notification(Notification::error(attach_error_message(&err)), cx);
             return false;
         }
@@ -207,29 +244,26 @@ impl Composer {
             let prepared = cx
                 .background_executor()
                 .spawn(async move {
-                    let too_large =
-                        || AddImageError::Attachment(AttachError::TooLarge { name: name.clone() });
                     let bytes = match source {
                         PendingImageSource::Bytes(bytes) => bytes,
                         PendingImageSource::Path(path) => {
-                            let size = std::fs::metadata(&path)
-                                .map_err(AddImageError::Persist)?
-                                .len();
-                            if size > MAX_SOURCE_BYTES {
-                                return Err(too_large());
-                            }
-                            std::fs::read(path).map_err(AddImageError::Persist)?
+                            std::fs::read(path).map_err(|error| AddImageError::Read {
+                                name: name.clone(),
+                                error,
+                            })?
                         }
                     };
-                    if bytes.len() as u64 > MAX_SOURCE_BYTES {
-                        return Err(too_large());
-                    }
-                    let (mime, bytes) = fit_for_upload(&mime, bytes).map_err(|_| {
-                        AddImageError::Attachment(AttachError::UnsupportedType {
-                            name: name.clone(),
-                        })
+                    // How much memory decoding may take is the decoder's
+                    // own limit; when it is reached, its error says so.
+                    let Fitted {
+                        mime,
+                        bytes,
+                        scaled,
+                    } = fit_for_upload(&mime, bytes).map_err(|error| AddImageError::Decode {
+                        name: name.clone(),
+                        error,
                     })?;
-                    validate_attachment(&name, &mime, bytes.len() as u64, current_count)
+                    validate_attachment(&name, &mime, bytes.len() as u64)
                         .map_err(AddImageError::Attachment)?;
                     let dir = attachments_dir.ok_or_else(|| {
                         AddImageError::Persist(std::io::Error::new(
@@ -238,7 +272,12 @@ impl Composer {
                         ))
                     })?;
                     let ext = image_extension(&mime, &name);
-                    Ok::<_, AddImageError>(PreparedImage { dir, bytes, ext })
+                    Ok::<_, AddImageError>(PreparedImage {
+                        dir,
+                        bytes,
+                        ext,
+                        scaled,
+                    })
                 })
                 .await;
             let _ = this.update_in(cx, |composer, window, cx| {
@@ -329,6 +368,12 @@ impl Composer {
     ) {
         let message = match error {
             AddImageError::Attachment(err) => attach_error_message(&err),
+            AddImageError::Read { name, error } => {
+                crate::tr!("attach.read_failed", name = name, error = error).into_owned()
+            }
+            AddImageError::Decode { name, error } => {
+                crate::tr!("attach.decode_failed", name = name, error = error).into_owned()
+            }
             AddImageError::Persist(err) => {
                 crate::tr!("errors.persist_event", error = err).into_owned()
             }
@@ -346,7 +391,12 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let PreparedImage { dir, bytes, ext } = prepared;
+        let PreparedImage {
+            dir,
+            bytes,
+            ext,
+            scaled,
+        } = prepared;
         let task = self.workspace_store.update(cx, |store, cx| {
             store.save_attachment_to_dir(dir, bytes, ext, cx)
         });
@@ -359,7 +409,9 @@ impl Composer {
                 composer.pending_image_loads = composer.pending_image_loads.saturating_sub(1);
                 cx.notify();
                 match result {
-                    Ok(path) => composer.pending_images.push(PendingImage { path, name }),
+                    Ok(path) => composer
+                        .pending_images
+                        .push(PendingImage { path, name, scaled }),
                     Err(err) => {
                         composer.notify_add_image_error(AddImageError::Persist(err), window, cx)
                     }
@@ -377,17 +429,8 @@ impl Composer {
     ) {
         let host = cx.global::<crate::remote::ClientAttachment>().host();
         self.sync_images_session(cx);
-        let remaining =
-            MAX_IMAGES.saturating_sub(self.pending_images.len() + self.pending_image_loads);
-        if remaining == 0 {
-            window.push_notification(
-                Notification::error(attach_error_message(&AttachError::TooMany)),
-                cx,
-            );
-            return;
-        }
         cx.spawn_in(window, async move |this, cx| {
-            let picked = host.pick_images(remaining).await;
+            let picked = host.pick_images().await;
             let _ = this.update_in(cx, |composer, window, cx| match picked {
                 Ok(images) => {
                     for image in images {
@@ -619,14 +662,22 @@ impl Composer {
         let id = |part: &'static str| {
             gpui::ElementId::NamedChild(std::sync::Arc::new(part.into()), key.clone())
         };
+        let size = |(width, height): (u32, u32)| format!("{width}×{height}");
         Button::new(id("thumb"))
             .secondary()
             .small()
             .chip()
             .aria_label(name.clone())
             // A long file name truncates rather than taking the strip.
-            .max_w(px(220.))
+            .max_w(px(if image.scaled.is_some() { 360. } else { 220. }))
             .overflow_hidden()
+            .when_some(image.scaled, |chip, scaled| {
+                chip.tooltip(crate::tr!(
+                    "attach.scaled_detail",
+                    from = size(scaled.from),
+                    to = size(scaled.to)
+                ))
+            })
             // The thumbnail is decoded at the size it draws, inside the
             // chip's height; no owner sizes a chip's leading image.
             .child(
@@ -644,6 +695,15 @@ impl Composer {
                     .text_meta_mono(self.compact, cx)
                     .child(crate::widgets::fade_text(name)),
             )
+            .when_some(image.scaled, |chip, scaled| {
+                chip.child(
+                    div()
+                        .flex_none()
+                        .text_meta_mono(self.compact, cx)
+                        .text_color(cx.theme().muted_foreground)
+                        .child(crate::tr!("attach.scaled", size = size(scaled.to))),
+                )
+            })
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.open_image_preview(index, window, cx);
             }))
@@ -712,24 +772,30 @@ mod tests {
     }
 
     #[test]
-    fn fitting_bounds_the_long_edge_and_keeps_qualifying_bytes() {
+    fn fitting_bounds_the_long_edge_says_so_and_keeps_qualifying_bytes() {
         let wide = image::DynamicImage::new_rgb8(MAX_EDGE_PX * 2, 100);
-        let (mime, bytes) =
-            fit_for_upload("image/png", encoded(wide, image::ImageFormat::Png)).unwrap();
-        assert_eq!(mime, "image/png");
+        let fitted = fit_for_upload("image/png", encoded(wide, image::ImageFormat::Png)).unwrap();
+        assert_eq!(fitted.mime, "image/png");
         assert_eq!(
-            image::load_from_memory(&bytes).unwrap().dimensions(),
+            image::load_from_memory(&fitted.bytes).unwrap().dimensions(),
             (MAX_EDGE_PX, 50)
+        );
+        assert_eq!(
+            fitted.scaled,
+            Some(Scaled {
+                from: (MAX_EDGE_PX * 2, 100),
+                to: (MAX_EDGE_PX, 50)
+            })
         );
 
         let photo = encoded(
             image::DynamicImage::new_rgb8(100, MAX_EDGE_PX * 2),
             image::ImageFormat::Jpeg,
         );
-        let (mime, bytes) = fit_for_upload("image/jpeg", photo).unwrap();
-        assert_eq!(mime, "image/jpeg");
+        let fitted = fit_for_upload("image/jpeg", photo).unwrap();
+        assert_eq!(fitted.mime, "image/jpeg");
         assert_eq!(
-            image::load_from_memory(&bytes).unwrap().dimensions(),
+            image::load_from_memory(&fitted.bytes).unwrap().dimensions(),
             (50, MAX_EDGE_PX)
         );
 
@@ -739,17 +805,21 @@ mod tests {
         );
         assert_eq!(
             fit_for_upload("image/png", small.clone()).unwrap(),
-            ("image/png".to_string(), small)
+            Fitted {
+                mime: "image/png".to_string(),
+                bytes: small,
+                scaled: None
+            }
         );
 
         let bmp = encoded(
             image::DynamicImage::new_rgb8(10, 10),
             image::ImageFormat::Bmp,
         );
-        let (mime, bytes) = fit_for_upload("image/bmp", bmp).unwrap();
-        assert_eq!(mime, "image/png");
+        let fitted = fit_for_upload("image/bmp", bmp).unwrap();
+        assert_eq!((fitted.mime.as_str(), fitted.scaled), ("image/png", None));
         assert_eq!(
-            image::guess_format(&bytes).unwrap(),
+            image::guess_format(&fitted.bytes).unwrap(),
             image::ImageFormat::Png
         );
 
@@ -759,7 +829,11 @@ mod tests {
         );
         assert_eq!(
             fit_for_upload("image/gif", gif.clone()).unwrap(),
-            ("image/gif".to_string(), gif)
+            Fitted {
+                mime: "image/gif".to_string(),
+                bytes: gif,
+                scaled: None
+            }
         );
 
         assert!(fit_for_upload("image/png", b"not an image".to_vec()).is_err());

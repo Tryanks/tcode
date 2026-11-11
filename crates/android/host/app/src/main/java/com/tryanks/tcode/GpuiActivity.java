@@ -101,7 +101,6 @@ public final class GpuiActivity extends NativeActivity {
     private boolean keyboardShowPending;
     private long cameraRequest;
     private long imageRequest;
-    private int imageLimit;
     private ConnectivityManager.NetworkCallback networkCallback;
     private android.net.wifi.WifiManager.MulticastLock multicastLock;
 
@@ -577,29 +576,27 @@ public final class GpuiActivity extends NativeActivity {
 
     /**
      * The system photo picker (Android 13+, no permission) or the document
-     * picker below it, limited to {@code limit} images. Results arrive through
+     * picker below it, as many images as the picker allows. Results arrive through
      * {@link #nativeImagePicked} per image and {@link #nativeImagePickFinished}
      * once, in that order; a dismissed picker finishes with no images.
      */
-    public void gpuiPickImages(long requestId, int limit) {
+    public void gpuiPickImages(long requestId) {
         if (imageRequest != 0) {
             nativeImagePickFinished(requestId, HOST_ERROR, "busy");
             return;
         }
         imageRequest = requestId;
-        imageLimit = Math.max(1, limit);
         try {
             Intent intent;
             if (Build.VERSION.SDK_INT >= 33) {
                 intent = new Intent(android.provider.MediaStore.ACTION_PICK_IMAGES);
-                if (limit > 1) {
-                    int max = Math.min(limit, android.provider.MediaStore.getPickImagesMaxLimit());
-                    intent.putExtra(android.provider.MediaStore.EXTRA_PICK_IMAGES_MAX, max);
-                }
+                // Without this extra the photo picker takes one image.
+                intent.putExtra(android.provider.MediaStore.EXTRA_PICK_IMAGES_MAX,
+                        android.provider.MediaStore.getPickImagesMaxLimit());
             } else {
                 intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
                 intent.addCategory(Intent.CATEGORY_OPENABLE);
-                intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, limit > 1);
+                intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
             }
             intent.setType("image/*");
             startActivityForResult(intent, REQUEST_IMAGES);
@@ -619,7 +616,6 @@ public final class GpuiActivity extends NativeActivity {
             return;
         }
         imageRequest = requestId;
-        imageLimit = Integer.MAX_VALUE;
         try {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -632,12 +628,12 @@ public final class GpuiActivity extends NativeActivity {
         }
     }
 
-    private void deliverPickedImages(long request, int resultCode, Intent data, int limit) {
+    private void deliverPickedImages(long request, int resultCode, Intent data) {
         java.util.ArrayList<Uri> uris = new java.util.ArrayList<>();
         if (resultCode == Activity.RESULT_OK && data != null) {
             ClipData clip = data.getClipData();
             if (clip != null) {
-                for (int i = 0; i < clip.getItemCount() && uris.size() < limit; i++) {
+                for (int i = 0; i < clip.getItemCount(); i++) {
                     Uri uri = clip.getItemAt(i).getUri();
                     if (uri != null) uris.add(uri);
                 }
@@ -695,7 +691,7 @@ public final class GpuiActivity extends NativeActivity {
         if (requestCode == REQUEST_IMAGES) {
             long request = imageRequest;
             imageRequest = 0;
-            if (request != 0) deliverPickedImages(request, resultCode, data, imageLimit);
+            if (request != 0) deliverPickedImages(request, resultCode, data);
             return;
         }
         if (requestCode != REQUEST_CAMERA) {

@@ -1436,8 +1436,8 @@ notice:
   reference_boundary_crossed: "The model in “%{thread}” referenced “%{title}” from another project or Harness: what it reads there goes to that model's provider"
 attach:
   unsupported_type: "'%{name}' could not be read as an image."
+  decode_failed: "'%{name}' could not be read as an image: %{error}"
   too_large: "'%{name}' exceeds the 10MB attachment limit."
-  too_many: "You can attach up to 8 images per message."
   add: "Add"
   photo_library: "Photo library"
   pick_failed: "Could not open the photo library: %{error}"
@@ -1457,6 +1457,8 @@ attach:
   retry: "Retry upload"
   remove_file: "Remove file"
   wait_for_files: "Files are still uploading or failed. Wait for them, or retry or remove them, before sending."
+  scaled: "scaled to %{size}"
+  scaled_detail: "Scaled down from %{from} to %{to} px before sending, to stay within what model providers accept."
 image_viewer:
   cancelled: "Original read cancelled"
   progress: "%{received} / %{total} bytes"
