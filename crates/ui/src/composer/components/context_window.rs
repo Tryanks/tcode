@@ -117,7 +117,13 @@ impl Render for ContextWindowDialog {
                 .items_center()
                 .cursor_pointer()
                 .text_body(compact, cx)
-                .child(div().flex_1().min_w_0().child(label))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(label)),
+                )
                 .when(checked, |row| {
                     row.child(Icon::new(IconName::Check).text_color(primary))
                 })

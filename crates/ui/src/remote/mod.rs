@@ -1442,7 +1442,9 @@ impl RemotePanel {
                     .text_secondary(compact, cx)
                     .debug_selector(|| "hosts-pairing".into())
                     .child(crate::widgets::spinner::Spinner::new())
-                    .child(div().min_w_0().child(crate::tr!("hosts.pair.connecting")))
+                    .child(div().min_w_0().child(crate::widgets::fade_text(crate::tr!(
+                        "hosts.pair.connecting"
+                    ))))
                     .into_any_element(),
                 cx,
             ))
@@ -1642,7 +1644,9 @@ impl RemotePanel {
                     .child(
                         div()
                             .text_caption(cx)
-                            .child(crate::tr!("hosts.pair.invitation")),
+                            .child(crate::widgets::fade_text(crate::tr!(
+                                "hosts.pair.invitation"
+                            ))),
                     )
                     .child(reflow.part("field", field)),
             )

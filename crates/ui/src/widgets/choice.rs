@@ -224,7 +224,7 @@ fn render_choice(
         .when_some(on_select.filter(|_| !disabled), |this, handler| {
             this.on_change(move |_, _, window, cx| handler(window, cx))
         })
-        .child(div().flex_none().child(label))
+        .child(div().flex_none().child(super::fade_text(label)))
         .when(recommended, |this| {
             this.child(Icon::new(IconName::Star).flex_none())
                 .with_tooltip(|_, _| Tooltip::new(crate::tr!("choice.recommended")))

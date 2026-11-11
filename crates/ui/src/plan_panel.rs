@@ -115,7 +115,7 @@ impl Render for PlanPanel {
                                 div()
                                     .pt_1()
                                     .text_caption(cx)
-                                    .child(crate::tr!("tasks.steps")),
+                                    .child(crate::widgets::fade_text(crate::tr!("tasks.steps"))),
                             )
                             .child(material::rail_detail(
                                 render_steps(

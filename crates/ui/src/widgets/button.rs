@@ -496,7 +496,9 @@ impl RenderOnce for Button {
                         },
                     ))
                 })
-                .when_some(self.label, |this, label| this.child(label))
+                .when_some(self.label, |this, label| {
+                    this.child(super::fade_text(label))
+                })
                 .children(self.children);
         let button = self
             .base

@@ -84,10 +84,14 @@ impl SettingsPage {
                     .gap_1()
                     .debug_selector(|| "disk-usage-remeasuring".into())
                     .child(crate::widgets::spinner::Spinner::new().xsmall())
-                    .child(crate::tr!("settings.disk_usage.measuring").into_owned())
+                    .child(crate::widgets::fade_text(
+                        crate::tr!("settings.disk_usage.measuring").into_owned(),
+                    ))
             } else {
                 let ago = humanize_ago(now_secs(cx).saturating_sub(usage.measured_at));
-                h_flex().child(crate::tr!("settings.disk_usage.measured", ago = ago).into_owned())
+                h_flex().child(crate::widgets::fade_text(
+                    crate::tr!("settings.disk_usage.measured", ago = ago).into_owned(),
+                ))
             }
         });
         h_flex()
@@ -186,7 +190,10 @@ impl SettingsPage {
                         .items_center()
                         .text_secondary(compact, cx)
                         .child(div().flex_none().size(px(KEY)).rounded_full().bg(color))
-                        .child(format!("{label} {}", format_size(bytes)))
+                        .child(crate::widgets::fade_text(format!(
+                            "{label} {}",
+                            format_size(bytes)
+                        )))
                 }));
         crate::material::group_row_stacked(cx)
             .debug_selector(|| "disk-usage-tcode".into())
@@ -196,7 +203,9 @@ impl SettingsPage {
                     .justify_between()
                     .gap_3()
                     .text_body(compact, cx)
-                    .child(crate::tr!("settings.disk_usage.tcode").into_owned())
+                    .child(crate::widgets::fade_text(
+                        crate::tr!("settings.disk_usage.tcode").into_owned(),
+                    ))
                     .child(div().flex_none().child(format_size(total))),
             )
             .child(bar)

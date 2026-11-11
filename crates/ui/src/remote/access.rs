@@ -287,7 +287,7 @@ impl AccessSection {
                         div()
                             .text_secondary(compact, cx)
                             .text_color(status_color)
-                            .child(label.clone())
+                            .child(crate::widgets::fade_text(label.clone()))
                             .into_any_element()
                     },
                 );

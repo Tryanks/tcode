@@ -209,9 +209,9 @@ pub(crate) fn harness_row(
                     .child(
                         div()
                             .min_w_0()
-                            .truncate()
+                            .overflow_hidden()
                             .text_title(cx)
-                            .child(name.clone()),
+                            .child(crate::widgets::fade_text(name.clone())),
                     )
                     .children(version.map(|version| {
                         div()
@@ -224,9 +224,9 @@ pub(crate) fn harness_row(
                 column.child(
                     div()
                         .min_w_0()
-                        .truncate()
+                        .overflow_hidden()
                         .text_secondary(false, cx)
-                        .child(line),
+                        .child(crate::widgets::fade_text(line)),
                 )
             }),
     )

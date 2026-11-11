@@ -144,7 +144,7 @@ impl AddHost {
                     .items_center()
                     .text_body(false, cx)
                     .child(mark(kind).flex_none())
-                    .child(kind.terms().name),
+                    .child(crate::widgets::fade_text(kind.terms().name)),
             )
             .child(
                 div().text_secondary(false, cx).child(
@@ -175,7 +175,11 @@ impl Render for AddHost {
             .enumerate()
             .map(|(index, kind)| self.tile(index, kind, cx))
             .collect();
-        let label = |text: SharedString| div().text_caption(cx).child(text);
+        let label = |text: SharedString| {
+            div()
+                .text_caption(cx)
+                .child(crate::widgets::fade_text(text))
+        };
         div().w_full().child(
             v_flex()
                 .gap_2()

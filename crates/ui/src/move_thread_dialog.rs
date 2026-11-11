@@ -179,7 +179,11 @@ impl Render for MoveThreadDialog {
                             v_flex()
                                 .flex_1()
                                 .min_w_0()
-                                .child(div().text_body(false, cx).child(project.name.clone()))
+                                .child(
+                                    div()
+                                        .text_body(false, cx)
+                                        .child(crate::widgets::fade_text(project.name.clone())),
+                                )
                                 .child(
                                     div()
                                         .text_secondary(false, cx)

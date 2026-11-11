@@ -466,7 +466,11 @@ impl Render for Picker {
                     ))
                     .child(
                         v_flex()
-                            .child(div().text_body(false, cx).child(self.project.name.clone()))
+                            .child(
+                                div()
+                                    .text_body(false, cx)
+                                    .child(crate::widgets::fade_text(self.project.name.clone())),
+                            )
                             .child(div().text_secondary(false, cx).child(host)),
                     ),
             )

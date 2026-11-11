@@ -580,7 +580,11 @@ pub fn section(label: Option<SharedString>, cx: &App) -> Div {
         .w_full()
         .gap(cx.theme().tokens.spacing.md)
         .when_some(label, |section, label| {
-            section.child(div().text_caption(cx).child(label))
+            section.child(
+                div()
+                    .text_caption(cx)
+                    .child(crate::widgets::fade_text(label)),
+            )
         })
 }
 
@@ -650,7 +654,7 @@ pub fn group_caption(label: impl Into<SharedString>, cx: &App) -> Div {
         .pl(px(CARD_INSET))
         .pb(cx.theme().tokens.spacing.sm)
         .text_caption(cx)
-        .child(label.into())
+        .child(crate::widgets::fade_text(label.into()))
 }
 
 /// One row of a navigable content list — a thread, a machine, a project. Plain
@@ -1011,7 +1015,7 @@ pub fn list_caption(label: SharedString, compact: bool, cx: &App) -> Div {
             .flex()
             .items_center()
     }
-    .child(label)
+    .child(crate::widgets::fade_text(label))
 }
 
 /// Shared wordmark.
@@ -1143,7 +1147,7 @@ pub fn status_dot(color: Hsla) -> Div {
 
 /// A status badge in one semantic fill.
 pub fn semantic_chip(label: impl Into<SharedString>, bg: Hsla, fg: Hsla, cx: &App) -> Div {
-    chip_surface(bg, fg, cx).child(label.into())
+    chip_surface(bg, fg, cx).child(crate::widgets::fade_text(label.into()))
 }
 
 /// A [`semantic_chip`]'s surface, for a label that is not plain text.

@@ -1283,7 +1283,7 @@ impl SettingsPage {
                 gpui_base::h_flex()
                     .gap_1()
                     .text_caption(cx)
-                    .child(label)
+                    .child(crate::widgets::fade_text(label))
                     .child(
                         Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground),
                     ),
@@ -1368,7 +1368,7 @@ impl SettingsPage {
                     .update(cx, |state, cx| state.close_settings(cx));
             }))
             .child(Icon::new(IconName::ArrowLeft).text_color(cx.theme().muted_foreground))
-            .child(crate::tr!("settings.back")),
+            .child(crate::widgets::fade_text(crate::tr!("settings.back"))),
         )
         .into_any_element()
     }
@@ -1557,7 +1557,7 @@ impl SettingsPage {
             .debug_selector(move || section.id().into())
             .text_body(true, cx)
             .child(Icon::new(section.icon()).text_color(cx.theme().muted_foreground))
-            .child(div().flex_1().child(label))
+            .child(div().flex_1().child(crate::widgets::fade_text(label)))
             .child(Icon::new(IconName::ChevronRight).text_color(cx.theme().muted_foreground))
             .on_click(cx.listener(move |this, _, _, cx| this.select_section(section, cx)))
             .into_any_element()
@@ -1885,7 +1885,9 @@ impl SettingsPage {
                     .child(
                         div()
                             .text_caption(cx)
-                            .child(crate::tr!("settings.storage_migration.title")),
+                            .child(crate::widgets::fade_text(crate::tr!(
+                                "settings.storage_migration.title"
+                            ))),
                     )
                     .child(
                         div()
@@ -2097,7 +2099,9 @@ impl SettingsPage {
                     .flex_1()
                     .pl(px(crate::material::CARD_INSET))
                     .text_caption(cx)
-                    .child(crate::tr!("settings.providers_section")),
+                    .child(crate::widgets::fade_text(crate::tr!(
+                        "settings.providers_section"
+                    ))),
             );
         let checked = checked_at.map(|checked_at| {
             let ago = humanize_ago(now_secs(cx).saturating_sub(checked_at));
@@ -2109,7 +2113,7 @@ impl SettingsPage {
                 checked.fade(
                     div()
                         .text_secondary(compact, cx)
-                        .child(checked.value.clone()),
+                        .child(crate::widgets::fade_text(checked.value.clone())),
                 ),
             );
         }
@@ -2307,7 +2311,7 @@ impl SettingsPage {
                 .flex_1()
                 .pl(px(crate::material::CARD_INSET))
                 .text_caption(cx)
-                .child(crate::tr!("usage.section")),
+                .child(crate::widgets::fade_text(crate::tr!("usage.section"))),
         );
         let updated = updated_at.map(|updated_at| {
             let ago = humanize_ago(now_secs(cx).saturating_sub(updated_at));
@@ -2318,7 +2322,7 @@ impl SettingsPage {
                 updated.fade(
                     div()
                         .text_secondary(compact, cx)
-                        .child(updated.value.clone()),
+                        .child(crate::widgets::fade_text(updated.value.clone())),
                 ),
             );
         }
@@ -2508,7 +2512,11 @@ impl SettingsPage {
                 kind,
                 Some(profile_id),
             ))
-            .child(div().flex_1().child(name.to_owned()))
+            .child(
+                div()
+                    .flex_1()
+                    .child(crate::widgets::fade_text(name.to_owned())),
+            )
             .when_some(plan, |row, plan| {
                 row.child(plan.fade(crate::material::semantic_chip(
                     crate::usage::plan_label(&plan.value),
@@ -2539,7 +2547,11 @@ impl SettingsPage {
                     .child(
                         v_flex()
                             .gap_0p5()
-                            .child(div().text_caption(cx).child(label.clone()))
+                            .child(
+                                div()
+                                    .text_caption(cx)
+                                    .child(crate::widgets::fade_text(label.clone())),
+                            )
                             .when_some(
                                 crate::usage::resets_label(window.resets_at, now),
                                 |col, label| {
@@ -2677,12 +2689,12 @@ impl SettingsPage {
                     .child(
                         div()
                             .text_secondary(self.window_state.read(cx).compact, cx)
-                            .child(crate::tr!(
+                            .child(crate::widgets::fade_text(crate::tr!(
                                 "settings.archived_range",
                                 from = start + 1,
                                 to = end,
                                 count = total
-                            )),
+                            ))),
                     )
                     .child(div().flex_1())
                     .child(

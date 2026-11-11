@@ -169,51 +169,49 @@ impl GroupSection {
             .machines
             .iter()
             .map(|machine| (SharedString::from(machine.id.clone()), machine.clone()));
-        let rows = crate::motion::keyed(
-            "group-machines",
-            machines,
-            ROWS,
-            window,
-            cx,
-            |_, machine, _, cx| {
-                let remove = machine.clone();
-                group_row(cx)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_body(compact, cx)
-                            .overflow_hidden()
-                            .child(crate::widgets::fade_text(machine.name.clone())),
-                    )
-                    .when(machine.this_machine, |row| {
-                        row.child(
+        let rows =
+            crate::motion::keyed(
+                "group-machines",
+                machines,
+                ROWS,
+                window,
+                cx,
+                |_, machine, _, cx| {
+                    let remove = machine.clone();
+                    group_row(cx)
+                        .child(
                             div()
-                                .flex_none()
-                                .text_secondary(compact, cx)
-                                .child(crate::tr!("group.machines.this")),
+                                .flex_1()
+                                .min_w_0()
+                                .text_body(compact, cx)
+                                .overflow_hidden()
+                                .child(crate::widgets::fade_text(machine.name.clone())),
                         )
-                    })
-                    .when(!machine.this_machine, |row| {
-                        row.child(
-                            Button::new(SharedString::from(format!(
-                                "group-machine-remove-{}",
-                                machine.id
-                            )))
-                            .ghost()
-                            .compact()
-                            .danger()
-                            .label(crate::tr!("group.machines.remove"))
-                            .on_click(cx.listener(
-                                move |section, _, window, cx| {
-                                    section.remove_machine(&remove, window, cx);
-                                },
-                            )),
-                        )
-                    })
-                    .into_any_element()
-            },
-        );
+                        .when(machine.this_machine, |row| {
+                            row.child(div().flex_none().text_secondary(compact, cx).child(
+                                crate::widgets::fade_text(crate::tr!("group.machines.this")),
+                            ))
+                        })
+                        .when(!machine.this_machine, |row| {
+                            row.child(
+                                Button::new(SharedString::from(format!(
+                                    "group-machine-remove-{}",
+                                    machine.id
+                                )))
+                                .ghost()
+                                .compact()
+                                .danger()
+                                .label(crate::tr!("group.machines.remove"))
+                                .on_click(cx.listener(
+                                    move |section, _, window, cx| {
+                                        section.remove_machine(&remove, window, cx);
+                                    },
+                                )),
+                            )
+                        })
+                        .into_any_element()
+                },
+            );
         settings_group(
             crate::tr!("group.machines.section"),
             vec![rows.render(v_flex().w_full())],
@@ -320,7 +318,12 @@ impl GroupSection {
                     .overflow_hidden()
                     .child(crate::widgets::fade_text(group.name.clone())),
             )
-            .child(div().flex_none().text_secondary(compact, cx).child(count))
+            .child(
+                div()
+                    .flex_none()
+                    .text_secondary(compact, cx)
+                    .child(crate::widgets::fade_text(count)),
+            )
             .into_any_element();
         let leave = group.clone();
         let (fill, on_hover) = crate::motion::hover_fill(
@@ -345,7 +348,7 @@ impl GroupSection {
         .on_hover(on_hover)
         .text_body(compact, cx)
         .text_color(cx.theme().danger_foreground)
-        .child(crate::tr!("group.leave"))
+        .child(crate::widgets::fade_text(crate::tr!("group.leave")))
         .on_click(cx.listener(move |section, _, window, cx| {
             section.leave(&leave, window, cx);
         }))
@@ -593,9 +596,9 @@ fn open_join(spaces: Entity<Spaces>, window: &mut Window, cx: &mut App) {
                             )
                             .child(Input::new(&link_field))
                             .child(
-                                div()
-                                    .text_caption(cx)
-                                    .child(crate::tr!("group.join.address")),
+                                div().text_caption(cx).child(crate::widgets::fade_text(
+                                    crate::tr!("group.join.address"),
+                                )),
                             )
                             .child(Input::new(&address_field))
                             .child(brought_warning(&brought, compact, cx)),

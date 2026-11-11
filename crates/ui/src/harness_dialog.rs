@@ -1143,7 +1143,7 @@ impl HarnessDialog {
                             },
                             |row, glyph| row.child(glyph),
                         )
-                        .child(div().text_title(cx).child(title))
+                        .child(div().text_title(cx).child(crate::widgets::fade_text(title)))
                         .when(endpoint, |row| row.child(endpoint_chip(cx))),
                 )
                 .into_any_element();
@@ -1197,7 +1197,7 @@ impl HarnessDialog {
                         h_flex()
                             .gap_2()
                             .items_center()
-                            .child(div().text_title(cx).child(name))
+                            .child(div().text_title(cx).child(crate::widgets::fade_text(name)))
                             .children(version.map(|version| {
                                 div()
                                     .text_meta_mono(false, cx)
@@ -1794,7 +1794,11 @@ impl HarnessDialog {
                     h_flex()
                         .gap_2()
                         .items_center()
-                        .child(div().text_body(false, cx).child(name))
+                        .child(
+                            div()
+                                .text_body(false, cx)
+                                .child(crate::widgets::fade_text(name)),
+                        )
                         .when(is_default, |row| {
                             row.child(crate::material::chip(
                                 crate::tr!("providers.harness.default").into_owned(),
@@ -1807,9 +1811,9 @@ impl HarnessDialog {
                     column.child(
                         div()
                             .min_w_0()
-                            .truncate()
+                            .overflow_hidden()
                             .text_secondary(false, cx)
-                            .child(detail),
+                            .child(crate::widgets::fade_text(detail)),
                     )
                 }),
         )
@@ -1900,7 +1904,9 @@ impl HarnessDialog {
                     .into_any_element(),
                 None => div()
                     .text_body(false, cx)
-                    .child(crate::tr!("providers.status.authenticated"))
+                    .child(crate::widgets::fade_text(crate::tr!(
+                        "providers.status.authenticated"
+                    )))
                     .into_any_element(),
             };
             let hint = (!manages)
@@ -2273,9 +2279,9 @@ impl HarnessDialog {
                     .child(
                         div()
                             .min_w_0()
-                            .truncate()
+                            .overflow_hidden()
                             .when(model.hidden, |name| name.text_color(muted))
-                            .child(model.name.clone()),
+                            .child(crate::widgets::fade_text(model.name.clone())),
                     )
                     .when(!capabilities.is_empty(), |row| {
                         row.child(

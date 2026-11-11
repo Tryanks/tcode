@@ -734,7 +734,7 @@ impl PullRequestView {
                 .text_token(&xs)
                 .cursor_pointer()
                 .child(chevron.text_color(muted))
-                .child(label)
+                .child(crate::widgets::fade_text(label))
                 .on_click(cx.listener(|this, _, _, cx| {
                     if let Some(page) = this.page_mut() {
                         page.files_view.off_diff_open = !page.files_view.off_diff_open;
@@ -927,7 +927,7 @@ impl PullRequestView {
                         |text, _, _| {
                             div()
                                 .whitespace_nowrap()
-                                .child(text.clone())
+                                .child(crate::widgets::fade_text(text.clone()))
                                 .into_any_element()
                         },
                     )
@@ -1209,7 +1209,7 @@ impl PullRequestView {
                         .child(
                             div()
                                 .text_color(cx.theme().danger)
-                                .child(format!("−{deletions}")),
+                                .child(crate::widgets::fade_text(format!("−{deletions}"))),
                         )
                 }),
         )
@@ -1255,7 +1255,7 @@ impl PullRequestView {
                     .items_center()
                     .text_body(false, cx)
                     .child(Icon::new(IconName::Files))
-                    .child(label)
+                    .child(crate::widgets::fade_text(label))
                     .child(Icon::new(IconName::ChevronDown).text_color(muted)),
             );
         let popover = Popover::new("pr-file-jump-popover").trigger(trigger);
@@ -1295,7 +1295,12 @@ impl PullRequestView {
             .border_color(cx.theme().border)
             .p_1()
             .gap_1()
-            .child(div().px_2().text_secondary(false, cx).child(count))
+            .child(
+                div()
+                    .px_2()
+                    .text_secondary(false, cx)
+                    .child(crate::widgets::fade_text(count)),
+            )
             .child(Input::new(&input).placeholder(crate::tr!("pull_requests.files.filter")))
             .child(self.file_list("pr-file-column-rows", &filter, false, cx))
             .into_any_element()
@@ -1424,7 +1429,9 @@ impl PullRequestView {
                         .gap_2()
                         .items_center()
                         .child(crate::widgets::spinner::Spinner::new())
-                        .child(crate::tr!("pull_requests.files.loading_more"))
+                        .child(crate::widgets::fade_text(crate::tr!(
+                            "pull_requests.files.loading_more"
+                        )))
                 };
                 let bar = material::bar("pr-files-footer", material::Bar::Toolbar, compact, cx)
                     .items_center()
@@ -1445,11 +1452,9 @@ impl PullRequestView {
                         row.child(loading_line().opacity(1. - failing))
                     })
                     .when(failed, |row| {
-                        row.child(
-                            div()
-                                .opacity(failing)
-                                .child(crate::tr!("pull_requests.files.rest_failed")),
-                        )
+                        row.child(div().opacity(failing).child(crate::widgets::fade_text(
+                            crate::tr!("pull_requests.files.rest_failed"),
+                        )))
                         .child(
                             Button::new("pr-files-rest-retry")
                                 .outline()
@@ -1719,7 +1724,9 @@ impl DiffListHost for PullRequestView {
                     cx,
                 )
                 .map(|kept| {
-                    kept.fade(text.child(crate::tr!("pull_requests.files.changed_since_viewed")))
+                    kept.fade(text.child(crate::widgets::fade_text(crate::tr!(
+                        "pull_requests.files.changed_since_viewed"
+                    ))))
                 })
                 // Out of flow, so an absent note takes no gap in the header.
                 .unwrap_or_else(|| div().absolute().into_any_element())

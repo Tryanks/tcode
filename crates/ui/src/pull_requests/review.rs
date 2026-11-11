@@ -357,11 +357,11 @@ impl PullRequestView {
                         cx.theme().info,
                         cx,
                     ))
-                    .child(lines_label(
+                    .child(crate::widgets::fade_text(lines_label(
                         comment.start_line,
                         comment.end_line,
                         comment.side,
-                    ))
+                    )))
                     .child(div().flex_1())
                     .when(!editing, |head| {
                         head.child(
@@ -513,12 +513,9 @@ impl PullRequestView {
                     )),
             )
             .when(!comment.placed, |row| {
-                row.child(
-                    div()
-                        .flex_none()
-                        .text_color(cx.theme().warning)
-                        .child(crate::tr!("pull_requests.review.line_changed")),
-                )
+                row.child(div().flex_none().text_color(cx.theme().warning).child(
+                    crate::widgets::fade_text(crate::tr!("pull_requests.review.line_changed")),
+                ))
                 .child(
                     Button::new(SharedString::from(format!("pr-pending-copy-{id}")))
                         .ghost()
@@ -663,7 +660,9 @@ impl PullRequestView {
                         .items_center()
                         .text_color(cx.theme().warning)
                         .child(Icon::new(IconName::TriangleAlert))
-                        .child(crate::tr!("pull_requests.review.head_changed")),
+                        .child(crate::widgets::fade_text(crate::tr!(
+                            "pull_requests.review.head_changed"
+                        ))),
                 ),
             )
         })
@@ -1117,10 +1116,10 @@ impl PullRequestView {
             .font_family(cx.theme().font_family.clone())
             .when(!compact, |sheet| {
                 sheet.child(
-                    div().text_title(cx).child(
+                    div().text_title(cx).child(crate::widgets::fade_text(
                         crate::tr!("pull_requests.review.sheet_title", number = number.clone())
                             .into_owned(),
-                    ),
+                    )),
                 )
             })
             .children(stale_notice)
@@ -1131,7 +1130,7 @@ impl PullRequestView {
                         .gap_2()
                         .items_center()
                         .text_secondary(compact, cx)
-                        .child(if comments == 1 {
+                        .child(crate::widgets::fade_text(if comments == 1 {
                             crate::tr!("pull_requests.review.pending_count_one").into_owned()
                         } else {
                             crate::tr!(
@@ -1139,7 +1138,7 @@ impl PullRequestView {
                                 count = comments.to_string()
                             )
                             .into_owned()
-                        })
+                        }))
                         .child(
                             Button::new("pr-review-show")
                                 .ghost()
@@ -1233,13 +1232,13 @@ impl PullRequestView {
                 .items_center()
                 .text_secondary(self.compact(cx), cx)
                 .child(Icon::new(IconName::MessageSquare))
-                .child(
+                .child(crate::widgets::fade_text(
                     crate::tr!(
                         "pull_requests.review.pending_line",
                         count = count.to_string()
                     )
                     .into_owned(),
-                )
+                ))
                 .child(
                     Button::new("pr-review-line-finish")
                         .ghost()

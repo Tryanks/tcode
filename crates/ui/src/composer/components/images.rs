@@ -727,7 +727,10 @@ impl Composer {
                         .flex_none()
                         .text_meta_mono(self.compact, cx)
                         .text_color(cx.theme().muted_foreground)
-                        .child(crate::tr!("attach.scaled", size = size(scaled.to))),
+                        .child(crate::widgets::fade_text(crate::tr!(
+                            "attach.scaled",
+                            size = size(scaled.to)
+                        ))),
                 )
             })
             .on_click(cx.listener(move |this, _, window, cx| {

@@ -1192,7 +1192,7 @@ impl Entries {
                                 "agents-settled-chevron",
                                 *expanded,
                             ))
-                            .child(label),
+                            .child(crate::widgets::fade_text(label)),
                     )
                     .into_any_element()
             }
@@ -1371,7 +1371,7 @@ impl Entries {
                     div()
                         .flex_none()
                         .text_color(state.color(cx))
-                        .child(state.label()),
+                        .child(crate::widgets::fade_text(state.label())),
                 )
             });
         let activity = activity_line("agent", &row.key, row.activity.clone(), window, cx);

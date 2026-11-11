@@ -353,7 +353,7 @@ pub fn sidebar_badge(
                     .child(
                         div()
                             .text_caption(cx)
-                            .child(crate::tr!("pull_requests.title")),
+                            .child(crate::widgets::fade_text(crate::tr!("pull_requests.title"))),
                     );
                 let ordered: Vec<_> = pull_request::groups(&hover_links)
                     .into_iter()
@@ -428,22 +428,24 @@ pub fn sidebar_badge(
                                         |s| s.title.clone(),
                                     )),
                                 ))
-                                .children(
-                                    caption.clone().map(|caption| {
-                                        div().text_secondary(false, cx).child(caption)
-                                    }),
-                                ),
+                                .children(caption.clone().map(|caption| {
+                                    div()
+                                        .text_secondary(false, cx)
+                                        .child(crate::widgets::fade_text(caption))
+                                })),
                         );
                 }
                 if ordered.len() > 8 {
                     rows = rows.child(
-                        div().text_secondary(false, cx).child(
-                            crate::tr!(
-                                "pull_requests.more",
-                                count = (ordered.len() - 8).to_string()
-                            )
-                            .into_owned(),
-                        ),
+                        div()
+                            .text_secondary(false, cx)
+                            .child(crate::widgets::fade_text(
+                                crate::tr!(
+                                    "pull_requests.more",
+                                    count = (ordered.len() - 8).to_string()
+                                )
+                                .into_owned(),
+                            )),
                     );
                 }
                 rows
@@ -1088,7 +1090,8 @@ impl PullRequestsPanel {
         // The layer and the diff stat never give way; the parts before them do.
         let tail_layer = |line: gpui::Div, layer: Option<String>| {
             line.when_some(layer, |line, layer| {
-                line.child(dot()).child(div().flex_none().child(layer))
+                line.child(dot())
+                    .child(div().flex_none().child(crate::widgets::fade_text(layer)))
             })
         };
         let mut detail = vec![source.clone()];
@@ -1151,7 +1154,7 @@ impl PullRequestsPanel {
                                 h_flex()
                                     .flex_none()
                                     .child(sep())
-                                    .child(div().ml_1().child(author)),
+                                    .child(div().ml_1().child(crate::widgets::fade_text(author))),
                             ),
                     )
                 })
@@ -1168,8 +1171,12 @@ impl PullRequestsPanel {
                         .child(crate::widgets::fade_text(format!(" · {branches}"))),
                 )
                 .when_some(layer.clone(), |line, layer| {
-                    line.child(sep())
-                        .child(div().flex_none().ml_1().child(layer))
+                    line.child(sep()).child(
+                        div()
+                            .flex_none()
+                            .ml_1()
+                            .child(crate::widgets::fade_text(layer)),
+                    )
                 })
                 .when_some(stat, |line, (additions, deletions)| {
                     line.child(sep())
@@ -1187,7 +1194,7 @@ impl PullRequestsPanel {
                                 .ml_1()
                                 .font_family(mono)
                                 .text_color(cx.theme().danger)
-                                .child(deletions),
+                                .child(crate::widgets::fade_text(deletions)),
                         )
                 })
                 .into_any_element()
@@ -1555,7 +1562,7 @@ impl PullRequestsPanel {
                     }
                     None => div()
                         .text_secondary(false, cx)
-                        .children(updated.clone())
+                        .children(updated.clone().map(crate::widgets::fade_text))
                         .into_any_element(),
                 },
             )
@@ -1622,14 +1629,14 @@ impl PullRequestsPanel {
                                     .child(title),
                             )
                             .when_some(draft, |row, draft| {
-                                row.child(
-                                    draft.fold_across_gap(
-                                        spacing.sm,
-                                        div()
-                                            .text_secondary(false, cx)
-                                            .child(crate::tr!("pull_requests.draft")),
+                                row.child(draft.fold_across_gap(
+                                    spacing.sm,
+                                    div().text_secondary(false, cx).child(
+                                        crate::widgets::fade_text(crate::tr!(
+                                            "pull_requests.draft"
+                                        )),
                                     ),
-                                )
+                                ))
                             })
                             .child(signals),
                     )
@@ -1702,7 +1709,11 @@ pub(crate) fn agent_sees_body(
     cx: &App,
 ) -> gpui::Div {
     let muted = cx.theme().muted_foreground;
-    let caption = |text: String| div().text_caption(cx).child(text);
+    let caption = |text: String| {
+        div()
+            .text_caption(cx)
+            .child(crate::widgets::fade_text(text))
+    };
     let tool = |(name, description): &(String, String)| {
         v_flex()
             .gap_0p5()
@@ -1730,10 +1741,10 @@ pub(crate) fn agent_sees_body(
                     div()
                         .pt(cx.theme().tokens.spacing.xs)
                         .text_caption(cx)
-                        .child(crate::tr!(
+                        .child(crate::widgets::fade_text(crate::tr!(
                             "pull_requests.agent_tools_server",
                             name = server.name.as_str()
-                        )),
+                        ))),
                 )
                 .children(own.iter().map(tool));
         }
@@ -1746,7 +1757,11 @@ pub(crate) fn agent_sees_body(
     let instructions = tools.instructions.clone();
     let id = id.to_owned();
     body.child(crate::motion::Sampled::new(move |window, cx| {
-        let caption = |text: String, cx: &App| div().text_caption(cx).child(text);
+        let caption = |text: String, cx: &App| {
+            div()
+                .text_caption(cx)
+                .child(crate::widgets::fade_text(text))
+        };
         let not_attached = crate::motion::shown(
             SharedString::from(format!("{id}-not-attached")),
             (!attached).then_some(()),
@@ -1817,7 +1832,11 @@ pub(crate) fn agent_sees_body(
                 };
                 v_flex()
                     .gap_0p5()
-                    .child(div().text_caption(cx).child(channel))
+                    .child(
+                        div()
+                            .text_caption(cx)
+                            .child(crate::widgets::fade_text(channel)),
+                    )
                     .child(crate::chat::components::disclosure::disclosure_body(
                         &format!("{id}-instructions-{index}"),
                         &injected.text,
@@ -1913,7 +1932,7 @@ impl PullRequestsPanel {
         .text_secondary(false, cx)
         .cursor_pointer()
         .child(Icon::new(IconName::Bot))
-        .child(label)
+        .child(crate::widgets::fade_text(label))
         .on_click(cx.listener(|this, _, _, cx| {
             this.agent_tools_open = !this.agent_tools_open;
             cx.notify();

@@ -567,7 +567,9 @@ impl HostEditor {
                             super::connected_as(&account.login, account.name.as_deref(), cx)
                         }
                         None => div()
-                            .child(crate::tr!("source_control.connected").into_owned())
+                            .child(crate::widgets::fade_text(
+                                crate::tr!("source_control.connected").into_owned(),
+                            ))
                             .into_any_element(),
                     }),
             )
@@ -730,7 +732,9 @@ impl HostEditor {
                     .gap_1()
                     .items_center()
                     .text_secondary(compact, cx)
-                    .child(crate::tr!("source_control.scopes_needed").into_owned())
+                    .child(crate::widgets::fade_text(
+                        crate::tr!("source_control.scopes_needed").into_owned(),
+                    ))
                     .children(scopes.into_iter().map(|scope| {
                         crate::material::chip(scope, cx)
                             .font_family(cx.theme().mono_font_family.clone())
@@ -853,7 +857,12 @@ impl HostEditor {
             .gap_3()
             .items_center()
             .text_secondary(compact, cx)
-            .child(div().flex_none().min_w(px(56.)).child(label))
+            .child(
+                div()
+                    .flex_none()
+                    .min_w(px(56.))
+                    .child(crate::widgets::fade_text(label)),
+            )
             .child(
                 div()
                     .flex_1()
@@ -890,7 +899,9 @@ impl HostEditor {
                                     div()
                                         .text_color(theme.danger)
                                         .font_weight(gpui::FontWeight::MEDIUM)
-                                        .child(crate::tr!("source_control.rejected").into_owned()),
+                                        .child(crate::widgets::fade_text(
+                                            crate::tr!("source_control.rejected").into_owned(),
+                                        )),
                                 )
                                 .child(
                                     div().text_color(theme.foreground).child(
@@ -1014,9 +1025,15 @@ impl HostEditor {
                         })
                     })
                     .child(indicator)
-                    .child(v_flex().min_w_0().child(label).children(
-                        detail.map(|detail| div().text_secondary(compact, cx).child(detail)),
-                    ))
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .child(crate::widgets::fade_text(label))
+                            .children(
+                                detail
+                                    .map(|detail| div().text_secondary(compact, cx).child(detail)),
+                            ),
+                    )
                     .into_any_element()
             })
             .collect::<Vec<_>>();
@@ -1024,11 +1041,9 @@ impl HostEditor {
             v_flex()
                 .w_full()
                 .gap_1p5()
-                .child(
-                    div()
-                        .text_caption(cx)
-                        .child(crate::tr!("source_control.cli_accounts", tool = tool).into_owned()),
-                )
+                .child(div().text_caption(cx).child(crate::widgets::fade_text(
+                    crate::tr!("source_control.cli_accounts", tool = tool).into_owned(),
+                )))
                 .child(
                     crate::material::grouped(
                         vec![
@@ -1075,7 +1090,7 @@ impl HostEditor {
                 crate::tr!("source_control.field_source").into_owned(),
                 div()
                     .id("source-control-source")
-                    .child(super::source_label(source))
+                    .child(crate::widgets::fade_text(super::source_label(source)))
                     .with_tooltip(move |_, _| Tooltip::new(tooltip.clone())),
                 compact,
                 cx,
@@ -1088,7 +1103,7 @@ impl HostEditor {
         {
             fields = fields.child(Self::field(
                 crate::tr!("source_control.field_account").into_owned(),
-                format!("@{login}"),
+                crate::widgets::fade_text(format!("@{login}")),
                 compact,
                 cx,
             ));
@@ -1124,11 +1139,9 @@ impl HostEditor {
                 v_flex()
                     .w_full()
                     .gap_1p5()
-                    .child(
-                        div()
-                            .text_caption(cx)
-                            .child(crate::tr!("source_control.new_token").into_owned()),
-                    )
+                    .child(div().text_caption(cx).child(crate::widgets::fade_text(
+                        crate::tr!("source_control.new_token").into_owned(),
+                    )))
                     .child(fields)
                     .child(help),
             );

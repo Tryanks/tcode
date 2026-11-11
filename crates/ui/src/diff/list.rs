@@ -1259,7 +1259,7 @@ fn render_file_header<H: DiffListHost>(
                     .flex_none()
                     .text_secondary(false, cx)
                     .text_color(foreground)
-                    .child(label),
+                    .child(crate::widgets::fade_text(label)),
             )
         })
         .children(host.header_note(file_index, cx))
@@ -1319,7 +1319,9 @@ fn render_gap<H: DiffListHost>(
                     let shown = crate::motion::appear(id, true, APPEAR, window, cx).progress;
                     div()
                         .opacity(shown)
-                        .child(crate::tr!("pull_requests.files.loading_lines"))
+                        .child(crate::widgets::fade_text(crate::tr!(
+                            "pull_requests.files.loading_lines"
+                        )))
                         .into_any_element()
                 }))
                 .into_any_element();
@@ -1330,7 +1332,7 @@ fn render_gap<H: DiffListHost>(
                 .child(
                     div()
                         .id(("diff-gap-fixed", file_index * 100_000 + start as usize))
-                        .child(label)
+                        .child(crate::widgets::fade_text(label))
                         .when_some(reason, |this, reason| {
                             this.with_tooltip(move |_, _| {
                                 crate::widgets::tooltip::Tooltip::new(reason.clone())

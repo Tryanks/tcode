@@ -412,11 +412,11 @@ pub(in crate::chat) fn controls(
                     .items_center()
                     .whitespace_nowrap()
                     .child(Spinner::new().xsmall().color(theme.muted_foreground))
-                    .child(crate::tr!("background.stopping"))
+                    .child(crate::widgets::fade_text(crate::tr!("background.stopping")))
                     .into_any_element(),
                 Standing::Ended => div()
                     .whitespace_nowrap()
-                    .child(crate::tr!("background.ended"))
+                    .child(crate::widgets::fade_text(crate::tr!("background.ended")))
                     .into_any_element(),
             }
         },

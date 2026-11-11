@@ -262,7 +262,7 @@ fn render_steer_choices(
                         .whitespace_nowrap()
                         .text_token(&cx.theme().tokens.typography.xs)
                         .text_color(hint_color)
-                        .child(hint),
+                        .child(crate::widgets::fade_text(hint)),
                 )
                 .into_any_element();
             // Steer rises from over the button into its place; both fade in.

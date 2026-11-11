@@ -112,7 +112,7 @@ impl Render for Ticks {
         } else {
             now.saturating_sub(self.at_ms)
         };
-        div().child((self.text)(distance))
+        div().child(super::fade_text((self.text)(distance)))
     }
 }
 

@@ -27,6 +27,12 @@ const MAX_CHARS: usize = 1000;
 /// text contains, that fades out its last [`FADE_EMS`] when it is given less
 /// width than the line. Like the `truncate()` it replaces, its container
 /// needs `overflow_hidden()` to shrink below the line's width.
+///
+/// The line is painted on the baseline its style's own font gives it,
+/// whatever fonts its text falls back to: a line takes the tallest metrics
+/// of the fonts it is drawn in (see
+/// [`crate::typography::baseline_below_centre`]), so one with CJK in it would
+/// otherwise sit lower in its box than the Latin one beside it.
 pub struct FadeText {
     text: SharedString,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
@@ -55,6 +61,8 @@ pub struct FadeTextLayout {
     line: ShapedLine,
     runs: Vec<TextRun>,
     line_height: Pixels,
+    /// How far down the line is painted to stand on its own font's baseline.
+    drop: Pixels,
 }
 
 impl IntoElement for FadeText {
@@ -98,9 +106,14 @@ impl Element for FadeText {
             self.text.clone()
         };
         let runs = runs(&style, text.len(), &self.highlights);
+        let own = window
+            .text_system()
+            .shape_line("x".into(), font_size, &[style.to_run(1)], None);
         let line = window
             .text_system()
             .shape_line(text, font_size, &runs, None);
+        let drop = crate::typography::line_below_centre(&own, window)
+            - crate::typography::line_below_centre(&line, window);
         // Whole pixels, as GPUI measures text: layout rounds sizes to the
         // pixel grid, which would otherwise leave a fitting line a fraction
         // too wide and fade it.
@@ -123,6 +136,7 @@ impl Element for FadeText {
                 line,
                 runs,
                 line_height,
+                drop,
             },
         )
     }
@@ -152,12 +166,14 @@ impl Element for FadeText {
             line,
             runs,
             line_height,
+            drop,
         } = layout;
         let line_height = *line_height;
+        let origin = point(bounds.left(), bounds.top() + *drop);
         if line.width() <= bounds.size.width {
             let align = window.text_style().text_align;
             line.paint(
-                bounds.origin,
+                origin,
                 line_height,
                 align,
                 Some(bounds.size.width),
@@ -172,21 +188,14 @@ impl Element for FadeText {
         let fade_start = bounds.right() - fade;
         let solid = Bounds::from_corners(bounds.origin, point(fade_start, bounds.bottom()));
         window.with_content_mask(Some(ContentMask { bounds: solid }), |window| {
-            line.paint(
-                bounds.origin,
-                line_height,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            )
-            .ok();
+            line.paint(origin, line_height, TextAlign::Left, None, window, cx)
+                .ok();
         });
 
         // A glyph's ink can start up to about an em before the band it
         // reaches; the scene drops whatever falls outside each band.
         let reach = line.font_size;
-        let baseline = bounds.top() + (line_height - line.ascent - line.descent) / 2. + line.ascent;
+        let baseline = origin.y + (line_height - line.ascent - line.descent) / 2. + line.ascent;
         let font_size = line.font_size;
         let fading: Vec<_> = line
             .runs

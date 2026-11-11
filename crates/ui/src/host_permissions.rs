@@ -113,7 +113,12 @@ impl Render for HostPermissions {
                                     .w_full()
                                     .gap_3()
                                     .items_center()
-                                    .child(div().flex_1().min_w_0().child(crate::tr!(name)))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(crate::widgets::fade_text(crate::tr!(name))),
+                                    )
                                     .child(crate::material::semantic_chip(
                                         crate::tr!(label),
                                         bg.opacity(0.12),

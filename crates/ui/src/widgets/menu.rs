@@ -522,7 +522,7 @@ impl Render for PopupMenu {
                                 (false, None) => None,
                             },
                         ))
-                        .when_some(label.clone(), |el, label| el.child(label))
+                        .when_some(label.clone(), |el, label| el.child(super::fade_text(label)))
                         .when_some(content, |el, content| el.child(content))
                         .when_some(key, |el, key| {
                             el.child(
