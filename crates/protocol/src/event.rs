@@ -1283,6 +1283,13 @@ pub enum RuntimeToast {
     },
 }
 
+/// A possible orphaned worktree left where it is, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeftOrphan {
+    pub path: PathBuf,
+    pub error: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum RuntimeError {
@@ -1317,6 +1324,15 @@ pub enum RuntimeError {
     },
     WorktreeRemove {
         error: String,
+    },
+    /// The start's sweep of abandoned worktrees did not run: the host's
+    /// threads, which say which worktrees are in use, could not be read.
+    OrphanSweepSkipped {
+        error: String,
+    },
+    /// Abandoned worktrees the start's sweep could not judge or remove.
+    OrphansLeft {
+        left: Vec<LeftOrphan>,
     },
     DeleteSession {
         error: String,

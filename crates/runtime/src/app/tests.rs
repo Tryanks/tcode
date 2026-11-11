@@ -9575,7 +9575,7 @@ fn orphan_sweep_leaves_worktrees_a_thread_works_in_or_the_user_kept() {
         filetime::set_file_mtime(path, abandoned).unwrap();
     }
 
-    let summary = cleanup_orphans(&store);
+    let summary = cleanup_orphans(&store, std::time::SystemTime::now()).unwrap();
 
     assert_eq!(summary.removed, std::slice::from_ref(&orphan));
     assert!(!orphan.exists());

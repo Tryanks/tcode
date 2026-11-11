@@ -1401,6 +1401,8 @@ errors:
   export_thread: "导出线程失败：%{error}"
   worktree_add: "创建 worktree 失败：%{error}"
   worktree_remove: "移除 worktree 失败：%{error}"
+  orphan_sweep_skipped: "Tcode 未清理废弃的 worktree：无法读取线程：%{error}"
+  orphans_left: "Tcode 无法移除以下废弃的 worktree：\n%{worktrees}"
   zed_cli_missing: "找不到 Zed CLI（已尝试 zed / zeditor / zed-cli；请通过 Zed → Install CLI 安装）"
 editor:
   zed:

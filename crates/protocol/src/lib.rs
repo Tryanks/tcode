@@ -43,7 +43,7 @@ pub use event::{
     DiskUsageState, EndpointDescription, EndpointPresetDescription, EventEnvelope,
     ExternalImportState, ExternalImportStatus, ForkAvailability, ForkStatus, GitActionRequest,
     GitStatusStatus, HarnessDescription, HarnessPermission, ImportFailure, IndexSnapshot,
-    IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools,
+    IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools, LeftOrphan,
     MergeWorktreeFailure, NoticeSeverity, PendingRewind, PluginCatalogState, PluginChallenge,
     PluginChallengeKind, PluginOperationTarget, PluginStaleReason, PluginsDescription,
     ProviderDiskUsage, ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun,
@@ -392,6 +392,8 @@ pub use wire::{
 // ScheduleTurn carries due, a TurnDue (after_secs from when the host takes it
 // in, or at_unix_secs), instead of fire_at_unix_secs computed by the client's
 // clock.
+// RuntimeError gains orphan_sweep_skipped {error} and orphans_left {left}, each
+// a LeftOrphan {path, error}.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

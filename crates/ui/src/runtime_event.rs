@@ -51,6 +51,18 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeError::WorktreeRemove { error } => {
                     crate::tr!("errors.worktree_remove", error = error).into_owned()
                 }
+                RuntimeError::OrphanSweepSkipped { error } => {
+                    crate::tr!("errors.orphan_sweep_skipped", error = error).into_owned()
+                }
+                RuntimeError::OrphansLeft { left } => crate::tr!(
+                    "errors.orphans_left",
+                    worktrees = left
+                        .iter()
+                        .map(|orphan| format!("{}: {}", orphan.path.display(), orphan.error))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+                .into_owned(),
                 RuntimeError::DeleteSession { error } => {
                     crate::tr!("errors.delete_session", error = error).into_owned()
                 }
