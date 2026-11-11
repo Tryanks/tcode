@@ -120,6 +120,9 @@ enum MeasureItem {
         highlights: Vec<(Range<usize>, HighlightStyle)>,
         font_overrides: Vec<(Range<usize>, SharedString)>,
         code_style: Option<InlineCodeStyle>,
+        /// Where the paragraph breaks its line inside this text: the byte
+        /// offsets of its line feeds, which `text` carries as spaces.
+        breaks: Vec<usize>,
     },
     Image,
     ImageLink,
@@ -531,7 +534,8 @@ impl From<&InlineFlowItem> for MeasureItem {
                 // The flow places every row itself, so a break inside the paragraph is a
                 // space of the same byte length: the wrapper, the shaper (which panics on a
                 // break) and the painted fragment (which would start a row of its own) all
-                // see one row, and ranges keep their offsets.
+                // see one row, and ranges keep their offsets. Where a line feed was, the
+                // flow starts a new row ([`line_ranges`]).
                 text: if text.contains(['\n', '\r']) {
                     text.replace(['\n', '\r'], " ").into()
                 } else {
@@ -541,6 +545,11 @@ impl From<&InlineFlowItem> for MeasureItem {
                 highlights: highlights.clone(),
                 font_overrides: font_overrides.clone(),
                 code_style: code_style.clone(),
+                breaks: if code_style.is_some() {
+                    Vec::new()
+                } else {
+                    text.match_indices('\n').map(|(at, _)| at).collect()
+                },
             },
             InlineFlowItem::Math { .. } | InlineFlowItem::Image { .. } => Self::Image,
             InlineFlowItem::ImageLink { .. } => Self::ImageLink,
@@ -594,6 +603,7 @@ fn layout_flow(
                     highlights,
                     font_overrides,
                     code_style,
+                    ..
                 } => {
                     let local_start = line_range.start.max(item_start) - item_start;
                     let local_end = line_range.end.min(item_end) - item_start;
@@ -716,53 +726,80 @@ fn line_ranges(
     window: &mut Window,
 ) -> Vec<Range<usize>> {
     let total_len = items.iter().map(MeasureItem::len).sum::<usize>();
-    let Some(wrap_width) = wrap_width else {
-        return std::iter::once(0..total_len).collect();
-    };
-    let fragments = items
-        .iter()
-        .enumerate()
-        .map(|(ix, item)| match item {
-            MeasureItem::Text {
-                text,
-                highlights,
-                code_style: Some(code),
-                ..
-            } => {
-                let mut code_text_style = text_style.clone();
-                code_text_style.font_family = code.font_family.clone();
-                code_text_style.font_size = AbsoluteLength::Pixels(code.font_size);
-                let runs = runs_for_highlights(text, &code_text_style, highlights);
-                let width = window
-                    .text_system()
-                    .shape_line(text.clone(), code.font_size, &runs, None)
-                    .width()
-                    + INLINE_CODE_PADDING_X * 2.;
-                WrapLineFragment::element(width, text.len())
+    // Each line the paragraph breaks into is wrapped on its own, ending
+    // just past its line feed.
+    let mut segments = Vec::new();
+    let mut segment_start = 0;
+    let mut item_start = 0;
+    for item in items {
+        if let MeasureItem::Text { breaks, .. } = item {
+            for at in breaks {
+                segments.push(segment_start..item_start + at + 1);
+                segment_start = item_start + at + 1;
             }
-            MeasureItem::Text { text, .. } => WrapLineFragment::text(text),
-            MeasureItem::Image | MeasureItem::ImageLink => {
-                WrapLineFragment::element(element_sizes[ix].unwrap_or_default().width, ELEMENT_LEN)
-            }
-        })
-        .collect::<Vec<_>>();
-    let font_size = text_style.font_size.to_pixels(window.rem_size());
-    let boundaries = window
-        .text_system()
-        .line_wrapper(text_style.font(), font_size)
-        .wrap_line(&fragments, wrap_width, Default::default())
-        .map(|boundary| boundary.ix.min(total_len))
-        .collect::<Vec<_>>();
-    let mut ranges = Vec::with_capacity(boundaries.len() + 1);
-    let mut start = 0;
-    for end in boundaries {
-        if start < end {
-            ranges.push(start..end);
         }
-        start = end;
+        item_start += item.len();
     }
-    if start < total_len {
-        ranges.push(start..total_len);
+    if segment_start < total_len || segments.is_empty() {
+        segments.push(segment_start..total_len);
+    }
+    let Some(wrap_width) = wrap_width else {
+        return segments;
+    };
+    let font_size = text_style.font_size.to_pixels(window.rem_size());
+    let mut ranges = Vec::new();
+    for segment in segments {
+        let mut fragments = Vec::new();
+        let mut item_start = 0;
+        for (ix, item) in items.iter().enumerate() {
+            let item_end = item_start + item.len();
+            let (from, to) = (segment.start.max(item_start), segment.end.min(item_end));
+            if from < to {
+                fragments.push(match item {
+                    MeasureItem::Text {
+                        text,
+                        highlights,
+                        code_style: Some(code),
+                        ..
+                    } => {
+                        let mut code_text_style = text_style.clone();
+                        code_text_style.font_family = code.font_family.clone();
+                        code_text_style.font_size = AbsoluteLength::Pixels(code.font_size);
+                        let runs = runs_for_highlights(text, &code_text_style, highlights);
+                        let width = window
+                            .text_system()
+                            .shape_line(text.clone(), code.font_size, &runs, None)
+                            .width()
+                            + INLINE_CODE_PADDING_X * 2.;
+                        WrapLineFragment::element(width, text.len())
+                    }
+                    MeasureItem::Text { text, .. } => {
+                        WrapLineFragment::text(&text[from - item_start..to - item_start])
+                    }
+                    MeasureItem::Image | MeasureItem::ImageLink => WrapLineFragment::element(
+                        element_sizes[ix].unwrap_or_default().width,
+                        ELEMENT_LEN,
+                    ),
+                });
+            }
+            item_start = item_end;
+        }
+        let boundaries = window
+            .text_system()
+            .line_wrapper(text_style.font(), font_size)
+            .wrap_line(&fragments, wrap_width, Default::default())
+            .map(|boundary| (segment.start + boundary.ix).min(segment.end))
+            .collect::<Vec<_>>();
+        let mut start = segment.start;
+        for end in boundaries {
+            if start < end {
+                ranges.push(start..end);
+            }
+            start = end;
+        }
+        if start < segment.end {
+            ranges.push(start..segment.end);
+        }
     }
     ranges
 }
