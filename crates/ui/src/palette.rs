@@ -36,8 +36,11 @@ use tcode_protocol::{SessionContentHits, ThreadExportFormat};
 use crate::provider_card::profile_glyph;
 use crate::settings::ThemeMode;
 use crate::store::{HostKey, StoreChange, ThreadKey, TopicKind, WorkspaceStore};
-use crate::time::{humanize_ago, now_secs};
+use crate::time::humanize_ago;
 use crate::window_state::{PickerFrom, WindowState};
+
+/// How many content hits a host is asked for at a time.
+const MESSAGE_HITS: u32 = 50;
 
 /// How long a surface drawn here takes to appear, and to leave.
 const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
@@ -101,6 +104,8 @@ enum Action {
     },
     /// A pane command or layout, which the shell answers.
     Pane(Rc<dyn gpui::Action>),
+    /// List more of the host's content hits.
+    MoreHits(HostKey),
 }
 
 impl Action {
@@ -110,7 +115,8 @@ impl Action {
             Self::ChangeProjectIcon(host, _)
             | Self::NewThread { host, .. }
             | Self::QuickChat(host)
-            | Self::CheckUpdates(host) => Some(host),
+            | Self::CheckUpdates(host)
+            | Self::MoreHits(host) => Some(host),
             Self::MergeWorktree(thread)
             | Self::ExportThread { thread, .. }
             | Self::OpenThread { thread, .. } => Some(&thread.host),
@@ -335,24 +341,60 @@ impl CommandPalette {
             return;
         }
         for host in &self.hosts {
-            let query = query.to_string();
-            let store = host.store.clone();
-            self._search_tasks.push(cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(150))
-                    .await;
-                let (host, hits) = store.update(cx, |store, cx| {
-                    (
-                        store.host_key(),
-                        store.search_session_content(query, 50, cx),
-                    )
-                });
-                let hits = hits.await;
-                let _ = this.update(cx, |palette, cx| {
-                    palette.apply_content_hits(generation, host, hits, cx);
-                });
-            }));
+            let task = Self::search_host(
+                host.store.clone(),
+                query.to_string(),
+                MESSAGE_HITS,
+                generation,
+                Some(Duration::from_millis(150)),
+                cx,
+            );
+            self._search_tasks.push(task);
         }
+    }
+
+    /// Ask `store`'s host for `limit` content hits after `debounce`, adopted
+    /// while `generation` is still the query shown.
+    fn search_host(
+        store: Entity<WorkspaceStore>,
+        query: String,
+        limit: u32,
+        generation: u64,
+        debounce: Option<Duration>,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            if let Some(debounce) = debounce {
+                cx.background_executor().timer(debounce).await;
+            }
+            let (host, hits) = store.update(cx, |store, cx| {
+                (
+                    store.host_key(),
+                    store.search_session_content(query, limit, cx),
+                )
+            });
+            let hits = hits.await;
+            let _ = this.update(cx, |palette, cx| {
+                palette.apply_content_hits(generation, host, hits, cx);
+            });
+        })
+    }
+
+    /// List `host`'s next [`MESSAGE_HITS`] content hits after the ones shown.
+    fn more_hits(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        let Some(store) = self.store_of(host, cx) else {
+            return;
+        };
+        let shown = self
+            .content_hits
+            .get(host)
+            .map_or(0, |found| found.hits.len());
+        let query = self.query.read(cx).value().trim().to_string();
+        let limit = u32::try_from(shown)
+            .unwrap_or(u32::MAX)
+            .saturating_add(MESSAGE_HITS);
+        let task = Self::search_host(store, query, limit, self.search_generation, None, cx);
+        self._search_tasks.push(task);
     }
 
     /// Adopt `host`'s answer only while it still belongs to the current
@@ -782,7 +824,7 @@ impl CommandPalette {
                 continue;
             }
             let sessions = store.sidebar_sessions();
-            let messages = found
+            let mut messages: Vec<Item> = found
                 .hits
                 .iter()
                 .map(|hit| {
@@ -802,6 +844,18 @@ impl CommandPalette {
                     }
                 })
                 .collect();
+            if found.truncated {
+                messages.push(Item {
+                    icon: IconName::Plus,
+                    label: crate::tr!("palette.more_messages").into_owned(),
+                    subtitle: None,
+                    provider: None,
+                    updated_at: None,
+                    host_name: None,
+                    current: false,
+                    action: Action::MoreHits(key.clone()),
+                });
+            }
             groups.push(Group {
                 label: match on_host(store) {
                     Some(host) => crate::tr!("palette.messages_on", host = host),
@@ -999,6 +1053,7 @@ impl CommandPalette {
                 crate::shell::select_current_pane(window, cx);
                 window.dispatch_action(action.boxed_clone(), cx);
             }
+            Action::MoreHits(host) => self.more_hits(&host, cx),
             Action::OpenThread { thread, turn } => {
                 if let Some(store) = store {
                     store.update(cx, |store, cx| {
@@ -1154,7 +1209,7 @@ impl CommandPalette {
                                 .items_center()
                                 .text_secondary(compact, cx)
                                 .when_some(item.updated_at, |this, at| {
-                                    let ago = now_secs(cx).saturating_sub(at);
+                                    let ago = store.read(cx).host_now_secs(cx).saturating_sub(at);
                                     this.child(
                                         div().child(crate::widgets::fade_text(humanize_ago(ago))),
                                     )
@@ -1229,8 +1284,8 @@ impl CommandPalette {
                 .top(drop)
                 .child(crate::widgets::fade_text(host))
         });
-        let ago = item.updated_at.map(|at| {
-            let ago = humanize_ago(now_secs(cx).saturating_sub(at));
+        let ago = item.updated_at.zip(store.clone()).map(|(at, store)| {
+            let ago = humanize_ago(store.read(cx).host_now_secs(cx).saturating_sub(at));
             div()
                 .flex_none()
                 .text_secondary(compact, cx)

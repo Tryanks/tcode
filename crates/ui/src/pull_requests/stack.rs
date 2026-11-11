@@ -353,10 +353,11 @@ pub(super) fn operation_chip(
     target: Option<Target>,
     operation: &PullRequestStackOperation,
     links: &[ThreadPullRequestLink],
+    host_now: u64,
     compact: bool,
     cx: &App,
 ) -> AnyElement {
-    let (icon, color, label, tooltip) = chip_words(operation, cx);
+    let (icon, color, label, tooltip) = chip_words(operation, host_now, cx);
     // A stack write's chip recolours, and its glyph and words cross-fade, as the write moves
     // from step to step; the chip stays where it is.
     let glyph = match operation.kind {
@@ -536,12 +537,14 @@ pub(super) fn operation_chip(
         .into_any_element()
 }
 
-/// The chip's glyph, colour, label and long form.
+/// The chip's glyph, colour, label and long form, at `host_now` (unix seconds)
+/// by the clock of the host that started the write.
 pub(super) fn chip_words(
     operation: &PullRequestStackOperation,
+    host_now: u64,
     cx: &App,
 ) -> (IconName, Hsla, String, String) {
-    let ago = super::detail::ago(operation.started_at, cx);
+    let ago = super::detail::ago(operation.started_at, host_now);
     match &operation.kind {
         StackOperationKind::Merging {
             layers, adopted, ..
@@ -722,6 +725,7 @@ fn map_content(
     cx: &mut Context<gpui_base::PopoverState>,
 ) -> AnyElement {
     let popover = cx.entity();
+    let host_now = view.read(cx).store.read(cx).host_now_secs(cx);
     let map = offer.map();
     let theme = cx.theme().clone();
     let muted = theme.muted_foreground;
@@ -791,6 +795,7 @@ fn map_content(
             target.cloned(),
             &shown.value,
             &offer.links,
+            host_now,
             compact,
             cx,
         )))
@@ -1050,6 +1055,7 @@ pub(super) fn caption(
     stack: &core_pr::PullRequestStack,
     operation: Option<&PullRequestStackOperation>,
     links: &[ThreadPullRequestLink],
+    host_now: u64,
     compact: bool,
     cx: &App,
 ) -> AnyElement {
@@ -1088,9 +1094,14 @@ pub(super) fn caption(
                     let id = SharedString::from(format!("pr-stack-caption-operation-{}", stack.id));
                     crate::motion::Sampled::new(move |window, cx| {
                         match crate::motion::shown(id, operation, SHOW, window, cx) {
-                            Some(shown) => {
-                                shown.fade(operation_chip(None, &shown.value, &links, compact, cx))
-                            }
+                            Some(shown) => shown.fade(operation_chip(
+                                None,
+                                &shown.value,
+                                &links,
+                                host_now,
+                                compact,
+                                cx,
+                            )),
                             // Out of flow, so an absent chip takes no gap.
                             None => div().absolute().into_any_element(),
                         }
@@ -2222,7 +2233,13 @@ impl Render for MergeStackDialog {
                             theme.warning,
                             tr_with(
                                 "previous_unconfirmed",
-                                &[("ago", super::detail::ago(*started_at, cx))],
+                                &[(
+                                    "ago",
+                                    super::detail::ago(
+                                        *started_at,
+                                        self.target.store.read(cx).host_now_secs(cx),
+                                    ),
+                                )],
                             ),
                         ),
                     ));
@@ -2936,7 +2953,10 @@ fn progress_view(
         body = body.child(div().text_secondary(false, cx).child(tr_with(
             "progress_started",
             &[
-                ("ago", super::detail::ago(started, cx)),
+                (
+                    "ago",
+                    super::detail::ago(started, target.store.read(cx).host_now_secs(cx)),
+                ),
                 ("machine", machine),
             ],
         )));

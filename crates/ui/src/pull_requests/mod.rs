@@ -236,11 +236,31 @@ pub fn badge(links: &[ThreadPullRequestLink], cx: &App) -> Option<AnyElement> {
         .into_any_element(),
     )
 }
-/// Every visible linked pull request's number in link order, each in its own state's glyph and
-/// color: the thread's header and the phone's row show them all, where the sidebar's rows can
-/// afford only [`badge`]. A number linked or unlinked widens in or narrows away.
+/// The visible linked pull requests as the thread's chip names them: up to two by number in
+/// link order, each in its own state's glyph and color, a number linked or unlinked widening
+/// in or narrowing away; more than two as their count. The chip opens the list either way, so
+/// a longer row of numbers would only take the room.
 pub fn numbers(links: &[ThreadPullRequestLink], cx: &App) -> Option<AnyElement> {
     let label = badge_label(links, cx)?;
+    let visible = links.iter().filter(|link| link.visible()).count();
+    if visible > 2 {
+        return Some(
+            h_flex()
+                .id("pull-request-numbers")
+                .debug_selector(|| "pull-request-count".into())
+                .aria_label(label)
+                .flex_none()
+                .items_center()
+                .gap(cx.theme().tokens.spacing.xxs)
+                .text_token(&cx.theme().tokens.typography.xs)
+                .child(Icon::new(IconName::GitPullRequest))
+                .child(
+                    crate::tr!("pull_requests.linked_count", count = visible.to_string())
+                        .into_owned(),
+                )
+                .into_any_element(),
+        );
+    }
     let spacing = &cx.theme().tokens.spacing;
     let (gap, inner) = (spacing.xs, spacing.xxs);
     let typography = cx.theme().tokens.typography.xs;
@@ -554,22 +574,22 @@ fn source(link: Option<&ThreadPullRequestLink>) -> &'static str {
 }
 /// The number's tooltip: what made the thread show the pull request, and when the thread linked
 /// it where it did. A dismissed link and a stack layer carry no time.
-fn number_tooltip(link: Option<&ThreadPullRequestLink>, cx: &App) -> String {
+fn number_tooltip(link: Option<&ThreadPullRequestLink>, host_now: u64) -> String {
     let source = crate::tr!(source(link)).into_owned();
     match link.and_then(|link| link.linked_at) {
         Some(linked_at) => crate::tr!(
             "pull_requests.number_tooltip",
             source = source,
-            ago = crate::time::humanize_ago(crate::time::now_secs(cx).saturating_sub(linked_at))
+            ago = crate::time::humanize_ago(host_now.saturating_sub(linked_at))
         )
         .into_owned(),
         None => source,
     }
 }
 
-/// When a rate limit lifts, as the notices say it: ahead, or soon once its time has passed.
-pub(super) fn resumes(retry_at: u64, cx: &App) -> String {
-    let now = crate::time::now_secs(cx);
+/// When a rate limit lifts, as the notices say it: ahead, or soon once its time has passed by
+/// the host's clock, which reads `now` (unix seconds).
+pub(super) fn resumes(retry_at: u64, now: u64) -> String {
     if retry_at <= now {
         crate::tr!("pull_requests.notice_soon").into_owned()
     } else {
@@ -577,7 +597,7 @@ pub(super) fn resumes(retry_at: u64, cx: &App) -> String {
     }
 }
 
-fn sync_error(link: &ThreadPullRequestLink, host_name: &str, cx: &App) -> String {
+fn sync_error(link: &ThreadPullRequestLink, host_name: &str, host_now: u64) -> String {
     match link.sync_error.as_ref() {
         Some(PullRequestSyncError::NoCredential | PullRequestSyncError::HostDisabled) => {
             crate::tr!(
@@ -589,7 +609,7 @@ fn sync_error(link: &ThreadPullRequestLink, host_name: &str, cx: &App) -> String
         Some(PullRequestSyncError::RateLimited { retry_at }) => crate::tr!(
             "pull_requests.notice_rate_limited",
             host_name = host_name,
-            when = resumes(*retry_at, cx)
+            when = resumes(*retry_at, host_now)
         )
         .into_owned(),
         Some(PullRequestSyncError::NotFound) => crate::tr!(
@@ -726,9 +746,13 @@ fn change_link<T: 'static>(
     .detach();
 }
 
-/// What Tcode says about the pull request host at `host`, by the kind settings give it.
+/// What Tcode says about the pull request host at `host`, by the kind settings give it; a host
+/// of no kind Tcode knows goes by its own name.
 pub(crate) fn host_terms(store: &WorkspaceStore, host: &str) -> &'static HostTerms {
-    store.settings().source_control.kind(host).terms()
+    store.settings().source_control.kind(host).map_or(
+        &tcode_core::pull_request::UNKNOWN,
+        tcode_core::pull_request::HostKind::terms,
+    )
 }
 
 /// The pull request host at `host` as a person reads it.
@@ -1202,7 +1226,11 @@ impl PullRequestsPanel {
             let layer = if let Some(link) = link.filter(|_| visible) {
                 detail.insert(
                     0,
-                    sync_error(link, &host_name(self.store.read(cx), &key.host), cx),
+                    sync_error(
+                        link,
+                        &host_name(self.store.read(cx), &key.host),
+                        self.store.read(cx).host_now_secs(cx),
+                    ),
                 );
                 None
             } else {
@@ -1474,7 +1502,7 @@ impl PullRequestsPanel {
                 .map_or(&[][..], |meta| meta.pull_request_operations.as_slice());
             let running = pull_request::stack_operation(operations, links, &key)
                 .filter(|operation| operation.covers(key.number))
-                .map(|operation| stack::chip_words(operation, cx));
+                .map(|operation| stack::chip_words(operation, store.host_now_secs(cx), cx));
             (stack::row_blocker(links, &key), running)
         };
         if let Some(kept) =
@@ -1526,7 +1554,9 @@ impl PullRequestsPanel {
                     .and_then(|updated| chrono::DateTime::parse_from_rfc3339(updated).ok())
                     .map(|updated| {
                         crate::time::humanize_ago(
-                            crate::time::now_secs(cx)
+                            self.store
+                                .read(cx)
+                                .host_now_secs(cx)
                                 .saturating_sub(updated.timestamp().max(0) as u64),
                         )
                     }),
@@ -1611,7 +1641,10 @@ impl PullRequestsPanel {
                                     .text_color(cx.theme().foreground)
                                     .id("pr-number")
                                     .with_tooltip({
-                                        let label = number_tooltip(link, cx);
+                                        let label = number_tooltip(
+                                            link,
+                                            self.store.read(cx).host_now_secs(cx),
+                                        );
                                         move |_, _| {
                                             crate::widgets::tooltip::Tooltip::new(label.clone())
                                         }
@@ -2106,7 +2139,11 @@ impl PullRequestsPanel {
                     );
                     (credential || rate_limited).then(|| {
                         (
-                            sync_error(link, &host_name(self.store.read(cx), &host), cx),
+                            sync_error(
+                                link,
+                                &host_name(self.store.read(cx), &host),
+                                self.store.read(cx).host_now_secs(cx),
+                            ),
                             credential,
                         )
                     })
@@ -2220,7 +2257,14 @@ impl PullRequestsPanel {
                         stack,
                         operation,
                         links,
-                    } => stack::caption(stack, operation.as_ref(), links, compact, cx),
+                    } => stack::caption(
+                        stack,
+                        operation.as_ref(),
+                        links,
+                        self.store.read(cx).host_now_secs(cx),
+                        compact,
+                        cx,
+                    ),
                     ListEntry::Row {
                         key,
                         url,
@@ -2368,8 +2412,9 @@ impl PullRequestsPanel {
                 " · {}",
                 crate::tr!(
                     "pull_requests.summary_synced",
-                    ago =
-                        crate::time::humanize_ago(crate::time::now_secs(cx).saturating_sub(synced))
+                    ago = crate::time::humanize_ago(
+                        self.store.read(cx).host_now_secs(cx).saturating_sub(synced)
+                    )
                 )
             ));
         }
@@ -2598,7 +2643,7 @@ mod tests {
     /// A dismissed link keeps no time (`tcode_core::pull_request::unlink_pull_request` clears it); its
     /// number said it was linked some fifty years ago, the epoch.
     #[gpui::test]
-    fn a_dismissed_number_names_no_link_time(cx: &mut gpui::TestAppContext) {
+    fn a_dismissed_number_names_no_link_time(_cx: &mut gpui::TestAppContext) {
         let link = ThreadPullRequestLink {
             key: PullRequestKey::new("github.com", "owner/project", 7),
             source: PullRequestSource::Dismissed,
@@ -2609,6 +2654,6 @@ mod tests {
             sync_error: None,
             watch: None,
         };
-        assert_eq!(cx.update(|cx| number_tooltip(Some(&link), cx)), "Dismissed");
+        assert_eq!(number_tooltip(Some(&link), 0), "Dismissed");
     }
 }

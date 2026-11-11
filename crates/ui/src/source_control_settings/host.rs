@@ -53,6 +53,8 @@ pub(crate) struct HostEditor {
     replacing: bool,
     verifying: bool,
     answer: Option<Answer>,
+    /// The kind the user just added the host as, which stands until settings name it.
+    chosen: Option<tcode_core::pull_request::HostKind>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -111,6 +113,7 @@ impl HostEditor {
             replacing: false,
             verifying: false,
             answer: None,
+            chosen: None,
             _subscriptions: subscriptions,
         }
     }
@@ -119,8 +122,15 @@ impl HostEditor {
         self.token.update(cx, |input, cx| input.focus(window, cx));
     }
 
-    fn platform(&self, cx: &App) -> Platform {
-        Platform::read(self.store.read(cx), &self.host)
+    /// The editor of a host the user has just added as `kind`.
+    pub(crate) fn chosen(mut self, kind: tcode_core::pull_request::HostKind) -> Self {
+        self.chosen = Some(kind);
+        self
+    }
+
+    /// `None` once the host has no kind Tcode knows, as when its settings were removed.
+    fn platform(&self, cx: &App) -> Option<Platform> {
+        Platform::read(self.store.read(cx), &self.host, self.chosen)
     }
 
     /// Whether the token typed goes with the account's email.
@@ -168,7 +178,9 @@ impl HostEditor {
     }
 
     fn verify(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let platform = self.platform(cx);
+        let Some(platform) = self.platform(cx) else {
+            return;
+        };
         let Some((token, email)) = self.typed(&platform, cx) else {
             return;
         };
@@ -205,7 +217,9 @@ impl HostEditor {
 
     /// Saves the token the host could not check, to be checked once the platform answers.
     fn save_anyway(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let platform = self.platform(cx);
+        let Some(platform) = self.platform(cx) else {
+            return;
+        };
         let Some((token, email)) = self.typed(&platform, cx) else {
             return;
         };
@@ -304,7 +318,9 @@ impl HostEditor {
 
     /// The dialog's title: the platform's mark and address over its kind.
     pub(crate) fn title(&self, cx: &App) -> AnyElement {
-        let platform = self.platform(cx);
+        let Some(platform) = self.platform(cx) else {
+            return div().into_any_element();
+        };
         let compact = self.compact;
         h_flex()
             .gap_3()
@@ -332,7 +348,9 @@ impl HostEditor {
     /// check, or Done once there is nothing to check.
     pub(crate) fn footer(editor: &Entity<Self>, cx: &App) -> AnyElement {
         let this = editor.read(cx);
-        let platform = this.platform(cx);
+        let Some(platform) = this.platform(cx) else {
+            return div().into_any_element();
+        };
         let mut leading = Vec::new();
         if !this.connect && this.accepted().is_none() {
             leading.extend(this.danger_actions(editor, &platform, cx));
@@ -552,7 +570,9 @@ impl HostEditor {
     fn connected(&self, account: Option<&HostAccount>, cx: &App) -> AnyElement {
         let theme = cx.theme();
         let compact = self.compact;
-        let platform = self.platform(cx);
+        let Some(platform) = self.platform(cx) else {
+            return div().into_any_element();
+        };
         v_flex()
             .w_full()
             .gap_3()
@@ -879,7 +899,9 @@ impl HostEditor {
         let theme = cx.theme();
         match platform.standing() {
             Standing::Rejected { status, at } => {
-                let ago = crate::time::humanize_ago(crate::time::now_secs(cx).saturating_sub(at));
+                let ago = crate::time::humanize_ago(
+                    self.store.read(cx).host_now_secs(cx).saturating_sub(at),
+                );
                 Some(
                     crate::material::notice(theme.danger, cx)
                         .debug_selector(|| "source-control-problem-rejected".into())
@@ -1215,7 +1237,9 @@ impl HostEditor {
 
 impl Render for HostEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let platform = self.platform(cx);
+        let Some(platform) = self.platform(cx) else {
+            return div();
+        };
         let body = if self.connect {
             self.render_connect(&platform, cx)
         } else {

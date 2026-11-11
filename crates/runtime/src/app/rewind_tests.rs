@@ -118,7 +118,7 @@ fn a_cold_rewind_answers_the_client_that_asked_and_lets_the_provider_go() {
     let events = scripted.events.clone();
     let state = cx.new_entity({
         let mut state = TestClientState::new((*store).clone());
-        state.set_provider_launcher_for_test(scripted.launcher);
+        state.set_provider_launcher(scripted.launcher);
         state
     });
     state.update(cx, |state, cx| {

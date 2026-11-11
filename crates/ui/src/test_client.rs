@@ -7,12 +7,17 @@ use gpui::App;
 use tcode_client::{
     host::{ClientHost, FileFailure, Transport},
     pairing::PairedHost,
+    speech::SpeechRecognizer,
 };
 
-/// A desktop client with nothing saved and no platform pickers.
-struct Desktop;
+/// A desktop client with nothing saved and no platform pickers, and the
+/// dictation it is given.
+struct Desktop(Option<Rc<dyn SpeechRecognizer>>);
 
 impl ClientHost for Desktop {
+    fn speech_recognizer(&self) -> Option<Rc<dyn SpeechRecognizer>> {
+        self.0.clone()
+    }
     fn device_name(&self) -> String {
         "Desktop".into()
     }
@@ -41,7 +46,13 @@ impl ClientHost for Desktop {
 /// state every window of a client has before it opens.
 pub(crate) fn init(cx: &mut App) {
     crate::theme::init(cx);
-    attach(Rc::new(Desktop), true, cx);
+    attach(Rc::new(Desktop(None)), true, cx);
+}
+
+/// This desktop client dictates with `recognizer`, as a platform that
+/// supplies its own does.
+pub(crate) fn dictate_with(recognizer: Rc<dyn SpeechRecognizer>, cx: &mut App) {
+    attach(Rc::new(Desktop(Some(recognizer))), true, cx);
 }
 
 /// This client is `host`, with or without a host in its own process, and

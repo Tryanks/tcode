@@ -11,6 +11,14 @@ const FOLD: std::time::Duration = std::time::Duration::from_millis(200);
 /// A disclosure's section: its content grows open and shrinks shut through
 /// [`crate::motion::Shown::fold`], the one fold Tcode draws, and is not
 /// built while it is shut.
+///
+/// gpui-base's `Collapsible` (0.9) shows and hides its content at once
+/// unless its caller supplies a progress, and then reveals it through
+/// `MotionReveal`, the reveal `Shown::fold` replaces (it draws an unmeasured
+/// child at zero height, does not fade, and keeps the content built while
+/// shut). Nor can it keep its clock with a view
+/// that the dock moves under another parent, which [`Collapsible::motion`]
+/// does.
 #[derive(IntoElement)]
 pub struct Collapsible {
     id: ElementId,

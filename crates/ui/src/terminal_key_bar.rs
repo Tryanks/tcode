@@ -456,19 +456,7 @@ mod tests {
         use gpui::Focusable as _;
         use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic, encode_line};
         cx.update(crate::test_client::init);
-        let root = crate::store::tests::scratch_root("terminal-keybar");
-        let host = tcode_runtime::pipe::spawn_host(
-            tcode_services::store::SessionStore::open_at(root.clone()).unwrap(),
-            tcode_runtime::pipe::HostServices::default(),
-        )
-        .unwrap();
-        let mut status = smol::block_on(host.update_state_for_test(|state, cx| {
-            let id = state.start_draft("terminal".into(), std::env::temp_dir(), cx);
-            state.session_status_snapshot(&id).unwrap()
-        }))
-        .unwrap();
-        host.shutdown_blocking().unwrap();
-        let _ = std::fs::remove_dir_all(root);
+        let mut status = crate::store::tests::draft_status();
         status.terminals = vec![tcode_protocol::TerminalStatus {
             id: 7,
             title: "shell".into(),

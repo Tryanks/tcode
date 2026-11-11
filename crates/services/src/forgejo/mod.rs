@@ -9,8 +9,8 @@ mod repository;
 
 use crate::{
     forge::{
-        Anchoring, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary, Tails,
-        ViewedMarks,
+        Anchoring, Forge, ForgeError, ForgeErrorKind, Held, Moved, Repository, Summary, Tails,
+        ViewedMarks, held,
     },
     settings::SettingsStore,
 };
@@ -20,7 +20,7 @@ use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex, RwLock},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tcode_core::{
     pull_request::{
@@ -35,9 +35,9 @@ use tcode_protocol::{
     PullRequestAction, PullRequestActionResult as Outcome, PullRequestActionState,
     PullRequestCapabilities, PullRequestComment, PullRequestConversation, PullRequestFileText,
     PullRequestFiles, PullRequestLabelCandidate, PullRequestLabelCandidates, PullRequestMedia,
-    PullRequestMergeState, PullRequestPatch, PullRequestPermissions, PullRequestRead,
-    PullRequestReadResponse, PullRequestReviewVerdict, PullRequestReviewerCandidate,
-    PullRequestReviewerCandidates, PullRequestThreadReplies, PullRequestViewedFiles,
+    PullRequestMergeState, PullRequestPermissions, PullRequestRead, PullRequestReadResponse,
+    PullRequestReviewVerdict, PullRequestReviewerCandidate, PullRequestReviewerCandidates,
+    PullRequestThreadReplies, PullRequestViewedFiles,
 };
 
 const READ_TTL: Duration = Duration::from_secs(60);
@@ -46,14 +46,13 @@ const TEXT_TTL: Duration = Duration::from_secs(600);
 const FILE_BYTES: usize = 1024 * 1024;
 const ANONYMOUS: &str = "anonymous";
 
-type Slot = (Instant, PullRequestReadResponse);
-
 pub struct Forgejo {
     api: Arc<Api>,
     viewed: Arc<ViewedMarks>,
     /// The servers known by settings, a CLI login or the environment, with their kind.
     known: RwLock<BTreeMap<String, HostKind>>,
-    reads: Mutex<HashMap<(PullRequestKey, String), Slot>>,
+    reads: Held<(PullRequestKey, String), PullRequestReadResponse>,
+    conversations: Held<PullRequestKey, PullRequestConversation>,
 }
 
 impl Forgejo {
@@ -67,6 +66,7 @@ impl Forgejo {
             api: Api::new(store, environment),
             known: RwLock::default(),
             reads: Mutex::default(),
+            conversations: Mutex::default(),
         })
     }
 
@@ -96,25 +96,15 @@ impl Forgejo {
         ttl: Duration,
         read: impl FnOnce() -> Result<PullRequestReadResponse, ForgeError>,
     ) -> Result<(PullRequestReadResponse, SystemTime), ForgeError> {
-        let slot = (key.clone(), name);
-        if let Some((at, response)) = self.reads.lock().unwrap().get(&slot)
-            && at.elapsed() < ttl
-        {
-            return Ok((response.clone(), SystemTime::now() + (ttl - at.elapsed())));
-        }
-        let response = read()?;
-        let mut reads = self.reads.lock().unwrap();
-        reads.retain(|_, (at, _)| at.elapsed() < TEXT_TTL);
-        reads.insert(slot, (Instant::now(), response.clone()));
-        Ok((response, SystemTime::now() + ttl))
+        held(&self.reads, (key.clone(), name), ttl, TEXT_TTL, read)
     }
 
     fn account_of(&self, viewer: Option<&str>, key: &PullRequestKey) -> String {
         format!("{}:{}", key.host, viewer.unwrap_or(ANONYMOUS))
     }
 
-    /// The whole diff with each path's head-side revision, or `None` past the read limit.
-    fn diff(&self, key: &PullRequestKey) -> Result<Option<String>, ForgeError> {
+    /// The whole diff with each path's head-side revision.
+    fn diff(&self, key: &PullRequestKey) -> Result<String, ForgeError> {
         let pull = self.pull(key);
         let response = self.api.send(
             pull.authority(),
@@ -123,96 +113,26 @@ impl Forgejo {
                 ..Request::get(pull.path(&format!("pulls/{}.diff", key.number)), "Diff")
             },
         )?;
-        Ok((!response.truncated).then(|| String::from_utf8_lossy(&response.body).into_owned()))
+        Ok(String::from_utf8_lossy(&response.body).into_owned())
     }
 
-    /// The whole diff's files, whose hunks place a comment's lines. Past the read limit the
-    /// listing withholds every file's hunks, so no line can be placed.
-    fn diff_files(&self, key: &PullRequestKey) -> Result<PullRequestFiles, ForgeError> {
-        let files = self.files(key, None)?;
-        if files
-            .files
-            .iter()
-            .any(|file| file.patch == PullRequestPatch::Withheld)
-        {
-            return Err(error(ForgeErrorKind::TooLarge, "Forgejo diff too large"));
-        }
-        Ok(files)
-    }
-
-    /// `page` is the page and the size the first page came back with, which a later one is
-    /// full at.
-    fn files(
-        &self,
-        key: &PullRequestKey,
-        page: Option<(u32, usize)>,
-    ) -> Result<PullRequestFiles, ForgeError> {
+    /// The whole diff's files, whose hunks place a comment's lines.
+    fn files(&self, key: &PullRequestKey) -> Result<PullRequestFiles, ForgeError> {
         let pull = self.pull(key);
         let pr = pull.pull()?;
         let head = text(&pr["head"], "sha").unwrap_or_default();
         let base = text(&pr, "merge_base")
             .or_else(|| text(&pr["base"], "sha"))
             .unwrap_or_default();
-        let changed_files = pr["changed_files"].as_u64();
-        if page.is_none()
-            && let Some(diff) = self.diff(key)?
-        {
-            return Ok(PullRequestFiles {
-                base,
-                head,
-                files: reads::files(&diff)
-                    .ok_or_else(|| error(ForgeErrorKind::Uncertain, "Forgejo diff unreadable"))?,
-                next_cursor: None,
-                complete: true,
-                changed_files,
-            });
-        }
-        // Past the read limit the files listing pages the changes, without their hunks.
-        let page_number = page.map_or(1, |(page, _)| page);
-        let rows: Vec<Value> = pull
-            .get(
-                &format!(
-                    "pulls/{}/files?limit={}&page={page_number}",
-                    key.number,
-                    api::PAGE_LIMIT
-                ),
-                "Files",
-            )?
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        let size = page.map_or(rows.len(), |(_, size)| size);
-        let listed = (page_number as u64 - 1) * size as u64 + rows.len() as u64;
-        let next = (api::page_full(rows.len(), &size)
-            && changed_files.is_none_or(|count| listed < count))
-        .then_some((page_number + 1, size));
+        let diff = self.diff(key)?;
         Ok(PullRequestFiles {
             base,
             head,
-            files: rows
-                .iter()
-                .filter_map(|row| {
-                    let status = row["status"].as_str().unwrap_or_default();
-                    Some(tcode_protocol::PullRequestFile {
-                        path: text(row, "filename")?,
-                        previous_path: text(row, "previous_filename")
-                            .filter(|path| !path.is_empty()),
-                        kind: match status {
-                            "added" => agent::FileChangeKind::Create,
-                            "deleted" => agent::FileChangeKind::Delete,
-                            "renamed" => agent::FileChangeKind::Rename,
-                            _ => agent::FileChangeKind::Modify,
-                        },
-                        additions: Some(row["additions"].as_u64()?),
-                        deletions: Some(row["deletions"].as_u64()?),
-                        patch: PullRequestPatch::Withheld,
-                        url: None,
-                    })
-                })
-                .collect(),
-            next_cursor: next.map(|(page, size)| format!("{page}:{size}")),
-            complete: next.is_none() && changed_files.is_none_or(|count| listed >= count),
-            changed_files,
+            files: reads::files(&diff)
+                .ok_or_else(|| error(ForgeErrorKind::Uncertain, "Forgejo diff unreadable"))?,
+            next_cursor: None,
+            complete: true,
+            changed_files: pr["changed_files"].as_u64(),
         })
     }
 
@@ -240,7 +160,7 @@ impl Forgejo {
             pull.authority(),
             Request {
                 accept: "application/octet-stream",
-                limit: FILE_BYTES,
+                limit: Some(FILE_BYTES),
                 ..Request::get(
                     pull.path(&format!("raw/{}?ref={revision}", encoded.join("/"))),
                     "FileText",
@@ -407,12 +327,7 @@ impl Forgejo {
 
     fn viewed_files(&self, key: &PullRequestKey) -> Result<PullRequestViewedFiles, ForgeError> {
         let viewer = self.pull(key).viewer()?;
-        let Some(diff) = self.diff(key)? else {
-            return Ok(PullRequestViewedFiles {
-                files: Vec::new(),
-                complete: false,
-            });
-        };
+        let diff = self.diff(key)?;
         Ok(PullRequestViewedFiles {
             files: self.viewed.states(
                 &self.account_of(viewer.as_deref(), key),
@@ -615,7 +530,7 @@ impl Forgejo {
         if !own {
             return Ok(PullRequestMedia::Unsupported);
         }
-        let conversation = self.conversation_read(key)?;
+        let (conversation, _) = self.conversation_read(key)?;
         let named = std::iter::once(&conversation.description)
             .chain(&conversation.comments)
             .chain(
@@ -644,11 +559,10 @@ impl Forgejo {
     fn conversation_read(
         &self,
         key: &PullRequestKey,
-    ) -> Result<PullRequestConversation, ForgeError> {
-        match self.read(key, PullRequestRead::Conversation)?.0 {
-            PullRequestReadResponse::Conversation(conversation) => Ok(*conversation),
-            _ => Err(error(ForgeErrorKind::Uncertain, "unexpected read")),
-        }
+    ) -> Result<(PullRequestConversation, SystemTime), ForgeError> {
+        held(&self.conversations, key.clone(), READ_TTL, TEXT_TTL, || {
+            self.conversation(key)
+        })
     }
 
     fn drop_reads(&self, key: &PullRequestKey) {
@@ -656,6 +570,7 @@ impl Forgejo {
             .lock()
             .unwrap()
             .retain(|(held, name), _| held != key || name.starts_with("text:"));
+        self.conversations.lock().unwrap().remove(key);
     }
 }
 
@@ -836,20 +751,13 @@ impl Forge for Forgejo {
         read: PullRequestRead,
     ) -> Result<(PullRequestReadResponse, SystemTime), ForgeError> {
         match read {
-            PullRequestRead::Files { cursor } => {
-                let page = cursor
-                    .map(|cursor| {
-                        cursor
-                            .split_once(':')
-                            .and_then(|(page, size)| {
-                                Some((page.parse::<u32>().ok()?, size.parse::<usize>().ok()?))
-                            })
-                            .filter(|(page, size)| *page > 1 && *size > 0)
-                            .ok_or_else(|| error(ForgeErrorKind::InvalidInput, "invalid cursor"))
-                    })
-                    .transpose()?;
-                self.cached(key, format!("files:{page:?}"), READ_TTL, || {
-                    self.files(key, page).map(PullRequestReadResponse::Files)
+            // The whole diff is one page; a cursor is none Tcode wrote.
+            PullRequestRead::Files { cursor: Some(_) } => {
+                Err(error(ForgeErrorKind::InvalidInput, "invalid cursor"))
+            }
+            PullRequestRead::Files { cursor: None } => {
+                self.cached(key, "files".into(), READ_TTL, || {
+                    self.files(key).map(PullRequestReadResponse::Files)
                 })
             }
             PullRequestRead::FileText { revision, path } => {
@@ -859,10 +767,11 @@ impl Forge for Forgejo {
                 })
             }
             PullRequestRead::Conversation => {
-                self.cached(key, "conversation".into(), READ_TTL, || {
-                    self.conversation(key).map(|conversation| {
-                        PullRequestReadResponse::Conversation(Box::new(conversation))
-                    })
+                self.conversation_read(key).map(|(conversation, fresh)| {
+                    (
+                        PullRequestReadResponse::Conversation(Box::new(conversation)),
+                        fresh,
+                    )
                 })
             }
             // A thread here carries all of its comments.
@@ -925,9 +834,7 @@ impl Forge for Forgejo {
         viewed: bool,
     ) -> Result<(), ForgeError> {
         let account = self.account(key)?;
-        let diff = self
-            .diff(key)?
-            .ok_or_else(|| error(ForgeErrorKind::TooLarge, "Forgejo diff too large"))?;
+        let diff = self.diff(key)?;
         self.viewed
             .set(
                 &account,
@@ -969,7 +876,7 @@ impl Forge for Forgejo {
         lines: (u32, u32),
     ) -> Result<Anchoring, ForgeError> {
         Ok(crate::forge::anchors::anchoring(
-            &self.diff_files(key)?,
+            &self.files(key)?,
             head,
             path,
             side,
@@ -982,7 +889,7 @@ impl Forge for Forgejo {
         key: &PullRequestKey,
         comments: &[PullRequestReviewDraftComment],
     ) -> Result<(String, Vec<Moved>), ForgeError> {
-        crate::forge::anchors::reanchor(self.diff_files(key)?, comments, |revision, path| {
+        crate::forge::anchors::reanchor(self.files(key)?, comments, |revision, path| {
             self.file_text(key, revision, path)
         })
     }

@@ -21,7 +21,6 @@ use tcode_core::{
 /// Bitbucket Cloud's one web host, which settings and keys name it by.
 pub(super) const HOST: &str = "bitbucket.org";
 const API: &str = "https://api.bitbucket.org/2.0";
-const BODY_LIMIT: usize = 8 * 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(60);
 /// Same-origin redirects followed for one read, as `/diff` and `/diffstat` answer with one.
 const REDIRECTS: usize = 3;
@@ -116,7 +115,9 @@ pub(super) struct Request<'a> {
     pub(super) operation: &'static str,
     /// A write goes only with a credential.
     pub(super) write: bool,
-    pub(super) limit: usize,
+    /// The most of a body read; a longer one is cut and marked truncated. `None` reads it
+    /// whole.
+    pub(super) limit: Option<usize>,
 }
 
 impl<'a> Request<'a> {
@@ -128,7 +129,7 @@ impl<'a> Request<'a> {
             accept: "application/json",
             operation,
             write: false,
-            limit: BODY_LIMIT,
+            limit: None,
         }
     }
     pub(super) fn write(
@@ -428,15 +429,16 @@ impl Api {
         };
         let status = response.status();
         let retry_after = response.header("retry-after").map(str::to_owned);
-        let limit = request.limit.min(BODY_LIMIT);
         let mut body = Vec::new();
         response
             .into_reader()
-            .take(limit as u64 + 1)
+            .take(request.limit.map_or(u64::MAX, |limit| limit as u64 + 1))
             .read_to_end(&mut body)
             .map_err(|_| error(ForgeErrorKind::Uncertain, "Bitbucket response cut off"))?;
-        let truncated = body.len() > limit;
-        body.truncate(limit);
+        let truncated = request.limit.is_some_and(|limit| body.len() > limit);
+        if let Some(limit) = request.limit {
+            body.truncate(limit);
+        }
         if status == 429 {
             let named = retry_after.as_deref().and_then(retry_at);
             let retry_at =
@@ -560,10 +562,11 @@ fn retry_at(value: &str) -> Option<SystemTime> {
     Some(SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(at.timestamp()).ok()?))
 }
 
-/// Bitbucket's words for a refusal: `error.message`, then each field's own.
+/// Bitbucket's words for a refusal: `error.message`, then each field's own; a body that is not
+/// JSON as it came.
 pub(super) fn messages(body: &[u8]) -> Vec<String> {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
-        return Vec::new();
+        return crate::forge::unparsed(body);
     };
     let error = &value["error"];
     error["message"]

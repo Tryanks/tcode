@@ -22,12 +22,14 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::LiveCommandPanelDisabled(_)
         | SettingsPatch::SidebarProviderMarks(_)
         | SettingsPatch::InactiveFrameThrottleDisabled(_)
-        | SettingsPatch::ScrollToLatestOnSend(_) => false,
+        | SettingsPatch::ScrollToLatestOnSend(_)
+        | SettingsPatch::ShortenLongCommands(_) => false,
         SettingsPatch::SourceControlHost { .. }
         | SettingsPatch::RemoveSourceControlHost { .. }
         | SettingsPatch::SkipDeleteConfirmation(_)
         | SettingsPatch::ProviderUpdateChecksDisabled(_)
         | SettingsPatch::ResumeOnLimitReset(_)
+        | SettingsPatch::BackgroundCommandsOnSteer(_)
         | SettingsPatch::AutoSettleAfterDays(_)
         | SettingsPatch::AutoSettleOnMerge(_)
         | SettingsPatch::ProjectSettlement { .. }

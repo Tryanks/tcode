@@ -88,13 +88,13 @@ impl SpaceHost {
         SettingsStore::new(store.root().clone())
             .save(&settings)
             .unwrap();
-        let host = spawn_host(store.clone(), HostServices::default()).unwrap();
         let provider = crate::app::scripted_provider(ProviderKind::Codex);
-        let launcher = provider.launcher.clone();
-        smol::block_on(
-            host.update_state_for_test(move |state, _| {
-                state.set_provider_launcher_for_test(launcher)
-            }),
+        let host = spawn_host(
+            store.clone(),
+            HostServices {
+                provider_launcher: provider.launcher.clone(),
+                ..HostServices::default()
+            },
         )
         .unwrap();
         Self {
@@ -305,11 +305,14 @@ fn space_index_and_scope_project_only_the_members_projects() {
 
     host.subscribe(member.clone(), Topic::Scope);
     let scope = host.event(|event| event.topic == Topic::Scope && event.request_id.is_some());
-    let ServerEvent::ScopeSnapshot(Scope::Space {
-        projects,
-        providers,
+    let ServerEvent::ScopeSnapshot {
+        scope: Scope::Space {
+            projects,
+            providers,
+            ..
+        },
         ..
-    }) = &scope.event
+    } = &scope.event
     else {
         panic!("space scope")
     };

@@ -85,11 +85,29 @@ fn read_error(error: ForgeError) -> ProtocolError {
 fn resolve_reference(
     forge: &dyn Forge,
     hosts: &str,
+    kinds: &tcode_core::settings::SourceControlSettings,
     cwd: &Path,
     reference: &str,
 ) -> Result<(PullRequestKey, String), ProtocolError> {
     if let Some(target) = forge.pull_request_url(reference) {
         return Ok(target);
+    }
+    // A URL on a host of no kind Tcode knows is read once the user says which kind it is.
+    let reference_url = reference.trim();
+    if let Some(host) = reference_url
+        .strip_prefix("https://")
+        .or_else(|| reference_url.strip_prefix("http://"))
+        .and_then(|rest| rest.split('/').next())
+        .filter(|host| !host.is_empty())
+        .map(str::to_ascii_lowercase)
+        .filter(|host| kinds.kind(host).is_none())
+    {
+        return Err(ProtocolError {
+            code: "pull_request_unknown_host".into(),
+            message: format!(
+                "Tcode does not know what kind of host {host} is; choose its kind in Source Control settings."
+            ),
+        });
     }
     let invalid = || ProtocolError {
         code: "pull_request_invalid_reference".into(),
@@ -790,11 +808,14 @@ impl AppState {
         let id = session_id.to_owned();
         let forge = self.pull_requests.forge.clone();
         let hosts = pull_request::host_names(&self.pull_request_hosts());
+        let kinds = self.settings.source_control.clone();
         let host = cx.clone();
         cx.spawn_background(async move {
             let cwd = cwd.ok_or_else(|| failure("Unknown thread."))?;
             let target = host
-                .unblock(move || resolve_reference(forge.as_ref(), &hosts, &cwd, &reference))
+                .unblock(move || {
+                    resolve_reference(forge.as_ref(), &hosts, &kinds, &cwd, &reference)
+                })
                 .await?;
             let key = target.0.clone();
             let already_linked = host

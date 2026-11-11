@@ -870,6 +870,16 @@ impl BrowserLifecycle {
         self.apply(&key, outcome, cx);
     }
 
+    /// Stop `key`'s page loading, as a browser's Stop does.
+    pub(super) fn stop(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(WebViewSlot::Ready { view, page, .. }) = self.slots.get_mut(key) else {
+            return;
+        };
+        page_agent::stop(view.read(cx).raw());
+        let outcome = page.events.stopped(cx.background_executor().now());
+        self.apply(key, outcome, cx);
+    }
+
     /// Whether `key`'s page agent can answer now.
     pub(super) fn page_settled(&self, key: &str) -> bool {
         self.slots

@@ -648,12 +648,18 @@ fn scope_subscriptions_and_provider_choices_have_literal_wire_contracts() {
         "policy":{"agents":{"type":"only","content":[]},"approval":"no_unrestricted","terminals":false,"git_remote":false,"preview":false,"computer_use":false,"editor":false}}});
     for (event, wire) in [
         (
-            ServerEvent::ScopeSnapshot(Scope::Full),
-            json!({"type":"scope_snapshot","content":{"type":"full"}}),
+            ServerEvent::ScopeSnapshot {
+                scope: Scope::Full,
+                host_unix_ms: 1_700_000_000_000,
+            },
+            json!({"type":"scope_snapshot","content":{"scope":{"type":"full"},"host_unix_ms":1_700_000_000_000_u64}}),
         ),
         (
-            ServerEvent::ScopeSnapshot(scope.clone()),
-            json!({"type":"scope_snapshot","content":scope_wire.clone()}),
+            ServerEvent::ScopeSnapshot {
+                scope: scope.clone(),
+                host_unix_ms: 1_700_000_000_000,
+            },
+            json!({"type":"scope_snapshot","content":{"scope":scope_wire.clone(),"host_unix_ms":1_700_000_000_000_u64}}),
         ),
     ] {
         let response = HostMessage::Event(EventEnvelope {

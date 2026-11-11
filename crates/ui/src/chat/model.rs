@@ -1018,6 +1018,7 @@ pub(in crate::chat) mod tests {
             id,
             EntryContent::Item(ItemContent::CommandExecution {
                 command: id.to_string(),
+                input: Vec::new(),
                 output: String::new(),
                 exit_code: Some(0),
                 status: ItemStatus::Completed,

@@ -215,6 +215,89 @@ fn a_rollout_codex_compressed_is_listed_and_imports_as_it_was_written() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// A thread found in a profile's config directory is listed as that
+/// profile's, so it imports under the account it ran with; one found in the
+/// built-in directory names no profile.
+#[test]
+fn a_scanned_thread_belongs_to_the_profile_whose_directory_holds_it() {
+    let home = std::env::temp_dir().join(format!("tcode-profiles-{}", uuid::Uuid::new_v4()));
+    let cwd = home.join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let in_json = serde_json::to_string(cwd.to_str().unwrap()).unwrap();
+    let at_cwd = |text: &str| {
+        let first = text.lines().next().unwrap();
+        first.replace("/work/example", in_json.trim_matches('"'))
+    };
+    let claude_projects = home.join("claude-work").join("projects");
+    std::fs::create_dir_all(claude_projects.join("-project")).unwrap();
+    std::fs::write(
+        claude_projects
+            .join("-project")
+            .join("00000000-0000-4000-8000-000000000010.jsonl"),
+        at_cwd(CLAUDE_TRANSCRIPT),
+    )
+    .unwrap();
+    let codex_day = |root: &str| home.join(root).join("sessions/2026/01/02");
+    let rollout = "rollout-2026-01-02T03-04-05-00000000-0000-4000-8000-000000000001.jsonl";
+    std::fs::create_dir_all(codex_day("codex-personal")).unwrap();
+    std::fs::write(
+        codex_day("codex-personal").join(rollout),
+        at_cwd(CODEX_ROLLOUT),
+    )
+    .unwrap();
+    let builtin = at_cwd(CODEX_ROLLOUT).replace(
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002",
+    );
+    std::fs::create_dir_all(codex_day("codex")).unwrap();
+    std::fs::write(
+        codex_day("codex").join(rollout.replace("0001.jsonl", "0002.jsonl")),
+        builtin,
+    )
+    .unwrap();
+
+    let history = super::scan_recent_dirs(
+        &super::ExternalRoots {
+            claude_projects: vec![(Some("work".into()), claude_projects)],
+            claude_desktop_meta: None,
+            codex_session_roots: vec![
+                (
+                    Some("personal".into()),
+                    home.join("codex-personal/sessions"),
+                ),
+                (None, home.join("codex/sessions")),
+            ],
+        },
+        &[],
+    );
+    let _ = std::fs::remove_dir_all(&home);
+    assert!(history.unreadable.is_empty(), "{:?}", history.unreadable);
+    let mut profiles = history
+        .dirs
+        .into_iter()
+        .flat_map(|dir| dir.threads)
+        .map(|thread| (thread.external_id, thread.profile_id))
+        .collect::<Vec<_>>();
+    profiles.sort();
+    assert_eq!(
+        profiles,
+        [
+            (
+                "claude:00000000-0000-4000-8000-000000000010".to_owned(),
+                Some("work".to_owned())
+            ),
+            (
+                "codex:00000000-0000-4000-8000-000000000001".to_owned(),
+                Some("personal".to_owned())
+            ),
+            (
+                "codex:00000000-0000-4000-8000-000000000002".to_owned(),
+                None
+            ),
+        ]
+    );
+}
+
 /// A thread `thread/revert` rewound is listed once, by the rollout Codex now
 /// reads for it, and shows the history Codex assembles for it: what it kept
 /// of the rollout it continues, then what followed the revert. Shapes from
@@ -354,6 +437,112 @@ fn a_reverted_codex_thread_shows_the_history_it_kept_and_what_followed() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// A fork attached to its parent and made while the parent's turn ran shows
+/// what Codex shows of it: its own conversation, without the parent's
+/// history it continues or the records it opens with, the interrupted-turn
+/// guidance and the parent turn's abort. Shapes from `rust-v0.167.0`: the
+/// fork's `session_meta` carries `forked_from_id`, `attached_thread`,
+/// `forked_from_ordinal_exclusive` and `history_base` (`SessionMeta`,
+/// `protocol/src/protocol.rs`); a mid-turn fork opens with
+/// `thread_settings_applied`, the `<turn_aborted>` guidance as a user
+/// message (`core/src/context/turn_aborted.rs`) and `turn_aborted`
+/// (`append_interrupted_boundary`, `core/src/thread_manager.rs`), and
+/// Codex's history page starts after it (`attached_history_start`,
+/// thread-store `local/rollout_lineage.rs`). Settings fields Tcode does not
+/// read are left out; content invented.
+#[test]
+fn an_attached_mid_turn_fork_shows_its_own_conversation() {
+    let home = std::env::temp_dir().join(format!("tcode-codex-{}", uuid::Uuid::new_v4()));
+    let day = home.join("sessions").join("2026").join("01").join("02");
+    std::fs::create_dir_all(&day).unwrap();
+    let parent = "00000000-0000-7000-8000-000000000041";
+    let fork = "00000000-0000-7000-8000-000000000042";
+    let record = |ordinal: u64, time: &str, kind: &str, payload: &str| {
+        format!(
+            r#"{{"timestamp":"2026-01-02T03:{time}.000Z","ordinal":{ordinal},"type":"{kind}","payload":{payload}}}"#
+        )
+    };
+    let meta = |ordinal: u64, time: &str, id: &str, fork_of: &str| {
+        record(
+            ordinal,
+            time,
+            "session_meta",
+            &format!(
+                r#"{{"id":"{id}","timestamp":"2026-01-02T03:{time}.000Z","cwd":"/work/example","originator":"codex_cli_rs","cli_version":"0.167.0","history_mode":"paginated"{fork_of}}}"#
+            ),
+        )
+    };
+    let message = |ordinal: u64, time: &str, role: &str, kind: &str, text: &str| {
+        record(
+            ordinal,
+            time,
+            "response_item",
+            &format!(
+                r#"{{"type":"message","role":"{role}","content":[{{"type":"{kind}","text":"{text}"}}]}}"#
+            ),
+        )
+    };
+    let taken = [
+        meta(0, "04:05", parent, ""),
+        message(1, "04:06", "user", "input_text", "Plan the change"),
+        message(2, "04:07", "assistant", "output_text", "Planning it."),
+    ]
+    .map(|line| line + "\n")
+    .concat();
+    std::fs::write(
+        day.join(format!("rollout-2026-01-02T03-04-05-{parent}.jsonl")),
+        taken.clone() + &message(3, "04:08", "assistant", "output_text", "Still planning.") + "\n",
+    )
+    .unwrap();
+    let fork_of = format!(
+        r#","forked_from_id":"{parent}","attached_thread":true,"forked_from_ordinal_exclusive":3,"history_base":{{"thread_id":"{parent}","end_ordinal_exclusive":3,"end_byte_offset":{}}}"#,
+        taken.len()
+    );
+    let forked = day.join(format!("rollout-2026-01-02T03-05-00-{fork}.jsonl"));
+    std::fs::write(
+        &forked,
+        [
+            meta(3, "05:00", fork, &fork_of),
+            record(
+                4,
+                "05:00",
+                "event_msg",
+                r#"{"type":"thread_settings_applied","thread_settings":{"model":"gpt-5.5","model_provider_id":"openai","cwd":"/work/example"}}"#,
+            ),
+            message(
+                5,
+                "05:00",
+                "user",
+                "input_text",
+                "<turn_aborted>\\nThe user interrupted the previous turn on purpose.\\n</turn_aborted>",
+            ),
+            record(
+                6,
+                "05:00",
+                "event_msg",
+                r#"{"type":"turn_aborted","turn_id":"turn-1","reason":"interrupted"}"#,
+            ),
+            message(7, "05:01", "user", "input_text", "Only the tests"),
+            message(8, "05:02", "assistant", "output_text", "Tests only."),
+        ]
+        .map(|line| line + "\n")
+        .concat(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        shown(codex::convert(&forked, "codex:example").unwrap()),
+        [
+            user("Only the tests"),
+            Some(ItemContent::AssistantMessage {
+                text: "Tests only.".into(),
+                summarized: false,
+            }),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 fn command(
     command: &str,
     output: &str,
@@ -362,6 +551,7 @@ fn command(
 ) -> Option<ItemContent> {
     Some(ItemContent::CommandExecution {
         command: command.into(),
+        input: Vec::new(),
         output: output.into(),
         exit_code,
         status,
@@ -389,7 +579,8 @@ fn readme_revised(status: ItemStatus) -> Option<ItemContent> {
 /// `core/src/tools/context.rs`), an
 /// command still running when its call returned goes on through the
 /// `write_stdin` calls to its session (`Process running with session ID N`,
-/// `shell_spec.rs`), whose output is its own, until one sees it exit, an
+/// `shell_spec.rs`), whose output is its own and whose `chars` are the
+/// lines typed into it, until one sees it exit, an
 /// `update_plan` is the plan it sets (`UpdatePlanArgs`,
 /// `protocol/src/plan_tool.rs`), as live, a patch
 /// shows the changes Codex applied, a call Codex dropped, stopped or never
@@ -444,7 +635,13 @@ fn a_codex_rollout_imports_as_codex_recorded_it() {
                     tools: Some(vec!["calendar/list_events".into()]),
                 })),
             }),
-            command("python3 -i", ">>> 1\n>>> ", Some(0), ItemStatus::Completed),
+            Some(ItemContent::CommandExecution {
+                command: "python3 -i".into(),
+                input: vec!["print(1)".into(), "exit()".into()],
+                output: ">>> 1\n>>> ".into(),
+                exit_code: Some(0),
+                status: ItemStatus::Completed,
+            }),
             command(
                 "make lint",
                 "make: *** No rule to make target 'lint'.  Stop.\n",
@@ -594,6 +791,7 @@ fn a_claude_transcript_imports_as_claude_recorded_it() {
             }),
             Some(ItemContent::CommandExecution {
                 command: "make".into(),
+                input: Vec::new(),
                 output: "make: *** No targets.  Stop.".into(),
                 exit_code: Some(2),
                 status: ItemStatus::Failed,
@@ -625,6 +823,7 @@ fn a_claude_transcript_imports_as_claude_recorded_it() {
             }),
             Some(ItemContent::CommandExecution {
                 command: "make test".into(),
+                input: Vec::new(),
                 output: String::new(),
                 exit_code: None,
                 status: ItemStatus::Interrupted,

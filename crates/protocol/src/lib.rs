@@ -346,6 +346,14 @@ pub use wire::{
 // ProvidersStatus gains secrets_unreadable.
 // ProvidersStatus gains model_errors, why a provider's latest model listing
 // failed.
+// ProviderVersionStatus gains latest_error and TcodeUpdateStatus check_error,
+// why the latest version could not be looked up.
+// ProvidersStatus gains login_shell_unread, why the host could not read the
+// login shell's environment at start.
+// ProvidersStatus gains model_problems, what of a provider's model catalog
+// could not be read and was left out.
+// The agent event stream's command_execution gains input, the lines written to
+// the command's stdin in order; rows without it read as none.
 // The agent event stream gains unreadable_record {line}: a row of a thread's
 // log the host cannot read is sent as it is stored instead of left out, and so
 // is a subagent's item (with parent_item_id) a build before v0.1.42 wrote
@@ -398,12 +406,19 @@ pub use wire::{
 // ScheduleTurn carries due, a TurnDue (after_secs from when the host takes it
 // in, or at_unix_secs), instead of fire_at_unix_secs computed by the client's
 // clock.
+// ScopeSnapshot is {scope, host_unix_ms}: the host's wall clock when it sent
+// the scope, by which a client tells how long ago a host's time was.
 // RuntimeError gains orphan_sweep_skipped {error} and orphans_left {left}, each
 // a LeftOrphan {path, error}.
 // TokenCheck gains unreadable {status, error}: a host took the token but its
 // answer could not be read.
 // CommandResponse gains unsent, the UnsentMessage {text, attachments} list an
 // Interrupt answers with when the next turn had not reached the provider.
+// Settings gains shorten_long_commands with the ShortenLongCommands patch.
+// Settings gains background_commands_on_steer with the
+// BackgroundCommandsOnSteer patch.
+// SessionContentHits gains truncated: more messages matched than the limit
+// asked for. SearchSessionContent's limit is no longer capped at 50.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

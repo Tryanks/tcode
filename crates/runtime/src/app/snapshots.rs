@@ -1094,10 +1094,14 @@ impl AppState {
         &mut self,
         subscription: &tcode_protocol::Subscription,
         principal: &tcode_protocol::Principal,
+        now_ms: u64,
     ) -> Option<EventEnvelope> {
         let topic = &subscription.topic;
         let event = match topic {
-            Topic::Scope => ServerEvent::ScopeSnapshot(self.scope_snapshot(principal)),
+            Topic::Scope => ServerEvent::ScopeSnapshot {
+                scope: self.scope_snapshot(principal),
+                host_unix_ms: now_ms,
+            },
             Topic::SpaceIndex { space_id } => {
                 ServerEvent::IndexSnapshot(self.space_index_snapshot(
                     space_id,

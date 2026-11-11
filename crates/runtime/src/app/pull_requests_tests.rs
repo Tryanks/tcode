@@ -174,7 +174,7 @@ fn instructions_reach_the_provider_at_launch_and_no_turn_carries_them() {
     let mut cx = TestAppContext::default();
     let state = cx.new_entity({
         let mut state = TestClientState::new((*store).clone());
-        state.set_provider_launcher_for_test(launcher);
+        state.set_provider_launcher(launcher);
         state
     });
     state.update(&mut cx, |state, cx| {

@@ -222,8 +222,11 @@ fn main() {
             )
             .await
             {
-                Ok(models) => {
-                    println!("{}", serde_json::to_string_pretty(&models).unwrap());
+                Ok(listing) => {
+                    println!("{}", serde_json::to_string_pretty(&listing.models).unwrap());
+                    for problem in listing.problems {
+                        eprintln!("{problem}");
+                    }
                     0
                 }
                 Err(error) => {

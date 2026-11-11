@@ -33,7 +33,7 @@ use gpui_base::actions::{Confirm, SelectDown, SelectUp};
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
-use crate::time::{humanize_ago, now_secs};
+use crate::time::humanize_ago;
 use tcode_core::settings::ProjectStart;
 use tcode_protocol::{
     CommandResponse, DirectoryListing, ExternalHistory, ExternalImportState, ExternalThread,
@@ -772,8 +772,12 @@ impl AddProjectDialog {
                         .file_name()
                         .map(|name| name.to_string_lossy().into_owned())
                         .unwrap_or_else(|| recent.path.display().to_string());
-                    let ago =
-                        humanize_ago(now_secs(cx).saturating_sub(recent.last_active_ms / 1000));
+                    let ago = humanize_ago(
+                        self.store
+                            .read(cx)
+                            .host_now_secs(cx)
+                            .saturating_sub(recent.last_active_ms / 1000),
+                    );
                     let count = recent.threads.len();
                     let tag = if count == 1 {
                         crate::tr!("sidebar.recent_import_count_one").into_owned()

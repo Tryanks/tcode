@@ -62,9 +62,13 @@ pub(super) fn is_read_rollout(path: &Path) -> bool {
 /// `thread/revert` or a fork wrote names in its `session_meta.history_base`
 /// (`HistoryPosition`, `protocol/src/protocol.rs`) the rollout it continues
 /// and the byte offset just past the last record it takes from it; that
-/// rollout may continue another in turn.
+/// rollout may continue another in turn. A history stops at an attached
+/// fork made at its parent's bookmark ([`at_parent`]).
 fn inherited(path: &Path, meta: &Value, seen: &mut HashSet<String>) -> Result<Vec<String>, String> {
-    let Some(base) = meta.pointer("/payload/history_base") else {
+    let Some(base) = meta
+        .pointer("/payload/history_base")
+        .filter(|_| !at_parent(path, meta))
+    else {
         return Ok(Vec::new());
     };
     let malformed = || format!("{} has an unreadable history_base", path.display());
@@ -99,14 +103,81 @@ fn inherited(path: &Path, meta: &Value, seen: &mut HashSet<String>) -> Result<Ve
     }
     let text = String::from_utf8(bytes)
         .map_err(|err| format!("failed to read {}: {err}", base_path.display()))?;
-    let own: Vec<String> = text.lines().map(str::to_owned).collect();
+    let mut own: Vec<String> = text.lines().map(str::to_owned).collect();
     let base_meta = own
         .first()
         .and_then(|line| serde_json::from_str::<Value>(line).ok())
         .unwrap_or(Value::Null);
     let mut lines = inherited(&base_path, &base_meta, seen)?;
+    if at_parent(&base_path, &base_meta) && !own.is_empty() {
+        let opening = fork_opening(&own[1..]);
+        own.drain(1..=opening);
+    }
     lines.extend(own);
     Ok(lines)
+}
+
+/// Whether the rollout at `path` is a fork attached to its parent and made
+/// at the parent's bookmark, which Codex shows from its own records alone:
+/// none of the parent's, and none of the records it opens with
+/// ([`fork_opening`]). A revert of such a fork may continue its earlier
+/// records instead, and that history goes on to the fork's own start
+/// (`at_parent` in `resolve_rollout_lineage_with_mode`, thread-store
+/// `local/rollout_lineage.rs` at `rust-v0.167.0`, as it reads a history
+/// page; `attached_thread` and `history_base` of `SessionMeta`,
+/// `protocol/src/protocol.rs`).
+fn at_parent(path: &Path, meta: &Value) -> bool {
+    let meta = meta.get("payload").unwrap_or(&Value::Null);
+    meta.get("attached_thread").and_then(Value::as_bool) == Some(true)
+        && meta
+            .pointer("/history_base/end_ordinal_exclusive")
+            .and_then(Value::as_u64)
+            .zip(fork_bookmark(path, meta))
+            .is_some_and(|(end, bookmark)| end <= bookmark)
+}
+
+/// The first record of a fork's parent its history does not take: the
+/// fork's `forked_from_ordinal_exclusive`, else the end of its
+/// `history_base` when that is the parent or the rollout is the thread's
+/// first (`forked_from_ordinal_exclusive`, `rollout/src/metadata.rs` at
+/// `rust-v0.167.0`).
+fn fork_bookmark(path: &Path, meta: &Value) -> Option<u64> {
+    let parent = meta.get("forked_from_id")?.as_str()?;
+    if let Some(bookmark) = meta
+        .get("forked_from_ordinal_exclusive")
+        .and_then(Value::as_u64)
+    {
+        return Some(bookmark);
+    }
+    let base = meta.get("history_base")?;
+    let first = rollout_name(path)
+        .is_some_and(|(_, _, rollout)| meta.get("id").and_then(Value::as_str) == Some(rollout));
+    (base.get("thread_id").and_then(Value::as_str) == Some(parent) || first)
+        .then(|| base.get("end_ordinal_exclusive")?.as_u64())
+        .flatten()
+}
+
+/// How many of the records after a mid-turn fork's `session_meta` open it:
+/// past settings and response items (the interrupted-turn guidance), up to
+/// and including the `turn_aborted` its parent's turn ended with, when that
+/// is among the first three; none otherwise (`attached_history_start`,
+/// `local/rollout_lineage.rs` at `rust-v0.167.0`).
+fn fork_opening(records: &[String]) -> usize {
+    for (index, record) in records.iter().take(3).enumerate() {
+        let Ok(record) = serde_json::from_str::<Value>(record) else {
+            break;
+        };
+        match (
+            record.get("type").and_then(Value::as_str),
+            record.pointer("/payload/type").and_then(Value::as_str),
+        ) {
+            (Some("session_meta" | "response_item"), _)
+            | (Some("event_msg"), Some("thread_settings_applied")) => {}
+            (Some("event_msg"), Some("turn_aborted")) => return index + 1,
+            _ => break,
+        }
+    }
+    0
 }
 
 /// The rollout whose file name carries `rollout` as its rollout id, in the
@@ -169,6 +240,18 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
     }
 
     let inherited = inherited(path, &meta, &mut HashSet::new())?;
+    // A mid-turn fork's own history starts after the records it opens with.
+    let mut opening = Vec::new();
+    if at_parent(path, &meta) {
+        for _ in 0..3 {
+            match lines.next() {
+                Some(line) => opening.push(line.map_err(read)?),
+                None => break,
+            }
+        }
+        let skip = fork_opening(&opening);
+        opening.drain(..skip);
+    }
     let first_meta_ts = inherited
         .first()
         .and_then(|line| serde_json::from_str::<Value>(line).ok())
@@ -184,10 +267,13 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
     // Codex gave them, and the `write_stdin` calls to them.
     let mut sessions = HashMap::<u64, usize>::new();
     let mut stdin = HashMap::<String, usize>::new();
+    // What was written to each command's stdin since its last finished line.
+    let mut typing = HashMap::<usize, String>::new();
     let mut next_id = 0_u64;
 
     for line in inherited
         .into_iter()
+        .chain(opening)
         .map(Ok)
         .chain(lines.map(|line| line.map_err(read)))
     {
@@ -284,6 +370,18 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                 .and_then(Value::as_u64)
                                 .and_then(|session| sessions.get(&session))
                         {
+                            let chars = input.get("chars").and_then(Value::as_str);
+                            let lines = agent::codex::typed_lines(
+                                typing.entry(command).or_default(),
+                                chars.unwrap_or_default(),
+                            );
+                            if let Some(ConvertedEntry::Item { item, .. }) =
+                                entries.get_mut(command)
+                                && let ItemContent::CommandExecution { input, .. } =
+                                    &mut item.content
+                            {
+                                input.extend(lines);
+                            }
                             stdin.insert(call_id, command);
                             continue;
                         }
@@ -301,6 +399,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             Some(command) if name == EXEC_COMMAND => {
                                 ItemContent::CommandExecution {
                                     command: command.to_owned(),
+                                    input: Vec::new(),
                                     output: String::new(),
                                     exit_code: None,
                                     status: ItemStatus::InProgress,
@@ -340,8 +439,9 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                         if let Some(command) = stdin.remove(call_id) {
                             let (result, _) =
                                 call_output(payload.get("output").unwrap_or(&Value::Null));
-                            if let Some(ConvertedEntry::Item { item, .. }) =
-                                entries.get_mut(command)
+                            if let Some(ConvertedEntry::Item {
+                                item, finished_ts, ..
+                            }) = entries.get_mut(command)
                                 && let ItemContent::CommandExecution {
                                     output,
                                     exit_code,
@@ -353,6 +453,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                 let (code, printed) = exec_result(&result.text);
                                 output.push_str(printed);
                                 if let Some(code) = code {
+                                    *finished_ts = Some(ts);
                                     *exit_code = Some(code);
                                     *status = if code != 0 {
                                         ItemStatus::Failed
@@ -367,11 +468,17 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                         let Some(index) = pending.remove(call_id) else {
                             continue;
                         };
-                        let Some(ConvertedEntry::Item { item, .. }) = entries.get_mut(index) else {
+                        let Some(ConvertedEntry::Item {
+                            item, finished_ts, ..
+                        }) = entries.get_mut(index)
+                        else {
                             continue;
                         };
                         let (result, failed) =
                             call_output(payload.get("output").unwrap_or(&Value::Null));
+                        // The call ran until its output, unless it never
+                        // ran or what it started goes on past it.
+                        *finished_ts = (result.text != NOT_DISPATCHED).then_some(ts);
                         match &mut item.content {
                             ItemContent::CommandExecution {
                                 output,
@@ -393,6 +500,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                         (Some(code), _) if code != 0 => ItemStatus::Failed,
                                         (None, Some(session)) => {
                                             sessions.insert(session, index);
+                                            *finished_ts = None;
                                             ItemStatus::InProgress
                                         }
                                         _ => ItemStatus::Completed,
@@ -530,7 +638,9 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                         else {
                             continue;
                         };
-                        if let Some(ConvertedEntry::Item { item, .. }) = entries.get_mut(index)
+                        if let Some(ConvertedEntry::Item {
+                            item, finished_ts, ..
+                        }) = entries.get_mut(index)
                             && let ItemContent::ToolCall {
                                 output,
                                 status,
@@ -538,6 +648,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                 ..
                             } = &mut item.content
                         {
+                            *finished_ts = Some(ts);
                             let found = found_tools(payload.get("tools"));
                             *output = Some(found.join("\n"));
                             if let Some(ToolFamily::LoadTools { tools, .. }) = family.as_deref_mut()
@@ -562,6 +673,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             &mut next_id,
                             ItemContent::CommandExecution {
                                 command,
+                                input: Vec::new(),
                                 output: String::new(),
                                 exit_code: None,
                                 status: ItemStatus::Completed,
@@ -618,6 +730,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                         roll_back(&mut entries, &mut pending, turns);
                         sessions.retain(|_, command| *command < entries.len());
                         stdin.retain(|_, command| *command < entries.len());
+                        typing.retain(|command, _| *command < entries.len());
                     }
                 }
                 _ => {}
@@ -684,13 +797,18 @@ fn record(
     let call = (!id.is_empty())
         .then(|| {
             entries.iter_mut().rev().find_map(|entry| match entry {
-                ConvertedEntry::Item { item, .. } if item.id == id => Some(item),
+                ConvertedEntry::Item {
+                    item, finished_ts, ..
+                } if item.id == id => Some((item, finished_ts)),
                 _ => None,
             })
         })
         .flatten();
     match call {
-        Some(item) => item.content = content,
+        Some((item, finished_ts)) => {
+            item.content = content;
+            *finished_ts = Some(ts);
+        }
         None => push_item(entries, ts, next_id, content, Some(id)),
     }
 }
@@ -705,6 +823,7 @@ fn push_item(
     *next_id += 1;
     entries.push(ConvertedEntry::Item {
         ts,
+        finished_ts: None,
         item: Box::new(ThreadItem {
             id: id
                 .filter(|id| !id.is_empty())
@@ -739,12 +858,16 @@ fn is_harness_text(text: &str) -> bool {
         .any(|prefix| text.starts_with(prefix))
 }
 
+/// What Codex writes for a call its interrupted turn dropped before it ran
+/// (`abort_message`, `core/src/tools/parallel.rs` at `rust-v0.167.0`).
+const NOT_DISPATCHED: &str = "aborted before dispatch";
+
 /// Whether `output` is what Codex writes for a call its interrupted turn
 /// cut off (`abort_message`, `core/src/tools/parallel.rs` at
 /// `rust-v0.167.0`): one it never dispatched, a command it stopped, or
 /// another call it stopped.
 fn aborted(output: &str) -> bool {
-    output == "aborted before dispatch"
+    output == NOT_DISPATCHED
         || output
             .strip_prefix("Wall time: ")
             .is_some_and(|rest| rest.ends_with(" seconds\naborted by user"))

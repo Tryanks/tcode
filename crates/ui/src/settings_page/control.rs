@@ -268,7 +268,10 @@ impl SettingsPage {
         let mut context: Vec<String> = own_project.map(str::to_owned).into_iter().collect();
         context.push(self.store.read(cx).harness_name_of(meta));
         context.push(humanize_ago(
-            now_secs(cx).saturating_sub(request.requested_at),
+            self.store
+                .read(cx)
+                .host_now_secs(cx)
+                .saturating_sub(request.requested_at),
         ));
         let respond = |approve: bool| {
             let (session_id, request_id) = (meta.id.clone(), request.id.clone());
@@ -1178,7 +1181,10 @@ impl SettingsPage {
                 ];
             }
         };
-        let now = chrono::Local::now();
+        let now =
+            chrono::DateTime::from_timestamp_millis(self.store.read(cx).host_now_millis(cx) as i64)
+                .unwrap_or_default()
+                .with_timezone(&chrono::Local);
         let mut days: Vec<(ActivityDay, Vec<ControlActivityEntry>)> = Vec::new();
         for entry in entries {
             let day = ActivityDay::of(entry.at, &now);
@@ -1194,7 +1200,7 @@ impl SettingsPage {
             .into_iter()
             .map(|meta| meta.id)
             .collect();
-        let now_secs = now_secs(cx);
+        let now_secs = self.store.read(cx).host_now_secs(cx);
         let mut groups = Vec::new();
         for (day, entries) in days {
             // A refresh keeps the entries it found before where they were and

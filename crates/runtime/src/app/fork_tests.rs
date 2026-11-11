@@ -169,7 +169,7 @@ fn a_fork_through_a_turn_holds_it_and_what_came_before_and_leaves_the_source_alo
     let events = scripted.events.clone();
     let state = cx.new_entity({
         let mut state = TestClientState::new((*store).clone());
-        state.set_provider_launcher_for_test(scripted.launcher);
+        state.set_provider_launcher(scripted.launcher);
         state
     });
     state.update(cx, |state, cx| {
@@ -849,6 +849,7 @@ fn background_work_open_at_a_fork_point_ends_as_interrupted_in_the_fork() {
                     parent_item_id: None,
                     content: ItemContent::CommandExecution {
                         command: "serve".into(),
+                        input: Vec::new(),
                         output: "listening".into(),
                         exit_code: None,
                         status: ItemStatus::InProgress,

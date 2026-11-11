@@ -568,6 +568,9 @@ settings:
   scroll_to_latest_on_send:
     title: "Scroll to the latest message when you send"
     description: "When the thread is scrolled back, go to its end once a message you send gets through."
+  shorten_long_commands:
+    title: "Shorten long commands"
+    description: "Show the first 4 rows of a command longer than 5. Copying the command still gives all of it."
   live_command_panel:
     title: "Live command panel"
     description: "Automatically expand the latest command's output while a turn is running."
@@ -598,6 +601,9 @@ settings:
   inactive_frame_throttle:
     title: "Background frame throttle"
     description: "Lower the frame rate while the window is unfocused to save energy. Takes effect after restart."
+  background_commands_on_steer:
+    title: "Move running commands to the background when steering"
+    description: "When you steer while the turn is waiting on a command, move that command to the background so the steer reaches the model sooner. Applies where the harness can move a command to the background."
   resume_on_limit_reset:
     title: "Resume when the usage limit resets"
     description: "When Claude Code stops a turn because a usage limit was reached, Tcode resumes it when the limit resets. Off: the error card offers a button to schedule it by hand."
@@ -706,6 +712,8 @@ providers:
   tcode_update_aria: "Tcode update available — view details"
   tcode_update_title: "Tcode update available"
   tcode_update_message: "Download the latest release from GitHub."
+  login_shell_unread: "Couldn't read your login shell's environment, so harnesses are looked up on the PATH Tcode was started with: %{error}"
+  tcode_update_unchecked: "Couldn't check for a Tcode update: %{error}"
   view_release: "View release"
   # A harness's settings (Settings → Harnesses → a harness).
   configure: "Configure %{name}"
@@ -947,6 +955,7 @@ providers:
     trust_project_extensions: "Trust project extensions"
     trust_project_extensions_help: "Launch pi with --approve so extensions, settings, and skills in the project's .pi directory are loaded."
   harness:
+    catalog_problems: "Tcode left out what it could not read of the model catalog:"
     unnamed: "Harness"
     default_permission: "Default permissions"
     default_permission_help: "What a new thread may do without asking, where its project doesn't say."
@@ -991,6 +1000,7 @@ providers:
     install_help: "Run it in a terminal on the machine running Tcode, then check again."
     integrations: "Integrations"
     key_saved: "Saved — enter a new key to replace it"
+    latest_unknown: "Couldn't check for a newer version: %{error}"
     mcp: "MCP tools"
     model_id: "Model ID"
     more_models: "%{count} more models"
@@ -1041,6 +1051,7 @@ palette:
   messages: "Messages"
   messages_on: "Messages on %{host}"
   messages_unreadable: "Some threads could not be searched: %{reason}"
+  more_messages: "Show more messages"
   no_matches: "No matches"
   navigate: "↑↓ Navigate"
   select: "Enter Select"
@@ -1498,6 +1509,7 @@ preview:
   back: "Back"
   forward: "Forward"
   reload: "Reload"
+  stop: "Stop loading"
   dev_servers: "Dev servers on the machine"
   no_dev_servers: "No dev servers are running on the machine."
   open_external: "Open in system browser"
@@ -1563,6 +1575,8 @@ git:
     confirm: "Commit"
     confirm_push: "Commit & push"
     confirm_feature: "Commit on %{branch}"
+dialog:
+  ok: "OK"
 toast:
   show_details: "Show details"
   hide_details: "Hide details"
@@ -2071,6 +2085,7 @@ pull_requests:
   badge_single: "Pull request #%{number}, %{state}"
   badge_stack: "Stack of %{count} pull requests, %{state}"
   badge_several: "%{count} linked pull requests, %{state}"
+  linked_count: "%{count} linked PRs"
   more: "and %{count} more"
   stack_short: "Stack · %{count}"
   chain_short: "Chain · %{count}"
@@ -3281,6 +3296,7 @@ tools:
   input: "Input"
   output: "Output"
   error: "Error"
+  typed_input: "Typed into it:"
   no_output: "No output"
   more_lines: "+%{count} lines"
   show_less: "Show less"

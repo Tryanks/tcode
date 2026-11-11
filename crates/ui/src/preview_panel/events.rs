@@ -236,16 +236,32 @@ impl PageEvents {
         self.handle(Event::Started, now)
     }
 
+    /// The user stopped the load. The engine keeps the document it shows and
+    /// reports the stopped navigation as one another replaced, which is not
+    /// reported at all, so the page stops waiting here: calls held for the
+    /// next document go to the one shown.
+    pub(crate) fn stopped(&mut self, now: Instant) -> Outcome {
+        let mut outcome = Outcome {
+            changed: self.navigating,
+            ..Outcome::default()
+        };
+        self.navigating = false;
+        self.flush(&mut outcome, now);
+        outcome
+    }
+
     /// What `event` does to the page at `now`, the lifecycle's time.
     pub(crate) fn handle(&mut self, event: Event, now: Instant) -> Outcome {
         let mut outcome = Outcome::default();
         match event {
             Event::Started => {
+                // The panel shows a page loading.
+                outcome.changed = self.load_error.take().is_some() || !self.navigating;
                 self.navigating = true;
-                outcome.changed = self.load_error.take().is_some();
                 self.console = Console::default();
             }
             Event::Finished => {
+                outcome.changed = self.navigating;
                 self.navigating = false;
                 self.flush(&mut outcome, now);
             }

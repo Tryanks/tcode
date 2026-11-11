@@ -20,29 +20,30 @@ const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 #[cfg(unix)]
 const SKIP_VARS: &[&str] = &["PWD", "OLDPWD", "SHLVL", "_", "PS1", "PROMPT"];
 
-/// Merge the login shell's environment into this process. Must be called from
-/// `main` before any other thread exists (it writes the process environment).
+/// Merge the login shell's environment into this process, or say why it
+/// could not be read: the process then keeps the environment it was
+/// launched with. Must be called from `main` before any other thread exists
+/// (it writes the process environment).
 ///
 /// No-op on Windows (GUI apps inherit the user's registry environment there)
 /// and when launched from a terminal (`TERM` set → the environment is already
 /// the shell's).
-pub fn import_login_shell_environment() {
+pub fn import_login_shell_environment() -> Result<(), String> {
     #[cfg(unix)]
     {
         if std::env::var_os("TERM").is_some() {
-            return;
+            return Ok(());
         }
-        match capture_login_shell_env() {
-            Ok(stdout) => {
-                apply(parse_env_output(&stdout));
-                log::info!(
-                    "imported login-shell environment; PATH={}",
-                    std::env::var("PATH").unwrap_or_default()
-                );
-            }
-            Err(err) => log::warn!("could not import the login-shell environment: {err}"),
-        }
+        let stdout = capture_login_shell_env().inspect_err(|err| {
+            log::warn!("could not import the login-shell environment: {err}");
+        })?;
+        apply(parse_env_output(&stdout));
+        log::info!(
+            "imported login-shell environment; PATH={}",
+            std::env::var("PATH").unwrap_or_default()
+        );
     }
+    Ok(())
 }
 
 /// Run `$SHELL -l -i -c 'echo MARKER; command env -0'` and return its stdout.

@@ -136,6 +136,7 @@ pub fn notification(
                     content = content.child(
                         h_flex().justify_end().child(
                             Button::new(("toast-copy", id as usize))
+                                .debug_selector(|| "toast-copy".into())
                                 .ghost()
                                 .xsmall()
                                 .icon(IconName::Copy)

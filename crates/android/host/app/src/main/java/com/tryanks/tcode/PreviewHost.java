@@ -149,6 +149,7 @@ public final class PreviewHost implements Application.ActivityLifecycleCallbacks
                 case "back": if (view.canGoBack()) view.goBack(); break;
                 case "forward": if (view.canGoForward()) view.goForward(); break;
                 case "reload": view.reload(); break;
+                case "stop": view.stopLoading(); break;
                 case "canGoBack": nativeResult(request, Boolean.toString(view.canGoBack()), null, null); break;
                 case "evaluate":
                     view.evaluateJavascript(value, result -> nativeResult(request, result, null, null));

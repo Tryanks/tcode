@@ -488,9 +488,14 @@ async fn pump(
                         }
                         value["content"]["id"] = local_id.into();
                         if let Some(attachment) = clients.get(&connection_id) {
-                            let _ = attachment
-                                .outbox
-                                .try_send(encode_line(&value).unwrap(), None);
+                            let mut line = encode_line(&value).unwrap();
+                            if let Some(limit) = attachment.policy.line_limit()
+                                && line.len() > limit
+                            {
+                                value["content"]["result"] = serde_json::json!({ "Err": reply_too_large(line.len(), limit) });
+                                line = encode_line(&value).unwrap();
+                            }
+                            let _ = attachment.outbox.try_send(line, None);
                         }
                     }
                     _ => {}
@@ -516,6 +521,18 @@ fn withhold(line: &str) -> Option<String> {
     let bytes = serde_json::to_vec(record).ok()?.len() as u64;
     envelope.event = tcode_protocol::ServerEvent::SessionEvent(record.withheld(bytes));
     encode_line(&tcode_protocol::HostMessage::Event(envelope)).ok()
+}
+
+/// What a connection is answered in place of a reply longer than its line `limit`, which it
+/// would close on: the reply's size, so the request fails with why.
+fn reply_too_large(bytes: usize, limit: usize) -> tcode_protocol::ProtocolError {
+    tcode_protocol::ProtocolError {
+        code: "reply_too_large".into(),
+        message: format!(
+            "The reply takes {bytes} bytes to send, more than the {limit} bytes one reply to \
+             this device can carry."
+        ),
+    }
 }
 
 /// What the mux routes a host line on. Deserializing only this skips the
@@ -1061,5 +1078,58 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A network connection closes on a line longer than it carries, so a reply that long
+    /// fails its request with the reply's size, and the connection stays open.
+    #[test]
+    fn a_reply_longer_than_the_line_fails_its_request_and_the_connection_stays() {
+        let (to_host, host_rx) = async_channel::unbounded();
+        let (host_tx, from_host) = async_channel::unbounded();
+        let mux = HostMux::new(to_host, from_host);
+        let client = mux.attach(
+            Principal::Full,
+            tcode_client::attachment::AttachmentPolicy::network(),
+        );
+        let ask = |id: u64| {
+            let query = tcode_protocol::ClientMessage {
+                id,
+                key: None,
+                payload: tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Ping),
+                principal: None,
+            };
+            client
+                .to_host
+                .send_blocking(encode_line(&query).unwrap())
+                .unwrap();
+            let forwarded: serde_json::Value =
+                serde_json::from_str(&host_rx.recv_blocking().unwrap().line).unwrap();
+            forwarded["id"].as_u64().unwrap()
+        };
+        let answer = |id: u64, response: tcode_protocol::QueryResponse| {
+            let reply = tcode_protocol::HostMessage::QueryResult {
+                id,
+                result: Ok(response),
+            };
+            host_tx.send_blocking(encode_line(&reply).unwrap()).unwrap();
+            tcode_protocol::decode_host_line(&client.from_host.recv_blocking().unwrap()).unwrap()
+        };
+        let routed = ask(1);
+        let tcode_protocol::HostMessage::QueryResult { id, result } = answer(
+            routed,
+            tcode_protocol::QueryResponse::FileBytes(vec![0; tcode_protocol::MAX_LINE_BYTES]),
+        ) else {
+            panic!("not a query result");
+        };
+        assert_eq!(id, 1);
+        assert_eq!(result.unwrap_err().code, "reply_too_large");
+        let routed = ask(2);
+        assert_eq!(
+            answer(routed, tcode_protocol::QueryResponse::Pong),
+            tcode_protocol::HostMessage::QueryResult {
+                id: 2,
+                result: Ok(tcode_protocol::QueryResponse::Pong),
+            }
+        );
     }
 }

@@ -645,8 +645,6 @@ fn refused(store: &Entity<WorkspaceStore>, cx: &App) -> bool {
 /// What bootstrap tells the shell that is not the window itself.
 #[derive(Default)]
 pub struct ShellSetup {
-    /// This client's identity, saved hosts and preferences.
-    pub client_host: Option<Rc<dyn ClientHost>>,
     /// How to reach a host running inside this process. A client that can never
     /// host has none.
     pub local: Option<LocalTransport>,
@@ -694,6 +692,9 @@ struct PendingNavigationRestore {
 pub struct AppShell {
     window_state: Entity<WindowState>,
     setup: ShellSetup,
+    /// This client's identity, saved hosts and preferences: the
+    /// [`crate::remote::ClientAttachment`]'s.
+    client: Rc<dyn ClientHost>,
     /// The hosts this window is linked to.
     links: Vec<Link>,
     /// The panes, each over one of `links`' hosts.
@@ -866,22 +867,22 @@ impl AppShell {
                 window.push_notification(Notification::error(message.into_owned()), cx);
             },
         );
-        if let Some(client) = setup.client_host.clone() {
-            DevicePreferences::install(client.clone(), cx);
-            // The window lists no saved machines while they cannot be read.
-            // Said once the window holds its overlays.
-            // Nor can the machine this data directory hosts be told from the
-            // saved ones while its own file cannot be read.
-            for error in [client.load_hosts().err(), client.local_machine_id().err()]
-                .into_iter()
-                .flatten()
-            {
-                let message =
-                    crate::tr!("errors.file_unreadable", error = error.to_string()).into_owned();
-                cx.defer_in(window, move |_, window, cx| {
-                    window.push_notification(Notification::error(message), cx);
-                });
-            }
+        // This client's identity, saved hosts and preferences.
+        let client = cx.global::<crate::remote::ClientAttachment>().host();
+        DevicePreferences::install(client.clone(), cx);
+        // The window lists no saved machines while they cannot be read.
+        // Said once the window holds its overlays.
+        // Nor can the machine this data directory hosts be told from the
+        // saved ones while its own file cannot be read.
+        for error in [client.load_hosts().err(), client.local_machine_id().err()]
+            .into_iter()
+            .flatten()
+        {
+            let message =
+                crate::tr!("errors.file_unreadable", error = error.to_string()).into_owned();
+            cx.defer_in(window, move |_, window, cx| {
+                window.push_notification(Notification::error(message), cx);
+            });
         }
         if let Some(settings) = &setup.local_settings
             && DevicePreferences::adopt(settings, cx)
@@ -914,13 +915,11 @@ impl AppShell {
                     }
                 }
                 HostKey::Remote(host_id) => {
-                    if let Some(saved) = setup.client_host.as_ref().and_then(|client| {
-                        client
-                            .load_hosts()
-                            .ok()?
-                            .into_iter()
-                            .find(|saved| saved.host_id == *host_id)
-                    }) {
+                    if let Some(saved) = client
+                        .load_hosts()
+                        .ok()
+                        .and_then(|hosts| hosts.into_iter().find(|saved| saved.host_id == *host_id))
+                    {
                         setup.initial = Some(AttachmentTarget::Remote(Box::new(saved)));
                     }
                 }
@@ -928,8 +927,8 @@ impl AppShell {
         }
         // A host whose outbox cannot be read opens first too: opening it
         // says why.
-        if let Some(host) = setup.client_host.as_ref().and_then(|client| {
-            client.load_hosts().ok()?.into_iter().find(|host| {
+        if let Some(host) = client.load_hosts().ok().and_then(|hosts| {
+            hosts.into_iter().find(|host| {
                 client.outbox_storage(&host.host_id).is_some_and(|storage| {
                     storage.load().map_or(true, |entries| !entries.is_empty())
                 })
@@ -980,6 +979,7 @@ impl AppShell {
         let palette = cx.new(|cx| CommandPalette::new(window_state.clone(), window, cx));
         let mut shell = Self {
             window_state,
+            client,
             links: Vec::new(),
             column: None,
             alone: false,
@@ -1025,23 +1025,18 @@ impl AppShell {
         };
         let initial = shell.setup.initial.take();
         shell.open_workspace(initial, local_started, window, cx);
-        shell._saved_hosts = shell
-            .setup
-            .client_host
-            .as_ref()
-            .and_then(|client| client.saved_hosts_changes())
-            .map(|changes| {
-                cx.spawn_in(window, async move |this, cx| {
-                    while changes.recv().await.is_ok() {
-                        if this
-                            .update_in(cx, |shell, window, cx| shell.open_new_members(window, cx))
-                            .is_err()
-                        {
-                            return;
-                        }
+        shell._saved_hosts = shell.client.saved_hosts_changes().map(|changes| {
+            cx.spawn_in(window, async move |this, cx| {
+                while changes.recv().await.is_ok() {
+                    if this
+                        .update_in(cx, |shell, window, cx| shell.open_new_members(window, cx))
+                        .is_err()
+                    {
+                        return;
                     }
-                })
-            });
+                }
+            })
+        });
         if let Some(mut snapshot) = restored {
             let pane = shell.column.as_ref().and_then(|column| {
                 let thread = snapshot.thread.as_ref()?;
@@ -1252,12 +1247,7 @@ impl AppShell {
     /// The hosts this device's workspace holds, in order.
     fn members(&self, cx: &App) -> Vec<AttachmentTarget> {
         let local = self.setup.local.is_some();
-        let Some(client) = &self.setup.client_host else {
-            return local
-                .then_some(AttachmentTarget::Local)
-                .into_iter()
-                .collect();
-        };
+        let client = &self.client;
         // Saved machines that cannot be read are none; opening the window
         // said why.
         let saved = client.load_hosts().unwrap_or_default();
@@ -1285,9 +1275,7 @@ impl AppShell {
     ) {
         // Arranged from saved machines that cannot be read, the workspace
         // would lose every one of them.
-        if let Some(client) = &self.setup.client_host
-            && client.load_hosts().is_err()
-        {
+        if self.client.load_hosts().is_err() {
             return;
         }
         let members: Vec<HostKey> = self.members(cx).iter().map(AttachmentTarget::key).collect();
@@ -1320,7 +1308,7 @@ impl AppShell {
         self.alone = false;
         // A device's first workspace is the one an earlier version showed
         // it, kept from here on.
-        if self.setup.client_host.is_some() && DevicePreferences::workspace(cx).is_none() {
+        if DevicePreferences::workspace(cx).is_none() {
             self.arrange_workspace(|_| {}, cx);
         }
         let mut targets = self.members(cx);
@@ -1393,11 +1381,7 @@ impl AppShell {
     /// own. A link the machine refused is not reused: it stopped
     /// reconnecting, and pairing again lands here with the same machine.
     fn open_host(&mut self, target: AttachmentTarget, window: &mut Window, cx: &mut Context<Self>) {
-        let fixed = self
-            .setup
-            .client_host
-            .as_ref()
-            .is_some_and(|client| client.fixed_machine());
+        let fixed = self.client.fixed_machine();
         if fixed || !crate::workspace::joins_target(&target) {
             self.replace_workspace(target, window, cx);
             return;
@@ -1508,7 +1492,7 @@ impl AppShell {
         // Never drop a working link for one this client cannot open.
         let reachable = match &target {
             AttachmentTarget::Local => self.setup.local.is_some(),
-            AttachmentTarget::Remote(_) => self.setup.client_host.is_some(),
+            AttachmentTarget::Remote(_) => true,
         };
         if !reachable {
             log::error!("this client cannot reach {target:?}");
@@ -1763,7 +1747,7 @@ impl AppShell {
             AttachmentTarget::Local => crate::tr!("hosts.this_computer").into_owned(),
             AttachmentTarget::Remote(host) => host.name.clone(),
         };
-        let open = match Attachment::open(target, local, self.setup.client_host.clone(), cx) {
+        let open = match Attachment::open(target, local, self.client.clone(), cx) {
             Ok(open) => open?,
             Err(error) => {
                 window.push_notification(
@@ -1968,7 +1952,7 @@ impl AppShell {
     /// The host a relaunch returns to is the current pane's, whichever
     /// host that pane came to show.
     fn remember_host(&self, cx: &App) {
-        let (Some(client), Some(column)) = (&self.setup.client_host, &self.column) else {
+        let (client, Some(column)) = (&self.client, &self.column) else {
             return;
         };
         let host_id = match column.current_pane.read(cx).host(cx) {
@@ -5151,11 +5135,7 @@ impl AppShell {
     /// What the threads are while the window has no host: the ways to one.
     fn no_hosts(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::widgets::button::{Button, ButtonVariants as _};
-        let pairs = self
-            .setup
-            .client_host
-            .as_ref()
-            .is_some_and(|client| !client.fixed_machine());
+        let pairs = !self.client.fixed_machine();
         v_flex()
             .debug_selector(|| "no-hosts".into())
             .flex_1()
@@ -6899,7 +6879,6 @@ pub(crate) mod tests {
                 state,
                 ShellSetup {
                     initial: crate::last_host_target(setup_client.as_ref()),
-                    client_host: Some(setup_client),
                     restore_navigation: true,
                     ..Default::default()
                 },
@@ -7181,7 +7160,6 @@ pub(crate) mod tests {
                 AppShell::new(
                     window_state,
                     ShellSetup {
-                        client_host: Some(setup_client),
                         // As every mobile build does.
                         restore_navigation: true,
                         ..Default::default()
@@ -8092,6 +8070,7 @@ pub(crate) mod tests {
                             turn: 0,
                             snippet: "a zebra".into(),
                         }],
+                        truncated: false,
                         unreadable: Vec::new(),
                     },
                 )),
@@ -8114,6 +8093,73 @@ pub(crate) mod tests {
         crate::test_frames::draw_settled(cx);
         assert_eq!(pane_hosts(&shell, cx), [key_b]);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
+    }
+
+    /// A host's answer to a search the user has since typed past is not
+    /// listed, even when it arrives after the answer to what they typed.
+    #[gpui::test]
+    fn a_search_answer_for_an_earlier_query_is_not_listed(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1200.);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
+        let host = &hosts[&HostKey::Remote("host-a".into())].host;
+        let asked = |text: &str| {
+            std::iter::from_fn(|| host.outgoing.try_recv().ok())
+                .map(|line| decode_client_line(&line).expect("client line"))
+                .filter(|line| {
+                    matches!(
+                        &line.payload,
+                        ClientPayload::Query(tcode_protocol::Query::SearchSessionContent {
+                            query,
+                            ..
+                        }) if query == text
+                    )
+                })
+                .map(|line| line.id)
+                .collect::<Vec<_>>()
+        };
+        let hits = |count: usize| {
+            Ok(tcode_protocol::QueryResponse::SessionContentHits(
+                tcode_protocol::SessionContentHits {
+                    hits: (0..count)
+                        .map(|index| tcode_protocol::SessionSearchHit {
+                            session_id: "thread-1".into(),
+                            session_title: "thread-1".into(),
+                            entry_id: format!("entry-{index}"),
+                            turn: 0,
+                            snippet: "a zebra".into(),
+                        })
+                        .collect(),
+                    unreadable: Vec::new(),
+                    truncated: false,
+                },
+            ))
+        };
+        search_palette(&shell, "zebra", cx);
+        cx.executor().advance_clock(Duration::from_millis(200));
+        draw(cx);
+        let [earlier] = asked("zebra")[..] else {
+            panic!("the first query is asked");
+        };
+        cx.simulate_input("s");
+        cx.executor().advance_clock(Duration::from_millis(200));
+        draw(cx);
+        let [later] = asked("zebras")[..] else {
+            panic!("the second query is asked");
+        };
+
+        answer_query(host, later, hits(1));
+        answer_query(host, earlier, hits(2));
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            cx.debug_bounds("palette-caption-Messages on host-a")
+                .is_some()
+        );
+        assert!(cx.debug_bounds("palette-row-0").is_some());
+        assert!(
+            cx.debug_bounds("palette-row-1").is_none(),
+            "the earlier query's two hits are not listed"
+        );
     }
 
     /// Over two hosts a host's toast names it and its action goes to it
@@ -8219,6 +8265,72 @@ pub(crate) mod tests {
             says(cx, "host-a: Updating Codex… 0/1"),
             "A's second update shows from its progress"
         );
+    }
+
+    /// A failed git action's toast carries git's own words, which Copy
+    /// error gives back as they came, and its Retry sends the host the
+    /// action that failed, as it was asked.
+    #[gpui::test]
+    fn a_failed_git_actions_toast_gives_its_detail_and_retries_the_same_action(
+        cx: &mut TestAppContext,
+    ) {
+        use tcode_protocol::{
+            GitActionRequest, RuntimeNotification, RuntimeOperationId, RuntimeToast,
+        };
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (_shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1200.);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
+        let host = &hosts[&HostKey::Remote("host-a".into())].host;
+        let detail = "fatal: the remote end hung up unexpectedly\n  (see `git help push`)";
+        let failed = GitActionRequest {
+            session_id: "thread-1".into(),
+            action: tcode_core::git::GitAction::CommitPush,
+            message: Some("Ship the parser".into()),
+            included: Some(vec!["src/parse.rs".into()]),
+            feature_branch: Some("parser".into()),
+        };
+        send_events(
+            host,
+            vec![(
+                Topic::RuntimeEvents,
+                ServerEvent::Runtime(RuntimeNotification::Toast(RuntimeToast::GitFailed {
+                    operation: RuntimeOperationId(1),
+                    detail: detail.into(),
+                    retry: failed.clone(),
+                })),
+            )],
+        );
+        draw(cx);
+        cx.run_until_parked();
+        draw(cx);
+
+        click("toast-copy", cx);
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(detail.to_owned())
+        );
+        let _ = sent(host);
+        click("toast-action", cx);
+        let retried: Vec<_> = sent(host)
+            .into_iter()
+            .filter_map(|payload| match payload {
+                ClientPayload::Command(Command::RunGitAction {
+                    session_id,
+                    action,
+                    message,
+                    included,
+                    feature_branch,
+                }) => Some(GitActionRequest {
+                    session_id,
+                    action,
+                    message,
+                    included,
+                    feature_branch,
+                }),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(retried, [failed]);
     }
 
     /// Over two hosts Settings opens on the current thread's host and
@@ -8646,13 +8758,13 @@ pub(crate) mod tests {
             machine_exists: true,
             outbox: Some(std::sync::Arc::new(SavedOutbox)),
         });
+        cx.update(|cx| crate::test_client::attach(client, true, cx));
         let (shell, cx) = cx.add_window_view(|window, cx| {
             let state = cx.new(|_| WindowState::default());
             AppShell::new(
                 state,
                 ShellSetup {
                     initial: Some(AttachmentTarget::Local),
-                    client_host: Some(client),
                     restore_navigation: false,
                     ..Default::default()
                 },
@@ -13624,6 +13736,9 @@ pub(crate) mod tests {
         // As `run_shell` does before opening the window: the shell alone,
         // without the window root, initializes nothing of gpui-base itself.
         cx.update(crate::test_client::init);
+        if let Some(client) = client_host {
+            cx.update(|cx| crate::test_client::attach(client, true, cx));
+        }
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let (states, state) = async_channel::unbounded();
@@ -13646,7 +13761,6 @@ pub(crate) mod tests {
                             Ok(transport.borrow_mut().take().expect("one attachment"))
                         })),
                         initial,
-                        client_host,
                         ..Default::default()
                     },
                     window,
@@ -13825,7 +13939,6 @@ pub(crate) mod tests {
                 AppShell::new(
                     window_state,
                     ShellSetup {
-                        client_host: Some(desk),
                         local: Some(local),
                         local_failure: Some(busy.to_owned()),
                         initial: Some(AttachmentTarget::Remote(Box::new(saved))),
@@ -15999,6 +16112,7 @@ pub(crate) mod tests {
                     "cmd",
                     agent::ItemContent::CommandExecution {
                         command: "cargo build".into(),
+                        input: Vec::new(),
                         output: "line 0\nline 1\n".into(),
                         exit_code: None,
                         status: agent::ItemStatus::InProgress,

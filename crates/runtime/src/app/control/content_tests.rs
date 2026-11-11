@@ -82,6 +82,7 @@ fn user_message(text: &str) -> ItemContent {
 fn command(command: &str, output: String) -> ItemContent {
     ItemContent::CommandExecution {
         command: command.into(),
+        input: Vec::new(),
         output,
         exit_code: Some(1),
         status: agent::ItemStatus::Failed,

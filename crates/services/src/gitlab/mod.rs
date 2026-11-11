@@ -8,8 +8,8 @@ mod repository;
 
 use crate::{
     forge::{
-        Anchoring, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary, Tails,
-        ViewedMarks, account,
+        Anchoring, Forge, ForgeError, ForgeErrorKind, Held, Moved, Repository, Summary, Tails,
+        ViewedMarks, account, held,
     },
     settings::SettingsStore,
 };
@@ -17,9 +17,9 @@ use api::{Api, Request, error};
 use reads::{MAX_PAGES, Mr, text};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     sync::{Arc, Mutex, RwLock},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tcode_core::{
     pull_request::{
@@ -47,14 +47,13 @@ const ANONYMOUS: &str = "anonymous";
 /// index line names a missing side.
 const DELETED: &str = "0000000000000000000000000000000000000000";
 
-type Slot = (Instant, PullRequestReadResponse);
-
 pub struct GitLab {
     api: Arc<Api>,
     viewed: Arc<ViewedMarks>,
     /// The servers known by settings, a glab login or the environment.
     known: RwLock<Vec<String>>,
-    reads: Mutex<HashMap<(PullRequestKey, String), Slot>>,
+    reads: Held<(PullRequestKey, String), PullRequestReadResponse>,
+    conversations: Held<PullRequestKey, PullRequestConversation>,
 }
 
 impl GitLab {
@@ -68,6 +67,7 @@ impl GitLab {
             api: Api::new(store, environment),
             known: RwLock::default(),
             reads: Mutex::default(),
+            conversations: Mutex::default(),
         })
     }
 
@@ -97,17 +97,7 @@ impl GitLab {
         ttl: Duration,
         read: impl FnOnce() -> Result<PullRequestReadResponse, ForgeError>,
     ) -> Result<(PullRequestReadResponse, SystemTime), ForgeError> {
-        let slot = (key.clone(), name);
-        if let Some((at, response)) = self.reads.lock().unwrap().get(&slot)
-            && at.elapsed() < ttl
-        {
-            return Ok((response.clone(), SystemTime::now() + (ttl - at.elapsed())));
-        }
-        let response = read()?;
-        let mut reads = self.reads.lock().unwrap();
-        reads.retain(|_, (at, _)| at.elapsed() < TEXT_TTL);
-        reads.insert(slot, (Instant::now(), response.clone()));
-        Ok((response, SystemTime::now() + ttl))
+        held(&self.reads, (key.clone(), name), ttl, TEXT_TTL, read)
     }
 
     fn account_of(&self, viewer: Option<&str>, key: &PullRequestKey) -> String {
@@ -190,7 +180,7 @@ impl GitLab {
             mr.authority(),
             Request {
                 accept: "application/octet-stream",
-                limit: FILE_BYTES,
+                limit: Some(FILE_BYTES),
                 ..Request::get(
                     mr.project_path(&format!(
                         "/repository/files/{}/raw?ref={revision}",
@@ -430,7 +420,7 @@ impl GitLab {
             return Ok(PullRequestMedia::Unsupported);
         }
         // Bodies name their uploads in full (see reads::absolute_uploads).
-        let conversation = self.conversation_read(key)?;
+        let (conversation, _) = self.conversation_read(key)?;
         let named = std::iter::once(&conversation.description)
             .chain(&conversation.comments)
             .chain(
@@ -463,11 +453,10 @@ impl GitLab {
     fn conversation_read(
         &self,
         key: &PullRequestKey,
-    ) -> Result<PullRequestConversation, ForgeError> {
-        match self.read(key, PullRequestRead::Conversation)?.0 {
-            PullRequestReadResponse::Conversation(conversation) => Ok(*conversation),
-            _ => Err(error(ForgeErrorKind::Uncertain, "unexpected read")),
-        }
+    ) -> Result<(PullRequestConversation, SystemTime), ForgeError> {
+        held(&self.conversations, key.clone(), READ_TTL, TEXT_TTL, || {
+            self.conversation(key)
+        })
     }
 
     fn drop_reads(&self, key: &PullRequestKey) {
@@ -475,6 +464,7 @@ impl GitLab {
             .lock()
             .unwrap()
             .retain(|(held, name), _| held != key || name.starts_with("text:"));
+        self.conversations.lock().unwrap().remove(key);
     }
 }
 
@@ -664,10 +654,11 @@ impl Forge for GitLab {
                 })
             }
             PullRequestRead::Conversation => {
-                self.cached(key, "conversation".into(), READ_TTL, || {
-                    self.conversation(key).map(|conversation| {
-                        PullRequestReadResponse::Conversation(Box::new(conversation))
-                    })
+                self.conversation_read(key).map(|(conversation, fresh)| {
+                    (
+                        PullRequestReadResponse::Conversation(Box::new(conversation)),
+                        fresh,
+                    )
                 })
             }
             // A thread here carries all of its comments.

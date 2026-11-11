@@ -2342,21 +2342,24 @@ mod replica_tests {
         async_channel::Receiver<String>,
         SessionStatus,
     ) {
+        let (store, incoming, outgoing, status, _) = attach_over(attachment, cx);
+        (store, incoming, outgoing, status)
+    }
+
+    /// [`attach_as`], with the link the transport reports its path on.
+    fn attach_over(
+        attachment: crate::store::WorkspaceAttachment,
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<WorkspaceStore>,
+        async_channel::Sender<String>,
+        async_channel::Receiver<String>,
+        SessionStatus,
+        tcode_client::HostLink,
+    ) {
         cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
-        let root = crate::store::tests::scratch_root("composer-replica");
-        let host = tcode_runtime::pipe::spawn_host(
-            tcode_services::store::SessionStore::open_at(root.clone()).unwrap(),
-            tcode_runtime::pipe::HostServices::default(),
-        )
-        .unwrap();
-        let status = smol::block_on(host.update_state_for_test(|state, cx| {
-            let id = state.start_draft("replica".into(), std::env::temp_dir(), cx);
-            state.session_status_snapshot(&id).unwrap()
-        }))
-        .unwrap();
-        host.shutdown_blocking().unwrap();
-        let _ = std::fs::remove_dir_all(root);
+        let status = crate::store::tests::draft_status();
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
@@ -2366,12 +2369,13 @@ mod replica_tests {
                 pump.pump().await;
             })
             .detach();
-        let store = cx.new(|cx| WorkspaceStore::new_attached(link, attachment, None, None, cx));
+        let store =
+            cx.new(|cx| WorkspaceStore::new_attached(link.clone(), attachment, None, None, cx));
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
         store.update(cx, |store, cx| {
             store.show_alone(status.session_id.clone(), cx)
         });
-        (store, incoming, outgoing, status)
+        (store, incoming, outgoing, status, link)
     }
 
     /// A composer in a window, seeded with its thread's status, ready to send.
@@ -2658,25 +2662,51 @@ mod replica_tests {
     }
 
     /// A folder has no remote path to carry, and a file over the device's
-    /// ceiling never leaves a link that cannot be trusted with it.
+    /// ceiling never leaves a link that cannot be trusted with it: one whose
+    /// path is not known yet, or a relay. On the machine's own network it
+    /// goes.
     #[gpui::test]
     fn a_remote_client_refuses_folders_and_files_over_the_link_ceiling(cx: &mut TestAppContext) {
-        let (store, incoming, outgoing, status) = attach_as(remote(), cx);
-        let root = crate::store::tests::scratch_root("composer-remote-refused");
-        std::fs::create_dir_all(&root).unwrap();
-        let large = root.join("large.bin");
-        std::fs::File::create(&large)
-            .unwrap()
-            .set_len(tcode_core::attachments::DEFAULT_REMOTE_BYTES + 1)
-            .unwrap();
-        let (_composer, cx) = composer_on(&store, &incoming, status, cx);
-        drop_paths(vec![root.clone(), large], cx);
-        assert!(cx.debug_bounds("attached-file-0").is_none());
-        assert_eq!(
-            answer_upload(&outgoing, &incoming, |_| Err("unexpected".into())),
-            None
-        );
-        let _ = std::fs::remove_dir_all(root);
+        let path = |direct, lan| tcode_protocol::PathInfo {
+            direct,
+            relay: (!direct).then(|| "https://relay.example.invalid".into()),
+            lan,
+            probing_direct: false,
+        };
+        for (path, attached) in [
+            (None, false),
+            (Some(path(false, false)), false),
+            (Some(path(true, true)), true),
+        ] {
+            let (store, incoming, outgoing, status, link) = attach_over(remote(), cx);
+            if let Some(path) = path.clone() {
+                link.set_connection_state(tcode_client::ConnectionState::Connected {
+                    path: Some(path),
+                });
+            }
+            let root = crate::store::tests::scratch_root("composer-remote-refused");
+            std::fs::create_dir_all(&root).unwrap();
+            let large = root.join("large.bin");
+            std::fs::File::create(&large)
+                .unwrap()
+                .set_len(tcode_core::attachments::DEFAULT_REMOTE_BYTES + 1)
+                .unwrap();
+            let (_composer, cx) = composer_on(&store, &incoming, status, cx);
+            drop_paths(vec![root.clone(), large], cx);
+            assert_eq!(
+                cx.debug_bounds("attached-file-0").is_some(),
+                attached,
+                "{path:?}"
+            );
+            assert!(cx.debug_bounds("attached-file-1").is_none(), "{path:?}");
+            if !attached {
+                assert_eq!(
+                    answer_upload(&outgoing, &incoming, |_| Err("unexpected".into())),
+                    None
+                );
+            }
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     fn replace(incoming: &async_channel::Sender<String>, topic: Topic, event: ServerEvent) {
@@ -2867,6 +2897,89 @@ mod replica_tests {
         }
     }
 
+    /// A platform's dictation the test speaks for: what it would hear is
+    /// sent on the channel it was started with.
+    #[derive(Default)]
+    struct Recognizer {
+        events:
+            std::cell::RefCell<Option<async_channel::Sender<tcode_client::speech::SpeechEvent>>>,
+        finished: std::rc::Rc<std::cell::Cell<bool>>,
+    }
+
+    struct Listening(std::rc::Rc<std::cell::Cell<bool>>);
+
+    impl tcode_client::speech::SpeechSession for Listening {
+        fn finish(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    impl tcode_client::speech::SpeechRecognizer for Recognizer {
+        fn is_available(&self, _: &str) -> bool {
+            true
+        }
+        fn start(
+            &self,
+            _: &str,
+            events: async_channel::Sender<tcode_client::speech::SpeechEvent>,
+        ) -> Result<Box<dyn tcode_client::speech::SpeechSession>, tcode_client::speech::SpeechError>
+        {
+            *self.events.borrow_mut() = Some(events);
+            Ok(Box::new(Listening(self.finished.clone())))
+        }
+    }
+
+    /// Dictation started from the mic writes where the cursor was, and a
+    /// send pressed while it listens asks the recognizer to finish and goes
+    /// once its last words are in the draft, with them.
+    #[gpui::test]
+    fn a_send_during_dictation_goes_with_the_recognizers_last_words(cx: &mut TestAppContext) {
+        use tcode_client::speech::SpeechEvent;
+        let (store, incoming, outgoing, status) = attach(cx);
+        let recognizer = std::rc::Rc::new(Recognizer::default());
+        cx.update(|cx| crate::test_client::dictate_with(recognizer.clone(), cx));
+        let (_composer, cx) = composer_on(&store, &incoming, status, cx);
+        cx.simulate_input("Note: ");
+        draw_settled(cx);
+        let mic = cx.debug_bounds("voice-mic").expect("mic button");
+        cx.simulate_click(mic.center(), Modifiers::default());
+        let events = recognizer
+            .events
+            .borrow()
+            .clone()
+            .expect("the mic starts the platform's dictation");
+        for event in [
+            SpeechEvent::Ready,
+            SpeechEvent::Hypothesis("fix the".into()),
+            SpeechEvent::Phrase("fix the bug".into()),
+        ] {
+            events.try_send(event).unwrap();
+            cx.run_until_parked();
+        }
+
+        // Sent with the button: the test platform types an Enter the field
+        // passes on as a line break, which neither macOS nor Windows does.
+        draw_settled(cx);
+        let send = cx.debug_bounds("send-message").expect("send button");
+        cx.simulate_click(send.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            sent_texts(&outgoing).is_empty(),
+            "the send waits for what is spoken but not yet written"
+        );
+        assert!(
+            recognizer.finished.get(),
+            "the recognizer is asked to finish"
+        );
+
+        events
+            .try_send(SpeechEvent::Phrase(" before lunch".into()))
+            .unwrap();
+        events.try_send(SpeechEvent::Finished).unwrap();
+        cx.run_until_parked();
+        assert_eq!(sent_texts(&outgoing), ["Note: fix the bug before lunch"]);
+    }
+
     /// A value the provider reports as unavailable is shown but never sent.
     #[gpui::test]
     fn unavailable_permission_rows_cannot_be_chosen(cx: &mut TestAppContext) {
@@ -2951,42 +3064,55 @@ mod replica_tests {
         let project = tcode_core::project::Project::from_root(root.clone());
         let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
         disk.upsert_project(&project).unwrap();
-        let host =
-            tcode_runtime::pipe::spawn_host(disk, tcode_runtime::pipe::HostServices::default())
-                .unwrap();
-        let scripted = tcode_runtime::app::scripted_provider(ProviderKind::ClaudeCode);
-        let (launcher, launches, project_id, cwd) = (
-            scripted.launcher.clone(),
-            scripted.launches.clone(),
-            project.id.clone(),
-            root.clone(),
-        );
-        let session_id = smol::block_on(host.update_state_for_test(move |state, cx| {
-            let spec = |id: &str| agent::ModelSpec {
-                id: id.into(),
-                display_name: id.into(),
-                is_default: false,
-                options: Vec::new(),
-            };
-            state.providers.model_catalogs.insert(
-                ProviderKind::ClaudeCode,
-                vec![spec("first-model"), spec("shared-model")],
-            );
-            state.settings.profiles.insert(
-                "second-account".to_owned(),
-                tcode_core::settings::ProviderProfile {
-                    kind: ProviderKind::ClaudeCode,
-                    settings: tcode_core::settings::ProviderSettings {
-                        home_path: Some("/profile-homes/second-account".into()),
-                        ..Default::default()
-                    },
+        let spec = |id: &str| agent::ModelSpec {
+            id: id.into(),
+            display_name: id.into(),
+            is_default: false,
+            options: Vec::new(),
+        };
+        disk.save_models(
+            ProviderKind::ClaudeCode,
+            &[spec("first-model"), spec("shared-model")],
+        )
+        .unwrap();
+        let mut settings = tcode_core::settings::Settings::default();
+        settings.profiles.insert(
+            "second-account".to_owned(),
+            tcode_core::settings::ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: tcode_core::settings::ProviderSettings {
+                    home_path: Some("/profile-homes/second-account".into()),
+                    ..Default::default()
                 },
-            );
-            state.set_provider_launcher_for_test(launcher);
-            state.start_draft(project_id, cwd, cx)
-        }))
+            },
+        );
+        tcode_services::settings::SettingsStore::new(root.clone())
+            .save(&settings)
+            .unwrap();
+        let scripted = tcode_runtime::app::scripted_provider(ProviderKind::ClaudeCode);
+        let launches = scripted.launches.clone();
+        let host = tcode_runtime::pipe::spawn_host(
+            disk,
+            tcode_runtime::pipe::HostServices {
+                provider_launcher: scripted.launcher.clone(),
+                ..Default::default()
+            },
+        )
         .unwrap();
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let link = driver.link.clone();
+        let tcode_protocol::CommandResponse::SessionId(Some(session_id)) = driver
+            .await_with_events(
+                cx,
+                link.command(tcode_protocol::Command::StartDraft {
+                    project_id: project.id.clone(),
+                    cwd: root.clone(),
+                }),
+            )
+            .unwrap()
+        else {
+            panic!("the host starts a draft");
+        };
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
                 driver.link.clone(),

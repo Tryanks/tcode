@@ -78,6 +78,7 @@ fn only_a_new_item_publishes_a_threads_latest_activity() {
             id,
             ItemContent::CommandExecution {
                 command: "cargo test".into(),
+                input: Vec::new(),
                 output: String::new(),
                 exit_code: None,
                 status: ItemStatus::InProgress,
@@ -220,6 +221,7 @@ fn a_native_subagents_activity_is_published_on_its_mirror() {
             parent_item_id: Some("spawn".into()),
             content: ItemContent::CommandExecution {
                 command: "ls".into(),
+                input: Vec::new(),
                 output: String::new(),
                 exit_code: None,
                 status: ItemStatus::InProgress,
@@ -2027,7 +2029,7 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
     let state = cx.new_entity({
         let mut state = TestClientState::new((*store).clone());
         state.ai_title_generation_enabled = true;
-        state.set_provider_launcher_for_test(scripted.launcher);
+        state.set_provider_launcher(scripted.launcher);
         state
     });
     state.deliver(
@@ -2211,7 +2213,7 @@ fn title_regeneration_rejects_empty_history_without_calling_the_provider() {
     let state = cx.new_entity({
         let mut state = TestClientState::new((*store).clone());
         state.ai_title_generation_enabled = true;
-        state.set_provider_launcher_for_test(scripted.launcher);
+        state.set_provider_launcher(scripted.launcher);
         state
     });
     state.dispatch_command(
@@ -2276,6 +2278,7 @@ fn title_regeneration_context_keeps_the_original_goal_and_recent_messages() {
             "command",
             ItemContent::CommandExecution {
                 command: "cargo test".into(),
+                input: Vec::new(),
                 output: "tool output".into(),
                 exit_code: Some(0),
                 status: ItemStatus::Completed,
@@ -2772,6 +2775,10 @@ fn draft_defaults_follow_project_history_then_global_history_without_persisting_
                 id: "reasoningEffort".into(),
                 value: serde_json::json!("high"),
             },
+            OptionSelection {
+                id: "permissions".into(),
+                value: serde_json::json!("ask"),
+            },
         ];
         meta
     };
@@ -2877,7 +2884,8 @@ fn draft_defaults_follow_project_history_then_global_history_without_persisting_
             expected.extend(
                 match provider {
                     ProviderKind::ClaudeCode => Some(("permissionMode", "auto")),
-                    ProviderKind::Codex => Some(("permissions", "auto_review")),
+                    // The project's last thread ran Codex at "ask".
+                    ProviderKind::Codex => Some(("permissions", "ask")),
                     _ => None,
                 }
                 .map(|(id, value)| OptionSelection {
@@ -3784,7 +3792,7 @@ fn a_follow_up_to_an_unloaded_subagent_is_not_answered_by_its_earlier_report() {
     let scripted = scripted_provider(ProviderKind::Codex);
     let state = cx.new_entity({
         let mut state = TestClientState::new((*store).clone());
-        state.set_provider_launcher_for_test(scripted.launcher);
+        state.set_provider_launcher(scripted.launcher);
         state
     });
     let (parent_commands, parent_receiver) = smol::channel::unbounded();
@@ -5062,7 +5070,7 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
     let store = (*test_store).clone();
     let state = cx.new_entity({
         let mut state = TestClientState::new(store);
-        state.set_provider_launcher_for_test(ProviderLauncher(Arc::new(|_, _| {
+        state.set_provider_launcher(ProviderLauncher(Arc::new(|_, _| {
             Box::pin(std::future::pending())
         })));
         state
@@ -5255,7 +5263,7 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
     let (launcher, launches) = recording_launcher();
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher_for_test(launcher.clone());
+        state.set_provider_launcher(launcher.clone());
         state
     });
 
@@ -5375,7 +5383,7 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
     let cx = &mut TestAppContext::default();
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher_for_test(launcher);
+        state.set_provider_launcher(launcher);
         state
     });
     state.read(|state| {
@@ -5584,7 +5592,7 @@ fn a_moved_thread_keeps_a_native_session_that_can_move() {
     let (launcher, launches) = recording_launcher();
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher_for_test(launcher);
+        state.set_provider_launcher(launcher);
         state
     });
     let move_to = |project: &Project| Command::MoveSession {
@@ -5749,7 +5757,7 @@ fn a_subagents_claude_worktree_belongs_to_the_thread_and_goes_with_it() {
     let (launcher, launches) = recording_launcher();
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher_for_test(launcher);
+        state.set_provider_launcher(launcher);
         state
     });
     state.update(cx, |state, cx| state.select_session("thread", cx));
@@ -5860,7 +5868,7 @@ impl AccountSwitch {
         // would otherwise start the CLI.
         let binary = Some(store.root().join("no-claude"));
         let mut host = TestClientState::new((*store).clone());
-        host.set_provider_launcher_for_test(launcher);
+        host.set_provider_launcher(launcher);
         let builtin = host.settings.provider_mut(ProviderKind::ClaudeCode);
         builtin.home_path = Some(default_home.clone());
         builtin.binary_path = binary.clone();
@@ -6311,7 +6319,7 @@ fn a_new_threads_permission_is_its_projects_then_its_harness_then_the_recommende
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let value = |state: &AppState| {
         state
-            .initial_permission_selection(Some("project"), ProviderKind::ClaudeCode)
+            .initial_permission_selection(Some("project"), ProviderKind::ClaudeCode, None)
             .unwrap()
             .value
     };
@@ -6557,7 +6565,7 @@ fn startup_generation_rejects_stale_same_session_attempt() {
         }));
         let state = cx.new_entity({
             let mut state = TestClientState::new((*store).clone());
-            state.set_provider_launcher_for_test(launcher);
+            state.set_provider_launcher(launcher);
             state
         });
         state.update(cx, |state, cx| {
@@ -7199,6 +7207,7 @@ fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
                 "toolu-sleep",
                 ItemContent::CommandExecution {
                     command: "sleep 300".into(),
+                    input: Vec::new(),
                     output: String::new(),
                     exit_code: None,
                     status: ItemStatus::InProgress,
@@ -7223,6 +7232,7 @@ fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
                 parent_item_id: Some("toolu-review".into()),
                 content: ItemContent::CommandExecution {
                     command: "cat migration.sql".into(),
+                    input: Vec::new(),
                     output: String::new(),
                     exit_code: None,
                     status: ItemStatus::InProgress,
@@ -7442,7 +7452,7 @@ fn a_stop_while_the_provider_starts_hands_the_message_back_and_force_quit_ends_t
     }));
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher_for_test(launcher);
+        state.set_provider_launcher(launcher);
         state
     });
     state.dispatch_command(
@@ -7646,6 +7656,7 @@ fn background_work_no_process_can_finish_ends_as_interrupted_on_load() {
                 parent_item_id: None,
                 content: ItemContent::CommandExecution {
                     command: "serve".into(),
+                    input: Vec::new(),
                     output: String::new(),
                     exit_code: None,
                     status: ItemStatus::InProgress,
@@ -9330,7 +9341,7 @@ fn a_worktree_draft_starts_from_the_picked_base() {
     let (launcher, launches) = recording_launcher();
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher_for_test(launcher);
+        state.set_provider_launcher(launcher);
         state
     });
 
@@ -9475,7 +9486,7 @@ fn a_subagent_started_in_a_worktree_works_in_it() {
     let scripted = scripted_provider(ProviderKind::Codex);
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher_for_test(scripted.launcher);
+        state.set_provider_launcher(scripted.launcher);
         state
     });
     let (reply, response) = smol::channel::bounded(1);
@@ -9623,9 +9634,12 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
         };
         Box::pin(async move { launcher.launch(kind, options).await })
     }));
-    let host = spawn_host((*root).clone(), HostServices::default()).unwrap();
-    smol::block_on(
-        host.update_state_for_test(move |state, _| state.set_provider_launcher_for_test(launcher)),
+    let host = spawn_host(
+        (*root).clone(),
+        HostServices {
+            provider_launcher: launcher,
+            ..HostServices::default()
+        },
     )
     .unwrap();
     let mux = tcode_traverse::HostMux::new(host.attachments.clone(), host.from_host.clone());
@@ -10715,6 +10729,7 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
                 parent_item_id: None,
                 content: ItemContent::CommandExecution {
                     command: "make".into(),
+                    input: Vec::new(),
                     output: command_output.clone(),
                     exit_code: Some(0),
                     status: ItemStatus::Completed,
@@ -11266,6 +11281,7 @@ fn a_completion_drops_the_deltas_it_repeats_in_the_same_commit() {
     };
     let command = |output: &str| ItemContent::CommandExecution {
         command: "ls".into(),
+        input: Vec::new(),
         output: output.into(),
         exit_code: Some(0),
         status: agent::ItemStatus::Completed,
@@ -14073,6 +14089,7 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
             parent_item_id: None,
             content: ItemContent::CommandExecution {
                 command: "make".into(),
+                input: Vec::new(),
                 output: String::new(),
                 exit_code: None,
                 status: ItemStatus::InProgress,
@@ -14105,7 +14122,7 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
     cx.clock.advance(Duration::from_secs(3_600));
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher_for_test(scripted.launcher);
+        state.set_provider_launcher(scripted.launcher);
         state
     });
     state.update(&mut cx, |state, cx| state.select_session("thread", cx));

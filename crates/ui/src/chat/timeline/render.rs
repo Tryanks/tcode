@@ -101,10 +101,20 @@ impl TimelineView {
                     let EntryContent::ModelChanged { from, to, reason } = &entry.content else {
                         unreachable!();
                     };
+                    let name = |model: &str| {
+                        self.session_id
+                            .as_deref()
+                            .and_then(|session_id| {
+                                self.workspace_store
+                                    .read(cx)
+                                    .thread_model_name(session_id, model)
+                            })
+                            .unwrap_or_else(|| model.to_owned())
+                    };
                     column = column.child(components::dividers::model_change_divider(
                         &entry.id,
-                        from.as_deref(),
-                        to,
+                        from.as_deref().map(name).as_deref(),
+                        &name(to),
                         reason.as_deref(),
                         cx,
                     ));
@@ -332,7 +342,10 @@ impl TimelineView {
                             match limit_resume_action(queued_id, ends_thread, queue_empty) {
                                 LimitResumeAction::Scheduled { queued_id: id } => {
                                     Some(components::error_card::LimitResume::Scheduled {
-                                        resets_at,
+                                        resets_at: self
+                                            .workspace_store
+                                            .read(cx)
+                                            .host_moment_here_secs(resets_at),
                                         on_cancel: Box::new(cx.listener(move |this, _, _, cx| {
                                             let Some(session_id) = this.session_id.clone() else {
                                                 return;
@@ -405,7 +418,9 @@ impl TimelineView {
                         .map(|retry| {
                             let turn_id = retry.turn_id;
                             components::error_card::LimitResume::Retry {
-                                retry_at: retry.retry_at,
+                                retry_at: retry.retry_at.map(|at| {
+                                    self.workspace_store.read(cx).host_moment_here_secs(at)
+                                }),
                                 on_retry: Box::new(cx.listener(move |this, _, _, cx| {
                                     let Some(session_id) = this.session_id.clone() else {
                                         return;
@@ -542,6 +557,10 @@ impl TimelineView {
                 .read(cx)
                 .session_status_for(self.session_id.as_deref(), cx)
                 .is_some_and(|status| status.stopping);
+            // The host stamped the start; the timer ticks on this client.
+            let started_here = turn
+                .start_ts
+                .map(|start| self.workspace_store.read(cx).host_moment_here(start));
             let turn = turn.clone();
             trailing = true;
             // The status moves with the trailer when the turn gains a last
@@ -575,7 +594,7 @@ impl TimelineView {
                                 .id(("working-status", index))
                                 .child(components::indicator::turn_working_indicator(
                                     number,
-                                    turn.start_ts,
+                                    started_here,
                                     stopping,
                                     served_model.clone(),
                                     &indicator_motion,
@@ -1365,7 +1384,17 @@ impl TimelineView {
                 capsule_label = crate::tr!("chat.work_log").into_owned();
             }
             let duration = activity_run_duration_ms(folded).map(format_elapsed);
-            let outcome = work_log_outcome(turn, is_last);
+            let mut outcome = work_log_outcome(turn, is_last);
+            // The turn was stopped, but what a call of this run started goes
+            // on in the background, as its row says: the run is not over.
+            if outcome == agent::TurnStatus::Interrupted
+                && folded.iter().any(|entry| {
+                    let status = tools::activity(entry, false, cwd).status;
+                    self.runs_in_background(entry, status, cx)
+                })
+            {
+                outcome = agent::TurnStatus::Completed;
+            }
             let rows = if expanded && !header_only {
                 self.compose_work_log_rows(folded, cwd, live_reasoning_id, false, window, cx)
             } else {
@@ -1646,6 +1675,29 @@ impl TimelineView {
         rows
     }
 
+    /// Whether the work `entry` started goes on in the background: the call
+    /// returned to the model and is still running, or its harness lists its
+    /// work as running there, whatever the call itself returned.
+    fn runs_in_background(
+        &self,
+        entry: &TimelineEntry,
+        status: agent::ItemStatus,
+        cx: &App,
+    ) -> bool {
+        entry.background
+            && (status == agent::ItemStatus::InProgress
+                || self
+                    .workspace_store
+                    .read(cx)
+                    .session_status_for(self.session_id.as_deref(), cx)
+                    .is_some_and(|status| {
+                        status
+                            .background_tasks
+                            .iter()
+                            .any(|task| task.task.item_id.as_deref() == Some(entry.id.as_str()))
+                    }))
+    }
+
     /// One Work Log activity as its window: a header in the shared grammar,
     /// and its body while it is open or folding shut.
     pub(in crate::chat) fn compose_activity_row(
@@ -1676,19 +1728,10 @@ impl TimelineView {
             path,
             ..
         } = activity;
-        // A call whose work its harness lists as running in the background
-        // goes on there, whatever the call itself returned; its window leads
-        // to that list.
         let thread = self
             .workspace_store
             .read(cx)
             .session_status_for(self.session_id.as_deref(), cx);
-        let listed = thread.is_some_and(|status| {
-            status
-                .background_tasks
-                .iter()
-                .any(|task| task.task.item_id.as_deref() == Some(entry.id.as_str()))
-        });
         // A running command or agent the harness can move into the
         // background, as its own Ctrl+B does.
         let movable = thread.is_some_and(|status| {
@@ -1699,7 +1742,7 @@ impl TimelineView {
             &entry.content,
             EntryContent::Item(ItemContent::CommandExecution { .. } | ItemContent::Subagent { .. })
         );
-        if entry.background && listed {
+        if self.runs_in_background(entry, status, cx) {
             status = agent::ItemStatus::InProgress;
             header.background = true;
         }
@@ -1916,6 +1959,7 @@ impl TimelineView {
         match item {
             ItemContent::CommandExecution {
                 command,
+                input,
                 output,
                 status,
                 ..
@@ -1923,6 +1967,7 @@ impl TimelineView {
                 tools::shell::ShellRun {
                     entry,
                     command,
+                    input,
                     output,
                     running: *status == agent::ItemStatus::InProgress,
                 },
@@ -2217,7 +2262,7 @@ mod tests {
         cx.update(|cx| cx.set_reduce_motion(true));
         // A provider runs the command, and its output grows.
         let turn = scripted_turn(
-            &threads.host,
+            &threads.scripts,
             &mut threads.driver,
             &threads.first.clone(),
             agent::ProviderKind::ClaudeCode,
@@ -2232,6 +2277,7 @@ mod tests {
                 parent_item_id: None,
                 content: ItemContent::CommandExecution {
                     command: "make".into(),
+                    input: Vec::new(),
                     output: String::new(),
                     exit_code: None,
                     status: ItemStatus::InProgress,
@@ -2246,6 +2292,7 @@ mod tests {
             host,
             first: session_id,
             second: other_id,
+            ..
         } = threads;
         driver.wait_until(cx, "the running command", |cx| {
             store.read_with(cx, |store, cx| {
@@ -2551,6 +2598,136 @@ mod tests {
                 "the files the default scope restores"
             );
         }
+    }
+
+    /// A plan the agent waits on is decided on its block, not in the
+    /// composer: a choice there answers with that option. Words sent from
+    /// the composer while one waits answer it instead, as feedback.
+    #[gpui::test]
+    fn a_plan_is_decided_on_its_block_and_answered_in_words_from_the_composer(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{Modifiers, VisualTestContext, px, size};
+
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (store, window_state, session_id, mut driver, scripted) = seed_chat_scripted(
+            cx,
+            log_of(&Timeline::default()),
+            false,
+            Some(agent::ProviderKind::ClaudeCode),
+            true,
+        );
+        let (commands, events) = scripted.expect("the provider is scripted");
+        driver.command(
+            cx,
+            tcode_protocol::Command::SendTurn {
+                session_id: session_id.clone(),
+                text: "Plan it first".into(),
+                attachment_paths: Vec::new(),
+            },
+        );
+        while !matches!(
+            driver.recv(cx, &commands),
+            agent::SessionCommand::SendTurn { .. }
+        ) {}
+        let (chat, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(800.)));
+        let propose = |id: &str, request: &str| {
+            let markdown = format!("# Plan {id}\n\n1. Write hello.txt");
+            for event in [
+                agent::AgentEvent::ItemStarted(agent::ThreadItem {
+                    id: id.into(),
+                    parent_item_id: None,
+                    content: ItemContent::Plan {
+                        markdown: markdown.clone(),
+                    },
+                }),
+                agent::AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+                    id: request.into(),
+                    turn_id: None,
+                    parent_item_id: None,
+                    kind: agent::ApprovalKind::Plan {
+                        item_id: id.into(),
+                        markdown,
+                    },
+                    reason: None,
+                    blocked_path: None,
+                    options: vec![
+                        agent::ApprovalOption {
+                            id: "allow".into(),
+                            label: "Approve".into(),
+                            kind: agent::ApprovalOptionKind::AllowOnce,
+                        },
+                        agent::ApprovalOption {
+                            id: "deny".into(),
+                            label: "Keep planning".into(),
+                            kind: agent::ApprovalOptionKind::RejectOnce,
+                        },
+                    ],
+                }),
+            ] {
+                events.try_send(event).expect("provider event");
+            }
+        };
+        let decided = |driver: &mut crate::store::tests::LocalHostDriver,
+                       cx: &mut VisualTestContext| loop {
+            if let agent::SessionCommand::RespondApproval {
+                request_id,
+                decision,
+            } = driver.recv(cx, &commands)
+            {
+                return (request_id, decision);
+            }
+        };
+
+        propose("plan-1", "decide-1");
+        driver.settle_until(cx, "the first plan's decision", |cx| {
+            cx.debug_bounds("plan-decision").is_some()
+        });
+        assert!(
+            cx.debug_bounds("approval-header").is_none(),
+            "a plan is decided on its block, not in the composer"
+        );
+        let approve = cx
+            .debug_bounds("plan-option-allow")
+            .expect("approve button");
+        cx.simulate_click(approve.center(), Modifiers::default());
+        assert_eq!(
+            decided(&mut driver, cx),
+            (
+                "decide-1".to_string(),
+                agent::ApprovalDecision::Option("allow".into())
+            )
+        );
+        // The first plan's choices go once the host has told this window
+        // the plan is answered; only then is a decision drawn the second's.
+        driver.settle_until(cx, "the first plan answered", |cx| {
+            cx.debug_bounds("plan-decision").is_none()
+        });
+
+        propose("plan-2", "decide-2");
+        driver.settle_until(cx, "the second plan's decision", |cx| {
+            cx.debug_bounds("plan-decision").is_some()
+        });
+        chat.update_in(cx, |chat, window, cx| chat.focus_composer(window, cx));
+        cx.simulate_input("Split step one");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            decided(&mut driver, cx),
+            (
+                "decide-2".to_string(),
+                agent::ApprovalDecision::Feedback("Split step one".into())
+            )
+        );
     }
 
     /// A finished turn's fork is beside its answer's Copy where the Harness

@@ -102,6 +102,20 @@ impl SettingsPage {
                 this.dispatch_settings(|store| store.set_scroll_to_latest_on_send(true), cx)
             }),
         );
+        let shorten_commands_reset = crate::settings_rows::reset_action(
+            "reset-shorten-long-commands",
+            !settings.shorten_long_commands,
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_shorten_long_commands(true), cx)
+            }),
+        );
+        let background_on_steer_reset = crate::settings_rows::reset_action(
+            "reset-background-commands-on-steer",
+            settings.background_commands_on_steer,
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_background_commands_on_steer(false), cx)
+            }),
+        );
         let resume_on_limit_reset_reset = crate::settings_rows::reset_action(
             "reset-resume-on-limit-reset",
             !settings.resume_on_limit_reset,
@@ -128,6 +142,24 @@ impl SettingsPage {
                 scroll_on_send_reset,
                 cx,
                 WorkspaceStore::set_scroll_to_latest_on_send,
+            ),
+            self.toggle_row(
+                "shorten-long-commands",
+                crate::tr!("settings.shorten_long_commands.title"),
+                crate::tr!("settings.shorten_long_commands.description"),
+                settings.shorten_long_commands,
+                shorten_commands_reset,
+                cx,
+                WorkspaceStore::set_shorten_long_commands,
+            ),
+            self.toggle_row(
+                "background-commands-on-steer",
+                crate::tr!("settings.background_commands_on_steer.title"),
+                crate::tr!("settings.background_commands_on_steer.description"),
+                settings.background_commands_on_steer,
+                background_on_steer_reset,
+                cx,
+                WorkspaceStore::set_background_commands_on_steer,
             ),
             self.toggle_row(
                 "resume-on-limit-reset",
@@ -933,6 +965,7 @@ impl Render for ProjectRulesEditor {
             )
             .child(rule_selector(
                 "project-auto-settle",
+                crate::tr!("settings.auto_settle.title").into_owned().into(),
                 days_choices,
                 days_index,
                 |editor, value| editor.draft.auto_settle_after_days = value,
@@ -964,6 +997,9 @@ impl Render for ProjectRulesEditor {
         );
         let merge = rule_selector(
             "project-auto-settle-merge",
+            crate::tr!("settings.auto_settle.on_merge")
+                .into_owned()
+                .into(),
             merge_choices,
             merge_index,
             |editor, value| editor.draft.auto_settle_on_merge = value,
@@ -1019,8 +1055,10 @@ fn on_off_label(on: bool) -> SharedString {
 }
 
 /// One project rule's choices: a phone page lists them; a dialog opens a dropdown.
+#[allow(clippy::too_many_arguments)]
 fn rule_selector<T: Clone + 'static>(
     id: &'static str,
+    label: SharedString,
     choices: Vec<(T, String)>,
     selected: usize,
     pick: fn(&mut ProjectRulesEditor, T),
@@ -1033,7 +1071,10 @@ fn rule_selector<T: Clone + 'static>(
     let swap = motion.swap(id, usize::from(compact), 2, CHANGE, window, cx);
     let mut layers = Vec::new();
     if swap.shows(0) {
-        layers.push((0, rule_dropdown(id, choices.clone(), selected, pick, cx)));
+        layers.push((
+            0,
+            rule_dropdown(id, label, choices.clone(), selected, pick, cx),
+        ));
     }
     if swap.shows(1) {
         layers.push((1, rule_list(id, choices, selected, pick, window, cx)));
@@ -1100,6 +1141,7 @@ fn rule_list<T: Clone + 'static>(
 
 fn rule_dropdown<T: Clone + 'static>(
     id: &'static str,
+    label: SharedString,
     choices: Vec<(T, String)>,
     selected: usize,
     pick: fn(&mut ProjectRulesEditor, T),
@@ -1110,64 +1152,48 @@ fn rule_dropdown<T: Clone + 'static>(
         .get(selected)
         .map(|(_, label)| label.clone())
         .unwrap_or_default();
-    crate::material::overlay_popover(id, cx)
-        .trigger(
-            Button::new(SharedString::from(format!("{id}-choice")))
-                .ghost()
-                .outline()
-                .compact()
-                .child(
-                    gpui_base::h_flex()
-                        .w_full()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(crate::widgets::fade_text(trigger_label))
-                        .child(
-                            Icon::new(IconName::ChevronDown)
-                                .text_color(cx.theme().muted_foreground),
-                        ),
-                ),
+    let trigger = Button::new(SharedString::from(format!("{id}-choice")))
+        .ghost()
+        .outline()
+        .compact()
+        .child(
+            gpui_base::h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(crate::widgets::fade_text(trigger_label))
+                .child(Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground)),
+        );
+    let options = choices
+        .into_iter()
+        .enumerate()
+        .map(
+            |(index, (value, label))| crate::settings_rows::SelectRowOption {
+                value,
+                id: format!("{id}-option-{index}").into(),
+                label: label.into(),
+                description: None,
+                selected: index == selected,
+            },
         )
-        .content(move |_, _, cx| {
-            let popover = cx.entity();
-            // The menu is at least as wide as its trigger; gpui-base's Select is not adopted yet.
-            v_flex().p_1().min_w(px(240.)).gap_0p5().children(
-                choices
-                    .clone()
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (value, label))| {
-                        let editor = editor.clone();
-                        let popover = popover.clone();
-                        let checked = index == selected;
-                        crate::material::accessible_clickable(
-                            crate::material::menu_item_frame(
-                                false,
-                                crate::material::ItemFill::Hover,
-                                cx,
-                            ),
-                            (SharedString::from(format!("{id}-option")), index),
-                            Role::MenuItem,
-                            SharedString::from(label.clone()),
-                            cx,
-                        )
-                        .aria_selected(checked)
-                        .w_full()
-                        .text_body(false, cx)
-                        .cursor_pointer()
-                        .child(div().flex_1().child(crate::widgets::fade_text(label)))
-                        .when(checked, |item| item.child(Icon::new(IconName::Check)))
-                        .on_click(move |_, window, cx| {
-                            editor.update(cx, |editor, cx| {
-                                pick(editor, value.clone());
-                                cx.notify();
-                            });
-                            popover.update(cx, |popover, cx| popover.dismiss(window, cx));
-                        })
-                    }),
-            )
-        })
-        .into_any_element()
+        .collect();
+    crate::settings_rows::select_menu(
+        trigger,
+        id,
+        SharedString::from(format!("{id}-menu")),
+        240.,
+        label,
+        options,
+        false,
+        move |value, _, cx| {
+            editor.update(cx, |editor, cx| {
+                pick(editor, value);
+                cx.notify();
+            })
+        },
+        cx,
+    )
+    .into_any_element()
 }
 impl gpui::EventEmitter<gpui::DismissEvent> for ProjectRulesEditor {}

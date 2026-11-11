@@ -23,7 +23,8 @@ fn retry_countdown(left_ms: u64) -> SharedString {
 
 pub(crate) enum LimitResume {
     Retry {
-        /// When the host retries on its own (unix seconds), if it does.
+        /// When the host retries on its own (unix seconds, on this client's
+        /// clock), if it does.
         retry_at: Option<u64>,
         on_retry: ClickHandler,
         on_cancel: ClickHandler,
@@ -32,7 +33,8 @@ pub(crate) enum LimitResume {
     Offer { on_schedule: ClickHandler },
     /// A resume is queued for the reset: live countdown plus cancel.
     Scheduled {
-        /// When the queued resume is sent (unix seconds).
+        /// When the queued resume is sent (unix seconds, on this client's
+        /// clock).
         resets_at: u64,
         on_cancel: ClickHandler,
     },

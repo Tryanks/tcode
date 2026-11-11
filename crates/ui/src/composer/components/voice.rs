@@ -176,6 +176,7 @@ impl Composer {
             Button::new("voice-mic")
                 .ghost()
                 .chip()
+                .debug_selector(|| "voice-mic".into())
                 .disabled(!available)
                 .aria_label(tooltip.clone())
                 .tooltip(tooltip)

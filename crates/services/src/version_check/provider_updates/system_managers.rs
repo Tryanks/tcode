@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use super::InstallSource;
 use super::installation::{
-    Context, Installation, LatestQuery, SystemProbe, UpdateCommand, env_value,
+    Context, Installation, LatestQuery, SystemProbe, UpdateCommand, env_value, unread,
 };
 
 #[derive(Debug, Clone)]
@@ -17,36 +17,45 @@ pub(super) enum Query {
     ScoopManifest(PathBuf),
 }
 
-pub(super) async fn latest(probe: &SystemProbe, query: &Query) -> Option<String> {
+/// The newest version the system's package manager offers, as
+/// [`super::latest_version`] answers it.
+pub(super) async fn latest(probe: &SystemProbe, query: &Query) -> Result<Option<String>, String> {
     match query {
         Query::Apt(command) => {
-            let output = probe.output(command).await?;
+            let output = probe.run(command).await?;
             let candidate = output
                 .lines()
-                .find_map(|line| line.trim().strip_prefix("Candidate:"))?
+                .find_map(|line| line.trim().strip_prefix("Candidate:"))
+                .ok_or_else(|| unread(&command.summary()))?
                 .trim();
-            if candidate == "(none)" || candidate.split_whitespace().count() != 1 {
-                return None;
+            if candidate == "(none)" {
+                return Ok(None);
+            }
+            if candidate.split_whitespace().count() != 1 {
+                return Err(unread(&command.summary()));
             }
             // The provider reports its upstream version, without Debian's epoch.
-            Some(
+            Ok(Some(
                 candidate
                     .split_once(':')
                     .map_or(candidate, |(_, version)| version)
                     .to_string(),
-            )
+            ))
         }
         Query::Apk { command, package } => {
-            let world = probe.read(Path::new("/etc/apk/world"))?;
+            let world = Path::new("/etc/apk/world");
+            let world = probe
+                .read(world)
+                .ok_or_else(|| format!("could not read {}", world.display()))?;
             if world.lines().any(|line| {
                 let line = line.split('#').next().unwrap_or_default().trim();
                 line.split(['@', '=', '<', '>', '~']).next() == Some(package.as_str())
                     && line.contains(['=', '<', '>', '~'])
             }) {
-                return None;
+                return Ok(None);
             }
-            let output = probe.output(command).await?;
-            output.lines().find_map(|line| {
+            let output = probe.run(command).await?;
+            Ok(output.lines().find_map(|line| {
                 let mut fields = line.split_whitespace();
                 let installed = fields
                     .next()?
@@ -64,11 +73,17 @@ pub(super) async fn latest(probe: &SystemProbe, query: &Query) -> Option<String>
                     .first()
                     .is_some_and(u8::is_ascii_digit)
                     .then(|| available.to_string())
-            })
+            }))
         }
         Query::ScoopManifest(path) => {
-            let manifest: Value = serde_json::from_str(&probe.read(path)?).ok()?;
-            manifest.get("version")?.as_str().map(str::to_string)
+            let manifest = probe
+                .read(path)
+                .ok_or_else(|| format!("could not read {}", path.display()))?;
+            serde_json::from_str::<Value>(&manifest)
+                .ok()
+                .and_then(|manifest| manifest.get("version")?.as_str().map(str::to_string))
+                .map(Some)
+                .ok_or_else(|| unread(&path.display().to_string()))
         }
     }
 }

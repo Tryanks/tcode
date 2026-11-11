@@ -88,7 +88,12 @@ impl SettingsPage {
                         crate::tr!("settings.disk_usage.measuring").into_owned(),
                     ))
             } else {
-                let ago = humanize_ago(now_secs(cx).saturating_sub(usage.measured_at));
+                let ago = humanize_ago(
+                    self.store
+                        .read(cx)
+                        .host_now_secs(cx)
+                        .saturating_sub(usage.measured_at),
+                );
                 h_flex().child(crate::widgets::fade_text(
                     crate::tr!("settings.disk_usage.measured", ago = ago).into_owned(),
                 ))

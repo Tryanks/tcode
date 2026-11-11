@@ -4723,7 +4723,9 @@ impl SessionsSidebar {
         let action_id = state.thread.clone();
         let row_key = state.row_key.as_str();
         let settled = meta.is_settled();
-        let ago = humanize_ago(now_secs(cx).saturating_sub(timestamp));
+        let ago = self
+            .store_of(&state.thread.host)
+            .map(|store| humanize_ago(store.read(cx).host_now_secs(cx).saturating_sub(timestamp)));
         let action_on_hover = settled || offers_settle;
         let label = if settled {
             crate::tr!("sidebar.unsettle_tooltip")
@@ -4753,7 +4755,7 @@ impl SessionsSidebar {
                     .whitespace_nowrap()
                     .text_secondary(false, cx)
                     .opacity(1. - hover)
-                    .child(crate::widgets::fade_text(ago)),
+                    .children(ago.map(crate::widgets::fade_text)),
             )
             .when(action_on_hover, |slot| {
                 slot.child(
@@ -5196,7 +5198,20 @@ impl SessionsSidebar {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) -> Rc<CompactListModel> {
+        // The list is drawn again as this client's minute turns; each row
+        // tells its time by its own host's clock.
         let now = now_secs(cx);
+        let host_nows: Vec<(HostKey, u64)> = self
+            .hosts
+            .iter()
+            .map(|host| (host.key.clone(), host.store.read(cx).host_now_secs(cx)))
+            .collect();
+        let host_now = move |host: &HostKey| {
+            host_nows
+                .iter()
+                .find(|(key, _)| key == host)
+                .map(|(_, now)| *now)
+        };
         let locale = rust_i18n::locale();
         if self.compact_model_dirty
             || self
@@ -5300,7 +5315,10 @@ impl SessionsSidebar {
                             .into_owned()
                             .into(),
                         timestamp,
-                        relative_time: humanize_ago(now.saturating_sub(timestamp)).into(),
+                        relative_time: humanize_ago(
+                            store.read(cx).host_now_secs(cx).saturating_sub(timestamp),
+                        )
+                        .into(),
                         working: of.flags.get(&meta.id).is_some_and(|flags| flags.working),
                         state,
                         meta: meta.clone(),
@@ -5571,7 +5589,9 @@ impl SessionsSidebar {
             for row in &mut model.rows {
                 if let CompactListRow::Thread(row) = row {
                     let row = Rc::make_mut(row);
-                    row.relative_time = humanize_ago(now.saturating_sub(row.timestamp)).into();
+                    if let Some(now) = host_now(&row.state.thread.host) {
+                        row.relative_time = humanize_ago(now.saturating_sub(row.timestamp)).into();
+                    }
                 }
             }
         }
@@ -7149,13 +7169,12 @@ mod tests {
                     meta
                 })
                 .collect();
+            session_store.upsert_project(&project).unwrap();
+            for meta in &sessions {
+                session_store.upsert_meta(meta).unwrap();
+            }
             let host = spawn_host(session_store, HostServices::default())
                 .expect("spawn sidebar test host");
-            smol::block_on(host.update_state_for_test(move |state, _| {
-                state.projects = vec![project];
-                state.sessions = sessions.into();
-            }))
-            .expect("seed sidebar host");
             let mut driver = crate::store::tests::LocalHostDriver::new(&host);
             let store = cx.new(|cx| {
                 WorkspaceStore::new_attached(driver.link.clone(), attachment, None, None, cx)
@@ -7242,13 +7261,10 @@ mod tests {
         meta.project_id = Some(project.id.clone());
         meta.title = "Original title".into();
         meta.id = "rename-thread".into();
+        session_store.upsert_project(&project).unwrap();
+        session_store.upsert_meta(&meta).unwrap();
         let host =
             spawn_host(session_store, HostServices::default()).expect("spawn sidebar test host");
-        smol::block_on(host.update_state_for_test(move |state, _| {
-            state.projects = vec![project];
-            state.sessions = vec![meta].into();
-        }))
-        .expect("seed sidebar host");
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -7382,22 +7398,18 @@ mod tests {
     fn thread_rows_carry_the_provider_mark_until_the_setting_is_off(cx: &mut TestAppContext) {
         cx.update(crate::test_client::init);
         let root = crate::store::tests::scratch_root("provider-mark");
-        let host = spawn_host(
-            SessionStore::open_at(root.clone()).unwrap(),
-            HostServices::default(),
-        )
-        .unwrap();
+        let disk = SessionStore::open_at(root.clone()).unwrap();
         let project = Project::from_root(root.clone());
         let mut codex = session("codex-thread", None);
         codex.project_id = Some(project.id.clone());
         let mut claude = session("claude-thread", None);
         claude.provider = ProviderKind::ClaudeCode;
         claude.project_id = Some(project.id.clone());
-        smol::block_on(host.update_state_for_test(move |state, _| {
-            state.projects = vec![project];
-            state.sessions = vec![codex, claude].into();
-        }))
-        .unwrap();
+        disk.upsert_project(&project).unwrap();
+        for meta in [&codex, &claude] {
+            disk.upsert_meta(meta).unwrap();
+        }
+        let host = spawn_host(disk, HostServices::default()).unwrap();
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -7487,11 +7499,7 @@ mod tests {
         use gpui::{PlatformInput, TouchEvent, TouchId, TouchPhase};
         cx.update(crate::test_client::init);
         let root = crate::store::tests::scratch_root("menu-selection");
-        let host = spawn_host(
-            SessionStore::open_at(root.clone()).unwrap(),
-            HostServices::default(),
-        )
-        .unwrap();
+        let disk = SessionStore::open_at(root.clone()).unwrap();
         let project = Project::from_root(root.clone());
         let sessions: Vec<_> = (0..12)
             .map(|index| {
@@ -7502,11 +7510,11 @@ mod tests {
                 meta
             })
             .collect();
-        smol::block_on(host.update_state_for_test(move |state, _| {
-            state.projects = vec![project];
-            state.sessions = sessions.into();
-        }))
-        .unwrap();
+        disk.upsert_project(&project).unwrap();
+        for meta in &sessions {
+            disk.upsert_meta(meta).unwrap();
+        }
+        let host = spawn_host(disk, HostServices::default()).unwrap();
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -8554,7 +8562,6 @@ mod tests {
         // counted them would take active rows' places.
         sessions.push(settled("many-settled-0", "many", 41, 41));
         sessions.push(settled("many-settled-1", "many", 40, 40));
-        cx.update(|cx| DevicePreferences::set_sidebar_layout(SidebarLayout::Grouped, cx));
         send(
             Topic::Settings,
             ServerEvent::SettingsSnapshot(Default::default()),
@@ -8583,6 +8590,8 @@ mod tests {
             )
         });
         crate::shell::tests::shell_behind(&store, cx);
+        // Chosen on this device once its shell has read its preferences.
+        cx.update(|cx| DevicePreferences::set_sidebar_layout(SidebarLayout::Grouped, cx));
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, cx| store.show_thread("mixed-a".into(), cx));
         let window_state = cx.new(|_| WindowState::default());

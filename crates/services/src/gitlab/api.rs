@@ -18,7 +18,6 @@ use tcode_core::{
     settings::{CredentialSource, HostProblem, HostSettings},
 };
 
-const BODY_LIMIT: usize = 8 * 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(60);
 /// The environment token glab itself reads, for the server its host variables name, else
 /// gitlab.com.
@@ -76,7 +75,9 @@ pub(super) struct Request<'a> {
     pub(super) operation: &'static str,
     /// A write goes only with a credential.
     pub(super) write: bool,
-    pub(super) limit: usize,
+    /// The most of a body read; a longer one is cut and marked truncated. `None` reads it
+    /// whole.
+    pub(super) limit: Option<usize>,
 }
 
 impl<'a> Request<'a> {
@@ -88,7 +89,7 @@ impl<'a> Request<'a> {
             accept: "application/json",
             operation,
             write: false,
-            limit: BODY_LIMIT,
+            limit: None,
         }
     }
     pub(super) fn write(
@@ -515,15 +516,16 @@ impl Api {
         let next_page = header("x-next-page").and_then(|page| page.trim().parse().ok());
         let retry_after = header("retry-after");
         let reset = header("ratelimit-reset");
-        let limit = request.limit.min(BODY_LIMIT);
         let mut body = Vec::new();
         response
             .into_reader()
-            .take(limit as u64 + 1)
+            .take(request.limit.map_or(u64::MAX, |limit| limit as u64 + 1))
             .read_to_end(&mut body)
             .map_err(|_| error(ForgeErrorKind::Uncertain, "GitLab response cut off"))?;
-        let truncated = body.len() > limit;
-        body.truncate(limit);
+        let truncated = request.limit.is_some_and(|limit| body.len() > limit);
+        if let Some(limit) = request.limit {
+            body.truncate(limit);
+        }
         if status == 429 {
             let named = retry_after
                 .and_then(|value| value.trim().parse().ok())
@@ -654,9 +656,10 @@ impl Api {
 /// GitLab's words for a refusal: `message` as text, as a field → messages map, or `error`.
 /// In the map, `error` is no field: `render_api_error!` is handed `{ error: … }` for a refusal
 /// that names none (`lib/api/merge_requests.rb`, a cancelled query), and its words stand alone.
+/// A body that is not JSON is given as it came.
 pub(super) fn messages(body: &[u8]) -> Vec<String> {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
-        return Vec::new();
+        return crate::forge::unparsed(body);
     };
     let said = |field: &str, item: &str| {
         if field == "error" {

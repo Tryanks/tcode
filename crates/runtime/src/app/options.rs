@@ -26,7 +26,8 @@ impl AppState {
         let project_id = self
             .resident(target_id)
             .and_then(|active| active.meta.project_id.clone());
-        let permission_default = self.initial_permission_selection(project_id.as_deref(), provider);
+        let permission_default =
+            self.initial_permission_selection(project_id.as_deref(), provider, None);
         let provider_commands =
             self.cached_provider_commands(provider, profile_id.as_deref(), None);
         let accounts: Vec<String> = if provider.caps().session_transfer {

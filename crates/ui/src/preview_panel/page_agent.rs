@@ -30,7 +30,7 @@ pub(super) use imp::observe;
 pub(super) use imp::scripts;
 #[cfg(target_os = "windows")]
 pub(super) use imp::{devtools, prepare};
-pub(super) use imp::{forget, run};
+pub(super) use imp::{forget, run, stop};
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod imp {
@@ -180,6 +180,15 @@ mod imp {
             if let Some(hooks) = &scripts.hooks {
                 manager.addUserScript(&script(hooks, &WKContentWorld::pageWorld(mtm)));
             }
+        }
+    }
+
+    /// `stopLoading`: wry has no Stop of its own.
+    pub(crate) fn stop(raw: &wry::WebView) {
+        let webview = raw.webview();
+        // objc2-web-kit declares WKWebView for macOS only.
+        unsafe {
+            let () = msg_send![&*webview, stopLoading];
         }
     }
 
@@ -635,6 +644,12 @@ mod imp {
         })
     }
 
+    pub(crate) fn stop(raw: &RawWebView) {
+        if let Err(error) = unsafe { raw.webview().Stop() } {
+            log::debug!("preview: failed to stop loading: {error}");
+        }
+    }
+
     pub(crate) fn run(raw: &RawWebView, script: &str) {
         let Some(context) = CONTEXTS.with_borrow(|contexts| contexts.get(&key(raw))?.get()) else {
             log::debug!("preview: no page agent context to run in");
@@ -840,6 +855,10 @@ mod imp {
     // `run_javascript_in_world` is deprecated from WebKitGTK 2.40, whose
     // replacement lb-wry's webkit2gtk features leave out.
     #[allow(deprecated)]
+    pub(crate) fn stop(raw: &wry::WebView) {
+        raw.webview().stop_loading();
+    }
+
     pub(crate) fn run(raw: &wry::WebView, script: &str) {
         raw.webview()
             .run_javascript_in_world(script, WORLD, None::<&gio::Cancellable>, |result| {
@@ -901,6 +920,10 @@ mod imp {
 
     pub(crate) fn run(raw: &RawWebView, script: &str) {
         raw.run(script);
+    }
+
+    pub(crate) fn stop(raw: &RawWebView) {
+        raw.stop();
     }
 
     pub(crate) fn forget(_raw: &RawWebView) {}

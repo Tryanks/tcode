@@ -535,8 +535,9 @@ impl AppState {
                 resident.interrupt_requested_at = None;
             }
             self.refresh_session_usage_if_stale(session_id, cx);
-            // The turn is over: the next queued message (if any) now goes out as
-            // an ordinary turn, FIFO, one at a time.
+            // The turn is over, however it ended, a stop included: the next
+            // queued message (if any) now goes out as an ordinary turn, FIFO,
+            // one at a time.
             let mut restart = false;
             // A restart would drop the answer of a rewind that stopped this turn.
             let rewinding = self.rewind_requests.contains_key(session_id);

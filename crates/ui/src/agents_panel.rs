@@ -1224,7 +1224,7 @@ impl Entries {
             Some(started) => Some(
                 crate::widgets::clock::Clock::since(
                     SharedString::from(format!("agent-elapsed-{}", row.key)),
-                    started,
+                    self.store.read(cx).host_moment_here(started),
                     |elapsed| crate::chat::format_elapsed_seconds(elapsed).into(),
                 )
                 .into_any_element(),

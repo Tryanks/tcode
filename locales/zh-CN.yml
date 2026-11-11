@@ -568,6 +568,9 @@ settings:
   scroll_to_latest_on_send:
     title: "发送消息时滚动到最新"
     description: "线程未停在最新处时，你发送的消息送达后自动滚动到最新内容。"
+  shorten_long_commands:
+    title: "折叠过长的命令"
+    description: "命令超过 5 行时只显示前 4 行；复制命令得到的仍是全文。"
   live_command_panel:
     title: "实时命令面板"
     description: "轮次进行中自动展开最新命令的输出。"
@@ -598,6 +601,9 @@ settings:
   inactive_frame_throttle:
     title: "后台帧率限制"
     description: "窗口失焦时降低刷新率以节省能耗。重启后生效。"
+  background_commands_on_steer:
+    title: "引导时把运行中的命令转入后台"
+    description: "发送引导消息时，如果本轮正在等一条命令跑完，自动把它转入后台，让引导消息尽快送达。仅在 Harness 能把命令转入后台时生效。"
   resume_on_limit_reset:
     title: "用量上限重置后继续"
     description: "当 Claude Code 因达到用量上限而停止本轮时，Tcode 会在上限重置时自动继续。关闭后，错误卡片上会提供一个按钮供手动安排。"
@@ -702,6 +708,8 @@ providers:
   tcode_update_aria: "Tcode 有可用更新 — 查看详情"
   tcode_update_title: "Tcode 有可用更新"
   tcode_update_message: "从 GitHub 下载最新版本。"
+  login_shell_unread: "无法读取登录 shell 的环境，因此按 Tcode 启动时的 PATH 查找 harness：%{error}"
+  tcode_update_unchecked: "无法检查 Tcode 更新：%{error}"
   view_release: "查看发布版本"
   # 一个 Harness 的设置（设置 › Harness › 某个 Harness）。
   configure: "配置 %{name}"
@@ -940,6 +948,7 @@ providers:
     trust_project_extensions: "信任项目扩展"
     trust_project_extensions_help: "以 --approve 启动 pi，加载项目 .pi 目录中的扩展、设置与技能。"
   harness:
+    catalog_problems: "模型目录中 Tcode 读不了的部分已略去："
     unnamed: "Harness"
     default_permission: "默认权限"
     default_permission_help: "项目未指定时，新线程无需询问即可执行的操作。"
@@ -984,6 +993,7 @@ providers:
     install_help: "在运行 Tcode 的主机上，在终端执行；装好后点“重新检查”。"
     integrations: "集成"
     key_saved: "已保存 —— 输入新的 Key 即可替换"
+    latest_unknown: "无法检查是否有新版本：%{error}"
     mcp: "MCP 工具"
     model_id: "模型标识"
     more_models: "另外 %{count} 个模型"
@@ -1034,6 +1044,7 @@ palette:
   messages: "消息"
   messages_on: "%{host} 上的消息"
   messages_unreadable: "有些线程无法搜索：%{reason}"
+  more_messages: "显示更多消息"
   no_matches: "没有匹配项"
   navigate: "↑↓ 导航"
   select: "Enter 选择"
@@ -1491,6 +1502,7 @@ preview:
   back: "后退"
   forward: "前进"
   reload: "重新加载"
+  stop: "停止加载"
   dev_servers: "主机上的开发服务器"
   no_dev_servers: "主机上没有正在运行的开发服务器。"
   open_external: "在系统浏览器中打开"
@@ -1556,6 +1568,8 @@ git:
     confirm: "提交"
     confirm_push: "提交并推送"
     confirm_feature: "提交到 %{branch}"
+dialog:
+  ok: "确定"
 toast:
   show_details: "展开详情"
   hide_details: "收起详情"
@@ -2064,6 +2078,7 @@ pull_requests:
   badge_single: "拉取请求 #%{number}，%{state}"
   badge_stack: "%{count} 个拉取请求组成的堆叠，%{state}"
   badge_several: "%{count} 个已关联的拉取请求，%{state}"
+  linked_count: "%{count} 个关联 PR"
   more: "还有 %{count} 个"
   stack_short: "堆叠 · %{count}"
   chain_short: "链 · %{count}"
@@ -3274,6 +3289,7 @@ tools:
   input: "输入"
   output: "输出"
   error: "错误"
+  typed_input: "向它输入了："
   no_output: "无输出"
   more_lines: "+%{count} 行"
   show_less: "收起"

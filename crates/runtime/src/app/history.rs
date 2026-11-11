@@ -121,12 +121,14 @@ fn wire_event(event: &AgentEvent) -> Option<(AgentEvent, Option<u64>)> {
     let (content, elided) = match &item.content {
         ItemContent::CommandExecution {
             command,
+            input,
             output,
             exit_code,
             status,
         } => (
             ItemContent::CommandExecution {
                 command: command.clone(),
+                input: input.clone(),
                 output: output_tail(output).to_owned(),
                 exit_code: *exit_code,
                 status: *status,
@@ -1215,7 +1217,9 @@ impl AppState {
             );
             return;
         }
-        if let Some(mut snapshot) = self.subscription_snapshot(&subscription, &cx.principal) {
+        let now_ms = cx.clock().unix_millis();
+        if let Some(mut snapshot) = self.subscription_snapshot(&subscription, &cx.principal, now_ms)
+        {
             snapshot.request_id = request_id;
             cx.emit(HostEvent::Domain(snapshot));
         }

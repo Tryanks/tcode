@@ -1793,6 +1793,7 @@ impl ToolItem {
                 },
                 ItemContent::CommandExecution {
                     command,
+                    input: Vec::new(),
                     output: String::new(),
                     exit_code: None,
                     status: ItemStatus::InProgress,
@@ -1847,6 +1848,7 @@ impl ToolItem {
                 };
                 ItemContent::CommandExecution {
                     command,
+                    input: Vec::new(),
                     output,
                     exit_code,
                     status,
@@ -3094,6 +3096,7 @@ impl Mapper {
             parent_item_id: None,
             content: ItemContent::CommandExecution {
                 command,
+                input: Vec::new(),
                 output,
                 exit_code: (status == ItemStatus::Completed).then_some(0),
                 status,
@@ -3736,6 +3739,7 @@ impl Mapper {
                     );
                     ItemContent::CommandExecution {
                         command,
+                        input: Vec::new(),
                         output,
                         exit_code: None,
                         status: ItemStatus::InProgress,
@@ -5186,19 +5190,22 @@ async fn claude_version(
 }
 
 /// List Claude's models: the manifest catalog (refreshed per `refresh`),
-/// gated by the installed CLI version.
+/// gated by the installed CLI version, and what of it could not be read.
 pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
     refresh: CatalogRefresh,
     processes: &crate::SessionProcesses,
-) -> Result<Vec<ModelSpec>, AgentError> {
+) -> Result<crate::ModelListing, AgentError> {
     crate::process::unblock(move || {
         crate::claude_manifest::refresh(refresh.cache_dir.as_deref(), refresh.network)
     })
     .await;
     let version = claude_version(binary_path.as_deref(), &launch_env, processes).await;
-    Ok(crate::claude_manifest::current().models_for_version(version))
+    Ok(crate::ModelListing {
+        models: crate::claude_manifest::current().models_for_version(version),
+        problems: crate::claude_manifest::problems(),
+    })
 }
 
 #[cfg(test)]
@@ -6753,6 +6760,7 @@ mod tests {
             item.content,
             ItemContent::CommandExecution {
                 command: "Get-ChildItem build".into(),
+                input: Vec::new(),
                 output: "Get-ChildItem: Cannot find path 'build'.".into(),
                 exit_code: Some(2),
                 status: ItemStatus::Failed,

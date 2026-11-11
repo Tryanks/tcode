@@ -58,6 +58,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                 next_id += 1;
                                 entries.push(ConvertedEntry::Item {
                                     ts,
+                                    finished_ts: None,
                                     item: Box::new(ThreadItem {
                                         id: format!("imported-user-{next_id}"),
                                         parent_item_id: None,
@@ -128,6 +129,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             .unwrap_or_else(|| format!("imported-assistant-{next_id}"));
                         entries.push(ConvertedEntry::Item {
                             ts,
+                            finished_ts: None,
                             item: Box::new(ThreadItem {
                                 id,
                                 parent_item_id: None,

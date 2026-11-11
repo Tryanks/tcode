@@ -31,7 +31,7 @@ use crate::settings::{
 };
 use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::theme::{self, ActiveTheme as _, ThemeMode as UiThemeMode};
-use crate::time::{humanize_ago, now_secs};
+use crate::time::humanize_ago;
 use crate::typography::TextRole as _;
 use crate::window_caption;
 use crate::window_drag_area;
@@ -210,8 +210,9 @@ struct RemotePanels {
     #[cfg(feature = "remote-hosting")]
     machine_spaces: Entity<crate::remote::SpacesSection>,
     group: Entity<crate::remote::GroupSection>,
+    /// Where this process hosts; the section is not offered elsewhere.
     #[cfg(feature = "remote-hosting")]
-    traverse: Entity<crate::remote::TraversePanel>,
+    traverse: Option<Entity<crate::remote::TraversePanel>>,
 }
 
 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
@@ -244,7 +245,9 @@ impl RemotePanels {
             }),
             group: cx.new(|_| crate::remote::GroupSection::new(store.clone(), resolve)),
             #[cfg(feature = "remote-hosting")]
-            traverse: cx.new(|cx| crate::remote::TraversePanel::new(window, cx)),
+            traverse: cx
+                .has_global::<crate::remote::RemoteController>()
+                .then(|| cx.new(|cx| crate::remote::TraversePanel::new(window, cx))),
         }
     }
 }
@@ -532,6 +535,9 @@ pub struct SettingsPage {
     /// Whether this page holds what Maintenance shows of the host: its
     /// storage migration and disk usage.
     maintenance_held: bool,
+    /// Whether this page shows the harnesses, whose ACP rows say when the
+    /// registry has a newer version.
+    providers_shown: bool,
     /// The providers whose disk usage is unfolded.
     disk_usage_open: std::collections::HashSet<agent::ProviderKind>,
     capabilities: SettingsCapabilities,
@@ -814,6 +820,7 @@ impl SettingsPage {
             section: Section::General,
             archived_held: false,
             maintenance_held: false,
+            providers_shown: false,
             disk_usage_open: Default::default(),
             capabilities,
             advanced_expanded: None,
@@ -1139,6 +1146,18 @@ impl SettingsPage {
                 }
             });
         }
+        // Asked for each time the harnesses come into view, and not before:
+        // a page is built for every host the window links, shown or not. The
+        // host answers from its cache while that is fresh.
+        let providers = matches!(self.section, Section::Providers | Section::Harness);
+        if providers && !self.providers_shown {
+            self.store.update(cx, |store, _| {
+                if store.can_manage_host() {
+                    store.refresh_acp_registry();
+                }
+            });
+        }
+        self.providers_shown = providers;
     }
 
     fn select_section(&mut self, section: Section, cx: &mut Context<Self>) {
@@ -1714,7 +1733,7 @@ impl SettingsPage {
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Section::Group => v_flex().child(self.remote.group.clone()),
             #[cfg(feature = "remote-hosting")]
-            Section::Traverse => v_flex().child(self.remote.traverse.clone()),
+            Section::Traverse => v_flex().children(self.remote.traverse.clone()),
             Section::Archived => self.render_archived(window, cx),
             Section::Maintenance => self.render_maintenance(window, cx),
         };
@@ -2104,7 +2123,12 @@ impl SettingsPage {
                     ))),
             );
         let checked = checked_at.map(|checked_at| {
-            let ago = humanize_ago(now_secs(cx).saturating_sub(checked_at));
+            let ago = humanize_ago(
+                self.store
+                    .read(cx)
+                    .host_now_secs(cx)
+                    .saturating_sub(checked_at),
+            );
             crate::tr!("providers.checked", when = ago).into_owned()
         });
         if let Some(checked) = crate::motion::shown("providers-checked", checked, SHOW, window, cx)
@@ -2266,6 +2290,24 @@ impl SettingsPage {
                 ),
             );
         }
+        if let Some(error) = self.store.read(cx).login_shell_unread() {
+            section = section.child(
+                crate::material::notice(cx.theme().warning, cx)
+                    .debug_selector(|| "providers-login-shell-unread".into())
+                    .child(div().flex_1().min_w_0().text_secondary(compact, cx).child(
+                        crate::tr!("providers.login_shell_unread", error = error).into_owned(),
+                    )),
+            );
+        }
+        if let Some(error) = self.store.read(cx).tcode_update_status().check_error {
+            section = section.child(
+                crate::material::notice(cx.theme().warning, cx)
+                    .debug_selector(|| "providers-tcode-update-unchecked".into())
+                    .child(div().flex_1().min_w_0().text_secondary(compact, cx).child(
+                        crate::tr!("providers.tcode_update_unchecked", error = error).into_owned(),
+                    )),
+            );
+        }
         section = section.child(crate::material::group(cx).child(provider_rows));
         // The update toggle follows the cards it governs; above them its caption
         // would stack straight under the page's own header row.
@@ -2314,7 +2356,12 @@ impl SettingsPage {
                 .child(crate::widgets::fade_text(crate::tr!("usage.section"))),
         );
         let updated = updated_at.map(|updated_at| {
-            let ago = humanize_ago(now_secs(cx).saturating_sub(updated_at));
+            let ago = humanize_ago(
+                self.store
+                    .read(cx)
+                    .host_now_secs(cx)
+                    .saturating_sub(updated_at),
+            );
             crate::tr!("usage.updated", when = ago).into_owned()
         });
         if let Some(updated) = crate::motion::shown("usage-updated", updated, SHOW, window, cx) {
@@ -2445,7 +2492,7 @@ impl SettingsPage {
                         }
                         None => div().into_any_element(),
                     };
-                    let now = now_secs(cx);
+                    let now = self.store.read(cx).host_now_secs(cx);
                     let windows = reported
                         .into_iter()
                         .flat_map(|usage| usage.windows.iter())
@@ -2677,7 +2724,7 @@ impl SettingsPage {
         let (page, start, end) = page_bounds(total, self.archived_page, ARCHIVED_PER_PAGE);
         self.archived_page = page;
 
-        let now = now_secs(cx);
+        let now = self.store.read(cx).host_now_secs(cx);
         // Each part below the controls carries the gap above it, so a project
         // whose last archived thread goes takes its gap with it.
         let gap = crate::material::section_gap(cx);
@@ -4114,15 +4161,17 @@ mod tests {
     #[gpui::test]
     fn editable_settings_wait_for_the_host_and_then_keep_the_user_edit(cx: &mut TestAppContext) {
         let root = crate::store::tests::scratch_root("settings-hydration");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut settings = tcode_core::settings::Settings::default();
+        settings.browser.home_url = Some("https://host.example".into());
+        tcode_services::settings::SettingsStore::new(root.clone())
+            .save(&settings)
+            .expect("seed host settings");
         let host = spawn_host(
             SessionStore::open_at(root.clone()).unwrap(),
             HostServices::default(),
         )
         .expect("spawn settings test host");
-        smol::block_on(host.update_state_for_test(|state, _| {
-            state.settings.browser.home_url = Some("https://host.example".into());
-        }))
-        .expect("seed host settings");
 
         // No blocking seed: this is the portable client's timeline, where the
         // first snapshot lands after the page already exists.

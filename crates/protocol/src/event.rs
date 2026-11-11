@@ -205,7 +205,14 @@ pub enum ServerEvent {
     },
     SessionHistoryError(crate::ProtocolError),
     IndexSnapshot(IndexSnapshot),
-    ScopeSnapshot(Scope),
+    /// What the subscriber may see, and the host's wall clock when it said
+    /// so: a client shows how long ago or how soon a time the host gave is by
+    /// the host's clock, not its own.
+    ScopeSnapshot {
+        scope: Scope,
+        /// Unix milliseconds.
+        host_unix_ms: u64,
+    },
     SettingsSnapshot(Settings),
     /// The current (or latest) external-import run for one project. `None`
     /// means no run has ever started, or the project is gone. Only the latest
@@ -371,6 +378,10 @@ pub struct ProvidersStatus {
     /// or the process said; its catalog is the one listed before, if any.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub model_errors: HashMap<ProviderKind, String>,
+    /// What of a provider's catalog could not be read and was left out of
+    /// its models, one line each.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_problems: HashMap<ProviderKind, Vec<String>>,
     pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
     pub update_run: Option<ProviderUpdateRun>,
     pub tcode_update: TcodeUpdateStatus,
@@ -393,6 +404,11 @@ pub struct ProvidersStatus {
     /// Why the host's saved secrets could not be read: then no name above is
     /// saved as far as clients can tell, and the host saves none.
     pub secrets_unreadable: Option<String>,
+    /// Why the login shell's environment could not be read when the host
+    /// started: harnesses are then looked up on the `PATH` it was launched
+    /// with, which may not hold them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_shell_unread: Option<String>,
     /// Native plugin catalogs of the profiles a client asked about: for each,
     /// the listing from outside any project and the listing of the one
     /// project last asked about.
@@ -684,6 +700,11 @@ pub struct ProviderVersionStatus {
     pub installed: Option<String>,
     pub latest: Option<String>,
     pub update_available: bool,
+    /// Why the latest version could not be looked up, in the words of what
+    /// failed; then `latest` is not known, and nothing says there is no
+    /// newer one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_error: Option<String>,
     pub checking: bool,
     pub updating: bool,
     pub update_command: Option<String>,
@@ -700,6 +721,9 @@ pub struct TcodeUpdateStatus {
     pub latest: Option<String>,
     pub release_url: Option<String>,
     pub update_available: bool,
+    /// Why the latest release could not be looked up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_error: Option<String>,
     pub checking: bool,
 }
 

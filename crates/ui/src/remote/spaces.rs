@@ -2651,7 +2651,14 @@ mod machines {
 mod tests {
     use super::*;
     use gpui::{BorrowAppContext as _, Render, TestAppContext, VisualTestContext, px};
-    use tcode_traverse::{DeviceIdentity, HostConfig, HostMux, TraverseHost};
+    use tcode_traverse::{DeviceIdentity, HostMux};
+
+    /// Hosting that publishes to no Traverse instance.
+    fn no_traverse() -> tcode_core::settings::TraverseSetting {
+        tcode_core::settings::TraverseSetting {
+            sources: Vec::new(),
+        }
+    }
 
     struct Probe(Entity<SpacesSection>);
 
@@ -2694,25 +2701,17 @@ mod tests {
         let (_host_tx, from_host) = async_channel::unbounded::<String>();
         let (attachments, _attachment_rx) = async_channel::unbounded();
         let mux = HostMux::new(attachments, from_host.clone());
-        let host = TraverseHost::start(
-            mux.clone(),
-            HostConfig {
-                host_name: "Studio".into(),
-                data_dir: root.clone(),
-                traverse: Vec::new(),
-                pairing_enabled: true,
-                bind_port: None,
-            },
-        )
-        .unwrap();
         let spaces = cx.update(|cx| {
             let mut controller = crate::remote::RemoteController::new(
                 mux,
                 root.clone(),
+                None,
                 tcode_client::HostLink::new(to_host, from_host),
                 Default::default(),
             );
-            controller.adopt_host(host);
+            controller
+                .start_hosting(&no_traverse(), "Studio".into())
+                .unwrap();
             cx.set_global(controller);
             local(cx).expect("hosting")
         });
@@ -2763,36 +2762,35 @@ mod tests {
         let (_host_tx, from_host) = async_channel::unbounded::<String>();
         let (attachments, _attachment_rx) = async_channel::unbounded();
         let mux = HostMux::new(attachments, from_host.clone());
-        // A random port: the desktop's fixed one may be taken on this machine.
-        let host = TraverseHost::start(
-            mux.clone(),
-            HostConfig {
-                host_name: "Studio".into(),
-                data_dir: root.clone(),
-                traverse: Vec::new(),
-                pairing_enabled: true,
-                bind_port: None,
-            },
-        )
-        .unwrap();
-        let space_id = host.create_space("Design".into()).unwrap();
-        let joined_by = host.space_link_url(&space_id).unwrap();
+        let mut controller = crate::remote::RemoteController::new(
+            mux,
+            root.clone(),
+            None,
+            tcode_client::HostLink::new(to_host.clone(), from_host.clone()),
+            Default::default(),
+        );
+        controller
+            .start_hosting(&no_traverse(), "Studio".into())
+            .unwrap();
+        let created = controller
+            .hosting(HostingAction::Spaces(SpaceAction::Create {
+                name: "Design".into(),
+            }))
+            .unwrap();
+        let space_id = created.created_space_id.unwrap();
+        let joined_by = created
+            .spaces
+            .into_iter()
+            .find(|space| space.id == space_id)
+            .and_then(|space| space.link)
+            .unwrap();
         let invite = tcode_client::pairing::parse_pair_url(&joined_by).unwrap();
         let device = DeviceIdentity::load_or_create(&member_dir).unwrap();
         device.set_details("Phone".into(), None);
         tcode_traverse::pair_blocking(&invite, Some(std::net::Ipv4Addr::LOCALHOST.into()), &device)
             .unwrap();
         let member_id = device.endpoint_id().to_string();
-        cx.update(|cx| {
-            let mut controller = crate::remote::RemoteController::new(
-                mux,
-                root.clone(),
-                tcode_client::HostLink::new(to_host.clone(), from_host.clone()),
-                Default::default(),
-            );
-            controller.adopt_host(host);
-            cx.set_global(controller);
-        });
+        cx.update(|cx| cx.set_global(controller));
         let (_, cx) = cx.add_window_view(|window, cx| {
             let store = cx.new(|cx| {
                 WorkspaceStore::new_attached(

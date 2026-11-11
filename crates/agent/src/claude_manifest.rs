@@ -271,6 +271,8 @@ pub(crate) struct ClaudeCatalog {
     /// and an undated manifest counts as older than any dated one.
     updated_at: Option<String>,
     pub(crate) models: Vec<CatalogModel>,
+    /// The entries of the manifest left out, each once, and why.
+    skipped: Vec<String>,
 }
 
 /// `value` trimmed, unless nothing is left.
@@ -279,11 +281,19 @@ fn non_empty(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
+/// `note` in `skipped`, unless it is there already.
+fn skip(skipped: &mut Vec<String>, note: String) {
+    if !skipped.contains(&note) {
+        skipped.push(note);
+    }
+}
+
 /// The descriptor an option entry describes; `None` for one tcode cannot
 /// read or render. A select option without a value or label is left out.
-fn descriptor(option: &Value) -> Option<OptionDescriptor> {
+/// What is left out for being unreadable is noted in `skipped`.
+fn descriptor(option: &Value, skipped: &mut Vec<String>) -> Option<OptionDescriptor> {
     let option = serde_json::from_value::<OptionFile>(option.clone())
-        .inspect_err(|error| log::warn!("skipping a Claude model option: {error}"))
+        .inspect_err(|error| skip(skipped, format!("Left out a model option: {error}")))
         .ok()?;
     Some(match option {
         OptionFile::Select {
@@ -301,7 +311,12 @@ fn descriptor(option: &Value) -> Option<OptionDescriptor> {
             {
                 let (Some(value), Some(label)) = (non_empty(&option.id), non_empty(&option.label))
                 else {
-                    log::warn!("skipping a choice of Claude model option {id:?}");
+                    skip(
+                        skipped,
+                        format!(
+                            "Left out a choice of model option {id:?} without a value or label"
+                        ),
+                    );
                     continue;
                 };
                 if option.is_default && default_value.is_none() {
@@ -373,11 +388,13 @@ fn fixed_context_window_descriptor(tokens: u64) -> OptionDescriptor {
     }
 }
 
-/// One model entry as tcode runs it, or why it cannot be.
+/// One model entry as tcode runs it, or why it cannot be. What its options
+/// leave out is noted in `skipped`.
 fn catalog_model(
     model: &Value,
     profiles: &HashMap<&str, ProfileFile>,
     defaults: &Value,
+    skipped: &mut Vec<String>,
 ) -> Result<CatalogModel, String> {
     let model: ModelFile =
         serde_json::from_value(model.clone()).map_err(|error| error.to_string())?;
@@ -420,7 +437,7 @@ fn catalog_model(
         .capabilities
         .option_descriptors
         .iter()
-        .filter_map(descriptor)
+        .filter_map(|option| descriptor(option, skipped))
         .collect();
     // Upstream lists no selector for a fixed window because it only
     // chooses between slug suffixes. Claude Code's `autoCompactWindow`
@@ -473,25 +490,29 @@ impl ClaudeCatalog {
             .providers
             .claude_agent
             .ok_or("manifest has no claudeAgent catalog")?;
-        let profiles: HashMap<&str, ProfileFile> = catalog
-            .profiles
-            .iter()
-            .filter_map(|(name, profile)| {
-                serde_json::from_value(profile.clone())
-                    .inspect_err(|error| {
-                        log::warn!("skipping Claude model profile {name:?}: {error}");
-                    })
-                    .ok()
-                    .map(|profile| (name.as_str(), profile))
-            })
-            .collect();
+        let mut skipped = Vec::new();
+        let mut profiles: HashMap<&str, ProfileFile> = HashMap::new();
+        for (name, profile) in &catalog.profiles {
+            match serde_json::from_value(profile.clone()) {
+                Ok(profile) => {
+                    profiles.insert(name.as_str(), profile);
+                }
+                Err(error) => skip(
+                    &mut skipped,
+                    format!("Left out model profile {name:?}: {error}"),
+                ),
+            }
+        }
         let mut seen = HashSet::new();
         let mut models = Vec::with_capacity(catalog.models.len());
         for model in &catalog.models {
-            match catalog_model(model, &profiles, &catalog.defaults) {
+            match catalog_model(model, &profiles, &catalog.defaults, &mut skipped) {
                 Ok(model) if seen.insert(model.spec.id.clone()) => models.push(model),
-                Ok(model) => log::warn!("skipping a second Claude model {:?}", model.spec.id),
-                Err(error) => log::warn!("skipping a Claude model: {error}"),
+                Ok(model) => skip(
+                    &mut skipped,
+                    format!("Left out a second model {:?}", model.spec.id),
+                ),
+                Err(error) => skip(&mut skipped, format!("Left out a model: {error}")),
             }
         }
         // Every entry unreadable is a manifest in a shape tcode cannot read,
@@ -502,6 +523,7 @@ impl ClaudeCatalog {
         Ok(Self {
             updated_at: file.updated_at,
             models,
+            skipped,
         })
     }
 
@@ -557,6 +579,8 @@ pub(crate) struct ManifestState {
     /// Wall-clock millis of the fetch that produced `catalog`; `None` for the
     /// bundle. Persisted with the disk cache.
     fetched_at_ms: Option<u64>,
+    /// Why Tcode's own cache of the manifest could not be read or written.
+    cache_error: Option<String>,
     #[cfg(feature = "process")]
     source_responses: HashMap<String, (String, Vec<u8>)>,
 }
@@ -575,11 +599,22 @@ pub(crate) fn current() -> Arc<ClaudeCatalog> {
     with_state(|state| state.catalog.clone())
 }
 
+/// What of the catalog in effect could not be read: the entries its
+/// manifest left out, and Tcode's cache of it.
+pub(crate) fn problems() -> Vec<String> {
+    with_state(|state| {
+        let mut problems = state.catalog.skipped.clone();
+        problems.extend(state.cache_error.clone());
+        problems
+    })
+}
+
 impl ManifestState {
     pub(crate) fn new(catalog: ClaudeCatalog) -> Self {
         Self {
             catalog: Arc::new(catalog),
             fetched_at_ms: None,
+            cache_error: None,
             #[cfg(feature = "process")]
             source_responses: HashMap::new(),
         }
@@ -633,20 +668,40 @@ mod refresh {
 
     impl ManifestState {
         /// Adopt the disk cache, unless the bundle is newer by `updatedAt`.
+        /// A cache that is there and cannot be read is the state's
+        /// `cache_error`.
         pub(crate) fn load_cache(&mut self, path: &Path) {
-            let Some(cache) = std::fs::read_to_string(path)
-                .ok()
-                .and_then(|text| serde_json::from_str::<CacheFile>(&text).ok())
-            else {
-                return;
+            let unreadable = |error: &dyn std::fmt::Display| {
+                Some(format!(
+                    "Could not read the cached catalog {}: {error}",
+                    path.display()
+                ))
             };
-            match ClaudeCatalog::from_value(cache.manifest) {
-                Ok(catalog) if catalog.updated_at >= self.catalog.updated_at => {
-                    self.catalog = catalog.into();
-                    self.fetched_at_ms = Some(cache.fetched_at_ms);
+            let text = match std::fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error) => {
+                    self.cache_error = unreadable(&error);
+                    return;
                 }
-                Ok(_) => log::info!("bundled Claude model manifest is newer than the cache"),
-                Err(error) => log::warn!("ignoring cached Claude model manifest: {error}"),
+            };
+            let catalog = serde_json::from_str::<CacheFile>(&text)
+                .map_err(|error| error.to_string())
+                .and_then(|cache| {
+                    ClaudeCatalog::from_value(cache.manifest)
+                        .map(|catalog| (catalog, cache.fetched_at_ms))
+                });
+            match catalog {
+                Ok((catalog, fetched_at_ms)) if catalog.updated_at >= self.catalog.updated_at => {
+                    self.catalog = catalog.into();
+                    self.fetched_at_ms = Some(fetched_at_ms);
+                    self.cache_error = None;
+                }
+                Ok(_) => {
+                    self.cache_error = None;
+                    log::info!("bundled Claude model manifest is newer than the cache");
+                }
+                Err(error) => self.cache_error = unreadable(&error),
             }
         }
 
@@ -753,12 +808,17 @@ mod refresh {
             fetched_at_ms: now,
             manifest,
         };
-        if let Err(error) = serde_json::to_vec(&cache)
+        let written = serde_json::to_vec(&cache)
             .map_err(std::io::Error::other)
-            .and_then(|bytes| std::fs::write(&path, bytes))
-        {
-            log::warn!("failed to cache Claude model manifest: {error}");
-        }
+            .and_then(|bytes| std::fs::write(&path, bytes));
+        with_state(|state| {
+            state.cache_error = written.err().map(|error| {
+                format!(
+                    "Could not write the cached catalog {}: {error}",
+                    path.display()
+                )
+            });
+        });
     }
 }
 

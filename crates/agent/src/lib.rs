@@ -2157,11 +2157,11 @@ pub async fn list_models(
     launch_env: LaunchEnv,
     refresh: CatalogRefresh,
     processes: &SessionProcesses,
-) -> Result<Vec<ModelSpec>, AgentError> {
-    match provider {
+) -> Result<ModelListing, AgentError> {
+    let models = match provider {
         ProviderKind::Codex => codex::list_models(binary_path, launch_env, processes).await,
         ProviderKind::ClaudeCode => {
-            claude::list_models(binary_path, launch_env, refresh, processes).await
+            return claude::list_models(binary_path, launch_env, refresh, processes).await;
         }
         ProviderKind::Pi => pi::list_models(binary_path, launch_env, processes).await,
         ProviderKind::OpenCode => opencode::list_models(binary_path, launch_env, processes).await,
@@ -2170,7 +2170,20 @@ pub async fn list_models(
         // ACP agents advertise their models over the wire at session start
         // (`AgentEvent::ProviderOptions`), so there is no catalog to pre-fetch.
         ProviderKind::Acp => Ok(Vec::new()),
-    }
+    }?;
+    Ok(ModelListing {
+        models,
+        problems: Vec::new(),
+    })
+}
+
+/// A provider's models, and what of the catalog they came from could not be
+/// read and was left out, in Tcode's words.
+#[cfg(feature = "process")]
+#[derive(Debug, Clone, Default)]
+pub struct ModelListing {
+    pub models: Vec<ModelSpec>,
+    pub problems: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -3077,6 +3090,9 @@ pub enum ItemContent {
     },
     CommandExecution {
         command: String,
+        /// The lines written to the command's stdin while it ran, in order.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        input: Vec<String>,
         output: String,
         exit_code: Option<i32>,
         status: ItemStatus,

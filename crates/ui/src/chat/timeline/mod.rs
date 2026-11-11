@@ -2045,12 +2045,8 @@ mod tests {
                 log_of(&synthetic_markdown_timeline(15)),
                 false,
                 Some(agent::ProviderKind::ClaudeCode),
+                tcode_runtime::app::scripted_provider(agent::ProviderKind::ClaudeCode).launcher,
             );
-            let scripted = tcode_runtime::app::scripted_provider(agent::ProviderKind::ClaudeCode);
-            smol::block_on(host.update_state_for_test(move |state, _| {
-                state.set_provider_launcher_for_test(scripted.launcher)
-            }))
-            .expect("script the provider");
             cx.update(|cx| cx.set_reduce_motion(true));
             // The host refuses a send for a thread it does not have.
             let (to_proxy, proxy) = async_channel::unbounded::<String>();
@@ -2579,6 +2575,7 @@ mod tests {
                 parent_item_id: None,
                 content: agent::ItemContent::CommandExecution {
                     command: format!("cargo test {id}"),
+                    input: Vec::new(),
                     output: "ok\n".into(),
                     exit_code: Some(0),
                     status: ItemStatus::Completed,

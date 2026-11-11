@@ -125,7 +125,14 @@ impl AppState {
         cx: &mut HostCx,
     ) -> HostTask<Result<(), ProtocolError>> {
         let host = host.trim().to_ascii_lowercase();
-        let kind = self.settings.source_control.kind(&host);
+        let Some(kind) = self.settings.source_control.kind(&host) else {
+            return cx.spawn_background(async {
+                Err(ProtocolError {
+                    code: "unknown_host_kind".into(),
+                    message: "Choose what kind of host this is before giving it a token.".into(),
+                })
+            });
+        };
         let (completion, receiver) = smol::channel::bounded(1);
         self.enqueue_store_write(
             StoreWrite::SetHostToken {

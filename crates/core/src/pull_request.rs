@@ -48,6 +48,20 @@ pub fn host_name(authority: &str) -> &str {
     host.split(':').next().unwrap_or(host)
 }
 
+/// What Tcode says about a host whose kind it does not know: the host's own name, and nothing
+/// a kind would add.
+pub const UNKNOWN: HostTerms = HostTerms {
+    name: "",
+    clis: "",
+    stacks: None,
+    merge_commands: &[],
+    pull_request_url: |_| false,
+    named_by_host: true,
+    mark: "icons/bundled/git-pull-request.svg",
+    conflicts_page: None,
+    checks_page: None,
+};
+
 pub const GITHUB: HostTerms = HostTerms {
     name: "GitHub",
     clis: "gh, gh stack",
@@ -353,10 +367,10 @@ impl HostKind {
         })
     }
 
-    /// The kind a host is read as: the one `known` from settings, else the one its name says,
-    /// else GitHub, as every host was before hosts had kinds.
-    pub fn of(known: Option<Self>, host: &str) -> Self {
-        known.or_else(|| Self::detect(host)).unwrap_or(Self::Github)
+    /// The kind a host is read as: the one `known` from settings, else the one its name says.
+    /// A host neither names is of no kind Tcode knows until settings give it one.
+    pub fn of(known: Option<Self>, host: &str) -> Option<Self> {
+        known.or_else(|| Self::detect(host))
     }
 
     /// What an authority of the kind looks like, for one [`Self::authority`] refused.

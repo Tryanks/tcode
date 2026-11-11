@@ -174,10 +174,14 @@ fn pair_command(args: &[String], client_host: &NativeClientHost) -> Result<Strin
 
 /// Start the in-process host and put the mux in front of it. This window is
 /// then one ordinary client among every link attached to that mux.
-fn start_local(store: SessionStore) -> std::io::Result<(SpawnedHost, HostMux)> {
+fn start_local(
+    store: SessionStore,
+    login_shell_unread: Option<String>,
+) -> std::io::Result<(SpawnedHost, HostMux)> {
     let mut host_services = HostServices {
         background_startup_probes: true,
         ai_title_generation: true,
+        login_shell_unread,
         ..HostServices::default()
     };
     host_services.start_mcp_servers(true);
@@ -300,14 +304,14 @@ enum LocalStart {
 /// Take ownership of the data dir and start the local host on it: at launch,
 /// and again on Retry. The error is what the window shows instead of that
 /// host.
-fn start_local_host() -> Result<LocalStart, String> {
+fn start_local_host(login_shell_unread: Option<String>) -> Result<LocalStart, String> {
     let store = SessionStore::open_host(None).map_err(|error| {
         tcode_ui::tr!("hosts.local.default_settings", reason = error.to_string()).into_owned()
     })?;
     if store.needs_migration().map_err(|error| error.to_string())? {
         return Ok(LocalStart::Migrate(store));
     }
-    LocalKernel::start(store)
+    LocalKernel::start(store, login_shell_unread)
         .map(LocalStart::Started)
         .map_err(|error| error.to_string())
 }
@@ -320,8 +324,8 @@ struct LocalKernel {
 }
 
 impl LocalKernel {
-    fn start(store: SessionStore) -> std::io::Result<Self> {
-        let (host, mux) = start_local(store)?;
+    fn start(store: SessionStore, login_shell_unread: Option<String>) -> std::io::Result<Self> {
+        let (host, mux) = start_local(store, login_shell_unread)?;
         let connection = mux.attach(
             tcode_protocol::Principal::Full,
             tcode_client::attachment::AttachmentPolicy::LOCAL,
@@ -348,6 +352,9 @@ impl LocalKernel {
         cx.set_global(RemoteController::new(
             self.mux.clone(),
             data_dir.to_path_buf(),
+            // Fixed, so the invitation's port, firewall rules and LAN probes
+            // survive restarts.
+            Some(tcode_traverse::lan::DEFAULT_PORT),
             self.control_link.clone(),
             local_settings.clone(),
         ));
@@ -523,7 +530,6 @@ impl MainWindow {
                 lifecycle: None,
                 window: options,
                 setup: ShellSetup {
-                    client_host: Some(state.native_client.clone()),
                     local: Some(state.local.clone()),
                     ..setup
                 },
@@ -627,8 +633,9 @@ fn main() {
     // A Finder/Dock launch inherits launchd's minimal PATH, under which none of
     // the provider CLIs resolve — import the login shell's environment first,
     // before anything (probes, sessions, the terminal) reads PATH. Must stay
-    // ahead of any thread spawn: it writes the process environment.
-    shell_env::import_login_shell_environment();
+    // ahead of any thread spawn: it writes the process environment. Why it
+    // could not be read goes to the local host, which says so.
+    let login_shell_unread = shell_env::import_login_shell_environment().err();
 
     settings::apply_locale(None);
 
@@ -711,7 +718,7 @@ fn main() {
     // before it starts, behind a window of their own; with nothing to
     // migrate, it starts before the event loop. A kernel that does not start
     // leaves the window without a local host, and says why there.
-    let started = start_local_host();
+    let started = start_local_host(login_shell_unread.clone());
 
     let application = gpui_platform::application();
     // AppKit asks only when the app has no window on screen: a Dock click,
@@ -775,6 +782,7 @@ fn main() {
             }
         });
 
+        let migrated_login_shell = login_shell_unread.clone();
         let launch = move |cx: &mut App, started: Result<LocalKernel, String>| {
             let initial_target = initial_target();
             let owned = started.and_then(|kernel| {
@@ -791,7 +799,7 @@ fn main() {
                 if let Some(kernel) = owned.borrow().as_ref() {
                     return Ok(kernel.transport());
                 }
-                match start_local_host()? {
+                match start_local_host(login_shell_unread.clone())? {
                     LocalStart::Started(kernel) => {
                         kernel.own(&data_dir, cx)?;
                         let transport = kernel.transport();
@@ -865,7 +873,10 @@ fn main() {
                 let options = window_options(cx, true);
                 let kernel_store = store.clone();
                 migration::run(cx, store, options, appearance, move |cx| {
-                    launch(cx, Ok(LocalKernel::start(kernel_store)?));
+                    launch(
+                        cx,
+                        Ok(LocalKernel::start(kernel_store, migrated_login_shell)?),
+                    );
                     Ok(())
                 });
             }

@@ -568,6 +568,9 @@ settings:
   scroll_to_latest_on_send:
     title: "送信時に最新のメッセージまでスクロール"
     description: "スレッドをさかのぼって表示しているとき、送信したメッセージが届いたらスレッドの末尾に移動します。"
+  shorten_long_commands:
+    title: "長いコマンドを短く表示"
+    description: "5 行を超えるコマンドは最初の 4 行だけ表示します。コピーするとコマンド全体が得られます。"
   live_command_panel:
     title: "ライブコマンドパネル"
     description: "ターンの実行中、最新のコマンドの出力を自動的に展開します。"
@@ -598,6 +601,9 @@ settings:
   inactive_frame_throttle:
     title: "バックグラウンドでのフレームレート制限"
     description: "ウィンドウにフォーカスがないときはフレームレートを下げて電力を節約します。再起動後に有効になります。"
+  background_commands_on_steer:
+    title: "ステア時に実行中のコマンドをバックグラウンドへ移す"
+    description: "ターンがコマンドの終了を待っている間にステアすると、そのコマンドをバックグラウンドへ移し、ステアがすぐモデルに届くようにします。ハーネスがコマンドをバックグラウンドへ移せる場合にのみ働きます。"
   resume_on_limit_reset:
     title: "使用量の上限のリセット時に再開"
     description: "使用量の上限に達して Claude Code がターンを停止した場合、上限がリセットされると Tcode がターンを再開します。オフの場合は、エラーカードのボタンから手動で再開を予約できます。"
@@ -706,6 +712,8 @@ providers:
   tcode_update_aria: "Tcode の更新があります：詳細を表示"
   tcode_update_title: "Tcode の更新があります"
   tcode_update_message: "GitHub から最新リリースをダウンロードしてください。"
+  login_shell_unread: "ログインシェルの環境を読み取れなかったため、Tcode 起動時の PATH でハーネスを探します：%{error}"
+  tcode_update_unchecked: "Tcode の更新を確認できませんでした: %{error}"
   view_release: "リリースを表示"
   # A harness's settings (Settings → Harnesses → a harness).
   configure: "%{name} を設定"
@@ -947,6 +955,7 @@ providers:
     trust_project_extensions: "プロジェクトの拡張機能を信頼"
     trust_project_extensions_help: "pi を --approve 付きで起動し、プロジェクトの .pi ディレクトリにある拡張機能、設定、スキルを読み込みます。"
   harness:
+    catalog_problems: "モデルカタログのうち Tcode が読み取れなかった部分は除外しました："
     unnamed: "ハーネス"
     default_permission: "デフォルトの権限"
     default_permission_help: "プロジェクトで指定がないとき、新しいスレッドが確認なしで行えることです。"
@@ -991,6 +1000,7 @@ providers:
     install_help: "Tcode を実行しているマシンのターミナルで実行し、終わったら再チェックしてください。"
     integrations: "連携"
     key_saved: "保存済み — 置き換えるには新しいキーを入力"
+    latest_unknown: "新しいバージョンを確認できませんでした: %{error}"
     mcp: "MCP ツール"
     model_id: "モデル ID"
     more_models: "ほか %{count} 個のモデル"
@@ -1041,6 +1051,7 @@ palette:
   messages: "メッセージ"
   messages_on: "%{host} のメッセージ"
   messages_unreadable: "検索できなかったスレッドがあります：%{reason}"
+  more_messages: "さらにメッセージを表示"
   no_matches: "一致する項目はありません"
   navigate: "↑↓ 移動"
   select: "Enter 選択"
@@ -1498,6 +1509,7 @@ preview:
   back: "戻る"
   forward: "進む"
   reload: "再読み込み"
+  stop: "読み込みを停止"
   dev_servers: "ホスト上の開発サーバー"
   no_dev_servers: "ホストで実行中の開発サーバーはありません。"
   open_external: "システムのブラウザーで開く"
@@ -1563,6 +1575,8 @@ git:
     confirm: "コミット"
     confirm_push: "コミットしてプッシュ"
     confirm_feature: "%{branch} にコミット"
+dialog:
+  ok: "OK"
 toast:
   show_details: "詳細を表示"
   hide_details: "詳細を隠す"
@@ -2071,6 +2085,7 @@ pull_requests:
   badge_single: "プルリクエスト #%{number}、%{state}"
   badge_stack: "%{count} 件のプルリクエストのスタック、%{state}"
   badge_several: "関連付けられた %{count} 件のプルリクエスト、%{state}"
+  linked_count: "関連 PR %{count} 件"
   more: "ほか %{count} 件"
   stack_short: "スタック · %{count}"
   chain_short: "チェーン · %{count}"
@@ -3281,6 +3296,7 @@ tools:
   input: "入力"
   output: "出力"
   error: "エラー"
+  typed_input: "入力した内容："
   no_output: "出力なし"
   more_lines: "+%{count} 行"
   show_less: "折りたたむ"

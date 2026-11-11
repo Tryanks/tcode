@@ -23,7 +23,8 @@ impl ReleaseFeed {
         }
     }
 
-    pub fn latest_json(&self) -> Result<Vec<u8>, FetchError> {
+    /// The latest release as GitHub gave it, or why it could not be had.
+    pub fn latest_json(&self) -> Result<Vec<u8>, String> {
         let mut cached = self.cached.lock().unwrap();
         let mut request = RestRequest::get("/repos/Tryanks/tcode/releases/latest");
         request.if_none_match = cached.as_ref().map(|(etag, _)| etag.as_str());
@@ -39,23 +40,15 @@ impl ReleaseFeed {
                     ..Default::default()
                 },
             )
-            .map_err(|error| match error {
-                GitHubError::RateLimited { status, .. } => FetchError::RateLimited { status },
-                GitHubError::Paused { .. } => FetchError::RateLimited { status: 429 },
-                GitHubError::Response { status, .. } => FetchError::Http { status },
-                GitHubError::Unauthorized => FetchError::Http { status: 401 },
-                GitHubError::NotFound => FetchError::Http { status: 404 },
-                GitHubError::BodyTooLarge => FetchError::ResponseTooLarge,
-                _ => FetchError::Network,
-            })?;
+            .map_err(|error: GitHubError| error.to_string())?;
         if response.status == 304 {
             return cached
                 .as_ref()
                 .map(|(_, body)| body.clone())
-                .ok_or(FetchError::Network);
+                .ok_or_else(|| "GitHub answered 304 for a release Tcode had not read".into());
         }
         if response.truncated {
-            return Err(FetchError::ResponseTooLarge);
+            return Err(GitHubError::BodyTooLarge.to_string());
         }
         *cached = response
             .headers
@@ -65,20 +58,14 @@ impl ReleaseFeed {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FetchError {
-    Network,
-    RateLimited { status: u16 },
-    Http { status: u16 },
-    ResponseTooLarge,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Assessment {
     pub latest: Option<String>,
     pub release_url: Option<String>,
     /// True only when a parsed release is newer and permitted by prerelease policy.
     pub update_available: bool,
+    /// Why the latest release could not be had or read.
+    pub failure: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,17 +88,27 @@ struct Version {
 /// they identify a precise published build; prerelease state also participates
 /// in the app's stable/prerelease update policy. Provider CLI output is looser
 /// and is parsed independently in `provider_updates`.
-pub fn check(current: &str, fetched_release_json: Result<&[u8], FetchError>) -> Assessment {
-    let Some(release) = fetched_release_json
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Release>(bytes).ok())
-    else {
-        return Assessment::default();
+pub fn check(current: &str, fetched_release_json: Result<&[u8], &str>) -> Assessment {
+    let release = fetched_release_json
+        .map_err(str::to_owned)
+        .and_then(|bytes| {
+            serde_json::from_slice::<Release>(bytes)
+                .map_err(|error| format!("could not read GitHub's latest release: {error}"))
+        });
+    let release = match release {
+        Ok(release) => release,
+        Err(failure) => {
+            return Assessment {
+                failure: Some(failure),
+                ..Assessment::default()
+            };
+        }
     };
     let mut assessment = Assessment {
         latest: Some(release.tag_name.trim_start_matches('v').to_string()),
         release_url: Some(release.html_url),
         update_available: false,
+        failure: None,
     };
     let Some(current_version) = parse_app_version(current) else {
         return assessment;
@@ -195,10 +192,5 @@ mod tests {
             );
             assert_eq!(assessment.release_url.as_deref(), Some(RELEASE_URL));
         }
-        assert_eq!(
-            check("0.4.0", Err(FetchError::Network)),
-            Assessment::default()
-        );
-        assert_eq!(check("0.4.0", Ok(b"not json")), Assessment::default());
     }
 }

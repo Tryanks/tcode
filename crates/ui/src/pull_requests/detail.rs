@@ -236,14 +236,17 @@ pub struct PullRequestView {
 /// The busy mark of a lifecycle write in flight.
 const LIFECYCLE: &str = "lifecycle";
 
-pub(super) fn ago(seconds: u64, cx: &App) -> String {
-    crate::time::humanize_ago(crate::time::now_secs(cx).saturating_sub(seconds))
+/// How long before `now` (unix seconds) `seconds` was, on the clock that
+/// stamped it.
+pub(super) fn ago(seconds: u64, now: u64) -> String {
+    crate::time::humanize_ago(now.saturating_sub(seconds))
 }
 
-pub(super) fn ago_rfc3339(stamp: &str, cx: &App) -> Option<String> {
+/// [`ago`] for a forge's RFC 3339 stamp, told against the host's `now`.
+pub(super) fn ago_rfc3339(stamp: &str, now: u64) -> Option<String> {
     chrono::DateTime::parse_from_rfc3339(stamp)
         .ok()
-        .map(|time| ago(time.timestamp().max(0) as u64, cx))
+        .map(|time| ago(time.timestamp().max(0) as u64, now))
 }
 
 /// The host's reason, as it gave it.
@@ -842,7 +845,10 @@ impl PullRequestView {
                     }
                     let failed = match this.loaded_at() {
                         Some(loaded) => {
-                            crate::tr!("pull_requests.detail.refresh_failed", ago = ago(loaded, cx))
+                            crate::tr!(
+                                "pull_requests.detail.refresh_failed",
+                                ago = ago(loaded, crate::time::now_secs(cx))
+                            )
                         }
                         None => crate::tr!("pull_requests.detail.refresh_failed_unloaded"),
                     };
@@ -932,7 +938,10 @@ impl PullRequestView {
                     .font_family(cx.theme().mono_font_family.clone())
                     .child(format!("#{}", key.number))
                     .with_tooltip({
-                        let label = super::number_tooltip(link.as_ref(), cx);
+                        let label = super::number_tooltip(
+                            link.as_ref(),
+                            self.store.read(cx).host_now_secs(cx),
+                        );
                         move |_, _| Tooltip::new(label.clone())
                     }),
             )
@@ -992,7 +1001,10 @@ impl PullRequestView {
                         (&snapshot.closed_at, "pull_requests.conversation.closed"),
                     ]
                     .into_iter()
-                    .find_map(|(at, key)| Some((ago_rfc3339(at.as_deref()?, cx)?, key)))
+                    .find_map(|(at, key)| {
+                        let host_now = self.store.read(cx).host_now_secs(cx);
+                        Some((ago_rfc3339(at.as_deref()?, host_now)?, key))
+                    })
                     .map(|(ago, key)| {
                         synced.fade(crate::widgets::fade_text(
                             crate::tr!(key, ago = ago).into_owned(),
@@ -1853,9 +1865,11 @@ impl PullRequestView {
             (true, _) => {
                 crate::tr!("pull_requests.detail.refreshing", pr = self.noun(cx).pr).into_owned()
             }
-            (false, Some(loaded)) => {
-                crate::tr!("pull_requests.detail.refresh", ago = ago(loaded, cx)).into_owned()
-            }
+            (false, Some(loaded)) => crate::tr!(
+                "pull_requests.detail.refresh",
+                ago = ago(loaded, crate::time::now_secs(cx))
+            )
+            .into_owned(),
             (false, None) => crate::tr!("pull_requests.detail.refresh_unloaded").into_owned(),
         };
         // `toolbar_icon_button`'s touch form takes its glyph as a child, which `Button::loading`
@@ -2175,7 +2189,10 @@ impl PullRequestView {
                         .and_then(|link| match link.sync_error {
                             Some(tcode_core::pull_request::PullRequestSyncError::RateLimited {
                                 retry_at,
-                            }) => Some(super::resumes(retry_at, cx)),
+                            }) => Some(super::resumes(
+                                retry_at,
+                                self.store.read(cx).host_now_secs(cx),
+                            )),
                             _ => None,
                         })
                         .unwrap_or_else(|| crate::tr!("pull_requests.notice_soon").into_owned())
@@ -2245,7 +2262,7 @@ impl PullRequestView {
         let stale = stale.map(|(_, loaded_at)| {
             crate::tr!(
                 "pull_requests.detail.refresh_failed",
-                ago = ago(loaded_at, cx)
+                ago = ago(loaded_at, crate::time::now_secs(cx))
             )
             .into_owned()
         });

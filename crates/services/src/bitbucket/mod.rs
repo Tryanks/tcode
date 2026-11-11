@@ -8,8 +8,8 @@ mod repository;
 
 use crate::{
     forge::{
-        Anchoring, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary, Tails,
-        ViewedMarks,
+        Anchoring, Forge, ForgeError, ForgeErrorKind, Held, Moved, Repository, Summary, Tails,
+        ViewedMarks, held,
     },
     settings::SettingsStore,
 };
@@ -33,9 +33,9 @@ use tcode_core::{
 use tcode_protocol::{
     PullRequestAction, PullRequestActionResult as Outcome, PullRequestActionState,
     PullRequestCapabilities, PullRequestConversation, PullRequestFileText, PullRequestFiles,
-    PullRequestMedia, PullRequestPatch, PullRequestRead, PullRequestReadResponse,
-    PullRequestReviewVerdict, PullRequestReviewerCandidate, PullRequestReviewerCandidates,
-    PullRequestThreadReplies, PullRequestViewedFiles,
+    PullRequestMedia, PullRequestRead, PullRequestReadResponse, PullRequestReviewVerdict,
+    PullRequestReviewerCandidate, PullRequestReviewerCandidates, PullRequestThreadReplies,
+    PullRequestViewedFiles,
 };
 
 const READ_TTL: Duration = Duration::from_secs(60);
@@ -48,17 +48,16 @@ const TEXT_TTL: Duration = Duration::from_secs(600);
 const FILE_BYTES: usize = 1024 * 1024;
 const ANONYMOUS: &str = "anonymous";
 
-type Slot = (Instant, PullRequestReadResponse);
-/// Each pull request's whole diff, `None` past the read limit, by when and at which head it
-/// was read.
-type Diffs = HashMap<PullRequestKey, (Instant, String, Option<String>)>;
+/// Each pull request's whole diff, by when and at which head it was read.
+type Diffs = HashMap<PullRequestKey, (Instant, String, String)>;
 /// Each changed path's blob at the head, with the files read beside it.
 type Revisions = (PullRequestFiles, BTreeMap<String, String>);
 
 pub struct Bitbucket {
     api: Arc<Api>,
     viewed: Arc<ViewedMarks>,
-    reads: Mutex<HashMap<(PullRequestKey, String), Slot>>,
+    reads: Held<(PullRequestKey, String), PullRequestReadResponse>,
+    conversations: Held<PullRequestKey, PullRequestConversation>,
     /// The whole diff, which the files, viewed marks and anchoring reads all page from.
     diffs: Mutex<Diffs>,
     /// Each pull request's last summary, kept for [`Bitbucket::sync_ttl`].
@@ -75,6 +74,7 @@ impl Bitbucket {
             viewed,
             api: Api::new(store, environment),
             reads: Mutex::default(),
+            conversations: Mutex::default(),
             diffs: Mutex::default(),
             summaries: Mutex::default(),
         })
@@ -110,17 +110,7 @@ impl Bitbucket {
         ttl: Duration,
         read: impl FnOnce() -> Result<PullRequestReadResponse, ForgeError>,
     ) -> Result<(PullRequestReadResponse, SystemTime), ForgeError> {
-        let slot = (key.clone(), name);
-        if let Some((at, response)) = self.reads.lock().unwrap().get(&slot)
-            && at.elapsed() < ttl
-        {
-            return Ok((response.clone(), SystemTime::now() + (ttl - at.elapsed())));
-        }
-        let response = read()?;
-        let mut reads = self.reads.lock().unwrap();
-        reads.retain(|_, (at, _)| at.elapsed() < TEXT_TTL);
-        reads.insert(slot, (Instant::now(), response.clone()));
-        Ok((response, SystemTime::now() + ttl))
+        held(&self.reads, (key.clone(), name), ttl, TEXT_TTL, read)
     }
 
     /// The reading account's uuid and nickname, `None` anonymously or with an access token
@@ -150,8 +140,8 @@ impl Bitbucket {
         self.pr(key).conflicts()
     }
 
-    /// The whole diff at the pull request's head, `None` past the read limit.
-    fn diff(&self, key: &PullRequestKey, head: &str) -> Result<Option<String>, ForgeError> {
+    /// The whole diff at the pull request's head.
+    fn diff(&self, key: &PullRequestKey, head: &str) -> Result<String, ForgeError> {
         if let Some((at, held, diff)) = self.diffs.lock().unwrap().get(key)
             && held == head
             && at.elapsed() < READ_TTL
@@ -162,8 +152,7 @@ impl Bitbucket {
             accept: "text/plain",
             ..Request::get(self.pr(key).path("/diff"), "Diff")
         })?;
-        let diff =
-            (!response.truncated).then(|| String::from_utf8_lossy(&response.body).into_owned());
+        let diff = String::from_utf8_lossy(&response.body).into_owned();
         let mut diffs = self.diffs.lock().unwrap();
         diffs.retain(|_, (at, _, _)| at.elapsed() < READ_TTL);
         diffs.insert(key.clone(), (Instant::now(), head.to_owned(), diff.clone()));
@@ -196,65 +185,21 @@ impl Bitbucket {
             .ok_or_else(|| error(ForgeErrorKind::Uncertain, "Bitbucket merge base unreadable"))
     }
 
-    /// The whole diff when it is within the read limit; past it, the diffstat's files from
-    /// `cursor`, a page Bitbucket named, without their hunks.
-    fn files(
-        &self,
-        key: &PullRequestKey,
-        cursor: Option<String>,
-    ) -> Result<PullRequestFiles, ForgeError> {
+    /// The whole diff's files.
+    fn files(&self, key: &PullRequestKey) -> Result<PullRequestFiles, ForgeError> {
         let pr = self.pr(key).pr()?;
         let head = reads::head(&pr).unwrap_or_default();
         let base = self.merge_base(key, &pr)?;
-        if cursor.is_none()
-            && let Some(diff) = self.diff(key, &head)?
-        {
-            let files = crate::github::pull_request_reads::diff_files(&diff)
-                .ok_or_else(|| error(ForgeErrorKind::Uncertain, "Bitbucket diff unreadable"))?;
-            return Ok(PullRequestFiles {
-                base,
-                head,
-                changed_files: Some(files.len() as u64),
-                files,
-                next_cursor: None,
-                complete: true,
-            });
-        }
-        let at = cursor.unwrap_or_else(|| {
-            self.pr(key)
-                .path(&format!("/diffstat?pagelen={PAGE_LIMIT}"))
-        });
-        let page: Value = self.api.send(Request::get(at, "Diffstat"))?.json()?;
-        let next = text(&page, "next");
+        let diff = self.diff(key, &head)?;
+        let files = crate::github::pull_request_reads::diff_files(&diff)
+            .ok_or_else(|| error(ForgeErrorKind::Uncertain, "Bitbucket diff unreadable"))?;
         Ok(PullRequestFiles {
             base,
             head,
-            files: page["values"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|row| {
-                    let path = text(&row["new"], "path").or_else(|| text(&row["old"], "path"))?;
-                    let previous = text(&row["old"], "path").filter(|old| *old != path);
-                    Some(tcode_protocol::PullRequestFile {
-                        kind: match row["status"].as_str().unwrap_or_default() {
-                            "added" => agent::FileChangeKind::Create,
-                            "removed" => agent::FileChangeKind::Delete,
-                            "renamed" => agent::FileChangeKind::Rename,
-                            _ => agent::FileChangeKind::Modify,
-                        },
-                        previous_path: previous,
-                        additions: Some(row["lines_added"].as_u64()?),
-                        deletions: Some(row["lines_removed"].as_u64()?),
-                        patch: PullRequestPatch::Withheld,
-                        url: None,
-                        path,
-                    })
-                })
-                .collect(),
-            complete: next.is_none(),
-            next_cursor: next,
-            changed_files: page["size"].as_u64(),
+            changed_files: Some(files.len() as u64),
+            files,
+            next_cursor: None,
+            complete: true,
         })
     }
 
@@ -279,7 +224,7 @@ impl Bitbucket {
             .collect();
         let answer = self.api.send(Request {
             accept: "application/octet-stream",
-            limit: FILE_BYTES,
+            limit: Some(FILE_BYTES),
             ..Request::get(
                 self.pr(key)
                     .repository_path(&format!("/src/{revision}/{}", encoded.join("/"))),
@@ -320,24 +265,16 @@ impl Bitbucket {
         })
     }
 
-    /// Each changed path's blob at the head, from the whole diff's index lines; `None` past
-    /// the diff's read limit.
-    fn revisions(&self, key: &PullRequestKey) -> Result<Option<Revisions>, ForgeError> {
-        let files = self.files(key, None)?;
-        let Some(diff) = self.diff(key, &files.head)? else {
-            return Ok(None);
-        };
-        Ok(Some((files, crate::forge::revisions(&diff))))
+    /// Each changed path's blob at the head, from the whole diff's index lines.
+    fn revisions(&self, key: &PullRequestKey) -> Result<Revisions, ForgeError> {
+        let files = self.files(key)?;
+        let diff = self.diff(key, &files.head)?;
+        Ok((files, crate::forge::revisions(&diff)))
     }
 
     fn viewed_files(&self, key: &PullRequestKey) -> Result<PullRequestViewedFiles, ForgeError> {
         let account = self.account(key)?;
-        let Some((files, revisions)) = self.revisions(key)? else {
-            return Ok(PullRequestViewedFiles {
-                files: Vec::new(),
-                complete: false,
-            });
-        };
+        let (files, revisions) = self.revisions(key)?;
         Ok(PullRequestViewedFiles {
             files: self.viewed.states(&account, key, &revisions),
             complete: files.complete && revisions.len() == files.files.len(),
@@ -466,7 +403,7 @@ impl Bitbucket {
         if !own {
             return Ok(PullRequestMedia::Unsupported);
         }
-        let conversation = self.conversation_read(key)?;
+        let (conversation, _) = self.conversation_read(key)?;
         let named = std::iter::once(&conversation.description)
             .chain(&conversation.comments)
             .chain(
@@ -488,11 +425,10 @@ impl Bitbucket {
     fn conversation_read(
         &self,
         key: &PullRequestKey,
-    ) -> Result<PullRequestConversation, ForgeError> {
-        match self.read(key, PullRequestRead::Conversation)?.0 {
-            PullRequestReadResponse::Conversation(conversation) => Ok(*conversation),
-            _ => Err(error(ForgeErrorKind::Uncertain, "unexpected read")),
-        }
+    ) -> Result<(PullRequestConversation, SystemTime), ForgeError> {
+        held(&self.conversations, key.clone(), READ_TTL, TEXT_TTL, || {
+            self.conversation(key)
+        })
     }
 
     fn drop_reads(&self, key: &PullRequestKey) {
@@ -500,6 +436,7 @@ impl Bitbucket {
             .lock()
             .unwrap()
             .retain(|(held, name), _| held != key || name.starts_with("text:"));
+        self.conversations.lock().unwrap().remove(key);
         self.diffs.lock().unwrap().remove(key);
         self.summaries.lock().unwrap().remove(key);
     }
@@ -650,10 +587,13 @@ impl Forge for Bitbucket {
         read: PullRequestRead,
     ) -> Result<(PullRequestReadResponse, SystemTime), ForgeError> {
         match read {
-            PullRequestRead::Files { cursor } => {
-                // A cursor is a page Bitbucket named, which the request checks is its own.
-                self.cached(key, format!("files:{cursor:?}"), READ_TTL, || {
-                    self.files(key, cursor).map(PullRequestReadResponse::Files)
+            // The whole diff is one page; a cursor is none Tcode wrote.
+            PullRequestRead::Files { cursor: Some(_) } => {
+                Err(error(ForgeErrorKind::InvalidInput, "invalid cursor"))
+            }
+            PullRequestRead::Files { cursor: None } => {
+                self.cached(key, "files".into(), READ_TTL, || {
+                    self.files(key).map(PullRequestReadResponse::Files)
                 })
             }
             PullRequestRead::FileText { revision, path } => {
@@ -663,10 +603,11 @@ impl Forge for Bitbucket {
                 })
             }
             PullRequestRead::Conversation => {
-                self.cached(key, "conversation".into(), READ_TTL, || {
-                    self.conversation(key).map(|conversation| {
-                        PullRequestReadResponse::Conversation(Box::new(conversation))
-                    })
+                self.conversation_read(key).map(|(conversation, fresh)| {
+                    (
+                        PullRequestReadResponse::Conversation(Box::new(conversation)),
+                        fresh,
+                    )
                 })
             }
             // A thread here carries all of its comments.
@@ -729,9 +670,7 @@ impl Forge for Bitbucket {
         viewed: bool,
     ) -> Result<(), ForgeError> {
         let account = self.account(key)?;
-        let (_, revisions) = self
-            .revisions(key)?
-            .ok_or_else(|| error(ForgeErrorKind::Uncertain, "Bitbucket file revisions unread"))?;
+        let (_, revisions) = self.revisions(key)?;
         self.viewed
             .set(&account, key, &revisions, paths, viewed)
             .map_err(|_| error(ForgeErrorKind::Uncertain, "viewed marks not saved"))
@@ -756,7 +695,7 @@ impl Forge for Bitbucket {
         let files = if comments.is_empty() {
             Vec::new()
         } else {
-            match self.files(key, None) {
+            match self.files(key) {
                 Ok(files) => files.files,
                 Err(error) => return Outcome::Rejected(error.rejection()),
             }
@@ -775,7 +714,7 @@ impl Forge for Bitbucket {
         lines: (u32, u32),
     ) -> Result<Anchoring, ForgeError> {
         Ok(crate::forge::anchors::anchoring(
-            &self.files(key, None)?,
+            &self.files(key)?,
             head,
             path,
             side,
@@ -788,7 +727,7 @@ impl Forge for Bitbucket {
         key: &PullRequestKey,
         comments: &[PullRequestReviewDraftComment],
     ) -> Result<(String, Vec<Moved>), ForgeError> {
-        crate::forge::anchors::reanchor(self.files(key, None)?, comments, |revision, path| {
+        crate::forge::anchors::reanchor(self.files(key)?, comments, |revision, path| {
             self.file_text(key, revision, path)
         })
     }

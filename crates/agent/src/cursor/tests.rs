@@ -164,6 +164,7 @@ fn tool_results_are_judged_by_their_raw_output_and_cursors_failure_text_fails_th
     match &last_item(&events, "call_shell_1").content {
         ItemContent::CommandExecution {
             command,
+            input: _,
             output,
             exit_code,
             status,

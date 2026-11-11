@@ -68,6 +68,9 @@ impl RawWebView {
         self.browser.command("reload", "", [0; 4]);
         Ok(())
     }
+    pub(super) fn stop(&self) {
+        self.browser.command("stop", "", [0; 4]);
+    }
     pub fn forward(&self) -> Result<(), String> {
         self.browser.command("forward", "", [0; 4]);
         Ok(())

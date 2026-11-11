@@ -37,8 +37,15 @@ pub struct HostServices {
     /// Why the MCP servers could not start; the host tells the user when the first thread
     /// starts without them.
     pub mcp_unavailable: Option<String>,
+    /// Why the login shell's environment could not be read before the host
+    /// started, so harnesses are looked up on the `PATH` it was launched
+    /// with; the host shows it with its harnesses.
+    pub login_shell_unread: Option<String>,
     /// The host's time; the system's unless a test turns it.
     pub clock: crate::clock::HostClock,
+    /// How the host starts a provider's adapter: [`agent::start_session`]
+    /// unless a test plays the adapter's half of the canonical stream.
+    pub provider_launcher: crate::app::ProviderLauncher,
 }
 
 impl HostServices {
@@ -277,6 +284,8 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 state.attach_control_mcp(server);
             }
             state.mcp_unavailable(services.mcp_unavailable.take());
+            state.login_shell_unread(services.login_shell_unread.take());
+            state.set_provider_launcher(services.provider_launcher);
             let mut cx = HostCx::new(mailbox_tx, event_tx, services.clock.clone());
             state.pump_pull_request_requests(services.pull_requests.take(), &mut cx);
             state.start_pull_request_workers(&mut cx);
@@ -1866,6 +1875,7 @@ mod tests {
                     parent_item_id: None,
                     content: agent::ItemContent::CommandExecution {
                         command: "echo red".into(),
+                        input: Vec::new(),
                         // Bold red, 25 characters: it fits one 40-column row and
                         // wraps onto a second at 20.
                         output: "\u{1b}[1;31mabcdefghijklmnopqrstuvwxy\u{1b}[0m\nplain\r\nend\n"
@@ -1885,6 +1895,7 @@ mod tests {
                     parent_item_id: None,
                     content: agent::ItemContent::CommandExecution {
                         command: "true".into(),
+                        input: Vec::new(),
                         output: String::new(),
                         exit_code: Some(0),
                         status: agent::ItemStatus::Completed,
@@ -1991,6 +2002,7 @@ mod tests {
             parent_item_id: None,
             content: agent::ItemContent::CommandExecution {
                 command: "build".into(),
+                input: Vec::new(),
                 output: String::new(),
                 exit_code: None,
                 status: agent::ItemStatus::InProgress,
@@ -2063,7 +2075,10 @@ mod tests {
         for (topic, expected) in [
             (
                 Topic::Scope,
-                ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+                ServerEvent::ScopeSnapshot {
+                    scope: tcode_protocol::Scope::Full,
+                    host_unix_ms: 0,
+                },
             ),
             (
                 Topic::SpaceIndex {
@@ -2082,7 +2097,11 @@ mod tests {
                 after: None,
             })
             .unwrap();
-            let snapshot = next_event(&events, |event| event.topic == topic);
+            let mut snapshot = next_event(&events, |event| event.topic == topic);
+            // This host keeps the system's time, which no expectation knows.
+            if let ServerEvent::ScopeSnapshot { host_unix_ms, .. } = &mut snapshot.event {
+                *host_unix_ms = 0;
+            }
             assert_eq!(snapshot.event, expected);
             assert!(snapshot.request_id.is_some());
         }

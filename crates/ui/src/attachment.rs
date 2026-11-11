@@ -94,15 +94,15 @@ pub struct Attachment {
 
 impl Attachment {
     /// Open a link to `target` and build its store, over `local` when the
-    /// target is this process's own host. `Ok(None)` when this client has no
-    /// way to reach that target — a browser asked to attach locally has no
-    /// local host to attach to. `Err` carries why the writes this device
+    /// target is this process's own host and through `client` otherwise.
+    /// `Ok(None)` when this client has no local host to attach to, as a
+    /// browser has none. `Err` carries why the writes this device
     /// still had for that host could not be read; the link is not opened, and
     /// nothing is written over them.
     pub fn open(
         target: AttachmentTarget,
         local: Option<Transport>,
-        client_host: Option<Rc<dyn ClientHost>>,
+        client: Rc<dyn ClientHost>,
         cx: &mut App,
     ) -> Result<Option<Self>, String> {
         let (transport, identity) = match &target {
@@ -111,10 +111,7 @@ impl Attachment {
                 None => return Ok(None),
             },
             AttachmentTarget::Remote(host) => (
-                match client_host.as_ref() {
-                    Some(client) => client.connect(host),
-                    None => return Ok(None),
-                },
+                client.connect(host),
                 WorkspaceAttachment::Remote {
                     host_id: host.host_id.clone(),
                     host_name: host.name.clone(),
@@ -122,12 +119,8 @@ impl Attachment {
             ),
         };
         let storage = match &target {
-            AttachmentTarget::Remote(host) => client_host
-                .as_ref()
-                .and_then(|client| client.outbox_storage(&host.host_id)),
-            AttachmentTarget::Local => client_host
-                .as_ref()
-                .and_then(|client| client.outbox_storage("local")),
+            AttachmentTarget::Remote(host) => client.outbox_storage(&host.host_id),
+            AttachmentTarget::Local => client.outbox_storage("local"),
         };
         let link = if matches!(target, AttachmentTarget::Local) {
             HostLink::new_local(transport.to_host, transport.from_host, transport.originals)
@@ -152,7 +145,7 @@ impl Attachment {
             WorkspaceStore::new_attached(
                 link.clone(),
                 identity,
-                client_host,
+                Some(client),
                 transport.current_host,
                 cx,
             )
@@ -237,10 +230,12 @@ mod tests {
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let attachment = cx.update(|cx| {
+            crate::test_client::init(cx);
+            let client = cx.global::<crate::remote::ClientAttachment>().host();
             Attachment::open(
                 AttachmentTarget::Local,
                 Some(transport(to_host, from_host)),
-                None,
+                client,
                 cx,
             )
             .expect("the outbox is readable")

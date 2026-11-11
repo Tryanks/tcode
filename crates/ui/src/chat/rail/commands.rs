@@ -263,6 +263,7 @@ pub(super) fn body(
     let tallest = Rc::new(Cell::new(0f32));
     let background = rail.background(cx).zip(rail.background_place(cx));
     let highlight = rail.background_highlight.clone();
+    let store = rail.workspace_store.clone();
     let rows = lines[..shown]
         .iter()
         .map(|line| (SharedString::from(line.key.clone()), line.clone()));
@@ -286,6 +287,7 @@ pub(super) fn body(
                 .child(row(
                     key,
                     line,
+                    &store,
                     background
                         .as_ref()
                         .map(|(background, place)| (background, place)),
@@ -358,6 +360,7 @@ pub(super) fn body(
 fn row(
     key: &SharedString,
     line: &Line,
+    store: &gpui::Entity<crate::store::WorkspaceStore>,
     background: Option<(&Background, &Place)>,
     highlighted: bool,
     window: &mut Window,
@@ -392,7 +395,7 @@ fn row(
         Mark::Running => line.started_ms.map(|since| {
             crate::widgets::clock::Clock::since(
                 SharedString::from(format!("rail-command-elapsed-{key}")),
-                since,
+                store.read(cx).host_moment_here(since),
                 |elapsed| crate::chat::model::format_elapsed_seconds(elapsed).into(),
             )
             .into_any_element()
@@ -594,6 +597,7 @@ mod tests {
                 parent_item_id: None,
                 content: ItemContent::CommandExecution {
                     command: "grep -q missing notes.txt".into(),
+                    input: Vec::new(),
                     output: String::new(),
                     exit_code,
                     status,

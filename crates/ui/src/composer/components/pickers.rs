@@ -516,12 +516,14 @@ impl Composer {
                 let compact = crate::window_seam::window_is_compact(window, cx);
                 let edit_window =
                     window_editable.then(|| (store_entity.clone(), session_id.clone()));
+                let host_now = store_entity.read(cx).host_now_secs(cx);
                 render_context_meter_pane(
                     usage,
                     account_usage.clone(),
                     provider,
                     pct,
                     compact,
+                    host_now,
                     edit_window,
                     window,
                     cx,
@@ -2061,6 +2063,8 @@ fn render_context_meter_pane(
     provider: Option<ProviderKind>,
     pct: Option<f32>,
     compact: bool,
+    // Now by the host's clock (unix seconds), which the usage is told against.
+    host_now: u64,
     // Present when the active model's context window can be changed here.
     edit_window: Option<(Entity<WorkspaceStore>, Option<String>)>,
     window: &mut Window,
@@ -2241,9 +2245,7 @@ fn render_context_meter_pane(
             .as_deref()
             .map(crate::usage::plan_label)
             .unwrap_or_else(|| {
-                let ago = crate::time::humanize_ago(
-                    crate::time::now_secs(cx).saturating_sub(account.fetched_at),
-                );
+                let ago = crate::time::humanize_ago(host_now.saturating_sub(account.fetched_at));
                 crate::tr!("usage.updated", when = ago).into_owned()
             });
         section = section.child(
@@ -2273,7 +2275,7 @@ fn render_context_meter_pane(
                 ),
             );
         }
-        let now = crate::time::now_secs(cx);
+        let now = host_now;
         for (index, limit) in account.windows.iter().enumerate() {
             let limit_id = |part: &str| glide(&format!("limit-{index}-{part}"));
             let fill = gpui_base::motion::transition(

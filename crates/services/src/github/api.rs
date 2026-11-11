@@ -12,7 +12,6 @@ use std::{
 };
 
 pub type Headers = BTreeMap<String, String>;
-const BODY_LIMIT: usize = 8 * 1024 * 1024;
 /// Every request ends by this deadline; only diff and file reads ask for more than the default.
 pub const DEADLINE_CAP: Duration = Duration::from_secs(60);
 
@@ -83,7 +82,8 @@ pub struct RequestOptions {
     pub interactive: bool,
     pub operation: &'static str,
     pub timeout: Duration,
-    pub body_limit: usize,
+    /// The most of a body read; a longer one is cut and marked truncated. `None` reads it whole.
+    pub body_limit: Option<usize>,
 }
 impl Default for RequestOptions {
     fn default() -> Self {
@@ -92,7 +92,7 @@ impl Default for RequestOptions {
             interactive: false,
             operation: "GitHub",
             timeout: Duration::from_secs(30),
-            body_limit: BODY_LIMIT,
+            body_limit: None,
         }
     }
 }
@@ -396,14 +396,13 @@ impl GitHubApi {
             number(&headers, "x-ratelimit-reset"),
             graphql.map(super::digest).unwrap_or_default()
         );
-        let cap = options.body_limit.min(BODY_LIMIT);
         let mut body = Vec::new();
         // A 304 has no message body, even when GitHub includes the cached
         // representation's Content-Encoding. Reading it asks ureq 2 to decode an empty gzip stream.
         if status != 304 {
             response
                 .into_reader()
-                .take(cap as u64 + 1)
+                .take(options.body_limit.map_or(u64::MAX, |cap| cap as u64 + 1))
                 .read_to_end(&mut body)
                 .map_err(|error| {
                     if error.kind() == std::io::ErrorKind::TimedOut || started.elapsed() >= timeout
@@ -414,9 +413,13 @@ impl GitHubApi {
                     }
                 })?;
         }
-        let truncated = body.len() > cap;
-        body.truncate(cap);
-        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        let truncated = options.body_limit.is_some_and(|cap| body.len() > cap);
+        if let Some(cap) = options.body_limit {
+            body.truncate(cap);
+        }
+        let parsed: Option<serde_json::Value> = serde_json::from_slice(&body).ok();
+        let unparsed = parsed.is_none();
+        let parsed = parsed.unwrap_or_default();
         let errors = graphql
             .and_then(|_| parsed.get("errors").and_then(|errors| errors.as_array()))
             .filter(|errors| !errors.is_empty());
@@ -526,6 +529,9 @@ impl GitHubApi {
             ) {
                 messages.push(format!("{field} {code}"));
             }
+        }
+        if unparsed {
+            messages = crate::forge::unparsed(&body);
         }
         Err(GitHubError::Response { status, messages })
     }

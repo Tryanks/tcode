@@ -162,8 +162,9 @@ impl Place {
     }
 }
 
-/// The stop for every piece at once, beside the title, wherever the harness
-/// stops them. More than one piece asks first: a stop takes a dev server
+/// The stop for every piece at once, wherever the harness stops them: a chip
+/// at the end of the row over the composer, there whether or not the rail
+/// lists the work. More than one piece asks first: a stop takes a dev server
 /// down along with what the reader meant to end.
 pub(in crate::chat) fn stop_all(
     background: &Background,
@@ -186,9 +187,9 @@ pub(in crate::chat) fn stop_all(
         )))
         .debug_selector(|| "background-stop-all".into())
         .ghost()
-        .xsmall()
-        .touch(place.touch)
-        .text_secondary(false, cx)
+        .outline()
+        .chip()
+        .text_body(false, cx)
         .label(crate::tr!("background.stop_all").into_owned())
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
@@ -373,7 +374,7 @@ pub(in crate::chat) fn controls(
         let first_seen = !task.started_reported;
         let clock = crate::widgets::clock::Clock::since(
             SharedString::from(format!("{key}-elapsed")),
-            task.started_at,
+            place.store.read(cx).host_moment_here(task.started_at),
             if first_seen {
                 |elapsed| {
                     format!("≥ {}", crate::chat::model::format_elapsed_seconds(elapsed)).into()
@@ -783,6 +784,7 @@ mod tests {
             parent_item_id: None,
             content: ItemContent::CommandExecution {
                 command: command.into(),
+                input: Vec::new(),
                 output: String::new(),
                 exit_code: (status == ItemStatus::Completed).then_some(0),
                 status,
@@ -959,6 +961,7 @@ mod tests {
                 parent_item_id: None,
                 content: ItemContent::CommandExecution {
                     command: "cargo build --release".into(),
+                    input: Vec::new(),
                     output: String::new(),
                     exit_code: None,
                     status: ItemStatus::InProgress,

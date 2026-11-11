@@ -328,7 +328,7 @@ impl Composer {
             let countdown = message.fire_at_unix_secs.map(|fire_at| {
                 crate::widgets::clock::Clock::until(
                     ("queued-countdown", id as usize),
-                    fire_at,
+                    self.workspace_store.read(cx).host_moment_here_secs(fire_at),
                     |left| crate::time::format_countdown(left / 1000).into(),
                 )
             });

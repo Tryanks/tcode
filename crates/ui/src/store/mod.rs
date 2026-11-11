@@ -259,6 +259,9 @@ pub struct WorkspaceStore {
     disk_usage: DiskUsageState,
     disk_usage_holds: usize,
     connection_state: ConnectionState,
+    /// How far the host's wall clock is ahead of this client's, in
+    /// milliseconds, as its last scope snapshot said; until one lands, none.
+    host_clock_offset_ms: i64,
     index_replica: (Vec<SessionMeta>, Vec<Project>),
     /// Each thread's place in `index_replica.0`, rebuilt by
     /// [`Self::reindex_sessions`] whenever that list changes.
@@ -482,6 +485,7 @@ impl WorkspaceStore {
             } else {
                 ConnectionState::Connected { path: None }
             },
+            host_clock_offset_ms: 0,
             index_replica: (Vec::new(), Vec::new()),
             index_positions: HashMap::new(),
             index_summary: IndexSummary::default(),
@@ -651,6 +655,31 @@ impl WorkspaceStore {
             .as_ref()
             .filter(|live| Some(live.snapshot().host_id.as_str()) == self.remote_host_id())
             .and_then(|live| Some((live.snapshot(), live.tunnels()?)))
+    }
+
+    /// Now by the host's clock, in unix milliseconds. How long ago or how
+    /// soon a time the host gave is, whether it stamped it or passed it on
+    /// from a harness or a forge, is told against this, not against this
+    /// client's clock.
+    pub(crate) fn host_now_millis(&self, cx: &App) -> u64 {
+        crate::time::now_millis(cx).saturating_add_signed(self.host_clock_offset_ms)
+    }
+
+    /// [`Self::host_now_millis`] in unix seconds.
+    pub(crate) fn host_now_secs(&self, cx: &App) -> u64 {
+        self.host_now_millis(cx) / 1000
+    }
+
+    /// The moment the host's clock reads `host_ms` (unix milliseconds) on
+    /// this client's clock, for a [`crate::widgets::clock::Clock`], which
+    /// ticks on this client's.
+    pub(crate) fn host_moment_here(&self, host_ms: u64) -> u64 {
+        host_ms.saturating_add_signed(-self.host_clock_offset_ms)
+    }
+
+    /// [`Self::host_moment_here`] in unix seconds.
+    pub(crate) fn host_moment_here_secs(&self, host_secs: u64) -> u64 {
+        self.host_moment_here(host_secs.saturating_mul(1000)) / 1000
     }
 
     pub(crate) fn can_manage_host(&self) -> bool {
@@ -1303,7 +1332,11 @@ impl WorkspaceStore {
             self.thread_list_revision += 1;
         }
         if envelope.topic == Topic::Scope {
-            if let ServerEvent::ScopeSnapshot(scope) = &envelope.event
+            if let ServerEvent::ScopeSnapshot { host_unix_ms, .. } = &envelope.event {
+                self.host_clock_offset_ms =
+                    *host_unix_ms as i64 - crate::time::now_millis(cx) as i64;
+            }
+            if let ServerEvent::ScopeSnapshot { scope, .. } = &envelope.event
                 && envelope.request_id.is_some()
                 && envelope.request_id != self.applied_scope_request
                 && !matches!(
@@ -2370,6 +2403,20 @@ impl WorkspaceStore {
             .get(*self.index_positions.get(session_id)?)
     }
 
+    /// The name the host's model list gives `model` among the models of the
+    /// thread's profile; `None` when the list has no such id.
+    pub(crate) fn thread_model_name(&self, session_id: &str, model: &str) -> Option<String> {
+        let meta = self.thread_meta(session_id)?;
+        let profile_id = meta
+            .profile_id
+            .as_deref()
+            .unwrap_or(Settings::builtin_profile_id(meta.provider));
+        self.profile_catalog(profile_id)
+            .into_iter()
+            .find(|spec| spec.id == model)
+            .map(|spec| spec.display_name)
+    }
+
     /// The thread `session_id` was forked from: its title, and its id while
     /// it still exists.
     pub(crate) fn fork_source(&self, session_id: &str) -> Option<(String, Option<String>)> {
@@ -2640,6 +2687,11 @@ impl WorkspaceStore {
 
     pub fn live_command_panel(&self) -> bool {
         !self.settings_replica.live_command_panel_disabled
+    }
+
+    /// Whether a command of more than five rows shows only its first four.
+    pub fn shortens_long_commands(&self) -> bool {
+        self.settings_replica.shorten_long_commands
     }
 
     /// The `0xRRGGBB` color of `meta`'s sidebar provider mark, `None` while
@@ -3038,6 +3090,18 @@ impl WorkspaceStore {
     }
 
     /// Why the host's saved secrets could not be read.
+    /// What of `provider`'s model catalog could not be read.
+    pub fn model_problems(&self, provider: agent::ProviderKind) -> &[String] {
+        self.providers_replica
+            .model_problems
+            .get(&provider)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    pub fn login_shell_unread(&self) -> Option<&str> {
+        self.providers_replica.login_shell_unread.as_deref()
+    }
+
     pub fn provider_secrets_unreadable(&self) -> Option<&str> {
         self.providers_replica.secrets_unreadable.as_deref()
     }
@@ -3253,6 +3317,7 @@ impl WorkspaceStore {
         cx.spawn(async move |_| {
             let failed = |reason: String| SessionContentHits {
                 hits: Vec::new(),
+                truncated: false,
                 unreadable: vec![reason],
             };
             match host
@@ -4525,7 +4590,10 @@ pub(crate) mod tests {
                 tcode_protocol::encode_line(&tcode_protocol::HostMessage::Event(EventEnvelope {
                     request_id: Some(request_id),
                     topic: Topic::Scope,
-                    event: ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+                    event: ServerEvent::ScopeSnapshot {
+                        scope: tcode_protocol::Scope::Full,
+                        host_unix_ms: 0,
+                    },
                 }))
                 .unwrap(),
             )
@@ -4595,7 +4663,10 @@ pub(crate) mod tests {
                             }
                             ClientPayload::Subscribe(subscription) => {
                                 let event = match (&subscription.topic, &scope) {
-                                    (Topic::Scope, _) => ServerEvent::ScopeSnapshot(scope.clone()),
+                                    (Topic::Scope, _) => ServerEvent::ScopeSnapshot {
+                                        scope: scope.clone(),
+                                        host_unix_ms: 0,
+                                    },
                                     (
                                         Topic::SpaceIndex { space_id },
                                         Scope::Space {
@@ -5242,7 +5313,10 @@ pub(crate) mod tests {
                 EventEnvelope {
                     request_id: None,
                     topic: Topic::Scope,
-                    event: ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+                    event: ServerEvent::ScopeSnapshot {
+                        scope: tcode_protocol::Scope::Full,
+                        host_unix_ms: crate::time::now_millis(cx),
+                    },
                 },
                 cx,
             );
@@ -5276,7 +5350,10 @@ pub(crate) mod tests {
                 EventEnvelope {
                     request_id: None,
                     topic: Topic::Scope,
-                    event: ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+                    event: ServerEvent::ScopeSnapshot {
+                        scope: tcode_protocol::Scope::Full,
+                        host_unix_ms: crate::time::now_millis(cx),
+                    },
                 },
                 cx,
             );
@@ -6517,16 +6594,39 @@ pub(crate) mod tests {
         });
     }
 
-    fn draft_status() -> tcode_protocol::SessionStatus {
+    /// The status a host gives a draft it starts, read as a client reads
+    /// it: the draft started with `StartDraft`, its status topic's snapshot.
+    pub(crate) fn draft_status() -> tcode_protocol::SessionStatus {
         let root = scratch_root("tcode-draft-status-test");
         let host = test_host(SessionStore::open_at(root.clone()).unwrap());
-        let status = smol::block_on(host.update_state_for_test(|state, cx| {
-            let id = state.start_draft("running".into(), std::env::temp_dir(), cx);
-            state.session_status_snapshot(&id).unwrap()
-        }))
-        .unwrap();
-        host.shutdown_blocking()
-            .expect("stop unsubscribed fixture host");
+        let link = host.link();
+        let events = link.events();
+        let tcode_protocol::CommandResponse::SessionId(Some(session_id)) = link
+            .command_blocking(Command::StartDraft {
+                project_id: "draft".into(),
+                cwd: std::env::temp_dir(),
+            })
+            .expect("start a draft")
+        else {
+            panic!("the host starts a draft");
+        };
+        link.subscribe(tcode_protocol::Subscription {
+            known_index: None,
+            topic: Topic::SessionStatus {
+                session_id: session_id.clone(),
+            },
+            after: None,
+        })
+        .expect("subscribe to the draft's status");
+        let status = loop {
+            let envelope = events.recv_blocking().expect("the host's events");
+            if let ServerEvent::SessionStatusReplaced(status) = envelope.event
+                && status.session_id == session_id
+            {
+                break *status;
+            }
+        };
+        host.shutdown_blocking().expect("stop the fixture host");
         let _ = std::fs::remove_dir_all(root);
         status
     }
@@ -6853,6 +6953,21 @@ pub(crate) mod tests {
 
     fn test_host(store: SessionStore) -> SpawnedHost {
         spawn_host(store, HostServices::default()).expect("spawn test host")
+    }
+
+    /// A test host that starts providers with `launcher`.
+    fn launching_host(
+        store: SessionStore,
+        launcher: tcode_runtime::app::ProviderLauncher,
+    ) -> SpawnedHost {
+        spawn_host(
+            store,
+            HostServices {
+                provider_launcher: launcher,
+                ..HostServices::default()
+            },
+        )
+        .expect("spawn test host")
     }
 
     macro_rules! update_host {
@@ -7346,7 +7461,10 @@ pub(crate) mod tests {
                 EventEnvelope {
                     request_id: None,
                     topic: Topic::Scope,
-                    event: ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+                    event: ServerEvent::ScopeSnapshot {
+                        scope: tcode_protocol::Scope::Full,
+                        host_unix_ms: crate::time::now_millis(cx),
+                    },
                 },
                 cx,
             );
@@ -7401,7 +7519,7 @@ pub(crate) mod tests {
                 })
                 .await
                 .unwrap();
-                if matches!(event.event, ServerEvent::ScopeSnapshot(_)) {
+                if matches!(event.event, ServerEvent::ScopeSnapshot { .. }) {
                     scope = Some(event);
                 } else {
                     if let ServerEvent::IndexUnchanged {
@@ -7416,7 +7534,7 @@ pub(crate) mod tests {
                 }
             }
         });
-        assert!(matches!(scope.event, ServerEvent::ScopeSnapshot(_)));
+        assert!(matches!(scope.event, ServerEvent::ScopeSnapshot { .. }));
         workspace.update(cx, |store, cx| {
             store.receive(scope, cx);
             assert!(
@@ -8263,7 +8381,10 @@ pub(crate) mod tests {
         let session_id = meta.id.clone();
         session_store.upsert_meta(&meta).expect("persist session");
 
-        let host = test_host(session_store);
+        let host = launching_host(
+            session_store,
+            tcode_runtime::app::scripted_provider(ProviderKind::Codex).launcher,
+        );
         let mut driver = LocalHostDriver::new(&host);
         let workspace = driver.workspace(cx);
         workspace.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
@@ -8274,9 +8395,6 @@ pub(crate) mod tests {
                     .is_some_and(|status| status.session_id == session_id)
             })
         });
-        let scripted = tcode_runtime::app::scripted_provider(ProviderKind::Codex);
-        update_host!(&host, move |state, _| state
-            .set_provider_launcher_for_test(scripted.launcher));
         driver.command(
             cx,
             Command::SendTurn {
@@ -8514,7 +8632,8 @@ pub(crate) mod tests {
         let disk = SessionStore::open_at(root.clone()).expect("open test store");
         disk.upsert_project(&project_at("p", &root))
             .expect("persist project");
-        let host = test_host(disk);
+        let scripts = tcode_runtime::app::Scripts::default();
+        let host = launching_host(disk, scripts.launcher());
         let mut driver = LocalHostDriver::new(&host);
         let workspace = driver.workspace(cx);
 
@@ -8540,10 +8659,7 @@ pub(crate) mod tests {
         });
 
         let provider = workspace.read_with(cx, |store, cx| store.sole_status(cx).unwrap().provider);
-        let scripted = tcode_runtime::app::scripted_provider(provider);
-        let launcher = scripted.launcher.clone();
-        update_host!(&host, move |state, _| state
-            .set_provider_launcher_for_test(launcher));
+        let _provider = scripts.script(provider);
         driver.command(
             cx,
             Command::SendTurn {

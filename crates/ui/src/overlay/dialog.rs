@@ -757,7 +757,7 @@ impl AlertDialog {
                 .button_props
                 .cancel_text
                 .clone()
-                .unwrap_or_else(|| "Cancel".into());
+                .unwrap_or_else(|| crate::tr!("settings.cancel").into_owned().into());
             Button::new("alert-cancel")
                 .label(label)
                 .on_click(move |event, window, cx| {
@@ -771,7 +771,7 @@ impl AlertDialog {
             .button_props
             .ok_text
             .clone()
-            .unwrap_or_else(|| "OK".into());
+            .unwrap_or_else(|| crate::tr!("dialog.ok").into_owned().into());
         let ok = Button::new("alert-ok")
             .label(ok_label)
             .with_variant(self.button_props.ok_variant)

@@ -267,6 +267,7 @@ mod tests {
     fn command(output: &str, status: ItemStatus) -> ItemContent {
         ItemContent::CommandExecution {
             command: "cargo test".into(),
+            input: Vec::new(),
             output: output.into(),
             exit_code: (status == ItemStatus::Completed).then_some(0),
             status,

@@ -1448,6 +1448,44 @@ impl HarnessDialog {
             }
             banners.push(column.into_any_element());
         }
+        if let HarnessId::Native(kind) = &self.harness
+            && let Some(error) = self
+                .store
+                .read(cx)
+                .provider_version_status(*kind)
+                .and_then(|version| version.latest_error)
+        {
+            banners.push(
+                crate::material::notice(theme.warning, cx)
+                    .debug_selector(|| "harness-banner-latest-unknown".into())
+                    .child(div().flex_1().min_w_0().text_secondary(false, cx).child(
+                        crate::tr!("providers.harness.latest_unknown", error = error).into_owned(),
+                    ))
+                    .into_any_element(),
+            );
+        }
+        if let HarnessId::Native(kind) = &self.harness {
+            let problems = self.store.read(cx).model_problems(*kind).join("\n");
+            if !problems.is_empty() {
+                banners.push(
+                    crate::material::notice(theme.warning, cx)
+                        .debug_selector(|| "harness-banner-catalog-problems".into())
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_body(false, cx)
+                                        .child(crate::tr!("providers.harness.catalog_problems")),
+                                )
+                                .child(div().text_secondary(false, cx).child(problems)),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
         if let Some(latest) = description.registry_update.clone()
             && let HarnessId::Acp(id) = &self.harness
         {

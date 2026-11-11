@@ -24,7 +24,6 @@ pub(super) const VERSION: &str = "7.1";
 /// For resources Azure still versions as previews (statuses, labels, policy evaluations); a
 /// released resource takes it too.
 pub(super) const PREVIEW: &str = "7.1-preview.1";
-const BODY_LIMIT: usize = 8 * 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(60);
 /// The personal access token az's devops extension reads, which Tcode sends only to the
 /// organization `ENV_ORGANIZATION` names; az itself sends it to any.
@@ -115,7 +114,9 @@ pub(super) struct Request<'a> {
     pub(super) operation: &'static str,
     /// A write goes only with a credential.
     pub(super) write: bool,
-    pub(super) limit: usize,
+    /// The most of a body read; a longer one is cut and marked truncated. `None` reads it
+    /// whole.
+    pub(super) limit: Option<usize>,
 }
 
 impl<'a> Request<'a> {
@@ -128,7 +129,7 @@ impl<'a> Request<'a> {
             accept: "application/json",
             operation,
             write: false,
-            limit: BODY_LIMIT,
+            limit: None,
         }
     }
     pub(super) fn write(
@@ -514,15 +515,16 @@ impl Api {
         let header = |name: &str| response.header(name).map(str::to_owned);
         let retry_after = header("retry-after");
         let reset = header("x-ratelimit-reset");
-        let limit = request.limit.min(BODY_LIMIT);
         let mut body = Vec::new();
         response
             .into_reader()
-            .take(limit as u64 + 1)
+            .take(request.limit.map_or(u64::MAX, |limit| limit as u64 + 1))
             .read_to_end(&mut body)
             .map_err(|_| error(ForgeErrorKind::Uncertain, "Azure DevOps response cut off"))?;
-        let truncated = body.len() > limit;
-        body.truncate(limit);
+        let truncated = request.limit.is_some_and(|limit| body.len() > limit);
+        if let Some(limit) = request.limit {
+            body.truncate(limit);
+        }
         if status == 429 {
             let named = retry_after
                 .and_then(|value| value.trim().parse().ok())
@@ -622,13 +624,16 @@ impl Api {
     }
 }
 
-/// Azure's words for a refusal: its `message`.
+/// Azure's words for a refusal: its `message`, or a body that is not JSON as it came.
 pub(super) fn messages(body: &[u8]) -> Vec<String> {
-    serde_json::from_slice::<Value>(body)
-        .ok()
-        .and_then(|value| value["message"].as_str().map(str::to_owned))
-        .into_iter()
-        .collect()
+    match serde_json::from_slice::<Value>(body) {
+        Ok(value) => value["message"]
+            .as_str()
+            .map(str::to_owned)
+            .into_iter()
+            .collect(),
+        Err(_) => crate::forge::unparsed(body),
+    }
 }
 
 #[cfg(test)]
