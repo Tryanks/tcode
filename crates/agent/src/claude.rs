@@ -4453,7 +4453,8 @@ fn tool_family(
     let family = match name {
         // `FileReadOutput`: a text read is `{type: "text", file: {filePath,
         // content, startLine, ..}}`, the content without the `N\t` numbers
-        // the tool result puts before each line.
+        // the tool result puts before each line. The content stands for the
+        // result only while the result is those lines and nothing else.
         "Read" => {
             let Some(path) = text("file_path") else {
                 return (None, output);
@@ -4464,16 +4465,32 @@ fn tool_family(
             if let Some(file) = file
                 && let Some(content) = file.get("content").and_then(Value::as_str)
             {
+                let first_line = file.get("startLine").and_then(Value::as_u64);
                 // An empty read's result is only Claude Code's warning that
                 // the file is empty or shorter than the offset.
-                return (
-                    Some(ToolFamily::Read {
-                        path: path.to_owned(),
-                        first_line: file.get("startLine").and_then(Value::as_u64),
-                        note: output.filter(|text| content.is_empty() && !text.trim().is_empty()),
-                    }),
-                    Some(content.to_owned()),
-                );
+                if content.is_empty() {
+                    return (
+                        Some(ToolFamily::Read {
+                            path: path.to_owned(),
+                            first_line,
+                            note: output.filter(|text| !text.trim().is_empty()),
+                        }),
+                        Some(String::new()),
+                    );
+                }
+                if let Some(first_line) = first_line
+                    && output.as_deref().and_then(numbered_read)
+                        == Some((first_line, content.to_owned()))
+                {
+                    return (
+                        Some(ToolFamily::Read {
+                            path: path.to_owned(),
+                            first_line: Some(first_line),
+                            note: None,
+                        }),
+                        Some(content.to_owned()),
+                    );
+                }
             }
             // A subagent's transcript can leave the output object out; its
             // tool result numbers the lines it read.
@@ -4720,18 +4737,18 @@ fn grep_lines(content: &str, searched: Option<&str>) -> Vec<SearchHit> {
         .collect()
 }
 
-/// A Read tool result's numbered lines (`N\t` before each, 2.1.322's
-/// format) as the first line's number and the lines without their numbers.
+/// A Read tool result's numbered lines (`N\t` before each, numbered on from
+/// the first, 2.1.322's format) as the first line's number and the lines
+/// without their numbers; `None` for a result that holds anything else.
 fn numbered_read(text: &str) -> Option<(u64, String)> {
-    let mut first = None;
-    let mut lines = Vec::new();
-    for line in text.lines() {
-        let (number, rest) = line.split_once('\t')?;
-        let number: u64 = number.trim_start().parse().ok()?;
-        first.get_or_insert(number);
-        lines.push(rest);
+    let mut rows = text.split('\n');
+    let (first, line) = rows.next()?.split_once('\t')?;
+    let first: u64 = first.parse().ok()?;
+    let mut lines = vec![line];
+    for (row, number) in rows.zip(first + 1..) {
+        lines.push(row.strip_prefix(&format!("{number}\t"))?);
     }
-    Some((first?, lines.join("\n")))
+    Some((first, lines.join("\n")))
 }
 
 fn is_file_tool(name: &str) -> bool {
