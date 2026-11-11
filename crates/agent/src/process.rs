@@ -514,6 +514,10 @@ pub(crate) async fn held_output(
         use std::os::unix::process::CommandExt as _;
         command.process_group(0);
     }
+    // Set on the `smol` command: spawning it gives the child this process's own
+    // stdio wherever its own setters were not called, whatever the `std`
+    // command it came from says.
+    let mut command = smol::process::Command::from(command);
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -525,9 +529,7 @@ pub(crate) async fn held_output(
         }
         Ok(bytes)
     }
-    let mut child = processes.hold(ProcessTree::new(
-        smol::process::Command::from(command).spawn()?,
-    ));
+    let mut child = processes.hold(ProcessTree::new(command.spawn()?));
     let (stdout, stderr) =
         smol::future::try_zip(read_all(child.stdout.take()), read_all(child.stderr.take())).await?;
     let status = child.status().await?;
