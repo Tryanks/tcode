@@ -724,6 +724,7 @@ fn walk_tree(root: AXUIElementRef, context: &mut WalkContext) -> Option<UiNode> 
         };
         let invisible_leaf = node.children.is_empty()
             && node.children_error.is_none()
+            && !node.children_omitted
             && !node.is_interactive()
             && node.title.is_empty()
             && node.value.is_empty()

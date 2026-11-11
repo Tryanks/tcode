@@ -699,6 +699,7 @@ fn raw_children(
 
 fn is_invisible_leaf(tree: &ElementNode, root_frame: Frame) -> bool {
     tree.children.is_empty()
+        && !tree.node.children_omitted
         && !tree.node.is_interactive()
         && tree.node.title.is_empty()
         && tree.node.value.is_empty()
