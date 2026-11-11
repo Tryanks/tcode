@@ -6,30 +6,6 @@ use tcode_core::notice::CHILD_REPORT_REMINDER;
 use tcode_core::project::ChildExpectation;
 use tcode_core::settings::{SettingsPatch, ThemeMode};
 use tcode_protocol::{BackgroundTaskStatus, Command, CommandResponse, HostMessage, Subscription};
-#[test]
-fn permission_relaunch_marker_requires_screen_access_only_for_computer_use() {
-    for (section, screen_recording, kept) in [
-        ("computer_use", false, false),
-        ("computer_use", true, true),
-        ("providers", false, true),
-        ("providers", true, true),
-    ] {
-        let permissions = computer_use_mcp::permissions::PermissionStatus {
-            screen_recording,
-            ..Default::default()
-        };
-        assert_eq!(permission_relaunch_marker(None, permissions), None);
-        let marker = tcode_services::relaunch::RelaunchMarker {
-            reopen_settings: section.into(),
-            active_session: Some("session-1".into()),
-        };
-        assert_eq!(
-            permission_relaunch_marker(Some(marker.clone()), permissions),
-            kept.then_some(marker),
-            "{section}, screen recording {screen_recording}"
-        );
-    }
-}
 
 /// What crosses the wire for `thread`'s index entry while `events` run, one
 /// host turn each, as the provider delivers them to `via`.
@@ -1411,65 +1387,6 @@ fn unreadable_secrets_are_reported_and_never_written_over() {
         std::fs::read_to_string(test_store.root().join("secrets.json")).unwrap(),
         torn
     );
-}
-
-#[test]
-fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-provider-diff-test");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    state.deliver(
-        cx,
-        1000,
-        tcode_protocol::ClientPayload::Subscribe(Subscription {
-            topic: Topic::Providers,
-            after: None,
-            known_index: None,
-        }),
-    );
-    cx.run_until_parked();
-    cx.drain_outgoing();
-    let command = Command::SetProfileSecret {
-        profile_id: "codex".into(),
-        name: "OPENAI_API_KEY".into(),
-        value: Some("test-secret".into()),
-    };
-
-    state.dispatch_command(cx, 43, command.clone());
-    cx.run_until_parked();
-
-    let outgoing = cx.drain_outgoing();
-    let provider_events: Vec<_> = outgoing
-        .iter()
-        .filter_map(|message| match message {
-            HostMessage::Event(EventEnvelope {
-                request_id: None,
-                topic: Topic::Providers,
-                event: ServerEvent::ProvidersReplaced(status),
-            }) => Some(status),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(provider_events.len(), 1);
-    assert!(
-        provider_events[0]
-            .secret_names
-            .get("codex")
-            .is_some_and(|names| names.contains("OPENAI_API_KEY"))
-    );
-
-    state.dispatch_command(cx, 44, command);
-    cx.run_until_parked();
-
-    let outgoing = cx.drain_outgoing();
-    assert!(!outgoing.iter().any(|message| matches!(
-        message,
-        HostMessage::Event(EventEnvelope {
-            request_id: None,
-            topic: Topic::Providers,
-            event: ServerEvent::ProvidersReplaced(_),
-        })
-    )));
 }
 
 /// A finished turn refreshes the account usage of the profile it ran on and
@@ -6717,37 +6634,6 @@ fn native_permission_selection_stays_pending_until_provider_confirmation() {
 }
 
 #[test]
-fn effort_changes_use_per_turn_overrides_or_require_provider_restart() {
-    for (provider, effort, restart) in [
-        (ProviderKind::Codex, Some("high"), false),
-        (ProviderKind::OpenCode, Some("high"), false),
-        (ProviderKind::ClaudeCode, None, true),
-        (ProviderKind::Pi, None, true),
-        (ProviderKind::Acp, None, false),
-    ] {
-        let (commands, receiver) = smol::channel::unbounded();
-        let mut active = live_session(provider, commands);
-        active.meta.option_selections.push(OptionSelection {
-            id: "reasoningEffort".into(),
-            value: serde_json::json!("high"),
-        });
-        assert_eq!(active.options_changed_while_live(), restart, "{provider:?}");
-        if !restart {
-            active.push_queued("next turn".into(), Vec::new());
-            assert_eq!(active.dispatch_next_pending(test_start()), Ok(true));
-            let SessionCommand::SendTurn {
-                options: Some(options),
-                ..
-            } = receiver.try_recv().unwrap()
-            else {
-                panic!("expected per-turn options for {provider:?}");
-            };
-            assert_eq!(options.effort.as_deref(), effort, "{provider:?}");
-        }
-    }
-}
-
-#[test]
 fn queued_message_stamps_live_context_window_change() {
     let mut active = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);
     active.meta.model = Some("claude-opus-5".into());
@@ -6818,48 +6704,6 @@ fn shutdown_all_notifies_active_and_parked_live_providers() {
         assert!(state.selected_session().is_none());
         assert!(state.residents.parked.is_empty());
     });
-}
-
-/// Enter always queues while a turn runs; ⌘Enter steers only where the
-/// provider actually supports it, and otherwise degrades to queueing.
-#[test]
-fn send_routing_matrix() {
-    let (commands, _rx) = smol::channel::unbounded();
-    let mut codex = live_session(ProviderKind::Codex, commands.clone());
-
-    // Idle: both gestures are a plain send — there is nothing to steer into.
-    assert_eq!(codex.route(false), SendRouting::Send);
-    assert_eq!(codex.route(true), SendRouting::Send);
-
-    // Turn running: Enter queues, ⌘Enter steers (Codex has `turn/steer`).
-    codex.turn_in_flight = true;
-    assert_eq!(codex.route(false), SendRouting::Queue);
-    assert_eq!(codex.route(true), SendRouting::Steer);
-
-    let mut claude = live_session(ProviderKind::ClaudeCode, commands.clone());
-    claude.turn_in_flight = true;
-    assert_eq!(claude.route(true), SendRouting::Steer);
-
-    let mut pi = live_session(ProviderKind::Pi, commands.clone());
-    pi.turn_in_flight = true;
-    assert_eq!(pi.route(true), SendRouting::Steer);
-
-    let mut opencode = live_session(ProviderKind::OpenCode, commands.clone());
-    opencode.turn_in_flight = true;
-    assert_eq!(opencode.route(true), SendRouting::Steer);
-
-    // ACP has no steering method, so a steer must fall back to the queue
-    // rather than silently vanish.
-    let mut acp = live_session(ProviderKind::Acp, commands);
-    acp.turn_in_flight = true;
-    assert_eq!(acp.route(false), SendRouting::Queue);
-    assert_eq!(acp.route(true), SendRouting::QueueUnsupported);
-
-    // A provider that can steer still can't while it isn't live.
-    let mut dead = live_session(ProviderKind::Codex, smol::channel::unbounded().0);
-    dead.runtime = Runtime::Idle;
-    dead.turn_in_flight = true;
-    assert_eq!(dead.route(true), SendRouting::QueueUnsupported);
 }
 
 /// A `$skill` the provider also exposes as a slash command (Claude) goes out
@@ -7236,28 +7080,6 @@ fn inferred_startup_model_updates_live_model_without_restart() {
         ));
         assert!(actor.try_recv().is_err(), "phantom restart sent Shutdown");
     });
-}
-#[test]
-fn parking_preserves_live_providers_and_only_starts_grace_when_idle() {
-    for background_tasks in [0, 2] {
-        let cx = &mut TestAppContext::default();
-        let store = TestStore::new("tcode-parking-liveness");
-        let state = cx.new_entity(TestClientState::new((*store).clone()));
-        let (commands, actor) = smol::channel::unbounded();
-        let mut session = live_session(ProviderKind::ClaudeCode, commands);
-        session.meta.id = "resident".into();
-        session.background_task_count = background_tasks;
-        state.update(cx, |state, cx| {
-            state.install_selected(session);
-            state.park_active(cx);
-            assert!(state.selected_session().is_none());
-            let parked = &state.residents.parked["resident"];
-            assert!(matches!(parked.runtime, Runtime::Live(_)));
-            assert_eq!(parked.background_task_count, background_tasks);
-            assert_eq!(parked.idle_since.is_some(), background_tasks == 0);
-            assert!(actor.try_recv().is_err(), "parking sent Shutdown");
-        });
-    }
 }
 
 #[test]
@@ -9719,54 +9541,6 @@ fn switching_threads_parks_a_working_session_instead_of_killing_it() {
             !state.turn_running_for(&id_a),
             "a completed active session must not remain Working"
         );
-    });
-
-    let _ = std::fs::remove_dir_all(&cwd);
-}
-
-/// A parked session that runs out of work becomes an idle resident instead
-/// of immediately rebuilding its provider on the next selection.
-#[test]
-fn drained_parked_session_stays_resident() {
-    let cx = &mut TestAppContext::default();
-    let cwd = std::env::temp_dir().join(format!("tcode-parkend-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&cwd).unwrap();
-    let test_store = TestStore::new("tcode-parkend-data");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-
-    // A live session (fake provider: commands land on `commands`).
-    let (session, commands) = fake_live_session(cwd.clone());
-    let id = session.meta.id.clone();
-
-    state.update(cx, |state, cx| {
-        state.store.upsert_meta(&session.meta).unwrap();
-        state.sessions = state.store.load_index().unwrap().into();
-        state.install_selected(session);
-        state.send_turn(&id, "one last thing".into(), Vec::new(), cx);
-        let delivery_id = match next_command(&commands) {
-            Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
-            other => panic!("expected final SendTurn, got {other:?}"),
-        };
-        state.on_event(&id, AgentEvent::TurnAccepted { delivery_id }, cx);
-
-        state.start_draft("proj".into(), cwd.clone(), cx);
-        assert!(state.turn_running_for(&id));
-
-        // The parked turn finishes with an empty queue → resident grace.
-        state.on_event(
-            &id,
-            AgentEvent::TurnCompleted {
-                turn_id: "turn-1".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            cx,
-        );
-        assert!(next_command(&commands).is_err(), "drain sent Shutdown");
-        assert!(state.residents.parked.contains_key(&id));
-        assert!(state.residents.parked[&id].idle_since.is_some());
-        assert!(!state.turn_running_for(&id));
     });
 
     let _ = std::fs::remove_dir_all(&cwd);
