@@ -19,11 +19,11 @@ struct UpdateRun {
 
 #[derive(Default)]
 struct ModelRefresh {
-    configuration: ProviderSettings,
-    profile_revision: u64,
-    network: bool,
     generation: u64,
     loading: bool,
+    /// The harness processes the latest listing started, which the next one
+    /// stops.
+    processes: agent::SessionProcesses,
 }
 
 struct SecretWrite {
@@ -107,38 +107,28 @@ impl ProviderCatalog {
         }
     }
 
-    fn begin_model_refresh(
-        &mut self,
-        provider: ProviderKind,
-        configuration: ProviderSettings,
-        profile_revision: u64,
-        network: bool,
-    ) -> Option<u64> {
+    /// A new listing of `provider`'s models, which replaces one still
+    /// running: that one's harness is stopped, and its answer is not taken.
+    fn begin_model_refresh(&mut self, provider: ProviderKind) -> (u64, agent::SessionProcesses) {
         let refresh = self.model_refreshes.entry(provider).or_default();
-        if refresh.loading
-            && refresh.configuration == configuration
-            && refresh.profile_revision == profile_revision
-            && refresh.network == network
-        {
-            return None;
-        }
+        refresh.processes.stop();
         *refresh = ModelRefresh {
-            configuration,
-            profile_revision,
-            network,
             generation: refresh.generation + 1,
             loading: true,
+            processes: agent::SessionProcesses::default(),
         };
-        Some(refresh.generation)
+        (refresh.generation, refresh.processes.clone())
     }
 
+    /// Ends the listing of `generation`; `false` when a later one replaced it.
     fn finish_model_refresh(&mut self, provider: ProviderKind, generation: u64) -> bool {
-        let Some(refresh) = self.model_refreshes.get_mut(&provider) else {
+        let Some(refresh) = self
+            .model_refreshes
+            .get_mut(&provider)
+            .filter(|refresh| refresh.generation == generation)
+        else {
             return false;
         };
-        if refresh.generation != generation {
-            return false;
-        }
         refresh.loading = false;
         true
     }
@@ -340,14 +330,7 @@ impl AppState {
                 .copied()
                 .unwrap_or(0);
             let network = self.provider_update_checks_enabled();
-            let Some(generation) = self.providers.begin_model_refresh(
-                provider,
-                configuration.clone(),
-                profile_revision,
-                network,
-            ) else {
-                continue;
-            };
+            let (generation, processes) = self.providers.begin_model_refresh(provider);
             let binary = configuration.binary_path.clone();
             let launch_env = self.prepare_profile_env(&profile_id, cx);
             let store = self.store.clone();
@@ -360,9 +343,11 @@ impl AppState {
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
                 let result = match launch_env.await {
-                    Ok(launch_env) => list_models(provider, binary, launch_env, refresh)
-                        .await
-                        .map_err(|error| error.to_string()),
+                    Ok(launch_env) => {
+                        list_models(provider, binary, launch_env, refresh, &processes)
+                            .await
+                            .map_err(|error| error.to_string())
+                    }
                     Err(error) => Err(error),
                 };
                 host_cx.enqueue(move |state, _cx| {

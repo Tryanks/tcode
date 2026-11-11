@@ -66,8 +66,8 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
 pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
+    processes: &crate::SessionProcesses,
 ) -> Result<Vec<ModelSpec>, AgentError> {
-    let processes = crate::SessionProcesses::default();
     let listing = crate::process::unblock({
         let processes = processes.clone();
         move || {

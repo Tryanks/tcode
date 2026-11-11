@@ -230,9 +230,11 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
 pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
+    processes: &crate::SessionProcesses,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     let (child, mut stdin, lines, mut stderr_tail) =
         spawn_server(binary_path.as_deref(), &[], &launch_env)?;
+    let child = processes.hold(child);
     let windows = home_dir(&launch_env)
         .map(|home| model_windows::read(&home))
         .unwrap_or_default();
@@ -6301,6 +6303,7 @@ mod tests {
         let message = smol::block_on(list_models(
             Some(PathBuf::from("/bin/cat")),
             LaunchEnv::default(),
+            &Default::default(),
         ))
         .unwrap_err()
         .to_string();

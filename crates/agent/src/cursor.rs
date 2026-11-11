@@ -85,6 +85,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
 pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
+    processes: &crate::SessionProcesses,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     let opts = SessionOptions {
         cwd: std::env::temp_dir(),
@@ -98,7 +99,7 @@ pub async fn list_models(
         extra_args: Vec::new(),
         acp: None,
         instructions: None,
-        processes: Default::default(),
+        processes: processes.clone(),
         clock: Default::default(),
         worktrees: Vec::new(),
     };

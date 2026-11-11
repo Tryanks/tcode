@@ -213,7 +213,15 @@ fn main() {
             None => None,
         };
         let exit_code = smol::block_on(async move {
-            match list_models(provider, binary, Default::default(), Default::default()).await {
+            match list_models(
+                provider,
+                binary,
+                Default::default(),
+                Default::default(),
+                &Default::default(),
+            )
+            .await
+            {
                 Ok(models) => {
                     println!("{}", serde_json::to_string_pretty(&models).unwrap());
                     0

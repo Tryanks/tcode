@@ -1630,7 +1630,11 @@ mod tests {
         // Started in the harness slot of a model catalog query, which it
         // never answers.
         let catalog = std::thread::spawn(move || {
-            smol::block_on(agent::pi::list_models(Some(stuck), Default::default()))
+            smol::block_on(agent::pi::list_models(
+                Some(stuck),
+                Default::default(),
+                &Default::default(),
+            ))
         });
         let harness: libc::pid_t = std::fs::read_to_string(&pid_file)
             .unwrap()

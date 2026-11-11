@@ -2147,19 +2147,25 @@ pub struct CatalogRefresh {
 /// provider's configured environment/home so the catalog reflects the same CLI
 /// (and account) a session would actually run against.
 #[cfg(feature = "process")]
+///
+/// The harness processes the listing starts are held in `processes`, which
+/// stops them, and so ends the listing, whatever it is waiting on.
 pub async fn list_models(
     provider: ProviderKind,
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
     refresh: CatalogRefresh,
+    processes: &SessionProcesses,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     match provider {
-        ProviderKind::Codex => codex::list_models(binary_path, launch_env).await,
-        ProviderKind::ClaudeCode => claude::list_models(binary_path, launch_env, refresh).await,
-        ProviderKind::Pi => pi::list_models(binary_path, launch_env).await,
-        ProviderKind::OpenCode => opencode::list_models(binary_path, launch_env).await,
-        ProviderKind::Cursor => cursor::list_models(binary_path, launch_env).await,
-        ProviderKind::Grok => grok::list_models(binary_path, launch_env).await,
+        ProviderKind::Codex => codex::list_models(binary_path, launch_env, processes).await,
+        ProviderKind::ClaudeCode => {
+            claude::list_models(binary_path, launch_env, refresh, processes).await
+        }
+        ProviderKind::Pi => pi::list_models(binary_path, launch_env, processes).await,
+        ProviderKind::OpenCode => opencode::list_models(binary_path, launch_env, processes).await,
+        ProviderKind::Cursor => cursor::list_models(binary_path, launch_env, processes).await,
+        ProviderKind::Grok => grok::list_models(binary_path, launch_env, processes).await,
         // ACP agents advertise their models over the wire at session start
         // (`AgentEvent::ProviderOptions`), so there is no catalog to pre-fetch.
         ProviderKind::Acp => Ok(Vec::new()),

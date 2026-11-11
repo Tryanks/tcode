@@ -5165,17 +5165,13 @@ pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
     refresh: CatalogRefresh,
+    processes: &crate::SessionProcesses,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     crate::process::unblock(move || {
         crate::claude_manifest::refresh(refresh.cache_dir.as_deref(), refresh.network)
     })
     .await;
-    let version = claude_version(
-        binary_path.as_deref(),
-        &launch_env,
-        &crate::SessionProcesses::default(),
-    )
-    .await;
+    let version = claude_version(binary_path.as_deref(), &launch_env, processes).await;
     Ok(crate::claude_manifest::current().models_for_version(version))
 }
 
