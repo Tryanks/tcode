@@ -1736,7 +1736,7 @@ impl Composer {
                 };
                 // The name truncates to make room, down to one
                 // control's width so the picker can still be opened.
-                shown.fold_across_min(px(SEND_SIZE), div().min_w(px(SEND_SIZE)).child(picker))
+                shown.fold_across(div().min_w(px(SEND_SIZE)).child(picker))
             });
         let mut traits_picker = self.render_traits_picker(cx);
         // The chips give way to the send/stop control: Stop must stay
@@ -1782,7 +1782,7 @@ impl Composer {
                         window,
                         cx,
                     )
-                    .map(|shown| shown.fold_across_gap(px(4.), build(cx)))
+                    .map(|shown| shown.fold_across_gap(px(4.), div().min_w_0().child(build(cx))))
             };
             let meter = beside("meter", &mut |cx| self.render_context_meter(cx), window, cx);
             let permission = beside(

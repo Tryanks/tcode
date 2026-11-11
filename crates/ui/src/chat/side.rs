@@ -1350,18 +1350,22 @@ impl ChatView {
                         .overflow_hidden()
                         .child(crate::widgets::fade_text(title))
                 });
+                // A button keeps its own width in a row; the box around it
+                // lets the header shrink it.
                 shown.fold_across(
-                    Button::new("side-back")
-                        .motion(&self.motion)
-                        .debug_selector(|| "side-back".into())
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::ArrowLeft)
-                        .max_w(px(BACK_WIDEST))
-                        .children(label)
-                        .aria_label(name.clone())
-                        .tooltip(name)
-                        .on_click(close.clone()),
+                    div().min_w_0().child(
+                        Button::new("side-back")
+                            .motion(&self.motion)
+                            .debug_selector(|| "side-back".into())
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::ArrowLeft)
+                            .max_w(px(BACK_WIDEST))
+                            .children(label)
+                            .aria_label(name.clone())
+                            .tooltip(name)
+                            .on_click(close.clone()),
+                    ),
                 )
             });
         let badge = self
