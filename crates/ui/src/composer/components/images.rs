@@ -54,6 +54,7 @@ pub(in super::super) enum PendingImageSource {
 
 pub(in super::super) enum AddImageError {
     Attachment(AttachError),
+    Read { name: String, error: std::io::Error },
     Persist(std::io::Error),
 }
 
@@ -241,13 +242,15 @@ impl Composer {
                     let bytes = match source {
                         PendingImageSource::Bytes(bytes) => bytes,
                         PendingImageSource::Path(path) => {
-                            let size = std::fs::metadata(&path)
-                                .map_err(AddImageError::Persist)?
-                                .len();
+                            let read = |error| AddImageError::Read {
+                                name: name.clone(),
+                                error,
+                            };
+                            let size = std::fs::metadata(&path).map_err(read)?.len();
                             if size > MAX_SOURCE_BYTES {
                                 return Err(too_large());
                             }
-                            std::fs::read(path).map_err(AddImageError::Persist)?
+                            std::fs::read(path).map_err(read)?
                         }
                     };
                     if bytes.len() as u64 > MAX_SOURCE_BYTES {
@@ -367,6 +370,9 @@ impl Composer {
     ) {
         let message = match error {
             AddImageError::Attachment(err) => attach_error_message(&err),
+            AddImageError::Read { name, error } => {
+                crate::tr!("attach.read_failed", name = name, error = error).into_owned()
+            }
             AddImageError::Persist(err) => {
                 crate::tr!("errors.persist_event", error = err).into_owned()
             }
