@@ -2842,7 +2842,9 @@ impl Actor {
                     self.clear_retry().await;
                 }
                 self.active_turn = None;
-                // An answer can only steer the turn that asked.
+                // An async question is answered by steering the turn that
+                // asked it, so it ends with that turn: its card goes, and
+                // nothing is sent to Codex, which waited on no answer.
                 if let Some((request_id, _)) = self.async_questions.take() {
                     self.events
                         .emit(AgentEvent::UserInputResolved {
