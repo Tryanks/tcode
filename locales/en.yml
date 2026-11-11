@@ -762,7 +762,6 @@ providers:
     cap_reasoning: "Reasoning"
     err_empty: "Enter a model slug."
     err_builtin: "That model is already built in."
-    err_too_long: "Model slugs must be %{limit} characters or less."
     err_saved: "That custom model is already saved."
   # ACP agents (Settings → Providers → ACP Agents): the marketplace over the
   # ACP registry, plus the installed agents' cards.

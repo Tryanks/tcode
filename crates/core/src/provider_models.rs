@@ -5,8 +5,6 @@ use serde_json::Value;
 
 use crate::settings::ProviderSettings;
 
-pub const MAX_SLUG_LEN: usize = 128;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelCapability {
     FastMode,
@@ -209,7 +207,6 @@ pub fn picker_models(
 pub enum SlugError {
     Empty,
     AlreadyBuiltIn,
-    TooLong,
     AlreadySaved,
 }
 
@@ -221,9 +218,6 @@ pub fn validate_slug(
     let slug = raw.trim();
     if slug.is_empty() {
         return Err(SlugError::Empty);
-    }
-    if slug.chars().count() > MAX_SLUG_LEN {
-        return Err(SlugError::TooLong);
     }
     if catalog.iter().any(|spec| spec.id == slug) {
         return Err(SlugError::AlreadyBuiltIn);
@@ -355,10 +349,6 @@ mod tests {
         assert_eq!(
             validate_slug("already", &catalog(), &settings),
             Err(SlugError::AlreadySaved)
-        );
-        assert_eq!(
-            validate_slug(&"x".repeat(MAX_SLUG_LEN + 1), &catalog(), &settings),
-            Err(SlugError::TooLong)
         );
         assert_eq!(
             validate_slug("  claude-sonnet-5 ", &catalog(), &settings),

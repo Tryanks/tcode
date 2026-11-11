@@ -762,7 +762,6 @@ providers:
     cap_reasoning: "推論"
     err_empty: "モデル ID を入力してください。"
     err_builtin: "このモデルはすでに組み込まれています。"
-    err_too_long: "モデル ID は %{limit} 文字以内にしてください。"
     err_saved: "このカスタムモデルはすでに保存されています。"
   # ACP agents (Settings → Providers → ACP Agents): the marketplace over the
   # ACP registry, plus the installed agents' cards.

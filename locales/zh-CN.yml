@@ -758,7 +758,6 @@ providers:
     cap_reasoning: "推理"
     err_empty: "请输入模型标识。"
     err_builtin: "该模型已内置。"
-    err_too_long: "模型标识不能超过 %{limit} 个字符。"
     err_saved: "该自定义模型已保存。"
   acp:
     add_agent: "添加 Harness"
