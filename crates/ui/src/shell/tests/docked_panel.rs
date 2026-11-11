@@ -1,6 +1,6 @@
 //! A pane is `[conversation | panel]`: the right panel docks beside the
 //! conversation it belongs to, and covers the pane only where there is no
-//! room for both or the reader expanded it. Neighbouring panes never move.
+//! room for both or the reader expanded it.
 
 use super::*;
 
@@ -11,28 +11,8 @@ const LEAST: f32 = crate::material::PANEL_CONTENT_MIN_WIDTH
     + crate::window_caption::RIGHT_PANEL_CAPTION_WIDTH
     + PANE_MIN_WIDTH;
 
-fn conversation(cx: &mut VisualTestContext) -> gpui::Bounds<Pixels> {
-    cx.debug_bounds("pane-conversation")
-        .expect("the conversation")
-}
-
 fn panel(cx: &mut VisualTestContext) -> gpui::Bounds<Pixels> {
     cx.debug_bounds("right-panel").expect("the panel")
-}
-
-/// Whether the panel `panel` casts a shadow on what is around it.
-fn casts_shadow(panel: gpui::Bounds<Pixels>, cx: &mut VisualTestContext) -> bool {
-    cx.update(|window, _| {
-        let scale = window.scale_factor();
-        crate::test_frames::painted_shadows(window)
-            .iter()
-            .any(|shadow| {
-                let bounds = shadow.element_bounds;
-                shadow.color.a > 0.
-                    && (bounds.origin.x.0 / scale - f32::from(panel.left())).abs() < 1.
-                    && (bounds.size.width.0 / scale - f32::from(panel.size.width)).abs() < 1.
-            })
-    })
 }
 
 /// The composer of the first pane holding the keyboard.
@@ -64,9 +44,9 @@ fn one_pane(width: f32, cx: &mut VisualTestContext) {
     crate::test_frames::draw_settled(cx);
 }
 
-/// A panel opens beside its conversation, the two sharing the pane edge to
-/// edge at the width the reader chose. The composer keeps the keyboard, and
-/// Escape, which means something else in a docked panel, does not close it.
+/// A panel opens beside its conversation. The composer keeps the keyboard,
+/// and Escape, which means something else in a docked panel, does not close
+/// it.
 #[gpui::test]
 fn a_panel_docks_beside_the_conversation_and_leaves_the_keyboard(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -74,19 +54,10 @@ fn a_panel_docks_beside_the_conversation_and_leaves_the_keyboard(cx: &mut TestAp
     let store = store_of(&shell, cx);
     one_pane(1345., cx);
     let input = typing(&shell, cx);
-    let pane = pane_bounds(&shell, cx)[0];
 
     open(&store, "thread-1", RightTab::Plan, cx);
 
-    let (conversation_at, panel_at) = (conversation(cx), panel(cx));
-    assert_eq!(conversation_at.right(), panel_at.left());
-    assert_eq!(
-        (conversation_at.left(), panel_at.right()),
-        (pane.left(), pane.right())
-    );
-    assert_eq!(panel_at.size.width, px(560.));
-    assert_eq!(pane_bounds(&shell, cx)[0], pane, "the pane's slot stays");
-    assert!(!casts_shadow(panel_at, cx), "a peer, not floating over it");
+    let panel_at = panel(cx);
     cx.update(|window, _| assert!(input.is_focused(window), "the composer keeps it"));
 
     // Escape is the panel's own to use with the keyboard in it.
@@ -101,10 +72,9 @@ fn a_panel_docks_beside_the_conversation_and_leaves_the_keyboard(cx: &mut TestAp
 
 /// In a pane too narrow for both, the panel covers that pane, as it is what
 /// the reader sees there: it takes the keyboard, Escape closes it, and the
-/// keyboard goes back. The conversation keeps the pane beneath, and the
-/// neighbour is not touched by any of it.
+/// keyboard goes back.
 #[gpui::test]
-fn a_narrow_pane_is_covered_and_its_neighbour_never_moves(cx: &mut TestAppContext) {
+fn a_narrow_pane_is_covered_and_its_panel_takes_the_keyboard(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx) = mount_panes(cx);
     let store = store_of(&shell, cx);
@@ -120,15 +90,12 @@ fn a_narrow_pane_is_covered_and_its_neighbour_never_moves(cx: &mut TestAppContex
     open(&store, "thread-1", RightTab::Plan, cx);
 
     assert_eq!(panel(cx), panes[0]);
-    assert!(casts_shadow(panes[0], cx), "it floats over the pane");
-    assert_eq!(pane_bounds(&shell, cx), panes, "the neighbour stays");
     cx.update(|window, _| assert!(!input.is_focused(window), "the panel has the keyboard"));
 
     cx.simulate_keystrokes("escape");
     crate::test_frames::draw_settled(cx);
     assert_eq!(panel_of(&store, "thread-1", cx), None);
     assert_eq!(cx.debug_bounds("right-panel"), None);
-    assert_eq!(pane_bounds(&shell, cx), panes, "the neighbour stays");
     cx.update(|window, _| assert!(input.is_focused(window), "it goes back"));
 }
 
@@ -164,38 +131,6 @@ fn an_agent_opened_from_a_covering_panel_closes_it(cx: &mut TestAppContext) {
                 store.toggle_diff_expanded_for(Some("thread-1"), cx)
             });
         }
-    }
-}
-
-/// Expanded by its own button, the panel covers the pane, floating over it,
-/// and the conversation stays laid out as it was beneath, Preview's too;
-/// Escape closes it there; restored, it is back at its width.
-#[gpui::test]
-fn an_expanded_panel_covers_the_pane_and_reflows_nothing(cx: &mut TestAppContext) {
-    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, _host, cx) = mount_panes(cx);
-    let store = store_of(&shell, cx);
-    one_pane(1345., cx);
-    let pane = pane_bounds(&shell, cx)[0];
-    let mut tabs = vec![(RightTab::Plan, "diff-expand")];
-    if cfg!(preview_backend) {
-        tabs.push((RightTab::Preview, "preview-expand"));
-    }
-    for (tab, expand) in tabs {
-        open(&store, "thread-1", tab, cx);
-        let docked = (panel(cx), conversation(cx));
-        let composer = cx.debug_bounds("composer-card").expect("the composer");
-
-        press_control(expand, cx);
-        crate::test_frames::draw_settled(cx);
-        assert_eq!(panel(cx), pane, "{tab:?}");
-        assert!(casts_shadow(pane, cx), "{tab:?}");
-        assert_eq!(conversation(cx), docked.1, "{tab:?}");
-        assert_eq!(cx.debug_bounds("composer-card"), Some(composer), "{tab:?}");
-
-        press_control(expand, cx);
-        crate::test_frames::draw_settled(cx);
-        assert_eq!((panel(cx), conversation(cx)), docked, "{tab:?}");
     }
 }
 

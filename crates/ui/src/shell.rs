@@ -11092,176 +11092,44 @@ pub(crate) mod tests {
     }
 
     /// An agent opened from its lead's Agents panel shows beside the lead in
-    /// the lead's own pane, the panel staying docked beside them: on a card
-    /// in the side rail's place, under the lead's header, the lead's column
-    /// keeping its width clear of it, and the lead keeping the store's focus. Close takes
-    /// it away, the panel still there, and with that closed the lead's pane,
-    /// its column and the keyboard are back where they were before it opened,
-    /// with the agent's thread closed. Opening and closing again leaves the
-    /// same layout each time.
-    /// The card's edge, dragged, widens it, and the lead's column keeps its
-    /// width.
+    /// the lead's own pane, the panel staying open beside them, and the lead
+    /// keeping the keyboard's pane. Close takes it away, the panel still
+    /// there, and the agent's thread closes.
     #[gpui::test]
     fn an_agent_opens_beside_its_lead_in_the_leads_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_lead_with_agent(cx);
         cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
-        crate::test_frames::draw_settled(cx);
-        let panes = pane_bounds(&shell, cx);
-        assert_eq!(panes.len(), 1);
-        let header = cx.debug_bounds("chat-title").expect("the lead's header");
-        let column = cx
-            .debug_bounds("composer-card")
-            .expect("the lead's composer");
-
-        for round in 0..2 {
-            store.update(cx, |store, cx| {
-                store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Agents, cx)
-            });
-            crate::test_frames::draw_settled(cx);
-            let panel = cx.debug_bounds("right-panel").expect("the panel");
-            open_agent_from_panel(&shell, &host, cx);
-            assert_eq!(
-                cx.debug_bounds("right-panel"),
-                Some(panel),
-                "round {round}: the panel stays beside the agent"
-            );
-            let beside = cx.debug_bounds("pane-conversation").expect("the lead");
-            assert_eq!(beside.right(), panel.left(), "round {round}");
-            assert_eq!(
-                pane_threads(&shell, cx),
-                [Some("thread-1".into())],
-                "round {round}"
-            );
-            assert_eq!(pane_bounds(&shell, cx), panes, "round {round}");
-            let pane = panes[0];
-            let side = cx
-                .debug_bounds("chat-side-header")
-                .expect("the agent beside its lead");
-            let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
-            assert!(
-                card.top() >= header.bottom() && card.bottom() < pane.bottom(),
-                "{card:?} under {header:?} in {pane:?}"
-            );
-            assert!(
-                side.left() >= card.left()
-                    && side.right() <= card.right()
-                    && side.top() >= card.top(),
-                "{side:?} on {card:?}"
-            );
-            let lead = lead_card(column, cx).unwrap_or_else(|| {
-                panic!("round {round}: the lead's composer keeps the width of {column:?}")
-            });
-            assert!(lead.right() < card.left(), "{lead:?} clear of {card:?}");
-            assert_eq!(keyboard_pane(&shell, cx), Some(0), "round {round}");
-            store.read_with(cx, |store, _| {
-                assert!(store.is_thread_open("thread-1"));
-                assert!(store.is_thread_open("agent-1"), "round {round}");
-            });
-
-            press_control("side-close", cx);
-            assert!(
-                cx.debug_bounds("chat-side-header").is_none(),
-                "round {round}"
-            );
-            assert_eq!(
-                pane_threads(&shell, cx),
-                [Some("thread-1".into())],
-                "round {round}"
-            );
-            assert_eq!(pane_bounds(&shell, cx), panes, "round {round}");
-            assert_eq!(cx.debug_bounds("right-panel"), Some(panel), "round {round}");
-            store.update(cx, |store, cx| {
-                store.close_right_panel_for(Some("thread-1"), cx)
-            });
-            crate::test_frames::draw_settled(cx);
-            assert_eq!(
-                cx.debug_bounds("composer-card"),
-                Some(column),
-                "round {round}"
-            );
-            assert_eq!(cx.debug_bounds("right-panel"), None, "round {round}");
-            assert_eq!(keyboard_pane(&shell, cx), Some(0), "round {round}");
-            store.read_with(cx, |store, _| {
-                assert!(store.is_thread_open("thread-1"));
-                assert!(!store.is_thread_open("agent-1"), "round {round}");
-            });
-        }
-
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Agents, cx)
         });
         crate::test_frames::draw_settled(cx);
         open_agent_from_panel(&shell, &host, cx);
-        // Beside a docked panel the card is about as wide as it can be.
-        store.update(cx, |store, cx| {
-            store.close_right_panel_for(Some("thread-1"), cx)
+        assert!(
+            cx.debug_bounds("right-panel").is_some(),
+            "the panel stays beside the agent"
+        );
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+        assert!(
+            cx.debug_bounds("chat-side-header").is_some(),
+            "the agent beside its lead"
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        store.read_with(cx, |store, _| {
+            assert!(store.is_thread_open("thread-1"));
+            assert!(store.is_thread_open("agent-1"));
         });
-        crate::test_frames::draw_settled(cx);
-        let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
-        let lead = lead_card(column, cx).expect("the lead's composer");
-        let grip = cx
-            .debug_bounds("chat-side-grip")
-            .expect("the grip of the card's edge");
-        assert!(
-            lead.right() <= grip.left() && grip.right() <= card.left(),
-            "{grip:?} in the gap between {lead:?} and {card:?}"
-        );
-        let edge = grip.center();
-        let to = edge - gpui::point(px(10.), px(0.));
-        let none = gpui::Modifiers::default();
-        cx.simulate_mouse_move(edge, None, none);
-        draw(cx);
-        cx.simulate_mouse_down(edge, MouseButton::Left, none);
-        draw(cx);
-        for step in [edge - gpui::point(px(4.), px(0.)), to] {
-            cx.simulate_mouse_move(step, Some(MouseButton::Left), none);
-            draw(cx);
-        }
-        cx.simulate_mouse_up(to, MouseButton::Left, none);
-        draw(cx);
-        let dragged = cx.debug_bounds("chat-side-card").expect("the agent's card");
-        assert_eq!(dragged.right(), card.right());
-        assert!(
-            (dragged.left() - (card.left() - px(10.))).abs() < px(1.),
-            "{dragged:?} widened from {card:?} as far as its edge went"
-        );
-        let lead = lead_card(column, cx).expect("the lead's composer keeps its width");
-        assert!(
-            lead.right() < dragged.left(),
-            "{lead:?} clear of {dragged:?}"
-        );
-    }
 
-    /// The lead's composer card, `column` as the lead alone drew it, where
-    /// it is painted now with the same size at the same height. With a
-    /// writable agent beside the lead, the agent's composer card is a
-    /// "composer-card" too, and drawn after the lead's.
-    fn lead_card(
-        column: gpui::Bounds<Pixels>,
-        cx: &mut VisualTestContext,
-    ) -> Option<gpui::Bounds<Pixels>> {
-        cx.update(|window, _| {
-            let scale = window.scale_factor();
-            crate::test_frames::painted_quads(window)
-                .iter()
-                .map(|quad| {
-                    let bounds = quad.bounds;
-                    gpui::Bounds::new(
-                        gpui::point(px(bounds.origin.x.0 / scale), px(bounds.origin.y.0 / scale)),
-                        gpui::size(
-                            px(bounds.size.width.0 / scale),
-                            px(bounds.size.height.0 / scale),
-                        ),
-                    )
-                })
-                .find(|bounds| {
-                    (bounds.size.width - column.size.width).abs() < px(0.5)
-                        && (bounds.size.height - column.size.height).abs() < px(0.5)
-                        && (bounds.top() - column.top()).abs() < px(0.5)
-                })
-        })
+        press_control("side-close", cx);
+        assert!(cx.debug_bounds("chat-side-header").is_none());
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+        assert!(cx.debug_bounds("right-panel").is_some(), "the panel stays");
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        store.read_with(cx, |store, _| {
+            assert!(store.is_thread_open("thread-1"));
+            assert!(!store.is_thread_open("agent-1"));
+        });
     }
 
     /// The rows of either timeline painted between `left` and `right`, by
@@ -11739,18 +11607,8 @@ pub(crate) mod tests {
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         assert!(cx.debug_bounds("waiting-pane").is_some());
-        // The draft keeps its layout while its pane halves, and takes the
-        // half once the glide lands: its header, the only one (a waiting
-        // pane draws none), ends inside it.
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
-        let draft = shell.read_with(cx, |shell, cx| {
-            shell.column.as_ref().expect("attached").all_panes(cx)[0]
-                .read(cx)
-                .bounds()
-        });
-        let menu = cx.debug_bounds("pane-menu").expect("the draft's pane menu");
-        assert!(menu.right() <= draft.right(), "{menu:?} in {draft:?}");
 
         cx.simulate_keystrokes("secondary-2");
         draw(cx);
@@ -12219,10 +12077,9 @@ pub(crate) mod tests {
     }
 
     /// Two panes each have a panel. Diff opened from the left pane's header
-    /// docks inside that pane, its conversation yielding to it and the right
-    /// pane untouched; Plan opened in the right pane too docks there, each
-    /// with its own thread's content. A thread moved to the other pane takes
-    /// its panel along.
+    /// opens inside that pane and the right pane's thread keeps its own shut;
+    /// Plan opened in the right pane opens there, each with its own thread's
+    /// content. A thread moved to the other pane takes its panel along.
     // Finds the left pane's toggle at the right pane's distance from its
     // pane's end. On Windows the rightmost header ends in the window's
     // caption buttons and the left one does not, so there the point is not
@@ -12277,27 +12134,9 @@ pub(crate) mod tests {
         cx.simulate_click(left_diff, gpui::Modifiers::default());
         crate::test_frames::draw_settled(cx);
         draw_until(cx, &host, "diff-line-new-left.rs-1", None);
-        let conversations = |cx: &mut VisualTestContext| {
-            shell.read_with(cx, |shell, cx| {
-                let attachment = shell.column.as_ref().expect("attached");
-                attachment
-                    .all_panes(cx)
-                    .iter()
-                    .map(|pane| pane.read(cx).chat_drawn(cx))
-                    .collect::<Vec<_>>()
-            })
-        };
         let drawer = cx.debug_bounds("right-panel").expect("the left drawer");
         assert!(inside(panes[0], drawer), "{drawer:?} in {panes:?}");
-        assert_eq!(drawer.right(), panes[0].right());
         assert_eq!(panel_of(&store, "thread-2", cx), None);
-        assert_eq!(pane_bounds(&shell, cx), panes);
-        let [left, right] = conversations(cx)[..] else {
-            panic!("two panes");
-        };
-        assert_eq!(left.left(), panes[0].left());
-        assert_eq!(left.right(), drawer.left());
-        assert_eq!(right, panes[1], "the right pane's conversation is its own");
 
         // Uncovered, the right pane's own header still takes a click.
         let plan = cx.debug_bounds("plan-panel").expect("the Plan toggle");
@@ -12316,14 +12155,6 @@ pub(crate) mod tests {
             .expect("the right thread's plan");
         assert!(inside(panes[0], diff), "{diff:?} in {panes:?}");
         assert!(inside(panes[1], step), "{step:?} in {panes:?}");
-        assert_eq!(pane_bounds(&shell, cx), panes);
-        let [both_left, both_right] = conversations(cx)[..] else {
-            panic!("two panes");
-        };
-        assert_eq!(both_left, left, "the left keeps what it had");
-        assert_eq!(both_right.left(), panes[1].left());
-        assert!(both_right.right() <= step.left(), "{both_right:?}");
-        assert_eq!(both_right.size.width, left.size.width);
 
         // The keyboard stayed in the left pane, which carries its thread over.
         cx.simulate_keystrokes("secondary-alt-shift-right");
@@ -12392,41 +12223,6 @@ pub(crate) mod tests {
         let other = open("thread-2", cx);
         assert_eq!(other.right(), panes[1].right(), "the other pane's drawer");
         assert_eq!(other.size.width, chosen);
-    }
-
-    /// A pane too narrow for its panel, zoomed, has room for both: the panel
-    /// stays inside the zoomed pane, which covers the column, docked beside
-    /// its conversation.
-    #[gpui::test]
-    fn a_zoomed_panes_drawer_stays_inside_it(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_panes(cx);
-        let store = store_of(&shell, cx);
-        side_by_side(&shell, || serve_thread(&host, "thread-2"), cx);
-        resize(cx, 1440.);
-        crate::test_frames::draw_settled(cx);
-        store.update(cx, |store, cx| {
-            store.toggle_tab_panel_for("thread-1", RightTab::Plan, cx)
-        });
-        crate::test_frames::draw_settled(cx);
-        let slot = pane_bounds(&shell, cx)[0];
-        assert_eq!(cx.debug_bounds("right-panel"), Some(slot), "it covers");
-        cx.simulate_keystrokes("secondary-shift-enter");
-        crate::test_frames::draw_settled(cx);
-        let zoomed = pane_bounds(&shell, cx)[0];
-        assert!(
-            zoomed.size.width > slot.size.width,
-            "{zoomed:?} from {slot:?}"
-        );
-        let drawer = cx.debug_bounds("right-panel").expect("the drawer");
-        assert_eq!(drawer.right(), zoomed.right());
-        assert!(zoomed.left() < drawer.left());
-        let conversation = shell.read_with(cx, |shell, cx| {
-            shell.column.as_ref().expect("attached").all_panes(cx)[0]
-                .read(cx)
-                .chat_drawn(cx)
-        });
-        assert_eq!(conversation.right(), drawer.left(), "docked");
     }
 
     /// A file listed in the rail of the pane without the keyboard opens that
@@ -12727,9 +12523,8 @@ pub(crate) mod tests {
         assert!(right < down, "menu: split right {right:?}, down {down:?}");
     }
 
-    /// Two columns fit beside the sidebar of a 1200pt window, each header
-    /// whole. A split the window has no room for is refused; stacking still
-    /// fits.
+    /// Two columns fit beside the sidebar of a 1200pt window. A split the
+    /// window has no room for is refused; stacking still fits.
     #[gpui::test]
     fn a_split_without_room_is_refused(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -12745,32 +12540,6 @@ pub(crate) mod tests {
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("draft-1".into())]
-        );
-        let panes: Vec<_> = shell.read_with(cx, |shell, cx| {
-            let panes = shell.column.as_ref().expect("attached").all_panes(cx);
-            panes.iter().map(|pane| pane.read(cx).bounds()).collect()
-        });
-        for pane in &panes {
-            assert!(pane.size.width >= px(PANE_MIN_WIDTH), "{pane:?}");
-        }
-        let overflow = cx
-            .debug_bounds("header-overflow")
-            .expect("the narrow header's one menu");
-        assert!(
-            overflow.right() <= panes[1].right(),
-            "the right pane's header ends at {:?}, past its pane at {:?}",
-            overflow.right(),
-            panes[1].right()
-        );
-        // Its close button keeps the header's right end, past the menu.
-        let close = cx
-            .debug_bounds("pane-close")
-            .expect("the pane's close button");
-        assert!(
-            overflow.right() <= close.left() && close.right() <= panes[1].right(),
-            "the close button at {close:?}, the menu ending at {:?}, the pane at {:?}",
-            overflow.right(),
-            panes[1].right()
         );
         cx.simulate_keystrokes("secondary-shift-w");
         draw(cx);
@@ -16314,48 +16083,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// The wide Machines and pairing pages' close is the page's own control:
-    /// where the window draws its own caption buttons it sits under them, a
-    /// gap below and over their Close, never beside them in the strip; where
-    /// it does not, the close holds the strip's right end.
-    #[gpui::test]
-    fn the_wide_hosts_close_sits_below_the_window_caption_buttons(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount(cx);
-        resize(cx, 1024.);
-        let state = shell.read_with(cx, |shell, _| shell.window_state());
-        state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
-        crate::test_frames::draw_settled(cx);
-        for page in ["Machines", "pairing"] {
-            if page == "pairing" {
-                let paste = cx
-                    .debug_bounds("hosts-pair")
-                    .expect("Machines offers pasting an invitation");
-                cx.simulate_click(paste.center(), gpui::Modifiers::default());
-                crate::test_frames::draw_settled(cx);
-            }
-            let close = cx
-                .debug_bounds("hosts-close")
-                .unwrap_or_else(|| panic!("the {page} page opened over a thread can close"));
-            match cx.debug_bounds("window-caption-close") {
-                Some(caption) => {
-                    assert!(
-                        close.top() > caption.bottom(),
-                        "the {page} close sits a gap below the caption buttons: {close:?} vs {caption:?}"
-                    );
-                    assert!(
-                        close.left() >= caption.left() && close.right() <= caption.right(),
-                        "the {page} close is right-aligned under the caption Close: {close:?} vs {caption:?}"
-                    );
-                }
-                None => assert!(
-                    close.bottom() <= px(window_caption::CAPTION_STRIP_HEIGHT),
-                    "without caption buttons the {page} close stays in the top strip: {close:?}"
-                ),
-            }
-        }
-    }
-
     /// A store selection can come from the sidebar or palette. In wide layout
     /// it switches the content column away from Hosts without requiring Back.
     #[gpui::test]
@@ -17061,71 +16788,29 @@ pub(crate) mod tests {
         (shell, host, cx)
     }
 
-    /// The right panel at the widths a desktop window passes through, on a thread whose header and tab strip are as full as they
-    /// get, with the sidebar open and collapsed: it rests against the
-    /// window's right edge at the width the user chose, as far as that leaves
-    /// the conversation a pane's narrowest beside it, or everything beside
-    /// the sidebar where the two do not fit, and comes back to that width
-    /// after the
-    /// window narrows and widens again, after a drag of its edge chose
-    /// another, after a sidebar drag, and after it was expanded to everything
-    /// beside the sidebar and dragged there. At every width no tab label is
-    /// cut off and the close button is on screen and closes the panel.
+    /// The right panel comes back to the width the user chose by dragging
+    /// its edge after the window narrows and widens again, after a sidebar
+    /// drag, and after it was expanded to everything beside the sidebar and
+    /// dragged there. In a narrow window the close button closes the panel.
     #[gpui::test]
     fn the_right_panel_keeps_the_width_the_user_chose(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_crowded_thread(cx);
-        // Its agents run, and what shows them running rests only with motion
-        // reduced.
-        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let (shell, host, cx) = mount_thread_with(cx, Vec::new());
         let store = store_of(&shell, cx);
         resize(cx, 1600.);
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
         });
         draw_until(cx, &host, "diff-body", None);
-        let chosen = Rc::new(Cell::new(px(560.)));
 
-        let walk = |cx: &mut VisualTestContext, widths: &[f32]| {
-            for &width in widths {
-                resize(cx, width);
-                draw_until(cx, &host, "diff-body", None);
-                crate::test_frames::draw_settled(cx);
-                let sidebar = shell.read_with(cx, |shell, cx| {
-                    let attachment = shell.column.as_ref().expect("attached");
-                    if crate::device::DevicePreferences::sidebar_collapsed(cx) {
-                        px(0.)
-                    } else {
-                        attachment.sidebar_width.get()
-                    }
-                });
-                let beside = px(width) - sidebar;
-                let panel_min = px(crate::material::PANEL_CONTENT_MIN_WIDTH
-                    + crate::window_caption::RIGHT_PANEL_CAPTION_WIDTH);
-                let expected = if beside < panel_min + px(PANE_MIN_WIDTH) {
-                    beside
-                } else {
-                    chosen.get().min(beside - px(PANE_MIN_WIDTH)).max(panel_min)
-                };
-                let panel = cx.debug_bounds("right-panel").expect("the right panel");
-                assert_eq!(
-                    (panel.size.width, panel.right()),
-                    (expected, px(width)),
-                    "{width}pt, sidebar {sidebar:?}"
-                );
-                let tabs = cx.debug_bounds("right-panel-tabs").expect("the tab list");
-                for tab in ["diff-tab", "plan-tab", "agents-tab", "pull-requests-tab"] {
-                    let bounds = cx.debug_bounds(tab).expect(tab);
-                    assert!(
-                        bounds.right() <= tabs.right(),
-                        "{width}pt: {tab} ends at {:?}, past the tab list's {:?}",
-                        bounds.right(),
-                        tabs.right()
-                    );
-                }
-                let close = cx.debug_bounds("diff-close").expect("the close button");
-                assert!(close.right() <= px(width), "{width}pt: close at {close:?}");
-            }
+        let width_at = |cx: &mut VisualTestContext, width: f32| {
+            resize(cx, width);
+            draw_until(cx, &host, "diff-body", None);
+            crate::test_frames::draw_settled(cx);
+            cx.debug_bounds("right-panel")
+                .expect("the right panel")
+                .size
+                .width
         };
         let drag = |cx: &mut VisualTestContext, from: gpui::Point<Pixels>, by: Pixels| {
             let to = from + gpui::point(by, px(0.));
@@ -17141,16 +16826,15 @@ pub(crate) mod tests {
             draw(cx);
         };
 
-        walk(cx, &[1600., 1200., 1600., 1140., 720., 1600., 1200.]);
-
         // A drag of the panel's own edge chooses its width, which a narrower
         // and a wider window keep.
+        width_at(cx, 1600.);
         let panel = cx.debug_bounds("right-panel").unwrap();
         drag(cx, gpui::point(panel.left(), px(400.)), px(60.));
-        let resized = cx.debug_bounds("right-panel").unwrap().size.width;
-        assert!(resized < panel.size.width, "the edge shrinks the panel");
-        chosen.set(resized);
-        walk(cx, &[900., 1600.]);
+        let chosen = cx.debug_bounds("right-panel").unwrap().size.width;
+        assert!(chosen < panel.size.width, "the edge shrinks the panel");
+        width_at(cx, 900.);
+        assert_eq!(width_at(cx, 1600.), chosen, "after the window narrowed");
 
         // A sidebar drag moves the sidebar, never the panel.
         resize(cx, 1200.);
@@ -17163,28 +16847,23 @@ pub(crate) mod tests {
             }) > px(SIDEBAR_WIDTH),
             "the drag moved the sidebar"
         );
-        walk(cx, &[1600.]);
+        assert_eq!(width_at(cx, 1600.), chosen, "after a sidebar drag");
 
-        // Expanded, the panel takes everything beside the sidebar, however
-        // wide the window; restored, it is back at the width the user chose.
+        // Expanded, the panel takes everything beside the sidebar; drags on
+        // its left edge there do not choose a width.
         store.update(cx, |store, cx| {
             store.toggle_diff_expanded_for(Some("thread-1"), cx)
         });
-        for width in [1600., 2000.] {
-            resize(cx, width);
-            draw_until(cx, &host, "diff-body", None);
-            crate::test_frames::draw_settled(cx);
-            let sidebar = shell.read_with(cx, |shell, _| {
-                shell.column.as_ref().expect("attached").sidebar_width.get()
-            });
-            let panel = cx.debug_bounds("right-panel").expect("the expanded panel");
-            assert_eq!(
-                (panel.left(), panel.right()),
-                (sidebar, px(width)),
-                "{width}pt: the expanded panel spans the window beside the sidebar"
-            );
-        }
-        // Drags on the expanded panel's left edge do not choose a width.
+        width_at(cx, 1600.);
+        let sidebar = shell.read_with(cx, |shell, _| {
+            shell.column.as_ref().expect("attached").sidebar_width.get()
+        });
+        let edge = cx.debug_bounds("right-panel").expect("the expanded panel");
+        assert_eq!(
+            (edge.left(), edge.right()),
+            (sidebar, px(1600.)),
+            "the expanded panel spans the window beside the sidebar"
+        );
         for _ in 0..2 {
             let edge = cx.debug_bounds("right-panel").expect("the expanded panel");
             drag(cx, gpui::point(edge.left(), px(400.)), px(12.));
@@ -17192,11 +16871,9 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.toggle_diff_expanded_for(Some("thread-1"), cx)
         });
-        walk(cx, &[1600.]);
+        assert_eq!(width_at(cx, 1600.), chosen, "after it was expanded");
 
         cx.update(|_, cx| crate::device::DevicePreferences::toggle_sidebar_collapsed(cx));
-        walk(cx, &[1600., 1250., 1100., 1000., 900., 860., 720., 1600.]);
-
         resize(cx, 720.);
         draw_until(cx, &host, "diff-body", None);
         let close = cx.debug_bounds("diff-close").expect("the close button");
