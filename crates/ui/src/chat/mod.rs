@@ -502,7 +502,7 @@ impl ChatView {
             .in_scene(&scene),
             terminal_glide_compact: false,
             body: Default::default(),
-            side: side::Side::new(),
+            side: side::Side::new(cx),
             side_of: None,
             pane_width: gpui::Pixels::ZERO,
             overhang: gpui::Pixels::ZERO,

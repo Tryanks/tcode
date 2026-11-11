@@ -19,7 +19,7 @@ use gpui::{
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
     WeakEntity, Window, div, prelude::FluentBuilder as _, px, relative,
 };
-use gpui_base::{ResizeHandleContext, ResizeHandleState};
+use gpui_base::{FocusTrapElement as _, ResizeHandleContext, ResizeHandleState};
 
 use super::ChatView;
 use crate::icon::IconName;
@@ -332,11 +332,15 @@ pub(super) struct Side {
     sync_pending: bool,
     /// The card on its way out of what opened it, or back into it.
     expand: Option<Expand>,
+    /// Keeps Tab within the agent's sheet: the lead's timeline and composer
+    /// under it take no input.
+    sheet_trap: gpui::FocusHandle,
 }
 
 impl Side {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(cx: &mut App) -> Self {
         Self {
+            sheet_trap: cx.focus_handle(),
             host: None,
             leaving: None,
             share: SIDE_SHARE,
@@ -1201,14 +1205,20 @@ impl ChatView {
         live: bool,
         cx: &App,
     ) -> AnyElement {
-        div()
+        let sheet = div()
             .absolute()
             .top_0()
             .left(px(SHEET_INSET))
             .right(px(SHEET_INSET))
             .bottom_0()
-            .child(self.side_surface(content, morph, live, cx))
-            .into_any_element()
+            .child(self.side_surface(content, morph, live, cx));
+        if live {
+            sheet
+                .focus_trap("side-sheet", &self.side.sheet_trap)
+                .into_any_element()
+        } else {
+            sheet.into_any_element()
+        }
     }
 
     /// `main`, the thread's timeline, deliveries and composer, under the
