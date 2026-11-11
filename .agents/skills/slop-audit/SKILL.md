@@ -1,9 +1,9 @@
 ---
-name: slot-audit
+name: slop-audit
 description: "Invoke before writing or changing a test, before adding a timeout, fallback, retry, validation or version branch, when a test fails or is met beside a change, and to audit an area of Tcode for habits with no grounds, code and tests alike."
 ---
 
-# Slot audit
+# Slop audit
 
 Much of Tcode was written by agents following the code they found, not
 anything the maintainer asked for. What they left is **habit**: the same
