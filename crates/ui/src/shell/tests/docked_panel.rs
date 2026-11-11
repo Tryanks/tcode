@@ -50,6 +50,7 @@ fn one_pane(width: f32, cx: &mut VisualTestContext) {
 #[gpui::test]
 fn a_panel_docks_beside_the_conversation_and_leaves_the_keyboard(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    cx.update(|cx| cx.set_reduce_motion(true));
     let (shell, _host, cx) = mount_panes(cx);
     let store = store_of(&shell, cx);
     one_pane(1345., cx);
@@ -77,6 +78,7 @@ fn a_panel_docks_beside_the_conversation_and_leaves_the_keyboard(cx: &mut TestAp
 fn a_narrow_pane_is_covered_and_its_panel_takes_the_keyboard(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx) = mount_panes(cx);
+    cx.update(|_, cx| cx.set_reduce_motion(true));
     let store = store_of(&shell, cx);
     side_by_side(&shell, || serve_thread(&host, "thread-2"), cx);
     // Narrow enough for a panel of 320 to leave no room for a conversation.
@@ -158,6 +160,7 @@ fn escape_closes_an_expanded_panel(cx: &mut TestAppContext) {
 fn a_pane_narrowing_into_cover_hands_the_panel_the_keyboard(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx) = mount_panes(cx);
+    cx.update(|_, cx| cx.set_reduce_motion(true));
     let store = store_of(&shell, cx);
     one_pane(LEAST, cx);
     let input = typing(&shell, cx);

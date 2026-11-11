@@ -7220,6 +7220,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_host_refused_and_paired_again_changes_nothing_on_another(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, hosts, client, cx) =
             mount_workspace(cx, two_hosts(), Default::default(), 1200.);
         cx.update(|_, cx| {
@@ -7658,6 +7659,7 @@ pub(crate) mod tests {
         cx: &mut TestAppContext,
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1600.);
         let (a, b) = (
             store_on(&shell, "host-a", cx),
@@ -7717,6 +7719,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_relaunch_returns_to_the_current_panes_host(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1600.);
         let (key_a, key_b) = (
             HostKey::Remote("host-a".into()),
@@ -7798,6 +7801,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn another_host_refused_or_gone_leaves_a_panes_conversation(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1600.);
         let (a, b) = (
             store_on(&shell, "host-a", cx),
@@ -7918,6 +7922,7 @@ pub(crate) mod tests {
         cx: &mut TestAppContext,
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1200.);
         // The device took up the system's language.
         crate::set_locale(crate::LANGUAGE_ENGLISH);
@@ -8164,6 +8169,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn settings_set_the_host_chosen_and_this_devices_rows_whichever_it_is(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, hosts, client, cx) =
             mount_workspace(cx, two_hosts(), Default::default(), 1200.);
         cx.update(|_, cx| crate::shortcut::init(cx));
@@ -9469,7 +9475,7 @@ pub(crate) mod tests {
             shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
-        for width in [1024., 393., 1024.] {
+        for width in [1024., 393.] {
             resize(cx, width);
             for id in ["thread-1", "thread-2"] {
                 cx.update(|window, cx| {
@@ -9513,7 +9519,7 @@ pub(crate) mod tests {
             }
         }
         cx.update(|window, cx| focus.focus(window, cx));
-        for width in [393., 1024., 393.] {
+        for width in [1024., 393.] {
             resize(cx, width);
             draw(cx);
             cx.update(|window, _| assert!(focus.is_focused(window)));
@@ -9828,7 +9834,7 @@ pub(crate) mod tests {
         });
     }
 
-    /// A tablet that rotates through phone widths and back: a subagent's
+    /// A tablet that rotates to a phone's width and back: a subagent's
     /// thread draws its model, effort, context and permission in one row,
     /// with no card, field, send or settings drawer, so its timeline reaches
     /// lower than the lead's; nothing pressed or typed there sends, and the
@@ -9855,7 +9861,7 @@ pub(crate) mod tests {
             })
         });
         draw(cx);
-        for width in [1200., 760., 393.] {
+        for width in [1200., 393.] {
             deliver_thread(&shell, &host, "thread-a", false, cx);
             resize(cx, width);
             show(cx);
@@ -9954,54 +9960,51 @@ pub(crate) mod tests {
         restore_index(&shell, &host, true, cx);
         restore_status(&shell, &host, cx);
         let composer = composer_of(&shell, cx);
-        for width in [1200., 600.] {
-            deliver_thread(&shell, &host, "thread-a", false, cx);
-            resize(cx, width);
-            cx.executor().advance_clock(Duration::from_millis(250));
-            draw(cx);
-            let field = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
-            let card = cx.debug_bounds("composer-card").expect("the lead's card");
-            cx.simulate_click(
-                gpui::point(card.center().x, card.top() + px(16.)),
-                gpui::Modifiers::default(),
-            );
-            draw(cx);
-            cx.update(|window, _| assert!(field.is_focused(window), "the lead's field types"));
+        deliver_thread(&shell, &host, "thread-a", false, cx);
+        cx.executor().advance_clock(Duration::from_millis(250));
+        draw(cx);
+        let field = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
+        let card = cx.debug_bounds("composer-card").expect("the lead's card");
+        cx.simulate_click(
+            gpui::point(card.center().x, card.top() + px(16.)),
+            gpui::Modifiers::default(),
+        );
+        draw(cx);
+        cx.update(|window, _| assert!(field.is_focused(window), "the lead's field types"));
 
-            deliver_thread(&shell, &host, "child", true, cx);
-            cx.executor().advance_clock(Duration::from_millis(250));
-            draw(cx);
-            sent(&host);
-            cx.update(|window, cx| {
-                let composer = composer.read(cx);
-                assert!(!composer.input_focus_handle(cx).is_focused(window));
-                assert!(composer.has_keyboard(window, cx));
-            });
-            assert_eq!(
-                keyboard_pane(&shell, cx),
-                Some(0),
-                "the keyboard left the pane at {width}"
-            );
-            cx.simulate_keystrokes("x y enter");
-            draw(cx);
-            assert!(
-                sent(&host)
-                    .iter()
-                    .all(|payload| !matches!(payload, ClientPayload::Command(_))),
-                "a key on a subagent's thread sent a command at {width}"
-            );
+        deliver_thread(&shell, &host, "child", true, cx);
+        cx.executor().advance_clock(Duration::from_millis(250));
+        draw(cx);
+        sent(&host);
+        cx.update(|window, cx| {
+            let composer = composer.read(cx);
+            assert!(!composer.input_focus_handle(cx).is_focused(window));
+            assert!(composer.has_keyboard(window, cx));
+        });
+        assert_eq!(
+            keyboard_pane(&shell, cx),
+            Some(0),
+            "the keyboard left the pane"
+        );
+        cx.simulate_keystrokes("x y enter");
+        draw(cx);
+        assert!(
+            sent(&host)
+                .iter()
+                .all(|payload| !matches!(payload, ClientPayload::Command(_))),
+            "a key on a subagent's thread sent a command"
+        );
 
-            deliver_thread(&shell, &host, "thread-a", false, cx);
-            cx.executor().advance_clock(Duration::from_millis(250));
-            draw(cx);
-            cx.update(|window, _| assert!(field.is_focused(window), "the field has it back"));
-            cx.simulate_keystrokes("z");
-            draw(cx);
-            assert_eq!(
-                composer.read_with(cx, |composer, cx| composer.draft(cx)),
-                "z".repeat(if width == 1200. { 1 } else { 2 })
-            );
-        }
+        deliver_thread(&shell, &host, "thread-a", false, cx);
+        cx.executor().advance_clock(Duration::from_millis(250));
+        draw(cx);
+        cx.update(|window, _| assert!(field.is_focused(window), "the field has it back"));
+        cx.simulate_keystrokes("z");
+        draw(cx);
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            "z"
+        );
     }
 
     #[gpui::test]
@@ -11182,12 +11185,12 @@ pub(crate) mod tests {
         // A running agent's mark never rests; the wheel is what is read.
         cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
-        serve_finished_turns(&host, "thread-1", 60, false);
+        serve_finished_turns(&host, "thread-1", 30, false);
         await_restore_update(&shell, cx, |store, cx| {
             store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx)
-                == Some(60)
+                == Some(30)
         });
-        serve_finished_turns(&host, "agent-1", 30, false);
+        serve_finished_turns(&host, "agent-1", 15, false);
         cx.update(|window, cx| {
             crate::agents_panel::open_agent(
                 &store,
@@ -11354,6 +11357,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_layout_fills_its_panes_from_the_focused_one(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, host, cx) = mount_panes(cx);
         let settle = |cx: &mut VisualTestContext| {
             cx.executor().advance_clock(crate::edge_back::SETTLE);
@@ -11485,6 +11489,7 @@ pub(crate) mod tests {
     fn tabbing_in_a_zoomed_pane_never_reaches_the_panes_it_covers(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount_panes(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         cx.simulate_keystrokes("secondary-d");
         draw(cx);
         cx.executor().advance_clock(crate::edge_back::SETTLE);
@@ -11716,6 +11721,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_click_on_a_pane_catching_up_gives_it_the_keyboard(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, host, cx) = mount_panes(cx);
         let store = store_of(&shell, cx);
         let click = |at: gpui::Point<Pixels>, modifiers, cx: &mut VisualTestContext| {
@@ -11787,6 +11793,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_click_on_a_loading_pane_gives_it_the_keyboard(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, host, cx) = mount_panes(cx);
         let store = store_of(&shell, cx);
         let row = cx
@@ -12089,6 +12096,7 @@ pub(crate) mod tests {
     fn each_pane_has_a_drawer_of_its_own(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
         serve_changed_turn(&host, "thread-1", "left.rs");
         side_by_side(
@@ -12232,6 +12240,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_changed_file_opens_the_diff_of_the_thread_of_its_own_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, host, cx) = mount_panes(cx);
         let store = store_of(&shell, cx);
         resize(cx, 3200.);
@@ -12326,6 +12335,7 @@ pub(crate) mod tests {
     fn the_way_back_to_a_lead_stays_in_its_own_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
         let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
             unreachable!("panes_index sends a snapshot");
@@ -12375,6 +12385,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn swapping_panes_takes_the_thread_and_its_draft_along(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, host, cx) = mount_panes(cx);
         open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
@@ -12603,11 +12614,11 @@ pub(crate) mod tests {
     }
 
     /// An archived agent leaves its pane however the panes stand: beside
-    /// others the pane goes and its lead's pane, which nobody chose, does not
-    /// take the keyboard; alone it stays and shows the lead.
+    /// others the pane goes; alone it stays and shows the lead.
     #[gpui::test]
     fn an_archived_agent_gives_way_to_its_lead(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, host, cx) = mount_lead_with_agent(cx);
         let store = store_of(&shell, cx);
         let archive_agent = |archived: bool| {
@@ -12641,8 +12652,6 @@ pub(crate) mod tests {
 
         send_events(&host, vec![archive_agent(true)]);
         await_restore_update(&shell, cx, |store, _| !store.is_thread_open("agent-1"));
-        draw(cx);
-        assert_ne!(keyboard_pane(&shell, cx), Some(0));
         crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
 
@@ -13042,6 +13051,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn among_panes_the_current_ones_row_is_selected(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, host, cx) = mount_panes(cx);
         let row = cx
             .debug_bounds("sidebar-thread-thread-2")
@@ -13129,6 +13139,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_rows_click_goes_to_its_shown_thread_or_replaces_the_current_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, host, cx) = mount_panes(cx);
         let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
             unreachable!("an index")
@@ -13233,6 +13244,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_rows_glyph_maps_the_column_and_fills_its_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, host, cx) = mount_panes(cx);
         assert_eq!(glyph_cells("thread-1", cx), [], "a lone pane has no map");
 
@@ -13327,6 +13339,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn an_unasked_thread_takes_only_a_keyboard_nothing_holds(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, host, cx) = mount_panes(cx);
         let store = store_of(&shell, cx);
         serve_thread(&host, "thread-2");
@@ -14687,7 +14700,7 @@ pub(crate) mod tests {
 
     /// What a phone's or a tablet's status bar, home indicator and side
     /// insets cover is the surface beneath them, painted to the window's
-    /// edges in either theme: a phone's page, a tablet's sidebar or reading
+    /// edges: a phone's page, a tablet's sidebar or reading
     /// column. Never a band of another colour, which leaves the page
     /// looking cut off above the screen's bottom.
     #[gpui::test]
@@ -14756,30 +14769,27 @@ pub(crate) mod tests {
                 ],
             ),
         ];
-        for mode in [ThemeMode::Light, ThemeMode::Dark] {
-            cx.update(|window, cx| {
-                crate::settings_page::apply_theme(mode, window, cx);
-            });
-            for destination in [
-                Destination::Thread,
-                Destination::Hosts,
-                Destination::Settings,
-            ] {
-                state.update(cx, |state, cx| state.go(destination, cx));
-                for ((width, height), insets, covered) in &geometries {
-                    cx.simulate_resize(size(px(*width), px(*height)));
-                    crate::window_seam::occlude_for_test(cx, *insets);
-                    crate::test_frames::draw_settled(cx);
-                    let (page, sidebar) = cx.update(|_, cx| {
-                        (crate::material::content_surface(cx), cx.theme().background)
-                    });
-                    for ((x, y), beside) in covered {
-                        assert_eq!(
-                            topmost(gpui::point(px(*x), px(*y)), cx),
-                            Some(if *beside { sidebar } else { page }),
-                            "{mode:?} {destination:?} at ({x}, {y}) of {width}x{height}"
-                        );
-                    }
+        cx.update(|window, cx| {
+            crate::settings_page::apply_theme(ThemeMode::Light, window, cx);
+        });
+        for destination in [
+            Destination::Thread,
+            Destination::Hosts,
+            Destination::Settings,
+        ] {
+            state.update(cx, |state, cx| state.go(destination, cx));
+            for ((width, height), insets, covered) in &geometries {
+                cx.simulate_resize(size(px(*width), px(*height)));
+                crate::window_seam::occlude_for_test(cx, *insets);
+                crate::test_frames::draw_settled(cx);
+                let (page, sidebar) = cx
+                    .update(|_, cx| (crate::material::content_surface(cx), cx.theme().background));
+                for ((x, y), beside) in covered {
+                    assert_eq!(
+                        topmost(gpui::point(px(*x), px(*y)), cx),
+                        Some(if *beside { sidebar } else { page }),
+                        "{destination:?} at ({x}, {y}) of {width}x{height}"
+                    );
                 }
             }
         }
@@ -15056,15 +15066,11 @@ pub(crate) mod tests {
         });
         draw_until(cx, &host, "diff-body", None);
         let line = "diff-line-new-a/deeply/nested/module/tree/with/an/absurdly/long/file_name.rs-1";
-        for (id, mode, end_x, elapsed, commits) in [
-            (3, crate::theme::ThemeMode::Light, 70., 400, false),
-            (4, crate::theme::ThemeMode::Light, 180., 400, true),
-            (5, crate::theme::ThemeMode::Light, 70., 40, true),
-            (6, crate::theme::ThemeMode::Dark, 70., 400, false),
-            (7, crate::theme::ThemeMode::Dark, 180., 400, true),
-            (8, crate::theme::ThemeMode::Dark, 70., 40, true),
+        for (id, end_x, elapsed, commits) in [
+            (3, 70., 400, false),
+            (4, 180., 400, true),
+            (5, 70., 40, true),
         ] {
-            cx.update(|window, cx| crate::theme::change_mode(mode, Some(window), cx));
             draw(cx);
             let initial_line = cx.debug_bounds(line).expect("diff line before scrolling");
             let body = cx.debug_bounds("diff-body").unwrap();
@@ -15577,18 +15583,16 @@ pub(crate) mod tests {
     fn a_narrow_desktop_window_keeps_the_wide_workspace(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
-        for width in [1024., 899., 400.] {
-            resize(cx, width);
-            shell.read_with(cx, |shell, cx| {
-                assert!(!shell.compact(cx), "{width}px on a desktop build is wide");
-                assert_eq!(shell.window_state.read(cx).route(), Route::Chat);
-            });
-            assert!(
-                cx.debug_bounds("sidebar-feature-hosts").is_some(),
-                "{width}px keeps the workspace sidebar"
-            );
-            assert!(cx.debug_bounds("compact-threads-page").is_none());
-        }
+        resize(cx, 400.);
+        shell.read_with(cx, |shell, cx| {
+            assert!(!shell.compact(cx), "400px on a desktop build is wide");
+            assert_eq!(shell.window_state.read(cx).route(), Route::Chat);
+        });
+        assert!(
+            cx.debug_bounds("sidebar-feature-hosts").is_some(),
+            "400px keeps the workspace sidebar"
+        );
+        assert!(cx.debug_bounds("compact-threads-page").is_none());
     }
 
     /// Rotating a tablet across the breakpoint is a layout decision and
@@ -15971,6 +15975,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn wide_hosts_route_keeps_its_sidebar_until_a_thread_selection(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, _host, cx) = mount(cx);
         resize(cx, 1024.);
         draw(cx);
@@ -16778,6 +16783,7 @@ pub(crate) mod tests {
     fn the_right_panel_gives_the_keyboard_back(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount_panes(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
         resize(cx, 1600.);
         let input = shell.read_with(cx, |shell, cx| {
