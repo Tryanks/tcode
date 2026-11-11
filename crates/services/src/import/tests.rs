@@ -437,26 +437,35 @@ fn a_reverted_codex_thread_shows_the_history_it_kept_and_what_followed() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// A fork attached to its parent and made while the parent's turn ran shows
-/// what Codex shows of it: its own conversation, without the parent's
-/// history it continues or the records it opens with, the interrupted-turn
-/// guidance and the parent turn's abort. Shapes from `rust-v0.167.0`: the
-/// fork's `session_meta` carries `forked_from_id`, `attached_thread`,
+/// A fork attached to its parent and made while the parent's turn ran is
+/// listed as Codex lists threads, which is not at all, and a thread that
+/// continues it shows what Codex shows of that history: the attached fork's
+/// own conversation, without the parent's history it continues or the
+/// records it opens with, the interrupted-turn guidance and the parent
+/// turn's abort, and then its own. Shapes from `rust-v0.167.0`: a fork's
+/// `session_meta` carries `forked_from_id`, `attached_thread`,
 /// `forked_from_ordinal_exclusive` and `history_base` (`SessionMeta`,
 /// `protocol/src/protocol.rs`); a mid-turn fork opens with
 /// `thread_settings_applied`, the `<turn_aborted>` guidance as a user
 /// message (`core/src/context/turn_aborted.rs`) and `turn_aborted`
-/// (`append_interrupted_boundary`, `core/src/thread_manager.rs`), and
-/// Codex's history page starts after it (`attached_history_start`,
-/// thread-store `local/rollout_lineage.rs`). Settings fields Tcode does not
-/// read are left out; content invented.
+/// (`append_interrupted_boundary`, `core/src/thread_manager.rs`); Codex's
+/// thread list passes over an `attached_thread` (`build_thread_item`,
+/// `rollout/src/list.rs`), and its history page stops at an attached fork
+/// made at its parent's bookmark, wherever that is in the lineage, and
+/// starts after its opening (`attached_history_start`, thread-store
+/// `local/rollout_lineage.rs`). Settings fields Tcode does not read are left
+/// out; content invented.
 #[test]
-fn an_attached_mid_turn_fork_shows_its_own_conversation() {
+fn an_attached_mid_turn_fork_is_not_listed_and_a_fork_of_it_shows_its_own_conversation() {
     let home = std::env::temp_dir().join(format!("tcode-codex-{}", uuid::Uuid::new_v4()));
+    let cwd = home.join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let cwd_json = serde_json::to_string(cwd.to_str().unwrap()).unwrap();
     let day = home.join("sessions").join("2026").join("01").join("02");
     std::fs::create_dir_all(&day).unwrap();
     let parent = "00000000-0000-7000-8000-000000000041";
     let fork = "00000000-0000-7000-8000-000000000042";
+    let fork_of_fork = "00000000-0000-7000-8000-000000000043";
     let record = |ordinal: u64, time: &str, kind: &str, payload: &str| {
         format!(
             r#"{{"timestamp":"2026-01-02T03:{time}.000Z","ordinal":{ordinal},"type":"{kind}","payload":{payload}}}"#
@@ -468,7 +477,7 @@ fn an_attached_mid_turn_fork_shows_its_own_conversation() {
             time,
             "session_meta",
             &format!(
-                r#"{{"id":"{id}","timestamp":"2026-01-02T03:{time}.000Z","cwd":"/work/example","originator":"codex_cli_rs","cli_version":"0.167.0","history_mode":"paginated"{fork_of}}}"#
+                r#"{{"id":"{id}","timestamp":"2026-01-02T03:{time}.000Z","cwd":{cwd_json},"originator":"codex_cli_rs","cli_version":"0.167.0","history_mode":"paginated"{fork_of}}}"#
             ),
         )
     };
@@ -489,8 +498,9 @@ fn an_attached_mid_turn_fork_shows_its_own_conversation() {
     ]
     .map(|line| line + "\n")
     .concat();
+    let parent_rollout = day.join(format!("rollout-2026-01-02T03-04-05-{parent}.jsonl"));
     std::fs::write(
-        day.join(format!("rollout-2026-01-02T03-04-05-{parent}.jsonl")),
+        &parent_rollout,
         taken.clone() + &message(3, "04:08", "assistant", "output_text", "Still planning.") + "\n",
     )
     .unwrap();
@@ -498,10 +508,8 @@ fn an_attached_mid_turn_fork_shows_its_own_conversation() {
         r#","forked_from_id":"{parent}","attached_thread":true,"forked_from_ordinal_exclusive":3,"history_base":{{"thread_id":"{parent}","end_ordinal_exclusive":3,"end_byte_offset":{}}}"#,
         taken.len()
     );
-    let forked = day.join(format!("rollout-2026-01-02T03-05-00-{fork}.jsonl"));
-    std::fs::write(
-        &forked,
-        [
+    let forked = [
+
             meta(3, "05:00", fork, &fork_of),
             record(
                 4,
@@ -526,18 +534,58 @@ fn an_attached_mid_turn_fork_shows_its_own_conversation() {
             message(8, "05:02", "assistant", "output_text", "Tests only."),
         ]
         .map(|line| line + "\n")
+        .concat();
+    std::fs::write(
+        day.join(format!("rollout-2026-01-02T03-05-00-{fork}.jsonl")),
+        &forked,
+    )
+    .unwrap();
+    let fork_of_fork_of = format!(
+        r#","forked_from_id":"{fork}","forked_from_ordinal_exclusive":9,"history_base":{{"thread_id":"{fork}","end_ordinal_exclusive":9,"end_byte_offset":{}}}"#,
+        forked.len()
+    );
+    let continued = day.join(format!("rollout-2026-01-02T03-06-00-{fork_of_fork}.jsonl"));
+    std::fs::write(
+        &continued,
+        [
+            meta(9, "06:00", fork_of_fork, &fork_of_fork_of),
+            message(10, "06:01", "user", "input_text", "And the docs"),
+            message(11, "06:02", "assistant", "output_text", "Docs too."),
+        ]
+        .map(|line| line + "\n")
         .concat(),
     )
     .unwrap();
 
+    let history = super::scan_recent_dirs(
+        &super::ExternalRoots {
+            claude_projects: Vec::new(),
+            claude_desktop_meta: None,
+            codex_session_roots: vec![(None, home.join("sessions"))],
+        },
+        &[],
+    );
+    let mut listed: Vec<_> = history
+        .dirs
+        .into_iter()
+        .flat_map(|dir| dir.threads)
+        .map(|thread| thread.file)
+        .collect();
+    listed.sort();
+    assert_eq!(listed, [parent_rollout, continued.clone()]);
+    let assistant = |text: &str| {
+        Some(ItemContent::AssistantMessage {
+            text: text.into(),
+            summarized: false,
+        })
+    };
     assert_eq!(
-        shown(codex::convert(&forked, "codex:example").unwrap()),
+        shown(codex::convert(&continued, "codex:example").unwrap()),
         [
             user("Only the tests"),
-            Some(ItemContent::AssistantMessage {
-                text: "Tests only.".into(),
-                summarized: false,
-            }),
+            assistant("Tests only."),
+            user("And the docs"),
+            assistant("Docs too."),
         ]
     );
     let _ = std::fs::remove_dir_all(&home);
