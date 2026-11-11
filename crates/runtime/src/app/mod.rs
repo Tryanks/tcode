@@ -318,7 +318,7 @@ mod terminals;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
-pub(crate) use test_support::{next_command, next_command_blocking};
+pub(crate) use test_support::{next_command, next_command_blocking, rpc};
 #[cfg(test)]
 mod tests;
 
