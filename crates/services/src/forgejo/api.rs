@@ -268,8 +268,9 @@ impl Api {
             &[],
         )?;
         if answer.status == 403
-            && let Some(scopes) = answer.body["message"]
-                .as_str()
+            && let Some(scopes) = answer
+                .body()
+                .and_then(|body| body["message"].as_str())
                 .filter(|message| message.contains("scope"))
                 .and_then(|message| message.split_once('[')?.1.split_once(']'))
                 .map(|(scopes, _)| {

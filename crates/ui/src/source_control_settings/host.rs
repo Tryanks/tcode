@@ -488,6 +488,17 @@ impl HostEditor {
                 true,
                 "unreachable",
             ),
+            Answer::Checked(TokenCheck::Unreadable { status, error }) => (
+                crate::tr!(
+                    "source_control.check_unreadable",
+                    host = host,
+                    status = status,
+                    error = error
+                ),
+                theme.warning,
+                true,
+                "unreadable",
+            ),
             Answer::Checked(TokenCheck::Unconfirmed) => (
                 crate::tr!("source_control.check_unconfirmed", host = host),
                 theme.warning,

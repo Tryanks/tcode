@@ -394,6 +394,8 @@ pub use wire::{
 // clock.
 // RuntimeError gains orphan_sweep_skipped {error} and orphans_left {left}, each
 // a LeftOrphan {path, error}.
+// TokenCheck gains unreadable {status, error}: a host took the token but its
+// answer could not be read.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

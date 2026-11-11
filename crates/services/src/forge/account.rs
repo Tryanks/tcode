@@ -24,18 +24,28 @@ pub(crate) type Whose = Result<(Option<HostAccount>, Vec<String>), TokenCheck>;
 pub(crate) struct Answer {
     pub(crate) status: u16,
     headers: BTreeMap<String, String>,
-    pub(crate) body: serde_json::Value,
+    /// What the host answered, or why it could not be read.
+    body: Result<serde_json::Value, String>,
 }
 
 impl Answer {
+    /// The body as the host gave it, when it could be read.
+    pub(crate) fn body(&self) -> Option<&serde_json::Value> {
+        self.body.as_ref().ok()
+    }
+
     pub(crate) fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(name).map(String::as_str)
     }
 
     /// The body of a success; a refusal of the token, or another answer, as the check it is.
+    /// A success whose body cannot be read says whose the token is to nobody.
     pub(crate) fn accepted(self) -> Result<serde_json::Value, TokenCheck> {
         match self.status {
-            200..=299 => Ok(self.body),
+            200..=299 => self.body.map_err(|error| TokenCheck::Unreadable {
+                status: self.status,
+                error,
+            }),
             401 | 403 => Err(TokenCheck::Rejected {
                 status: self.status,
             }),
@@ -76,16 +86,23 @@ pub(crate) fn ask(
                 .map(|value| (name.to_ascii_lowercase(), value.to_owned()))
         })
         .collect();
-    let mut body = Vec::new();
-    // An unreadable body is no answer about the token; the status still is.
-    let _ = response
+    let mut bytes = Vec::new();
+    let read = response
         .into_reader()
-        .take(BODY_LIMIT)
-        .read_to_end(&mut body);
+        .take(BODY_LIMIT + 1)
+        .read_to_end(&mut bytes);
+    let body = match read {
+        Err(error) => Err(error.to_string()),
+        Ok(_) if bytes.len() as u64 > BODY_LIMIT => Err(format!(
+            "the answer is longer than the {} KiB Tcode reads",
+            BODY_LIMIT / 1024
+        )),
+        Ok(_) => serde_json::from_slice(&bytes).map_err(|error| error.to_string()),
+    };
     Ok(Answer {
         status,
         headers,
-        body: serde_json::from_slice(&body).unwrap_or_default(),
+        body,
     })
 }
 

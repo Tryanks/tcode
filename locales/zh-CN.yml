@@ -2009,6 +2009,7 @@ source_control:
   check_rejected: "%{host} 拒绝了这个访问令牌（%{status}）。它可能已过期、被撤销，或复制不完整。"
   check_missing_scopes: "这个访问令牌缺少权限范围 %{scopes}。请在 %{host} 上为它加上后重试。"
   check_unreachable: "主机连不上 %{host}。可以先保存，等主机能连上时再验证。"
+  check_unreadable: "%{host} 接受了这个令牌（%{status}），但无法读取它的回答，因此不知道令牌属于谁：%{error}"
   check_unexpected: "%{host} 没有正常回答（%{status}）。可以先保存，等它恢复后再验证。"
   check_unconfirmed: "%{host} 不说明访问令牌属于谁，因此无法在保存前确认它。"
   check_failed: "无法验证：%{reason}"

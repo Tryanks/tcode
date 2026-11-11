@@ -2016,6 +2016,7 @@ source_control:
   check_rejected: "%{host} はこのアクセストークンを拒否しました（%{status}）。期限切れ、取り消し済み、またはコピーが不完全な可能性があります。"
   check_missing_scopes: "このアクセストークンにはスコープ %{scopes} がありません。%{host} で追加してから再試行してください。"
   check_unreachable: "ホストから %{host} に接続できません。先に保存しておき、接続できるようになってから検証できます。"
+  check_unreadable: "%{host} はトークンを受け付けました（%{status}）が、応答を読み取れなかったため、誰のトークンかはわかりません：%{error}"
   check_unexpected: "%{host} から正常な応答がありませんでした（%{status}）。先に保存しておき、復旧後に検証できます。"
   check_unconfirmed: "%{host} はアクセストークンの所有者を返さないため、保存前に確認できません。"
   check_failed: "検証できませんでした：%{reason}"

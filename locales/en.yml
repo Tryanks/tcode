@@ -2016,6 +2016,7 @@ source_control:
   check_rejected: "%{host} rejected this token (%{status}). It may have expired, been revoked, or been copied incompletely."
   check_missing_scopes: "This token lacks the scopes %{scopes}. Add them on %{host} and try again."
   check_unreachable: "The machine can't reach %{host}. You can save the token now and it's verified once the machine reaches it."
+  check_unreadable: "%{host} took the token (%{status}), but its answer could not be read, so whose it is is unknown: %{error}"
   check_unexpected: "%{host} didn't answer as expected (%{status}). You can save the token now and it's verified once it answers."
   check_unconfirmed: "%{host} doesn't say whose an access token is, so it can't be checked before it's saved."
   check_failed: "Couldn't verify: %{reason}"

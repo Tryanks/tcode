@@ -133,6 +133,9 @@ pub enum TokenCheck {
     /// The host could not be asked: no answer (`status` none), or an answer about something
     /// other than the token.
     Unreachable { status: Option<u16> },
+    /// The host took the token, but its answer could not be read or was not what its API
+    /// sends, so whose the token is stays unknown.
+    Unreadable { status: u16, error: String },
     /// The host never says whose a token of this kind is, so nothing can confirm it before use.
     Unconfirmed,
 }
