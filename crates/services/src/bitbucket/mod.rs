@@ -8,8 +8,8 @@ mod repository;
 
 use crate::{
     forge::{
-        Anchoring, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary, Tails,
-        ViewedMarks,
+        Anchoring, Forge, ForgeError, ForgeErrorKind, Held, Moved, Repository, Summary, Tails,
+        ViewedMarks, held,
     },
     settings::SettingsStore,
 };
@@ -48,7 +48,6 @@ const TEXT_TTL: Duration = Duration::from_secs(600);
 const FILE_BYTES: usize = 1024 * 1024;
 const ANONYMOUS: &str = "anonymous";
 
-type Slot = (Instant, PullRequestReadResponse);
 /// Each pull request's whole diff, `None` past the read limit, by when and at which head it
 /// was read.
 type Diffs = HashMap<PullRequestKey, (Instant, String, Option<String>)>;
@@ -58,7 +57,8 @@ type Revisions = (PullRequestFiles, BTreeMap<String, String>);
 pub struct Bitbucket {
     api: Arc<Api>,
     viewed: Arc<ViewedMarks>,
-    reads: Mutex<HashMap<(PullRequestKey, String), Slot>>,
+    reads: Held<(PullRequestKey, String), PullRequestReadResponse>,
+    conversations: Held<PullRequestKey, PullRequestConversation>,
     /// The whole diff, which the files, viewed marks and anchoring reads all page from.
     diffs: Mutex<Diffs>,
     /// Each pull request's last summary, kept for [`Bitbucket::sync_ttl`].
@@ -75,6 +75,7 @@ impl Bitbucket {
             viewed,
             api: Api::new(store, environment),
             reads: Mutex::default(),
+            conversations: Mutex::default(),
             diffs: Mutex::default(),
             summaries: Mutex::default(),
         })
@@ -110,17 +111,7 @@ impl Bitbucket {
         ttl: Duration,
         read: impl FnOnce() -> Result<PullRequestReadResponse, ForgeError>,
     ) -> Result<(PullRequestReadResponse, SystemTime), ForgeError> {
-        let slot = (key.clone(), name);
-        if let Some((at, response)) = self.reads.lock().unwrap().get(&slot)
-            && at.elapsed() < ttl
-        {
-            return Ok((response.clone(), SystemTime::now() + (ttl - at.elapsed())));
-        }
-        let response = read()?;
-        let mut reads = self.reads.lock().unwrap();
-        reads.retain(|_, (at, _)| at.elapsed() < TEXT_TTL);
-        reads.insert(slot, (Instant::now(), response.clone()));
-        Ok((response, SystemTime::now() + ttl))
+        held(&self.reads, (key.clone(), name), ttl, TEXT_TTL, read)
     }
 
     /// The reading account's uuid and nickname, `None` anonymously or with an access token
@@ -466,7 +457,7 @@ impl Bitbucket {
         if !own {
             return Ok(PullRequestMedia::Unsupported);
         }
-        let conversation = self.conversation_read(key)?;
+        let (conversation, _) = self.conversation_read(key)?;
         let named = std::iter::once(&conversation.description)
             .chain(&conversation.comments)
             .chain(
@@ -488,11 +479,10 @@ impl Bitbucket {
     fn conversation_read(
         &self,
         key: &PullRequestKey,
-    ) -> Result<PullRequestConversation, ForgeError> {
-        match self.read(key, PullRequestRead::Conversation)?.0 {
-            PullRequestReadResponse::Conversation(conversation) => Ok(*conversation),
-            _ => Err(error(ForgeErrorKind::Uncertain, "unexpected read")),
-        }
+    ) -> Result<(PullRequestConversation, SystemTime), ForgeError> {
+        held(&self.conversations, key.clone(), READ_TTL, TEXT_TTL, || {
+            self.conversation(key)
+        })
     }
 
     fn drop_reads(&self, key: &PullRequestKey) {
@@ -500,6 +490,7 @@ impl Bitbucket {
             .lock()
             .unwrap()
             .retain(|(held, name), _| held != key || name.starts_with("text:"));
+        self.conversations.lock().unwrap().remove(key);
         self.diffs.lock().unwrap().remove(key);
         self.summaries.lock().unwrap().remove(key);
     }
@@ -663,10 +654,11 @@ impl Forge for Bitbucket {
                 })
             }
             PullRequestRead::Conversation => {
-                self.cached(key, "conversation".into(), READ_TTL, || {
-                    self.conversation(key).map(|conversation| {
-                        PullRequestReadResponse::Conversation(Box::new(conversation))
-                    })
+                self.conversation_read(key).map(|(conversation, fresh)| {
+                    (
+                        PullRequestReadResponse::Conversation(Box::new(conversation)),
+                        fresh,
+                    )
                 })
             }
             // A thread here carries all of its comments.

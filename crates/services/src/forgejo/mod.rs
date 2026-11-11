@@ -9,8 +9,8 @@ mod repository;
 
 use crate::{
     forge::{
-        Anchoring, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary, Tails,
-        ViewedMarks,
+        Anchoring, Forge, ForgeError, ForgeErrorKind, Held, Moved, Repository, Summary, Tails,
+        ViewedMarks, held,
     },
     settings::SettingsStore,
 };
@@ -20,7 +20,7 @@ use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex, RwLock},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tcode_core::{
     pull_request::{
@@ -46,14 +46,14 @@ const TEXT_TTL: Duration = Duration::from_secs(600);
 const FILE_BYTES: usize = 1024 * 1024;
 const ANONYMOUS: &str = "anonymous";
 
-type Slot = (Instant, PullRequestReadResponse);
 
 pub struct Forgejo {
     api: Arc<Api>,
     viewed: Arc<ViewedMarks>,
     /// The servers known by settings, a CLI login or the environment, with their kind.
     known: RwLock<BTreeMap<String, HostKind>>,
-    reads: Mutex<HashMap<(PullRequestKey, String), Slot>>,
+    reads: Held<(PullRequestKey, String), PullRequestReadResponse>,
+    conversations: Held<PullRequestKey, PullRequestConversation>,
 }
 
 impl Forgejo {
@@ -67,6 +67,7 @@ impl Forgejo {
             api: Api::new(store, environment),
             known: RwLock::default(),
             reads: Mutex::default(),
+            conversations: Mutex::default(),
         })
     }
 
@@ -96,17 +97,7 @@ impl Forgejo {
         ttl: Duration,
         read: impl FnOnce() -> Result<PullRequestReadResponse, ForgeError>,
     ) -> Result<(PullRequestReadResponse, SystemTime), ForgeError> {
-        let slot = (key.clone(), name);
-        if let Some((at, response)) = self.reads.lock().unwrap().get(&slot)
-            && at.elapsed() < ttl
-        {
-            return Ok((response.clone(), SystemTime::now() + (ttl - at.elapsed())));
-        }
-        let response = read()?;
-        let mut reads = self.reads.lock().unwrap();
-        reads.retain(|_, (at, _)| at.elapsed() < TEXT_TTL);
-        reads.insert(slot, (Instant::now(), response.clone()));
-        Ok((response, SystemTime::now() + ttl))
+        held(&self.reads, (key.clone(), name), ttl, TEXT_TTL, read)
     }
 
     fn account_of(&self, viewer: Option<&str>, key: &PullRequestKey) -> String {
@@ -615,7 +606,7 @@ impl Forgejo {
         if !own {
             return Ok(PullRequestMedia::Unsupported);
         }
-        let conversation = self.conversation_read(key)?;
+        let (conversation, _) = self.conversation_read(key)?;
         let named = std::iter::once(&conversation.description)
             .chain(&conversation.comments)
             .chain(
@@ -644,11 +635,10 @@ impl Forgejo {
     fn conversation_read(
         &self,
         key: &PullRequestKey,
-    ) -> Result<PullRequestConversation, ForgeError> {
-        match self.read(key, PullRequestRead::Conversation)?.0 {
-            PullRequestReadResponse::Conversation(conversation) => Ok(*conversation),
-            _ => Err(error(ForgeErrorKind::Uncertain, "unexpected read")),
-        }
+    ) -> Result<(PullRequestConversation, SystemTime), ForgeError> {
+        held(&self.conversations, key.clone(), READ_TTL, TEXT_TTL, || {
+            self.conversation(key)
+        })
     }
 
     fn drop_reads(&self, key: &PullRequestKey) {
@@ -656,6 +646,7 @@ impl Forgejo {
             .lock()
             .unwrap()
             .retain(|(held, name), _| held != key || name.starts_with("text:"));
+        self.conversations.lock().unwrap().remove(key);
     }
 }
 
@@ -859,10 +850,11 @@ impl Forge for Forgejo {
                 })
             }
             PullRequestRead::Conversation => {
-                self.cached(key, "conversation".into(), READ_TTL, || {
-                    self.conversation(key).map(|conversation| {
-                        PullRequestReadResponse::Conversation(Box::new(conversation))
-                    })
+                self.conversation_read(key).map(|(conversation, fresh)| {
+                    (
+                        PullRequestReadResponse::Conversation(Box::new(conversation)),
+                        fresh,
+                    )
                 })
             }
             // A thread here carries all of its comments.

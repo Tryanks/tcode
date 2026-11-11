@@ -10,8 +10,8 @@ mod repository;
 
 use crate::{
     forge::{
-        Anchoring, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary, Tails,
-        ViewedMarks,
+        Anchoring, Forge, ForgeError, ForgeErrorKind, Held, Moved, Repository, Summary, Tails,
+        ViewedMarks, held,
     },
     settings::SettingsStore,
 };
@@ -57,14 +57,14 @@ const CONCURRENCY: usize = 6;
 /// The revision a deleted file's viewed mark holds.
 const DELETED: &str = "0000000000000000000000000000000000000000";
 
-type Slot = (Instant, PullRequestReadResponse);
 /// An iteration's changed files, and whether the list is whole, by pull request and iteration.
 type Changes = HashMap<(PullRequestKey, u64), (Instant, Arc<(Vec<Change>, bool)>)>;
 
 pub struct Azure {
     api: Arc<Api>,
     viewed: Arc<ViewedMarks>,
-    reads: Mutex<HashMap<(PullRequestKey, String), Slot>>,
+    reads: Held<(PullRequestKey, String), PullRequestReadResponse>,
+    conversations: Held<PullRequestKey, PullRequestConversation>,
     /// An iteration's changes never change; the files, viewed marks and anchoring reads page
     /// through them.
     changes: Mutex<Changes>,
@@ -97,6 +97,7 @@ impl Azure {
             viewed,
             api: Api::new(store, environment),
             reads: Mutex::default(),
+            conversations: Mutex::default(),
             changes: Mutex::default(),
         })
     }
@@ -123,17 +124,7 @@ impl Azure {
         ttl: Duration,
         read: impl FnOnce() -> Result<PullRequestReadResponse, ForgeError>,
     ) -> Result<(PullRequestReadResponse, SystemTime), ForgeError> {
-        let slot = (key.clone(), name);
-        if let Some((at, response)) = self.reads.lock().unwrap().get(&slot)
-            && at.elapsed() < ttl
-        {
-            return Ok((response.clone(), SystemTime::now() + (ttl - at.elapsed())));
-        }
-        let response = read()?;
-        let mut reads = self.reads.lock().unwrap();
-        reads.retain(|_, (at, _)| at.elapsed() < TEXT_TTL);
-        reads.insert(slot, (Instant::now(), response.clone()));
-        Ok((response, SystemTime::now() + ttl))
+        held(&self.reads, (key.clone(), name), ttl, TEXT_TTL, read)
     }
 
     /// The reading account's identity id, `None` anonymously.
@@ -615,7 +606,7 @@ impl Azure {
         if !own {
             return Ok(PullRequestMedia::Unsupported);
         }
-        let conversation = self.conversation_read(key)?;
+        let (conversation, _) = self.conversation_read(key)?;
         let named = std::iter::once(&conversation.description)
             .chain(&conversation.comments)
             .chain(
@@ -637,11 +628,10 @@ impl Azure {
     fn conversation_read(
         &self,
         key: &PullRequestKey,
-    ) -> Result<PullRequestConversation, ForgeError> {
-        match self.read(key, PullRequestRead::Conversation)?.0 {
-            PullRequestReadResponse::Conversation(conversation) => Ok(*conversation),
-            _ => Err(error(ForgeErrorKind::Uncertain, "unexpected read")),
-        }
+    ) -> Result<(PullRequestConversation, SystemTime), ForgeError> {
+        held(&self.conversations, key.clone(), READ_TTL, TEXT_TTL, || {
+            self.conversation(key)
+        })
     }
 
     fn drop_reads(&self, key: &PullRequestKey) {
@@ -649,6 +639,7 @@ impl Azure {
             .lock()
             .unwrap()
             .retain(|(held, name), _| held != key || name.starts_with("text:"));
+        self.conversations.lock().unwrap().remove(key);
     }
 }
 
@@ -815,10 +806,11 @@ impl Forge for Azure {
                 })
             }
             PullRequestRead::Conversation => {
-                self.cached(key, "conversation".into(), READ_TTL, || {
-                    self.conversation(key).map(|conversation| {
-                        PullRequestReadResponse::Conversation(Box::new(conversation))
-                    })
+                self.conversation_read(key).map(|(conversation, fresh)| {
+                    (
+                        PullRequestReadResponse::Conversation(Box::new(conversation)),
+                        fresh,
+                    )
                 })
             }
             // A thread here carries all of its comments.

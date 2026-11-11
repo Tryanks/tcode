@@ -16,8 +16,9 @@ pub(crate) use http::{CliFailure, Step, answered, in_order, media, run_cli, same
 pub(crate) use rate_limit::RateLimits;
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, RwLock},
-    time::{SystemTime, UNIX_EPOCH},
+    hash::Hash,
+    sync::{Arc, Mutex, RwLock},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tcode_core::{
     pull_request::{
@@ -283,6 +284,30 @@ impl ForgeError {
             _ => Rejection::Failed,
         }
     }
+}
+
+/// Answers a host gave, each with when it was read.
+pub(crate) type Held<K, T> = Mutex<HashMap<K, (Instant, T)>>;
+
+/// `slot`'s answer while it is younger than `ttl`, else `read`'s, which is kept; with when
+/// the slot is next read afresh. Keeping one drops every answer older than `keep`.
+pub(crate) fn held<K: Eq + Hash, T: Clone>(
+    held: &Held<K, T>,
+    slot: K,
+    ttl: Duration,
+    keep: Duration,
+    read: impl FnOnce() -> Result<T, ForgeError>,
+) -> Result<(T, SystemTime), ForgeError> {
+    if let Some((at, answer)) = held.lock().unwrap().get(&slot)
+        && at.elapsed() < ttl
+    {
+        return Ok((answer.clone(), SystemTime::now() + (ttl - at.elapsed())));
+    }
+    let answer = read()?;
+    let mut held = held.lock().unwrap();
+    held.retain(|_, (at, _)| at.elapsed() < keep);
+    held.insert(slot, (Instant::now(), answer.clone()));
+    Ok((answer, SystemTime::now() + ttl))
 }
 
 /// A repository-relative path as a URL's path: each segment percent-encoded.
