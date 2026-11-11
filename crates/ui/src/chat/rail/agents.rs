@@ -172,7 +172,9 @@ fn row(
             )
             .into_any_element(),
         ),
-        (None, Some(elapsed)) => Some(elapsed.clone().into_any_element()),
+        (None, Some(elapsed)) => {
+            Some(crate::widgets::fade_text(elapsed.clone()).into_any_element())
+        }
         (None, None) => None,
     };
     let title_line = h_flex()
@@ -236,7 +238,7 @@ fn row(
                     div()
                         .whitespace_nowrap()
                         .text_color(state.color(cx))
-                        .child(state.label())
+                        .child(crate::widgets::fade_text(state.label()))
                         .into_any_element()
                 },
             )

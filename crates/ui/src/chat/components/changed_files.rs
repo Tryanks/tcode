@@ -66,9 +66,14 @@ pub(crate) fn changed_files(
                 .gap_1p5()
                 .items_center()
                 .text_caption(cx)
-                .child(crate::tr!("chat.changed_files", count = changes.len()))
+                .child(crate::widgets::fade_text(crate::tr!(
+                    "chat.changed_files",
+                    count = changes.len()
+                )))
                 .when(completeness == ChangeCompleteness::Partial, |header| {
-                    header.child(crate::tr!("chat.changed_files_partial"))
+                    header.child(crate::widgets::fade_text(crate::tr!(
+                        "chat.changed_files_partial"
+                    )))
                 })
                 .child("·")
                 .child(
@@ -405,7 +410,7 @@ fn chip_element(
         .aria_label(format!("{}: {display}", crate::tr!("chat.view_diff")))
         .font_family(cx.theme().mono_font_family.clone())
         .text_token(&cx.theme().tokens.typography.xs)
-        .child(name.clone())
+        .child(crate::widgets::fade_text(name.clone()))
         .child(
             div()
                 .text_color(cx.theme().success)
@@ -456,5 +461,9 @@ pub(crate) fn quiet_control(
         .aria_label(label.clone())
         .text_token(&cx.theme().tokens.typography.xs)
         .on_click(on_click)
-        .child(div().text_color(cx.theme().muted_foreground).child(label))
+        .child(
+            div()
+                .text_color(cx.theme().muted_foreground)
+                .child(crate::widgets::fade_text(label)),
+        )
 }

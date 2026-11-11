@@ -1242,7 +1242,7 @@ impl MergeDialog {
                     .w(px(104.))
                     .flex_none()
                     .text_secondary(compact, cx)
-                    .child(crate::tr!(label).into_owned()),
+                    .child(crate::widgets::fade_text(crate::tr!(label).into_owned())),
             )
             .child(div().flex_1().min_w_0().text_body(compact, cx).child(value))
             .into_any_element()
@@ -1595,11 +1595,9 @@ impl Render for MergeDialog {
             .child(
                 v_flex()
                     .gap_2()
-                    .child(
-                        div()
-                            .text_caption(cx)
-                            .child(crate::tr!("pull_requests.merge.method").into_owned()),
-                    )
+                    .child(div().text_caption(cx).child(crate::widgets::fade_text(
+                        crate::tr!("pull_requests.merge.method").into_owned(),
+                    )))
                     .child(method)
                     .children(default_box),
             )
@@ -1702,7 +1700,7 @@ pub(super) fn primary_element(
             .text_secondary(compact, cx)
             .text_color(color)
             .child(Icon::new(icon))
-            .child(label);
+            .child(crate::widgets::fade_text(label));
         match tooltip {
             Some(tooltip) => chip
                 .with_tooltip(move |_, _| crate::widgets::tooltip::Tooltip::new(tooltip.clone()))

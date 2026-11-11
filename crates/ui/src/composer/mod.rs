@@ -1150,11 +1150,11 @@ impl Composer {
                     |armed, _, _| {
                         div()
                             .whitespace_nowrap()
-                            .child(crate::tr!(if *armed {
+                            .child(crate::widgets::fade_text(crate::tr!(if *armed {
                                 "mobile.steer"
                             } else {
                                 "mobile.queue"
-                            }))
+                            })))
                             .into_any_element()
                     },
                 );
@@ -1342,7 +1342,9 @@ impl Composer {
                     DesktopAction::Preparing => div()
                         .whitespace_nowrap()
                         .text_secondary(false, cx)
-                        .child(crate::tr!("composer.preparing_worktree"))
+                        .child(crate::widgets::fade_text(crate::tr!(
+                            "composer.preparing_worktree"
+                        )))
                         .into_any_element(),
                     DesktopAction::Send => Button::new("send-message")
                         .motion(&self.button_motion())

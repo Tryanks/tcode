@@ -103,7 +103,7 @@ pub(crate) fn plan_block(
                 .flex_1()
                 .text_caption(cx)
                 .text_color(theme.muted_foreground)
-                .child(crate::tr!("chat.plan_title").into_owned()),
+                .child(crate::widgets::fade_text(crate::tr!("chat.plan_title"))),
         )
         .child(copy_button(&format!("plan:{id}"), copied, compact, on_copy, cx).motion(&motion));
     let footer = decision.map(|decision| {

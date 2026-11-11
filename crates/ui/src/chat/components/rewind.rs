@@ -166,7 +166,7 @@ pub(crate) fn panel_body(
             .child(
                 div()
                     .text_caption(cx)
-                    .child(crate::tr!("rewind.restore").into_owned()),
+                    .child(crate::widgets::fade_text(crate::tr!("rewind.restore"))),
             )
             .child(group)
             .into_any_element()
@@ -181,9 +181,13 @@ pub(crate) fn panel_body(
                 .child(
                     div()
                         .text_caption(cx)
-                        .child(crate::tr!("rewind.restore").into_owned()),
+                        .child(crate::widgets::fade_text(crate::tr!("rewind.restore"))),
                 )
-                .child(div().text_secondary(compact, cx).child(mode_label(mode)))
+                .child(
+                    div()
+                        .text_secondary(compact, cx)
+                        .child(crate::widgets::fade_text(mode_label(mode))),
+                )
                 .into_any_element(),
         )
     });
@@ -316,7 +320,7 @@ fn choice_row(
                 .items_center()
                 .text_body(compact, cx)
                 .child(indicator)
-                .child(mode_label(mode)),
+                .child(crate::widgets::fade_text(mode_label(mode))),
         )
 }
 
@@ -384,7 +388,9 @@ fn preview_block(
             .text_token(xs)
             .text_color(muted)
             .child(crate::widgets::Spinner::new().xsmall().color(muted))
-            .child(crate::tr!("rewind.preview.checking").into_owned())
+            .child(crate::widgets::fade_text(crate::tr!(
+                "rewind.preview.checking"
+            )))
             .into_any_element(),
         PreviewState::Refused(failure) => div()
             .text_token(xs)
@@ -424,11 +430,11 @@ fn preview_block(
                     .items_center()
                     .debug_selector(|| "rewind-preview-files".into())
                     .text_token(xs)
-                    .child(counted(
+                    .child(crate::widgets::fade_text(counted(
                         "rewind.preview.files_one",
                         "rewind.preview.files",
                         files.files.len(),
-                    ))
+                    )))
                     .children(line_counts(files.insertions, files.deletions, cx))
                     .child(div().flex_1())
                     .child(toggle)
@@ -450,7 +456,7 @@ fn preview_block(
                                         .overflow_hidden()
                                         .font_family(mono.clone())
                                         .text_color(muted)
-                                        .child(file.path.clone()),
+                                        .child(crate::widgets::fade_text(file.path.clone())),
                                 )
                                 .children(line_counts(file.insertions, file.deletions, cx))
                                 .into_any_element()
@@ -464,16 +470,13 @@ fn preview_block(
                     .w_full()
                     .gap_0p5()
                     .debug_selector(|| "rewind-preview-conflicts".into())
-                    .child(
-                        div()
-                            .text_token(xs)
-                            .text_color(cx.theme().warning)
-                            .child(counted(
-                                "rewind.preview.conflicts_one",
-                                "rewind.preview.conflicts",
-                                preview.conflicts.len(),
-                            )),
-                    )
+                    .child(div().text_token(xs).text_color(cx.theme().warning).child(
+                        crate::widgets::fade_text(counted(
+                            "rewind.preview.conflicts_one",
+                            "rewind.preview.conflicts",
+                            preview.conflicts.len(),
+                        )),
+                    ))
                     .child(path_list(
                         preview
                             .conflicts
@@ -489,14 +492,13 @@ fn preview_block(
                                             .flex_1()
                                             .overflow_hidden()
                                             .font_family(mono.clone())
-                                            .child(conflict.path.clone()),
+                                            .child(crate::widgets::fade_text(
+                                                conflict.path.clone(),
+                                            )),
                                     )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_color(muted)
-                                            .child(conflict_label(conflict.kind)),
-                                    )
+                                    .child(div().flex_none().text_color(muted).child(
+                                        crate::widgets::fade_text(conflict_label(conflict.kind)),
+                                    ))
                                     .into_any_element()
                             })
                             .collect(),
@@ -576,7 +578,11 @@ pub(crate) fn rewound_divider(
                     )
                     .text_color(tint),
                 )
-                .child(div().text_color(tint).child(label.clone()))
+                .child(
+                    div()
+                        .text_color(tint)
+                        .child(crate::widgets::fade_text(label.clone())),
+                )
                 .on_click({
                     let on_toggle = on_toggle.clone();
                     move |_, window, cx| on_toggle(window, cx)
@@ -635,7 +641,7 @@ pub(crate) fn rewound_divider(
             DividerUndo::InProgress => div()
                 .text_token(&cx.theme().tokens.typography.xs)
                 .text_color(cx.theme().muted_foreground)
-                .child(crate::tr!("rewind.undoing").into_owned())
+                .child(crate::widgets::fade_text(crate::tr!("rewind.undoing")))
                 .into_any_element(),
         });
         let row = h_flex()

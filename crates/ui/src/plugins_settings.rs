@@ -1203,7 +1203,7 @@ impl PluginsSettingsPanel {
                 material::chip_surface(cx.theme().secondary, cx.theme().foreground, cx)
                     .debug_selector(move || id.clone())
                     .child(material::status_dot(account.color))
-                    .child(account.name.clone())
+                    .child(crate::widgets::fade_text(account.name.clone()))
                     .child(state)
             })
             .collect();
@@ -1513,9 +1513,10 @@ impl PluginsSettingsPanel {
                         .child(material::status_dot(account.color))
                         .child(
                             div()
-                                .truncate()
+                                .min_w_0()
+                                .overflow_hidden()
                                 .text_caption(cx)
-                                .child(account.name.clone()),
+                                .child(crate::widgets::fade_text(account.name.clone())),
                         )
                 }))
                 .child(div().w(px(MENU_WIDTH)))
@@ -1630,7 +1631,7 @@ impl PluginsSettingsPanel {
                         div()
                             .text_body(self.touch, cx)
                             .font_medium()
-                            .child(entry.name.clone()),
+                            .child(crate::widgets::fade_text(entry.name.clone())),
                     )
                     .child(source_chip(entry, cx))
                     .child(
@@ -1767,11 +1768,11 @@ impl PluginsSettingsPanel {
         if project {
             lines.push(
                 material::group_row(cx)
-                    .child(
-                        div().flex_1().min_w_0().text_body(self.touch, cx).child(
+                    .child(div().flex_1().min_w_0().text_body(self.touch, cx).child(
+                        crate::widgets::fade_text(
                             crate::tr!("providers.plugins.this_project_shared").into_owned(),
                         ),
-                    )
+                    ))
                     .child(self.project_switches(columns, row, cx))
                     .into_any_element(),
             );
@@ -1791,9 +1792,9 @@ impl PluginsSettingsPanel {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .truncate()
+                                .overflow_hidden()
                                 .text_body(self.touch, cx)
-                                .child(account.name.clone()),
+                                .child(crate::widgets::fade_text(account.name.clone())),
                         )
                         .child(self.cell(
                             account,
@@ -1945,21 +1946,27 @@ impl PluginsSettingsPanel {
                 div()
                     .text_token(&cx.theme().tokens.typography.xs)
                     .text_color(cx.theme().primary)
-                    .child(crate::tr!("providers.plugins.latest", version = latest).into_owned())
+                    .child(crate::widgets::fade_text(
+                        crate::tr!("providers.plugins.latest", version = latest).into_owned(),
+                    ))
                     .into_any_element(),
             ),
             (None, Some(_)) if differ => Some(
                 div()
                     .text_token(&cx.theme().tokens.typography.xs)
                     .text_color(cx.theme().warning)
-                    .child(crate::tr!("providers.plugins.versions_differ").into_owned())
+                    .child(crate::widgets::fade_text(
+                        crate::tr!("providers.plugins.versions_differ").into_owned(),
+                    ))
                     .into_any_element(),
             ),
             (_, None) if !inline => Some(
                 div()
                     .text_token(&cx.theme().tokens.typography.xs)
                     .text_color(muted)
-                    .child(crate::tr!("providers.plugins.not_installed").into_owned())
+                    .child(crate::widgets::fade_text(
+                        crate::tr!("providers.plugins.not_installed").into_owned(),
+                    ))
                     .into_any_element(),
             ),
             _ => None,
@@ -2048,7 +2055,7 @@ impl PluginsSettingsPanel {
                         div()
                             .text_secondary(false, cx)
                             .text_color(muted)
-                            .child(label.into_owned()),
+                            .child(crate::widgets::fade_text(label.into_owned())),
                     )
                     .child(
                         div().debug_selector(move || id.clone()).child(
@@ -2181,8 +2188,16 @@ impl PluginsSettingsPanel {
                         .items_center()
                         .gap_1p5()
                         .child(material::status_dot(account.color))
-                        .child(div().text_color(muted).child(account.name.clone()))
-                        .child(div().text_color(color).child(state.into_owned()))
+                        .child(
+                            div()
+                                .text_color(muted)
+                                .child(crate::widgets::fade_text(account.name.clone())),
+                        )
+                        .child(
+                            div()
+                                .text_color(color)
+                                .child(crate::widgets::fade_text(state.into_owned())),
+                        )
                         .children(install_button),
                 )
                 .children(why.map(|why| {
@@ -2318,7 +2333,9 @@ impl PluginsSettingsPanel {
             .items_center()
             .gap_2()
             .child(picker)
-            .child(crate::tr!("providers.plugins.project_shared").into_owned())
+            .child(crate::widgets::fade_text(
+                crate::tr!("providers.plugins.project_shared").into_owned(),
+            ))
             .into_any_element();
         let body = match &project {
             None => note_card(
@@ -2430,7 +2447,7 @@ impl PluginsSettingsPanel {
                         div()
                             .text_secondary(self.touch, cx)
                             .text_color(success)
-                            .child(crate::tr!("providers.plugins.added").into_owned())
+                            .child(crate::widgets::fade_text(crate::tr!("providers.plugins.added").into_owned()))
                             .into_any_element()
                     } else if can_add {
                         let (profile_id, source) = (account.id.clone(), marketplace.source.clone());
@@ -2459,7 +2476,7 @@ impl PluginsSettingsPanel {
                                     .gap_2()
                                     .items_center()
                                     .child(material::status_dot(account.color))
-                                    .child(div().flex_1().min_w_0().truncate().child(account.name.clone()))
+                                    .child(div().flex_1().min_w_0().overflow_hidden().child(crate::widgets::fade_text(account.name.clone())))
                                     .child(content),
                             )
                             .into_any_element()
@@ -2515,7 +2532,7 @@ impl PluginsSettingsPanel {
                             .flex_wrap()
                             .items_center()
                             .gap_2()
-                            .child(div().text_body(self.touch, cx).child(marketplace.name.clone()))
+                            .child(div().text_body(self.touch, cx).child(crate::widgets::fade_text(marketplace.name.clone())))
                             .child(material::semantic_chip(
                                 source_kind_label(marketplace.kind),
                                 cx.theme().muted,
@@ -2821,7 +2838,7 @@ impl PluginsSettingsPanel {
                                 div()
                                     .text_body(self.touch, cx)
                                     .font_medium()
-                                    .child(entry.name.clone()),
+                                    .child(crate::widgets::fade_text(entry.name.clone())),
                             )
                             .child(source_chip(entry, cx))
                             .children(badges)
@@ -3218,7 +3235,9 @@ fn details(
                     .gap_2()
                     .text_secondary(false, cx)
                     .child(div().w(px(96.)).flex_none().text_color(muted).child(
-                        crate::tr!(format!("providers.plugins.declared.{key}")).into_owned(),
+                        crate::widgets::fade_text(
+                            crate::tr!(format!("providers.plugins.declared.{key}")).into_owned(),
+                        ),
                     ))
                     .child(div().flex_1().min_w_0().child(if names.is_empty() {
                         crate::tr!("providers.plugins.none_declared").into_owned()
@@ -3251,8 +3270,12 @@ fn details(
                             .gap_1p5()
                             .items_center()
                             .child(material::status_dot(account.color))
-                            .child(account.name.clone())
-                            .child(div().text_color(muted).child(scope_label(scope)))
+                            .child(crate::widgets::fade_text(account.name.clone()))
+                            .child(
+                                div()
+                                    .text_color(muted)
+                                    .child(crate::widgets::fade_text(scope_label(scope))),
+                            )
                             .children(
                                 installation
                                     .version

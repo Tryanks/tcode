@@ -165,7 +165,12 @@ impl ProviderModelPicker {
                     .gap_2()
                     .text_body(false, cx)
                     .children(glyph)
-                    .child(div().flex_1().min_w_0().child(display))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(crate::widgets::fade_text(display)),
+                    )
                     .child(
                         Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground),
                     ),
@@ -275,8 +280,9 @@ impl Render for ProviderModelPicker {
                                 .px_2()
                                 .py_1()
                                 .text_secondary(false, cx)
-                                .truncate()
-                                .child(account),
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(crate::widgets::fade_text(account)),
                         )
                     })
                     .child(crate::material::faded_hairline(cx))

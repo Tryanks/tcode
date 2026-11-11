@@ -197,7 +197,11 @@ impl AcpPanel {
                         h_flex()
                             .gap_2()
                             .items_center()
-                            .child(div().text_title(cx).child(agent.name.clone()))
+                            .child(
+                                div()
+                                    .text_title(cx)
+                                    .child(crate::widgets::fade_text(agent.name.clone())),
+                            )
                             .when(!agent.version.is_empty(), |row| {
                                 row.child(
                                     div()

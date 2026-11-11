@@ -1702,7 +1702,9 @@ mod section {
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .child(div().child(crate::tr!("space_policy.approval.title")))
+                        .child(div().child(crate::widgets::fade_text(crate::tr!(
+                            "space_policy.approval.title"
+                        ))))
                         .child(div().text_secondary(compact, cx).child(crate::tr!(
                             match policy.approval {
                                 SpaceApproval::Any => "space_policy.approval.any_description",
@@ -2091,7 +2093,7 @@ mod section {
                             div()
                                 .text_secondary(compact, cx)
                                 .text_color(status_color)
-                                .child(label.clone())
+                                .child(crate::widgets::fade_text(label.clone()))
                                 .into_any_element()
                         },
                     );

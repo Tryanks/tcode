@@ -574,7 +574,7 @@ pub(crate) fn grant_editor(
             .pt_1()
             .pl(gpui::px(crate::material::CARD_INSET))
             .text_caption(cx)
-            .child(text)
+            .child(crate::widgets::fade_text(text))
     };
     let selected_projects = match &grant.scope {
         ControlScope::Projects(ids) => ids.clone(),
@@ -756,7 +756,11 @@ fn switch_row(
                 .flex_1()
                 .min_w_0()
                 .gap_0p5()
-                .child(div().text_body(compact, cx).child(title.clone()))
+                .child(
+                    div()
+                        .text_body(compact, cx)
+                        .child(crate::widgets::fade_text(title.clone())),
+                )
                 .child(div().text_secondary(compact, cx).child(description)),
         )
         .child(

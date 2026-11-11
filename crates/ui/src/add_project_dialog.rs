@@ -789,7 +789,12 @@ impl AddProjectDialog {
                         h_flex()
                             .min_w_0()
                             .gap_2()
-                            .child(div().flex_none().font_bold().child(name))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_bold()
+                                    .child(crate::widgets::fade_text(name)),
+                            )
                             .child(
                                 div()
                                     .min_w_0()
@@ -804,7 +809,11 @@ impl AddProjectDialog {
                             h_flex()
                                 .gap_2()
                                 .child(tag_chip(tag, cx))
-                                .child(div().text_secondary(false, cx).child(ago))
+                                .child(
+                                    div()
+                                        .text_secondary(false, cx)
+                                        .child(crate::widgets::fade_text(ago)),
+                                )
                                 .into_any_element(),
                         ),
                         false,
@@ -1047,7 +1056,12 @@ fn caption(label: String, detail: Option<String>, cx: &App) -> AnyElement {
         .px_2()
         .pt_2()
         .pb_1()
-        .child(div().flex_none().text_caption(cx).child(label))
+        .child(
+            div()
+                .flex_none()
+                .text_caption(cx)
+                .child(crate::widgets::fade_text(label)),
+        )
         .when_some(detail, |row, detail| {
             row.child(
                 div()
@@ -1068,7 +1082,7 @@ fn tag_chip(text: String, cx: &App) -> gpui::Div {
         .bg(cx.theme().primary.opacity(0.1))
         .text_color(cx.theme().primary)
         .text_secondary(false, cx)
-        .child(text)
+        .child(crate::widgets::fade_text(text))
 }
 
 /// Renders the host's replicated import status. It owns no progress state of

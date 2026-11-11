@@ -287,11 +287,15 @@ impl Composer {
                     this.approval_expanded = !this.approval_expanded;
                     cx.notify();
                 }))
-                .child(div().text_caption(cx).child(if self.compact {
-                    crate::tr!("mobile.approval")
-                } else {
-                    crate::tr!("approval.pending")
-                }))
+                .child(
+                    div()
+                        .text_caption(cx)
+                        .child(crate::widgets::fade_text(if self.compact {
+                            crate::tr!("mobile.approval")
+                        } else {
+                            crate::tr!("approval.pending")
+                        })),
+                )
                 .child(div().flex_1().text_title(cx).child(summary))
                 .when(count > 1, |this| {
                     this.child(

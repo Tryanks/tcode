@@ -267,7 +267,11 @@ impl LocalPermissions {
                     .flex_1()
                     .min_w_0()
                     .gap_0p5()
-                    .child(div().text_body(compact, cx).child(crate::tr!(name_key)))
+                    .child(
+                        div()
+                            .text_body(compact, cx)
+                            .child(crate::widgets::fade_text(crate::tr!(name_key))),
+                    )
                     .child(div().text_secondary(compact, cx).child(crate::tr!(why_key))),
             )
             .child(controls)

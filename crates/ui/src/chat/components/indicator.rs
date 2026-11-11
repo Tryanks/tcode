@@ -238,7 +238,7 @@ pub(crate) fn turn_working_indicator(
                             .items_center()
                             .text_color(warning)
                             .child(crate::icon::Icon::new(crate::icon::IconName::TriangleAlert))
-                            .child(served.value.clone())
+                            .child(crate::widgets::fade_text(served.value.clone()))
                             .with_tooltip(move |_, _| Tooltip::new(tooltip.clone())),
                     )
                 }

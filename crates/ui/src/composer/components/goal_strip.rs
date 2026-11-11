@@ -165,10 +165,14 @@ impl Composer {
             .items_center()
             .text_secondary(touch, cx)
             .child(status_icon)
-            .child(div().flex_none().child(crate::tr!(
-                "composer.goal_header",
-                status = status_label(goal.status)
-            )))
+            .child(
+                div()
+                    .flex_none()
+                    .child(crate::widgets::fade_text(crate::tr!(
+                        "composer.goal_header",
+                        status = status_label(goal.status)
+                    ))),
+            )
             .child(
                 div()
                     .flex_1()

@@ -519,7 +519,7 @@ impl ChatView {
                     .child(crate::widgets::breathing::BreathingDot::new(
                         cx.theme().muted_foreground,
                     ))
-                    .child(label),
+                    .child(crate::widgets::fade_text(label)),
             );
         let popover = crate::widgets::Popover::new("background-sheet")
             .anchor(gpui::Anchor::BottomLeft)
@@ -539,29 +539,28 @@ impl ChatView {
                 else {
                     return div().into_any_element();
                 };
-                let header = h_flex()
-                    .w_full()
-                    .px_1()
-                    .gap_2()
-                    .items_center()
-                    .when(!place.touch, |header| {
-                        header.child(
+                let header =
+                    h_flex()
+                        .w_full()
+                        .px_1()
+                        .gap_2()
+                        .items_center()
+                        .when(!place.touch, |header| {
+                            header.child(
+                                div().flex_none().text_body(false, cx).font_medium().child(
+                                    crate::widgets::fade_text(crate::tr!("background.title")),
+                                ),
+                            )
+                        })
+                        .child(
                             div()
-                                .flex_none()
-                                .text_body(false, cx)
-                                .font_medium()
-                                .child(crate::tr!("background.title")),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_secondary(place.touch, cx)
-                            .text_color(cx.theme().muted_foreground)
-                            .child(crate::widgets::fade_text(background.summary())),
-                    );
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_secondary(place.touch, cx)
+                                .text_color(cx.theme().muted_foreground)
+                                .child(crate::widgets::fade_text(background.summary())),
+                        );
                 v_flex()
                     .w_full()
                     .when(!place.touch, |list| list.w(px(340.)))
@@ -1634,7 +1633,11 @@ impl ChatView {
                         .items_center()
                         .text_body(false, cx)
                         .child(git_action_icon(action).text_color(muted))
-                        .child(div().flex_1().child(label.clone()));
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(crate::widgets::fade_text(label.clone())),
+                        );
                     let row = if disabled {
                         let mut row = frame
                             .id(("git-menu-item", index))

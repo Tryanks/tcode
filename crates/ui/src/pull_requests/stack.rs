@@ -408,7 +408,7 @@ pub(super) fn operation_chip(
                         |label, _, _| {
                             div()
                                 .whitespace_nowrap()
-                                .child(label.clone())
+                                .child(crate::widgets::fade_text(label.clone()))
                                 .into_any_element()
                         },
                     ))
@@ -669,14 +669,14 @@ pub(super) fn map_selector(
                 .items_center()
                 .text_body(compact, cx)
                 .child(Icon::new(IconName::Layers))
-                .child(
+                .child(crate::widgets::fade_text(
                     crate::tr!(
                         "pull_requests.layer_position",
                         index = index.to_string(),
                         count = count.to_string()
                     )
                     .into_owned(),
-                )
+                ))
                 // The running write's glyph fades in and out beside the position.
                 .child({
                     let status =
@@ -824,17 +824,20 @@ fn map_content(
             StackLayerRole::Above => (
                 div()
                     .text_color(muted)
-                    .child(state_word(row.layer.state, row.draft == Some(true)))
+                    .child(crate::widgets::fade_text(state_word(
+                        row.layer.state,
+                        row.draft == Some(true),
+                    )))
                     .into_any_element(),
                 tr("role_label_above"),
             ),
             StackLayerRole::InScope => (
                 div()
                     .text_color(muted)
-                    .child(tr_with(
+                    .child(crate::widgets::fade_text(tr_with(
                         "role_in_scope",
                         &[("number", selected_number.to_string())],
-                    ))
+                    )))
                     .into_any_element(),
                 tr_with(
                     "role_label_in_scope",
@@ -852,7 +855,7 @@ fn map_content(
                         .items_center()
                         .text_color(color)
                         .child(Icon::new(IconName::Lock))
-                        .child(label)
+                        .child(crate::widgets::fade_text(label))
                         .into_any_element(),
                     tr_with(
                         "role_label_blocks",
@@ -863,7 +866,7 @@ fn map_content(
             StackLayerRole::BelowMerged => (
                 div()
                     .text_color(muted)
-                    .child(tr("role_merged"))
+                    .child(crate::widgets::fade_text(tr("role_merged")))
                     .into_any_element(),
                 tr("role_label_merged"),
             ),
@@ -934,7 +937,11 @@ fn map_content(
                 .child(crate::widgets::fade_text(name)),
         )
         .child(trailing)
-        .children(condition.map(|condition| div().text_color(muted).child(condition.into_owned())))
+        .children(condition.map(|condition| {
+            div()
+                .text_color(muted)
+                .child(crate::widgets::fade_text(condition.into_owned()))
+        }))
         .on_click(move |_, window, cx| {
             view.update(cx, |view, cx| view.select_layer(layer_key.clone(), cx));
             popover.update(cx, |state, cx| state.dismiss(window, cx));
@@ -947,7 +954,7 @@ fn map_content(
         .items_center()
         .text_meta_mono(compact, cx)
         .child(Icon::new(IconName::CornerDownRight))
-        .child(map.stack.base.clone());
+        .child(crate::widgets::fade_text(map.stack.base.clone()));
     let summary = v_flex()
         .px_2()
         .py_1()
@@ -1573,7 +1580,11 @@ fn fact(label: String, value: impl IntoElement, cx: &App) -> AnyElement {
         .items_start()
         .child(
             // One label column so the facts' values line up; no token is a column width.
-            div().w(px(104.)).flex_none().text_caption(cx).child(label),
+            div()
+                .w(px(104.))
+                .flex_none()
+                .text_caption(cx)
+                .child(crate::widgets::fade_text(label)),
         )
         .child(div().flex_1().min_w_0().text_body(false, cx).child(value))
         .into_any_element()
@@ -1666,7 +1677,9 @@ fn layer_row(
                         layer.number
                     )))
                     .text_meta_mono(false, cx)
-                    .child(head.as_deref().map(short).unwrap_or_else(|| "—".into()))
+                    .child(crate::widgets::fade_text(
+                        head.as_deref().map(short).unwrap_or_else(|| "—".into()),
+                    ))
                     .when_some(head, |cell, head| {
                         cell.with_tooltip(move |_, _| Tooltip::new(head.clone()))
                     }),
@@ -1980,11 +1993,9 @@ impl Render for MergeStackDialog {
             v_flex()
                 .w_full()
                 .gap_2()
-                .child(
-                    div()
-                        .text_caption(cx)
-                        .child(crate::tr!("pull_requests.merge.method").into_owned()),
-                )
+                .child(div().text_caption(cx).child(crate::widgets::fade_text(
+                    crate::tr!("pull_requests.merge.method").into_owned(),
+                )))
                 .child(div().opacity(read).child(method))
                 .children(default_box),
         );
@@ -2074,35 +2085,36 @@ impl Render for MergeStackDialog {
                                 .gap_1()
                                 .text_color(color)
                                 .child(Icon::new(IconName::Lock))
-                                .child(tr(if layer.draft {
+                                .child(crate::widgets::fade_text(tr(if layer.draft {
                                     "blocks_draft"
                                 } else {
                                     "blocks_closed"
-                                }))
+                                })))
                                 .into_any_element()
                         } else {
                             div()
                                 .text_color(muted)
-                                .child(tr("tag_ready"))
+                                .child(crate::widgets::fade_text(tr("tag_ready")))
                                 .into_any_element()
                         };
                         layer_row(Some(index), layer, tag, false, false, cx)
                     })
                     .collect();
-                body = body.child(
-                    v_flex()
-                        .gap_1()
-                        .child(div().text_caption(cx).child(tr_with(
-                            "scope_label",
-                            &[("count", scope.len().to_string())],
-                        )))
-                        .children(merged_below.iter().map(|number| {
-                            div()
-                                .text_secondary(false, cx)
-                                .child(tr_with("already_merged", &[("number", number.to_string())]))
-                        }))
-                        .child(scope_box(rows, cx)),
-                );
+                body =
+                    body.child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_caption(cx).child(crate::widgets::fade_text(
+                                tr_with("scope_label", &[("count", scope.len().to_string())]),
+                            )))
+                            .children(merged_below.iter().map(|number| {
+                                div().text_secondary(false, cx).child(tr_with(
+                                    "already_merged",
+                                    &[("number", number.to_string())],
+                                ))
+                            }))
+                            .child(scope_box(rows, cx)),
+                    );
                 let above: Vec<_> = state.layers[(selected_index + 1).min(state.layers.len())..]
                     .iter()
                     .filter(|layer| layer.state == PullRequestState::Open)
@@ -2111,19 +2123,18 @@ impl Render for MergeStackDialog {
                     body = body.child(
                         v_flex()
                             .gap_1()
-                            .child(div().text_caption(cx).child(tr_with(
-                                "above_label",
-                                &[("count", above.len().to_string())],
+                            .child(div().text_caption(cx).child(crate::widgets::fade_text(
+                                tr_with("above_label", &[("count", above.len().to_string())]),
                             )))
                             .children(above.iter().map(|layer| {
                                 layer_row(
                                     None,
                                     layer,
                                     div()
-                                        .child(tr_with(
+                                        .child(crate::widgets::fade_text(tr_with(
                                             "above_tag",
                                             &[("base", state.base.clone())],
-                                        ))
+                                        )))
                                         .into_any_element(),
                                     false,
                                     true,
@@ -2615,17 +2626,17 @@ impl RebaseStackDialog {
                                 .gap_1()
                                 .text_color(muted)
                                 .child(Icon::new(IconName::Check))
-                                .child(tr("access_write")),
+                                .child(crate::widgets::fade_text(tr("access_write"))),
                             Some(PullRequestStackPushAccess::MaintainerCanModify) => h_flex()
                                 .gap_1()
                                 .text_color(muted)
                                 .child(Icon::new(IconName::Check))
-                                .child(tr("access_maintainer")),
+                                .child(crate::widgets::fade_text(tr("access_maintainer"))),
                             _ => h_flex()
                                 .gap_1()
                                 .text_color(theme.danger)
                                 .child(Icon::new(IconName::Lock))
-                                .child(tr("access_denied")),
+                                .child(crate::widgets::fade_text(tr("access_denied"))),
                         };
                         layer_row(Some(index), layer, tag.into_any_element(), true, false, cx)
                     })
@@ -2636,20 +2647,21 @@ impl RebaseStackDialog {
                     .filter(|layer| layer.state == PullRequestState::Merged)
                     .map(|layer| layer.number)
                     .collect();
-                body = body.child(
-                    v_flex()
-                        .gap_1()
-                        .child(div().text_caption(cx).child(tr_with(
-                            "rebase_layers_label",
-                            &[("count", count.to_string())],
-                        )))
-                        .children(merged.iter().map(|number| {
-                            div()
-                                .text_secondary(false, cx)
-                                .child(tr_with("merged_skipped", &[("number", number.to_string())]))
-                        }))
-                        .child(scope_box(rows, cx)),
-                );
+                body =
+                    body.child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_caption(cx).child(crate::widgets::fade_text(
+                                tr_with("rebase_layers_label", &[("count", count.to_string())]),
+                            )))
+                            .children(merged.iter().map(|number| {
+                                div().text_secondary(false, cx).child(tr_with(
+                                    "merged_skipped",
+                                    &[("number", number.to_string())],
+                                ))
+                            }))
+                            .child(scope_box(rows, cx)),
+                    );
                 body = body
                     .child(
                         notes(cx)
@@ -2909,7 +2921,9 @@ fn progress_view(
                 |(step, below), _, cx| {
                     div()
                         .whitespace_nowrap()
-                        .child(step_parts(step, *below, &base, cx).1)
+                        .child(crate::widgets::fade_text(
+                            step_parts(step, *below, &base, cx).1,
+                        ))
                         .into_any_element()
                 },
             );

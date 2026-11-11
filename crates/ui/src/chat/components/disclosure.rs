@@ -127,7 +127,7 @@ fn open_child_link(
     .flex_none()
     .text_token(&cx.theme().tokens.typography.xs)
     .text_color(primary)
-    .child(crate::tr!("agents.open_child"))
+    .child(crate::widgets::fade_text(crate::tr!("agents.open_child")))
     .into_any_element()
 }
 

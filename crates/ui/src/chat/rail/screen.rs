@@ -255,7 +255,12 @@ pub(super) fn body(
                         .text_color(cx.theme().foreground)
                         .children(shot.label().map(crate::widgets::fade_text)),
                 )
-                .children(ago.map(|ago| div().flex_none().text_color(muted).child(ago)))
+                .children(ago.map(|ago| {
+                    div()
+                        .flex_none()
+                        .text_color(muted)
+                        .child(crate::widgets::fade_text(ago))
+                }))
                 .into_any_element()
         },
     );
@@ -324,11 +329,11 @@ pub(super) fn body(
                     div()
                         .text_secondary(false, cx)
                         .text_color(muted)
-                        .child(crate::tr!(
+                        .child(crate::widgets::fade_text(crate::tr!(
                             "chat.screen_position",
                             index = position + 1,
                             total = total
-                        ))
+                        )))
                         .into_any_element()
                 },
             );

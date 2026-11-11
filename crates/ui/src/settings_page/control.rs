@@ -309,7 +309,7 @@ impl SettingsPage {
                     div()
                         .flex_none()
                         .text_secondary(compact, cx)
-                        .child(context.join(" · ")),
+                        .child(crate::widgets::fade_text(context.join(" · "))),
                 )
         };
         crate::material::group_row_stacked(cx)
@@ -554,7 +554,11 @@ impl SettingsPage {
                                     }),
                             )
                             .when(!compact, |row| {
-                                row.child(div().text_secondary(compact, cx).child(summary.clone()))
+                                row.child(
+                                    div()
+                                        .text_secondary(compact, cx)
+                                        .child(crate::widgets::fade_text(summary.clone())),
+                                )
                             })
                             .child(
                                 Button::new(SharedString::from(format!("edit-grant-{id}")))
@@ -712,7 +716,9 @@ impl SettingsPage {
             vec![
                 div()
                     .text_secondary(compact, cx)
-                    .child(crate::tr!("control.settings.same_as_default"))
+                    .child(crate::widgets::fade_text(crate::tr!(
+                        "control.settings.same_as_default"
+                    )))
                     .into_any_element(),
             ]
         } else {
@@ -774,7 +780,7 @@ impl SettingsPage {
                 div()
                     .flex_none()
                     .text_secondary(compact, cx)
-                    .child(format!("· {name}")),
+                    .child(crate::widgets::fade_text(format!("· {name}"))),
             );
         }
         let labels = v_flex()
@@ -1240,7 +1246,7 @@ impl SettingsPage {
                         div()
                             .pl(px(crate::material::CARD_INSET))
                             .text_secondary(compact, cx)
-                            .child(day.label()),
+                            .child(crate::widgets::fade_text(day.label())),
                     )
                     .child(crate::material::group(cx).child(list))
                     .into_any_element(),
@@ -1273,7 +1279,7 @@ fn activity_row(
         .min_w_0()
         .gap_2()
         .text_body(compact, cx)
-        .child(div().flex_none().child(action));
+        .child(div().flex_none().child(crate::widgets::fade_text(action)));
     if !own {
         first = first.child(
             div()
@@ -1286,12 +1292,9 @@ fn activity_row(
     } else {
         first = first.child(div().flex_1());
     }
-    first = first.child(
-        div()
-            .flex_none()
-            .text_secondary(compact, cx)
-            .child(humanize_ago(now_secs.saturating_sub(entry.at / 1000))),
-    );
+    first = first.child(div().flex_none().text_secondary(compact, cx).child(
+        crate::widgets::fade_text(humanize_ago(now_secs.saturating_sub(entry.at / 1000))),
+    ));
     let by = if own {
         crate::tr!(
             "control.settings.activity_self",

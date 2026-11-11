@@ -123,11 +123,11 @@ impl MetaChip {
                 .items_center()
                 .text_color(muted)
                 .child(Icon::new(icon.clone()))
-                .child(title.clone())
+                .child(crate::widgets::fade_text(title.clone()))
                 .into_any_element(),
             Self::Empty(text) => div()
                 .text_color(muted)
-                .child(text.clone())
+                .child(crate::widgets::fade_text(text.clone()))
                 .into_any_element(),
             Self::Reviewer {
                 name,
@@ -149,7 +149,7 @@ impl MetaChip {
                     .when_some(avatar.clone(), |chip, (login, source)| {
                         chip.child(super::conversation::avatar_image(&login, source, 16., cx))
                     })
-                    .child(name.clone())
+                    .child(crate::widgets::fade_text(name.clone()))
                     // A review recolours the reviewer's verdict where it stands.
                     .child(crate::motion::Sampled::new(move |window, cx| {
                         crate::motion::status_icon(verdict, icon, color, CHANGE, window, cx)
@@ -172,7 +172,7 @@ impl MetaChip {
                 .bg(cx.theme().secondary)
                 .text_token(&cx.theme().tokens.typography.xs)
                 .child(dot(*color))
-                .child(name.clone())
+                .child(crate::widgets::fade_text(name.clone()))
                 .when_some(description.clone(), |chip, description| {
                     chip.with_tooltip(move |_, _| Tooltip::new(description.clone()))
                 })
@@ -655,7 +655,11 @@ impl PullRequestView {
                                 .gap_2()
                                 .items_center()
                                 .child(lead)
-                                .child(div().text_body(compact, cx).child(row.key.clone()))
+                                .child(
+                                    div()
+                                        .text_body(compact, cx)
+                                        .child(crate::widgets::fade_text(row.key.clone())),
+                                )
                                 .children(row.secondary.clone().map(|secondary| {
                                     div()
                                         .flex_1()
@@ -805,5 +809,7 @@ fn loading_line(height: gpui::Pixels, compact: bool, cx: &App) -> gpui::Div {
         .items_center()
         .text_secondary(compact, cx)
         .child(Spinner::new())
-        .child(crate::tr!("pull_requests.meta.loading"))
+        .child(crate::widgets::fade_text(crate::tr!(
+            "pull_requests.meta.loading"
+        )))
 }

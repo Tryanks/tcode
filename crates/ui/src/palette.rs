@@ -27,8 +27,8 @@ use agent::ProviderKind;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
     IntoElement, KeyDownEvent, ListAlignment, ListState, ParentElement as _, Render, Role,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
-    list, prelude::FluentBuilder as _, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, list,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_protocol::{SessionContentHits, ThreadExportFormat};
@@ -1110,7 +1110,7 @@ impl CommandPalette {
                     .pt_1()
                     .pb_1()
                     .text_caption(cx)
-                    .child(label.clone())
+                    .child(crate::widgets::fade_text(label.clone()))
                     .into_any_element();
             }
             Row::Item(index) => *index,
@@ -1210,7 +1210,9 @@ impl CommandPalette {
                                 .text_secondary(compact, cx)
                                 .when_some(item.updated_at, |this, at| {
                                     let ago = store.read(cx).host_now_secs(cx).saturating_sub(at);
-                                    this.child(div().child(humanize_ago(ago)))
+                                    this.child(
+                                        div().child(crate::widgets::fade_text(humanize_ago(ago))),
+                                    )
                                 })
                                 .child(profile_glyph(
                                     store.read(cx),
@@ -1252,8 +1254,9 @@ impl CommandPalette {
         let is_sel = index == self.selected;
         let action = item.action.clone();
         // The row centres its lines; the smaller ones are moved onto the
-        // name's baseline.
-        let (family, name_size, secondary_size) = {
+        // name's baseline. Each line stands on its own font's baseline
+        // whatever it falls back to, so the font's own metrics give the move.
+        let drop = {
             let theme = cx.theme();
             let typography = &theme.tokens.typography;
             let (name, secondary) = if compact {
@@ -1261,22 +1264,15 @@ impl CommandPalette {
             } else {
                 (&typography.sm, &typography.xs)
             };
-            (theme.font_family.clone(), name.size, secondary.size)
-        };
-        let name_baseline = crate::typography::baseline_below_centre(
-            SharedString::from(item.label.clone()),
-            family.clone(),
-            name_size,
-            window,
-        );
-        let drop_of = |text: &str| {
-            name_baseline
-                - crate::typography::baseline_below_centre(
-                    SharedString::from(text.to_owned()),
-                    family.clone(),
-                    secondary_size,
+            let below = |size| {
+                crate::typography::baseline_below_centre(
+                    "x".into(),
+                    theme.font_family.clone(),
+                    size,
                     window,
                 )
+            };
+            below(name.size) - below(secondary.size)
         };
         let host = item.host_name.clone().map(|host| {
             div()
@@ -1285,7 +1281,7 @@ impl CommandPalette {
                 .overflow_hidden()
                 .text_secondary(compact, cx)
                 .relative()
-                .top(drop_of(&host))
+                .top(drop)
                 .child(crate::widgets::fade_text(host))
         });
         let ago = item.updated_at.zip(store.clone()).map(|(at, store)| {
@@ -1294,8 +1290,8 @@ impl CommandPalette {
                 .flex_none()
                 .text_secondary(compact, cx)
                 .relative()
-                .top(drop_of(&ago))
-                .child(ago)
+                .top(drop)
+                .child(crate::widgets::fade_text(ago))
         });
         let aria_label = match &item.host_name {
             Some(host) => format!("{} · {host}", item.label),
@@ -1575,13 +1571,15 @@ impl Render for CommandPalette {
                     .items_center()
                     .gap(cx.theme().tokens.spacing.md)
                     .text_secondary(false, cx)
-                    .child(crate::tr!("palette.navigate"))
-                    .child(crate::tr!("palette.select"))
-                    .child(crate::tr!("palette.close"))
+                    .child(crate::widgets::fade_text(crate::tr!("palette.navigate")))
+                    .child(crate::widgets::fade_text(crate::tr!("palette.select")))
+                    .child(crate::widgets::fade_text(crate::tr!("palette.close")))
                     .when(picker, |footer| {
                         footer
                             .child(div().flex_1())
-                            .child(crate::tr!("palette.recent_first"))
+                            .child(crate::widgets::fade_text(crate::tr!(
+                                "palette.recent_first"
+                            )))
                     }),
             )
         });

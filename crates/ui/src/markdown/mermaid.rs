@@ -795,7 +795,9 @@ pub(super) fn block(
             let label = div()
                 .px_2()
                 .text_secondary(false, cx)
-                .child(crate::tr!("markdown.mermaid_drawing").into_owned());
+                .child(crate::widgets::fade_text(
+                    crate::tr!("markdown.mermaid_drawing").into_owned(),
+                ));
             let path = path.to_string();
             label.debug_selector(move || format!("markdown-mermaid-drawing-{path}"))
         });

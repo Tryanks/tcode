@@ -592,7 +592,7 @@ impl Composer {
                     .flex_none()
                     .text_meta_mono(self.compact, cx)
                     .when(failed, |status| status.text_color(cx.theme().danger))
-                    .child(status),
+                    .child(crate::widgets::fade_text(status)),
             );
         }
         if failed {

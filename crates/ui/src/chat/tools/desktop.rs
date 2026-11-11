@@ -511,7 +511,7 @@ impl Desktop<'_> {
                                 } else {
                                     theme.foreground
                                 })
-                                .child(action.verb().text(status)),
+                                .child(crate::widgets::fade_text(action.verb().text(status))),
                         )
                         .when(!target.is_empty(), |row| {
                             row.child(
@@ -527,7 +527,7 @@ impl Desktop<'_> {
                                 div()
                                     .flex_none()
                                     .text_color(color)
-                                    .child(label.into_owned()),
+                                    .child(crate::widgets::fade_text(label)),
                             )
                         }),
                 )
@@ -565,7 +565,7 @@ impl Desktop<'_> {
                     div()
                         .flex_none()
                         .text_color(theme.muted_foreground)
-                        .child(crate::tr!("tools.expect.label").into_owned()),
+                        .child(crate::widgets::fade_text(crate::tr!("tools.expect.label"))),
                 )
                 .child(
                     div()
@@ -577,7 +577,7 @@ impl Desktop<'_> {
                     div()
                         .flex_none()
                         .text_color(color)
-                        .child(label.into_owned()),
+                        .child(crate::widgets::fade_text(label)),
                 )
                 .into_any_element()
         });

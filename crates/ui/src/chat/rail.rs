@@ -761,7 +761,7 @@ impl RailView {
                     .text_body(false, cx)
                     .font_medium()
                     .text_color(cx.theme().foreground)
-                    .child(card.title()),
+                    .child(crate::widgets::fade_text(card.title())),
             )
             .child(
                 div()

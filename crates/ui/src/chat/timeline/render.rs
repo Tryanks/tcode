@@ -1889,7 +1889,7 @@ impl TimelineView {
             // Not a chevron, which would read as the window's own that
             // opens its body.
             .child(Icon::new(IconName::Layers).xsmall())
-            .child(crate::tr!("background.in_list"))
+            .child(crate::widgets::fade_text(crate::tr!("background.in_list")))
             .on_click(move |_, _, cx| {
                 cx.stop_propagation();
                 let item = item.clone();

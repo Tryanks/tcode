@@ -681,7 +681,7 @@ fn status_detail(
         div()
             .pt(cx.theme().tokens.spacing.xs)
             .text_caption(cx)
-            .child(text)
+            .child(crate::widgets::fade_text(text))
     };
     let line = |name: String, value: AnyElement| {
         h_flex()
@@ -744,7 +744,7 @@ fn status_detail(
                 div()
                     .flex_none()
                     .text_color(muted)
-                    .child(manifest_value.join(" · "))
+                    .child(crate::widgets::fade_text(manifest_value.join(" · ")))
                     .into_any_element(),
             ),
             manifest_error,
@@ -805,7 +805,11 @@ fn status_detail(
                             .gap_2()
                             .items_center()
                             .children(home)
-                            .child(div().text_color(muted).child(latency.into_owned()))
+                            .child(
+                                div()
+                                    .text_color(muted)
+                                    .child(crate::widgets::fade_text(latency.into_owned())),
+                            )
                             .into_any_element(),
                     ),
                     relay_error,
@@ -857,7 +861,7 @@ fn status_detail(
                     div()
                         .flex_none()
                         .text_color(*color)
-                        .child(value.clone())
+                        .child(crate::widgets::fade_text(value.clone()))
                         .into_any_element()
                 },
             );

@@ -407,7 +407,9 @@ impl Composer {
                             .debug_selector(move || format!("queued-held-{id}"))
                             .flex_none()
                             .text_secondary(self.compact, cx)
-                            .child(crate::tr!("space_policy.queued_held")),
+                            .child(crate::widgets::fade_text(crate::tr!(
+                                "space_policy.queued_held"
+                            ))),
                     )
                 })
                 .child(

@@ -111,6 +111,11 @@ pub(crate) fn baseline_below_centre(
         strikethrough: None,
     };
     let line = window.text_system().shape_line(text, size, &[run], None);
+    line_below_centre(&line, window)
+}
+
+/// [`baseline_below_centre`] of a line already shaped.
+pub(crate) fn line_below_centre(line: &gpui::ShapedLine, window: &Window) -> Pixels {
     // Glyphs have no vertical subpixel variants, so a baseline is painted on
     // a whole device pixel, as layout puts a box's offset on one: rounded
     // likewise, the difference of two of these moves a line exactly onto

@@ -45,7 +45,7 @@ impl Composer {
                         .items_center()
                         .text_color(muted)
                         .child(Icon::empty().path("icons/git-branch.svg"))
-                        .child(picker_current.clone()),
+                        .child(crate::widgets::fade_text(picker_current.clone())),
                 )
                 .into_any_element()
         } else {
@@ -66,7 +66,7 @@ impl Composer {
                         .items_center()
                         .text_color(muted)
                         .child(Icon::empty().path("icons/git-branch.svg"))
-                        .child(picker_current.clone())
+                        .child(crate::widgets::fade_text(picker_current.clone()))
                         .child(Icon::new(IconName::ChevronDown)),
                 );
             crate::material::overlay_popover("branch-popover", cx)
@@ -94,14 +94,9 @@ impl Composer {
                         })
                         .gap_0p5();
                     if worktree_mode {
-                        col = col.child(
-                            div()
-                                .flex_none()
-                                .px_2()
-                                .py_1()
-                                .text_caption(cx)
-                                .child(crate::tr!("composer.worktree_base")),
-                        );
+                        col = col.child(div().flex_none().px_2().py_1().text_caption(cx).child(
+                            crate::widgets::fade_text(crate::tr!("composer.worktree_base")),
+                        ));
                     }
                     // "Loading…" gives way to the branches, fading out under
                     // them.
@@ -219,7 +214,7 @@ impl Composer {
                 .items_center()
                 .text_color(muted)
                 .child(Icon::empty().path("icons/folder-closed.svg"))
-                .child(label)
+                .child(crate::widgets::fade_text(label))
                 .into_any_element();
         }
 
@@ -237,7 +232,7 @@ impl Composer {
                     .items_center()
                     .text_color(muted)
                     .child(Icon::empty().path("icons/folder-closed.svg"))
-                    .child(label)
+                    .child(crate::widgets::fade_text(label))
                     .child(Icon::new(IconName::ChevronDown)),
             );
         crate::material::overlay_popover("workspace-popover", cx)
@@ -261,7 +256,13 @@ impl Composer {
                         .items_center()
                         .cursor_pointer()
                         .text_body(compact, cx)
-                        .child(div().flex_1().min_w_0().child(label))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(crate::widgets::fade_text(label)),
+                        )
                         .when(selected, |this| {
                             this.child(Icon::new(IconName::Check).text_color(cx.theme().primary))
                         })
@@ -275,7 +276,7 @@ impl Composer {
                             .px_2()
                             .py_1()
                             .text_caption(cx)
-                            .child(crate::tr!("composer.workspace")),
+                            .child(crate::widgets::fade_text(crate::tr!("composer.workspace"))),
                     )
                     .child(
                         workspace_row(

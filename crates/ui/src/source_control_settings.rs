@@ -277,14 +277,14 @@ pub(crate) fn connected_as(login: &str, name: Option<&str>, cx: &App) -> AnyElem
     let (before, after) = sentence.split_once(AT).unwrap_or((&sentence, ""));
     h_flex()
         .flex_wrap()
-        .child(before.to_owned())
+        .child(crate::widgets::fade_text(before.to_owned()))
         .child(
             div()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(cx.theme().foreground)
-                .child(format!("@{login}")),
+                .child(crate::widgets::fade_text(format!("@{login}"))),
         )
-        .child(after.to_owned())
+        .child(crate::widgets::fade_text(after.to_owned()))
         .into_any_element()
 }
 
@@ -363,7 +363,12 @@ pub(crate) fn status_line(platform: &Platform, compact: bool, cx: &App) -> gpui:
                 .child(status_text(&standing, cx)),
         )
         .child(div().flex_none().child("·"))
-        .child(div().min_w_0().truncate().child(detail))
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .child(crate::widgets::fade_text(detail)),
+        )
 }
 
 /// Emitted to manage a platform on a phone, which pushes a page for it.
@@ -526,7 +531,7 @@ impl SourceControlPanel {
         .text_body(compact, cx)
         .text_color(cx.theme().link)
         .child(Icon::new(IconName::Plus).flex_none())
-        .child(label)
+        .child(crate::widgets::fade_text(label))
         .into_any_element()
     }
 }

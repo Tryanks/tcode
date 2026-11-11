@@ -351,89 +351,88 @@ impl Composer {
             .workspace_store
             .read(cx)
             .harness_name_for(self.session_id.as_deref(), cx);
-        let list =
-            if rows.is_empty() {
-                let text: gpui::SharedString = if loading {
-                    crate::tr!("composer.searching").into_owned().into()
-                } else {
-                    empty_text.into()
-                };
-                let (motion, key) = (self.motion.clone(), self.motion_key("trigger-empty"));
-                crate::motion::Sampled::new(move |window, cx| {
-                    motion.cross_fade(key, text, CHANGE, window, cx, |text, _, cx| {
-                        crate::material::empty_row(text.clone(), cx).into_any_element()
-                    })
-                })
-                .into_any_element()
+        let list = if rows.is_empty() {
+            let text: gpui::SharedString = if loading {
+                crate::tr!("composer.searching").into_owned().into()
             } else {
-                // Group headers are not selectable: each opens the row that starts
-                // its group, so keyboard selection indexes `rows` directly.
-                let mut last_group: Option<&'static str> = None;
-                let headers: Vec<Option<&'static str>> = rows
-                    .iter()
-                    .map(|row| {
-                        let group = row.group.filter(|group| last_group != Some(*group));
-                        if group.is_some() {
-                            last_group = group;
-                        }
-                        group
-                    })
-                    .collect();
-                let count = rows.len();
-                let keys: Rc<[u64]> = rows.iter().map(menu_row_key).collect();
-                {
-                    let mut seen = self.menu_rows_seen.borrow_mut();
-                    for (key, row) in keys.iter().zip(&rows) {
-                        seen.entry(*key).or_insert_with(|| row.clone());
-                    }
-                }
-                let leaving = {
-                    let seen = self.menu_rows_seen.clone();
-                    let composer = cx.entity();
-                    move |key: u64, _: &mut Window, cx: &mut App| {
-                        let row = seen.borrow().get(&key).cloned()?;
-                        Some(composer.update(cx, |_, cx| {
-                            render_menu_row(&row, usize::MAX, false, compact, cx).into_any_element()
-                        }))
-                    }
-                };
-                let rows: Rc<[MenuRow]> = rows.into();
-                crate::scroll::VirtualList::measured(
-                    "composer-trigger-rows",
-                    count,
-                    cx.processor(move |_, index: usize, _, cx| {
-                        div().when(index + 1 < count, |row| row.pb_0p5()).child(
-                            v_flex()
-                                .gap_0p5()
-                                .when_some(headers[index], |col, group| {
-                                    col.child(
-                                        div().px_2().pt_1p5().pb_0p5().text_caption(cx).child(
-                                            crate::tr!(group, provider = harness).into_owned(),
-                                        ),
-                                    )
-                                })
-                                .child(render_menu_row(
-                                    &rows[index],
-                                    index,
-                                    index == highlight,
-                                    compact,
-                                    cx,
-                                )),
-                        )
-                    }),
-                )
-                .reveal(Some(highlight))
-                // Each keystroke's results fold in and out as the rows that
-                // still match glide to their places.
-                .keyed(keys, crate::motion::KEYSTROKE, leaving)
-                .w_full()
-                // About ten rows before the list scrolls, so the menu never
-                // covers the conversation; no owner sizes an in-flow menu. The
-                // menu's border sits outside this cap.
-                .max_h(px(286.))
-                .p_1()
-                .into_any_element()
+                empty_text.into()
             };
+            let (motion, key) = (self.motion.clone(), self.motion_key("trigger-empty"));
+            crate::motion::Sampled::new(move |window, cx| {
+                motion.cross_fade(key, text, CHANGE, window, cx, |text, _, cx| {
+                    crate::material::empty_row(text.clone(), cx).into_any_element()
+                })
+            })
+            .into_any_element()
+        } else {
+            // Group headers are not selectable: each opens the row that starts
+            // its group, so keyboard selection indexes `rows` directly.
+            let mut last_group: Option<&'static str> = None;
+            let headers: Vec<Option<&'static str>> = rows
+                .iter()
+                .map(|row| {
+                    let group = row.group.filter(|group| last_group != Some(*group));
+                    if group.is_some() {
+                        last_group = group;
+                    }
+                    group
+                })
+                .collect();
+            let count = rows.len();
+            let keys: Rc<[u64]> = rows.iter().map(menu_row_key).collect();
+            {
+                let mut seen = self.menu_rows_seen.borrow_mut();
+                for (key, row) in keys.iter().zip(&rows) {
+                    seen.entry(*key).or_insert_with(|| row.clone());
+                }
+            }
+            let leaving = {
+                let seen = self.menu_rows_seen.clone();
+                let composer = cx.entity();
+                move |key: u64, _: &mut Window, cx: &mut App| {
+                    let row = seen.borrow().get(&key).cloned()?;
+                    Some(composer.update(cx, |_, cx| {
+                        render_menu_row(&row, usize::MAX, false, compact, cx).into_any_element()
+                    }))
+                }
+            };
+            let rows: Rc<[MenuRow]> = rows.into();
+            crate::scroll::VirtualList::measured(
+                "composer-trigger-rows",
+                count,
+                cx.processor(move |_, index: usize, _, cx| {
+                    div().when(index + 1 < count, |row| row.pb_0p5()).child(
+                        v_flex()
+                            .gap_0p5()
+                            .when_some(headers[index], |col, group| {
+                                col.child(div().px_2().pt_1p5().pb_0p5().text_caption(cx).child(
+                                    crate::widgets::fade_text(
+                                        crate::tr!(group, provider = harness).into_owned(),
+                                    ),
+                                ))
+                            })
+                            .child(render_menu_row(
+                                &rows[index],
+                                index,
+                                index == highlight,
+                                compact,
+                                cx,
+                            )),
+                    )
+                }),
+            )
+            .reveal(Some(highlight))
+            // Each keystroke's results fold in and out as the rows that
+            // still match glide to their places.
+            .keyed(keys, crate::motion::KEYSTROKE, leaving)
+            .w_full()
+            // About ten rows before the list scrolls, so the menu never
+            // covers the conversation; no owner sizes an in-flow menu. The
+            // menu's border sits outside this cap.
+            .max_h(px(286.))
+            .p_1()
+            .into_any_element()
+        };
 
         crate::material::overlay_contour(div(), cx)
             .rounded(crate::material::radius_overlay(cx))
@@ -495,7 +494,11 @@ fn render_menu_row(
     .text_body(compact, cx)
     .cursor_pointer()
     .child(icon.text_color(muted))
-    .child(div().flex_none().child(row.primary.clone()))
+    .child(
+        div()
+            .flex_none()
+            .child(crate::widgets::fade_text(row.primary.clone())),
+    )
     .when(!row.secondary.is_empty(), |this| {
         this.child(
             div()

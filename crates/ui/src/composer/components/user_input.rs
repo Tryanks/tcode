@@ -228,16 +228,13 @@ impl Composer {
                             this.ui_go(-1, &questions_previous, window, cx);
                         })),
                 )
-                .child(
-                    div()
-                        .flex_none()
-                        .text_secondary(self.compact, cx)
-                        .child(crate::tr!(
-                            "userinput.question_count",
-                            index = index + 1,
-                            total = total
-                        )),
-                )
+                .child(div().flex_none().text_secondary(self.compact, cx).child(
+                    crate::widgets::fade_text(crate::tr!(
+                        "userinput.question_count",
+                        index = index + 1,
+                        total = total
+                    )),
+                ))
                 .child(
                     Button::new("ui-next")
                         .motion(&self.button_motion())
