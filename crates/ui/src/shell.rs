@@ -803,7 +803,8 @@ const CHAT_MIN_WIDTH: f32 = crate::chat::HEADER_COMPACT_MIN_WIDTH;
 /// ([`AppShell::column_min_width`]).
 pub(crate) const PANE_MIN_WIDTH: f32 =
     crate::chat::HEADER_OVERFLOW_MIN_WIDTH + crate::chat::PANE_CLOSE_WIDTH;
-const SIDEBAR_WIDTH: f32 = 255.;
+/// The sidebar's width in a new window.
+pub(crate) const SIDEBAR_WIDTH: f32 = 255.;
 /// The narrowest the sidebar is dragged to while it shows.
 pub(crate) const SIDEBAR_MIN_WIDTH: f32 = 220.;
 /// A new desktop window's width.
