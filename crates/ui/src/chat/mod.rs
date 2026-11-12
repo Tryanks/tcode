@@ -107,6 +107,53 @@ pub(crate) struct ForkThroughTurn {
 
 gpui::actions!(tcode_chat, [OpenMoveThreadDialog, RevokeSelfSettle]);
 
+/// What a fork is asked of, which its confirmation says.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForkOf {
+    /// The whole thread.
+    Thread,
+    /// The thread through one of its turns.
+    Turn,
+    /// Through a turn, carrying the words the reader selected: the fork
+    /// opens beside the thread with them in its composer.
+    TurnWithQuote,
+}
+
+/// Ask before forking: a fork is a thread of its own from then on, and
+/// `fork` makes it once the reader agrees.
+pub(crate) fn confirm_fork(
+    of: ForkOf,
+    window: &mut Window,
+    cx: &mut App,
+    fork: impl Fn(&mut App) + 'static,
+) {
+    use crate::overlay::{DialogButtons, OverlayExt as _};
+    let fork = Rc::new(fork);
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let fork = fork.clone();
+        alert
+            .title(crate::tr!(match of {
+                ForkOf::Thread => "fork.confirm_title_thread",
+                ForkOf::Turn | ForkOf::TurnWithQuote => "fork.confirm_title",
+            }))
+            .description(crate::tr!(match of {
+                ForkOf::Thread => "fork.confirm_thread",
+                ForkOf::Turn => "fork.confirm_turn",
+                ForkOf::TurnWithQuote => "fork.confirm_quote",
+            }))
+            .button_props(
+                DialogButtons::default()
+                    .ok_text(crate::tr!("fork.confirm"))
+                    .cancel_text(crate::tr!("settings.cancel"))
+                    .show_cancel(true),
+            )
+            .on_ok(move |_, _, cx| {
+                fork(cx);
+                true
+            })
+    });
+}
+
 /// A window's context-menu "Copy output" for an output the record holds only
 /// a preview of: the whole of it, loaded first when it is not here yet.
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
@@ -1191,9 +1238,10 @@ impl ChatView {
                     timeline.on_open_rewind(action, window, cx)
                 })
             }))
-            .on_action(cx.listener(|this, action, _, cx| {
-                this.timeline
-                    .update(cx, |timeline, cx| timeline.on_fork_through_turn(action, cx))
+            .on_action(cx.listener(|this, action, window, cx| {
+                this.timeline.update(cx, |timeline, cx| {
+                    timeline.on_fork_through_turn(action, window, cx)
+                })
             }))
             .on_action(cx.listener(|this, action, window, cx| {
                 this.timeline.update(cx, |timeline, cx| {
@@ -1454,6 +1502,22 @@ pub(crate) mod tests {
         });
         let chat = root.read_with(cx, |root, _| root.chat.clone());
         (chat, cx)
+    }
+
+    /// [`add_chat_window`] under the root that hosts dialogs, as the app's
+    /// windows are, for a test whose path opens one.
+    pub(crate) fn add_chat_window_hosting_dialogs(
+        cx: &mut TestAppContext,
+        build: impl FnOnce(&mut gpui::Window, &mut gpui::Context<ChatView>) -> ChatView,
+    ) -> (Entity<ChatView>, &mut gpui::VisualTestContext) {
+        let mut chat = None;
+        let (_root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| build(window, cx));
+            let frame = view.read(cx).frame();
+            chat = Some(view);
+            gpui_base::Root::new(frame, window, cx)
+        });
+        (chat.expect("the chat is built"), cx)
     }
 
     pub(crate) fn entry(id: &str, content: EntryContent) -> Arc<TimelineEntry> {

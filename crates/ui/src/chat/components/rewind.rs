@@ -1,4 +1,4 @@
-//! The rewind panel a user message opens, and the divider a rewind leaves.
+//! The rewind dialog a user message opens, and the divider a rewind leaves.
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -14,6 +14,7 @@ use gpui::{
 use gpui_base::{Radio, RadioGroup, h_flex, v_flex};
 use tcode_core::session::{EntryContent, Rewound, TimelineEntry};
 
+use crate::overlay::{Dialog, DialogActions};
 use crate::scroll::ScrollableElement as _;
 use crate::sizing::Sizable as _;
 use crate::store::RewindTarget;
@@ -24,7 +25,6 @@ use crate::widgets::button::{Button, ButtonVariants as _};
 /// How long what is drawn here only some of the time takes to come in or go.
 const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 
-const PANEL_WIDTH: f32 = 340.;
 const LIST_MAX_HEIGHT: f32 = 160.;
 const REMOVED_MAX_HEIGHT: f32 = 320.;
 
@@ -70,8 +70,12 @@ pub(crate) struct Panel {
 pub(crate) struct PanelActions {
     pub(crate) select: SelectHandler,
     pub(crate) toggle_files: Handler,
+    /// Makes the rewind and closes the dialog.
     pub(crate) confirm: Handler,
+    /// Closes the dialog.
     pub(crate) cancel: Handler,
+    /// The dialog closed by a way of its own.
+    pub(crate) closed: Handler,
 }
 
 pub(crate) fn mode_label(mode: RewindMode) -> String {
@@ -127,28 +131,54 @@ fn summary(panel: &Panel) -> String {
     }
 }
 
-/// The panel's body: what happens, the scopes the Harness restores, what it
-/// would restore, the limits, and Rewind / Cancel.
-pub(crate) fn panel_body(
-    panel: Panel,
+/// The dialog a message's rewind opens, which is also where it is agreed
+/// to: what happens, the scopes the Harness restores, what it would restore
+/// and the limits, over Cancel and Rewind. A message that stopped being a
+/// target while it was open leaves only the way out.
+pub(crate) fn dialog(
+    dialog: Dialog,
+    panel: Option<Panel>,
     actions: PanelActions,
     compact: bool,
     cx: &App,
-) -> AnyElement {
+) -> Dialog {
+    let destructive = panel.as_ref().is_some_and(|panel| {
+        panel.selected.includes_conversation()
+            && panel.target.rewind.later_history == LaterHistory::Truncated
+    });
+    let cancel = Button::new("rewind-cancel")
+        .label(crate::tr!("rewind.cancel").into_owned())
+        .touch(compact)
+        .on_click({
+            let cancel = actions.cancel.clone();
+            move |_, window, cx| cancel(window, cx)
+        });
+    let confirm = panel.is_some().then(|| {
+        Button::new("rewind-confirm")
+            .label(crate::tr!("rewind.confirm").into_owned())
+            .touch(compact)
+            .when(destructive, |button| button.danger())
+            .when(!destructive, |button| button.primary())
+            .on_click({
+                let confirm = actions.confirm.clone();
+                move |_, window, cx| confirm(window, cx)
+            })
+    });
+    let body = panel.map(|panel| panel_body(panel, &actions, compact, cx));
+    let body = Rc::new(std::cell::Cell::new(body));
+    let closed = actions.closed.clone();
+    dialog
+        .sheet()
+        .title(crate::tr!("rewind.title").into_owned())
+        .content(move |content, _, _| content.children(body.take()))
+        .footer(DialogActions::new().child(cancel).children(confirm))
+        .on_close(move |_, window, cx| closed(window, cx))
+}
+
+/// What the dialog says above its actions.
+fn panel_body(panel: Panel, actions: &PanelActions, compact: bool, cx: &App) -> AnyElement {
     let harness = panel.target.harness.clone();
     let note = |text: String| div().w_full().text_secondary(compact, cx).child(text);
-    let header = (!compact).then(|| {
-        v_flex()
-            .gap_0p5()
-            .child(
-                div()
-                    .text_title(cx)
-                    .child(crate::tr!("rewind.title").into_owned()),
-            )
-            .child(note(
-                crate::tr!("rewind.via", harness = harness.as_str()).into_owned(),
-            ))
-    });
     let choices = (panel.choices.len() > 1).then(|| {
         let count = panel.choices.len();
         let group = panel.choices.iter().enumerate().fold(
@@ -194,7 +224,7 @@ pub(crate) fn panel_body(
     let preview = panel
         .preview
         .as_ref()
-        .map(|preview| preview_block(preview, &harness, panel.files_expanded, &actions, cx));
+        .map(|preview| preview_block(preview, &harness, panel.files_expanded, actions, cx));
     let includes_files = panel.selected.includes_files();
     let target = &panel.target;
     let notes = [
@@ -206,7 +236,7 @@ pub(crate) fn panel_body(
             .then(|| crate::tr!("rewind.note.worktree").into_owned()),
         target
             .turn_running
-            .then(|| crate::tr!("rewind.note.running", harness = harness.as_str()).into_owned()),
+            .then(|| crate::tr!("rewind.note.running").into_owned()),
         (target.queued > 0).then(|| {
             counted(
                 "rewind.note.queued_one",
@@ -226,33 +256,11 @@ pub(crate) fn panel_body(
             .includes_conversation()
             .then(|| crate::tr!("rewind.summary.prompt_back").into_owned()),
     ];
-    let destructive = panel.selected.includes_conversation()
-        && target.rewind.later_history == LaterHistory::Truncated;
-    let confirm = Button::new("rewind-confirm")
-        .label(crate::tr!("rewind.confirm").into_owned())
-        .touch(compact)
-        .when(destructive, |button| button.danger())
-        .when(!destructive, |button| button.primary())
-        .on_click({
-            let confirm = actions.confirm.clone();
-            move |_, window, cx| confirm(window, cx)
-        });
-    let cancel = Button::new("rewind-cancel")
-        .label(crate::tr!("rewind.cancel").into_owned())
-        .touch(compact)
-        .outline()
-        .on_click({
-            let cancel = actions.cancel.clone();
-            move |_, window, cx| cancel(window, cx)
-        });
     v_flex()
         .id("rewind-panel")
         .debug_selector(|| "rewind-panel".into())
-        .when(!compact, |panel| panel.w(px(PANEL_WIDTH)))
         .w_full()
-        .p_3()
         .gap_3()
-        .children(header)
         .child(div().w_full().text_body(compact, cx).child(summary(&panel)))
         .children(choices)
         .children(preview)
@@ -260,14 +268,6 @@ pub(crate) fn panel_body(
             v_flex()
                 .gap_1()
                 .children(notes.into_iter().flatten().map(note)),
-        )
-        .child(
-            h_flex()
-                .w_full()
-                .justify_end()
-                .gap_2()
-                .child(cancel)
-                .child(confirm),
         )
         .into_any_element()
 }

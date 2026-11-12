@@ -2278,6 +2278,27 @@ impl AppShell {
         if self.compact(cx) {
             self.unwind_leads(&thread, cx);
         }
+        // A thread that opens beside another takes a pane of its own to
+        // that one's right; where the layout has no room for one, or the
+        // other is not shown, it is placed as any thread is.
+        let from = shown.beside.as_ref().and_then(|from| {
+            let from = ThreadKey {
+                host: thread.host.clone(),
+                session_id: from.clone(),
+            };
+            self.pane_showing(&from, cx)
+        });
+        if let Some(from) = from
+            && self.open_in_new_pane(
+                thread.clone(),
+                &from,
+                &[gpui_base::Placement::Right],
+                window,
+                cx,
+            )
+        {
+            return;
+        }
         if let Some(pane) = self.place(&thread, shown.replacing.as_deref(), cx) {
             self.show_in_pane(&pane, &thread, shown.asked, window, cx);
         }

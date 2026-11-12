@@ -139,7 +139,7 @@ pub(crate) struct TurnFork {
     pub(crate) on_fork: ForkHandler,
 }
 
-type ForkHandler = Rc<dyn Fn(usize, &mut App)>;
+type ForkHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 impl PartialEq for TurnFork {
     fn eq(&self, other: &Self) -> bool {
@@ -284,7 +284,7 @@ fn fork_action(
             .touch_in_row(compact)
             .motion(motion)
             .debug_selector(move || selector)
-            .on_click(move |_, _, cx| on_fork(turn, cx));
+            .on_click(move |_, window, cx| on_fork(turn, window, cx));
             let button = match &focus {
                 Some(focus) => button.track_focus(focus),
                 None => button,

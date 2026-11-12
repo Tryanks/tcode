@@ -124,6 +124,9 @@ pub struct ShowThread {
     pub replacing: Option<String>,
     /// The user asked for it, rather than the workspace falling back on it.
     pub asked: bool,
+    /// The thread it opens beside, in a pane of its own to that one's right
+    /// where the layout has room for one.
+    pub beside: Option<String>,
 }
 
 /// Observe selected store domains while keeping topic filtering out of views.

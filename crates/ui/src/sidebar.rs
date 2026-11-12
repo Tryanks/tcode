@@ -1952,13 +1952,13 @@ impl SessionsSidebar {
         }
     }
 
-    fn on_fork(&mut self, action: &ThreadFork, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_fork(&mut self, action: &ThreadFork, window: &mut Window, cx: &mut Context<Self>) {
         let Some(store) = self.store_of(&action.0.host) else {
             return;
         };
         let id = action.0.session_id.clone();
-        store.update(cx, |store, cx| {
-            store.fork_thread(id, cx);
+        crate::chat::confirm_fork(crate::chat::ForkOf::Thread, window, cx, move |cx| {
+            store.update(cx, |store, cx| store.fork_thread(id.clone(), cx));
         });
     }
 

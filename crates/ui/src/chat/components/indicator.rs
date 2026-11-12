@@ -251,11 +251,12 @@ pub(crate) fn turn_working_indicator(
 /// A finished turn's footer: on the leading edge the actions of the message
 /// it ends on, if any, and on the trailing edge its quiet mono timing, kept
 /// to one line: as the column narrows the last clause fades out first, then
-/// the one before it.
+/// the one before it. `before_time` stands whole just before the timing.
 fn turn_time_footer(
     id: SharedString,
     clauses: Vec<TurnTimeClause>,
     actions: Option<AnyElement>,
+    before_time: Option<AnyElement>,
     window: &Window,
     cx: &App,
 ) -> Stateful<Div> {
@@ -286,6 +287,7 @@ fn turn_time_footer(
                 .min_w_0()
                 .overflow_hidden()
                 .justify_end()
+                .children(before_time.map(|before| div().flex_none().pr_1p5().child(before)))
                 .children(clauses.into_iter().enumerate().map(|(index, clause)| {
                     let selector = clause.selector;
                     let drop = mono_baseline - below_centre(&clause.text);
@@ -325,12 +327,13 @@ const SHRINK_STEP: f32 = 1000.;
 
 /// [`turn_time_footer`] for `turn`, timed from `timestamp` when it has one;
 /// `served_model` names the model that served it where that is not the one
-/// asked for.
+/// asked for; `before_time` as [`turn_time_footer`] places it.
 pub(crate) fn finished_turn_time(
     timestamp: Option<u64>,
     turn: &TurnMeta,
     served_model: Option<&str>,
     actions: Option<AnyElement>,
+    before_time: Option<AnyElement>,
     window: &Window,
     cx: &App,
 ) -> Stateful<Div> {
@@ -344,6 +347,7 @@ pub(crate) fn finished_turn_time(
         SharedString::from(format!("turn-time-{}", timestamp.unwrap_or_default())),
         clauses,
         actions,
+        before_time,
         window,
         cx,
     )
