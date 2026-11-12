@@ -13856,7 +13856,10 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "calloop",
+ "calloop-wayland-source",
+ "futures-lite",
  "gtk",
+ "libc",
  "log",
  "memmap2",
  "rustix 1.1.5",
@@ -13865,6 +13868,7 @@ dependencies = [
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",
+ "wayland-protocols-wlr",
  "wayland-sys",
  "webkit2gtk",
 ]

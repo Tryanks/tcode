@@ -1,21 +1,21 @@
-//! The nested compositor: one client, software composition, input injected by
-//! the host instead of read from devices.
+//! The nested compositor: one client, software composition onto the host's
+//! surfaces, the session's pointer, and keys and text the host sends.
 
 use std::collections::HashMap;
-use std::convert::Infallible;
+use std::ffi::c_void;
 use std::io::{self, Read as _, Write as _};
 use std::ops::Range;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixListener;
-use std::panic::AssertUnwindSafe;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::ptr::NonNull;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use calloop::channel::{self, Channel, Sender};
 use calloop::generic::Generic;
-use calloop::{EventLoop, Interest, Mode, PostAction};
-use smithay::backend::input::{Axis, AxisSource, ButtonState, KeyState};
+use calloop::{EventLoop, Interest, LoopHandle, Mode, PostAction};
+use smithay::backend::input::{ButtonState, KeyState};
 use smithay::input::keyboard::{FilterResult, KeyboardHandle, Keycode, XkbConfig};
 use smithay::input::pointer::{
     AxisFrame, ButtonEvent, CursorImageStatus, MotionEvent, PointerHandle,
@@ -28,7 +28,7 @@ use smithay::reexports::wayland_server::backend::{
     ClientData, ClientId, DisconnectReason, ObjectId,
 };
 use smithay::reexports::wayland_server::protocol::{
-    wl_callback::WlCallback, wl_seat, wl_surface::WlSurface,
+    wl_buffer::WlBuffer, wl_callback::WlCallback, wl_seat, wl_surface::WlSurface,
 };
 use smithay::reexports::wayland_server::{Client, Display, DisplayHandle, Resource};
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Size};
@@ -53,8 +53,9 @@ use smithay::{
     delegate_xdg_shell,
 };
 
-use crate::compose::{Canvas, Image};
-use crate::{Event, Frame, PointerEvent, ScrollSource, ViewId};
+use crate::compose::Canvas;
+use crate::host::{Host, HostPtr};
+use crate::{Event, Placement, ViewId};
 
 mod text_input;
 
@@ -70,19 +71,12 @@ const TEXT_MIME_TYPES: [&str; 5] = [
 /// The socket's name, before the process id.
 const SOCKET_PREFIX: &str = "tcode-nest-";
 
-/// How long the compositor waits after its event loop fails, so a failure
-/// that repeats does not spin.
-const ERROR_PAUSE: Duration = Duration::from_millis(50);
-
-/// Largest distance from a surface's origin, in either direction, that the
-/// nest takes from the client; sums of a few of these stay within `i32`.
-const MAX_COORDINATE: i32 = 1 << 20;
-
 /// A running nested compositor.
 ///
-/// The compositor thread outlives this handle and serves its client for the
-/// life of the process: GDK exits the process when its display connection is
-/// lost, and the embedded client is GTK in this process.
+/// Once its client has connected, the compositor thread outlives this handle
+/// and serves the client for the life of the process: GDK exits the process
+/// when its display connection is lost, and the embedded client is GTK in
+/// this process.
 pub struct Nest {
     socket: String,
     commands: Sender<Command>,
@@ -90,13 +84,20 @@ pub struct Nest {
 }
 
 enum Command {
-    Configure {
+    Attach {
         view: ViewId,
-        size: Size<i32, Logical>,
+        surface: HostPtr,
     },
-    Pointer {
+    Place {
         view: ViewId,
-        event: PointerEvent,
+        placement: Option<Placement>,
+    },
+    Detach {
+        view: ViewId,
+        done: std::sync::mpsc::Sender<()>,
+    },
+    LeaveHost {
+        done: std::sync::mpsc::Sender<()>,
     },
     Key {
         code: u32,
@@ -104,25 +105,33 @@ enum Command {
     },
     Type(char),
     Focus(Option<ViewId>),
-    Presented(ViewId),
-    Clipboard(String),
     CommitText(String),
     ComposeText {
         text: String,
         cursor: Option<(usize, usize)>,
     },
+    /// The client's copy was read: the nest's own selection, which answers
+    /// from the host's clipboard, takes its place.
+    OfferClipboard,
 }
 
 impl Nest {
-    /// Binds the socket in `$XDG_RUNTIME_DIR` and starts the compositor. The
-    /// socket accepts one client and is unlinked once that client connects.
-    pub fn start() -> io::Result<Self> {
+    /// Binds the socket in `$XDG_RUNTIME_DIR` and starts the compositor,
+    /// which shows its views through `display`, the host's `wl_display`. The
+    /// socket accepts one client and is unlinked once that client connects,
+    /// or when this handle is dropped before one has.
+    ///
+    /// # Safety
+    ///
+    /// `display` is a live `wl_display` until [`Nest::leave_host`] returns.
+    pub unsafe fn start(display: NonNull<c_void>) -> io::Result<Self> {
         let runtime = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .ok_or_else(|| io::Error::other("XDG_RUNTIME_DIR is not set"))?;
-        remove_stale_sockets(&runtime);
         let socket = format!("{SOCKET_PREFIX}{}", std::process::id());
         let path = runtime.join(&socket);
+        // A run with this process id that ended before its client connected
+        // left its socket behind.
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -134,19 +143,25 @@ impl Nest {
         let (commands, command_source) = channel::channel();
         let (event_sender, events) = async_channel::unbounded();
         let (ready_sender, ready) = std::sync::mpsc::channel();
+        let display = HostPtr(display);
+        let sender = commands.clone();
         std::thread::Builder::new()
             .name("wayland-nest".into())
             .spawn(move || {
-                let Err(error) = run(
+                let result = run(
                     listener,
                     path.clone(),
+                    display,
+                    sender,
                     command_source,
                     event_sender,
                     &ready_sender,
                 );
                 let _ = std::fs::remove_file(&path);
-                log::error!("wayland nest did not start: {error}");
-                let _ = ready_sender.send(Err(error));
+                if let Err(error) = result {
+                    log::error!("wayland nest stopped: {error}");
+                    let _ = ready_sender.send(Err(error));
+                }
             })?;
         ready
             .recv()
@@ -167,14 +182,41 @@ impl Nest {
         self.events.clone()
     }
 
-    /// Sizes the view's window geometry, in physical pixels.
-    pub fn configure(&self, view: ViewId, width: u32, height: u32) {
-        let size = Size::from((width.max(1) as i32, height.max(1) as i32));
-        self.send(Command::Configure { view, size });
+    /// Shows `view` on `surface`, a `wl_surface` of the host's display, once
+    /// it is placed.
+    ///
+    /// # Safety
+    ///
+    /// `surface` is a live `wl_surface` of the host's display until
+    /// [`Nest::detach`] returns for `view`.
+    pub unsafe fn attach(&self, view: ViewId, surface: NonNull<c_void>) {
+        self.send(Command::Attach {
+            view,
+            surface: HostPtr(surface),
+        });
     }
 
-    pub fn pointer(&self, view: ViewId, event: PointerEvent) {
-        self.send(Command::Pointer { view, event });
+    /// Sizes `view` and shows `placement.crop` of it on its surface; `None`
+    /// stops drawing it, for a surface the host has hidden. A hidden view's
+    /// client is not asked for frames.
+    pub fn place(&self, view: ViewId, placement: Option<Placement>) {
+        self.send(Command::Place { view, placement });
+    }
+
+    /// Stops using the surface of `view`; returns once nothing of the nest
+    /// refers to it.
+    pub fn detach(&self, view: ViewId) {
+        let (done, wait) = std::sync::mpsc::channel();
+        self.send(Command::Detach { view, done });
+        let _ = wait.recv();
+    }
+
+    /// Stops using the host's display; returns once nothing of the nest
+    /// refers to it. Views are no longer drawn.
+    pub fn leave_host(&self) {
+        let (done, wait) = std::sync::mpsc::channel();
+        self.send(Command::LeaveHost { done });
+        let _ = wait.recv();
     }
 
     /// Presses or releases an evdev key on the view with keyboard focus.
@@ -195,17 +237,6 @@ impl Nest {
         self.send(Command::Focus(view));
     }
 
-    /// Reports that the view's last [`Event::Frame`] was shown, so its client
-    /// may draw the next one.
-    pub fn presented(&self, view: ViewId) {
-        self.send(Command::Presented(view));
-    }
-
-    /// Offers `text` as the clipboard to the embedded client.
-    pub fn set_clipboard(&self, text: String) {
-        self.send(Command::Clipboard(text));
-    }
-
     /// Inserts `text` into the focused view's text field, as an input method
     /// commits it, ending any composition.
     pub fn commit_text(&self, text: String) {
@@ -222,8 +253,24 @@ impl Nest {
 
     fn send(&self, command: Command) {
         if self.commands.send(command).is_err() {
-            log::debug!("wayland nest is not running");
+            log::error!("wayland nest is not running");
         }
+    }
+}
+
+/// The embedded client asking for the clipboard's text.
+pub struct Paste(OwnedFd);
+
+impl Paste {
+    /// Gives the client `text`; `None` when the clipboard holds no text.
+    pub fn answer(self, text: Option<String>) {
+        let Some(text) = text else {
+            return;
+        };
+        // The client reads from its own thread of control, in its own time.
+        std::thread::spawn(move || {
+            let _ = std::fs::File::from(self.0).write_all(text.as_bytes());
+        });
     }
 }
 
@@ -250,75 +297,34 @@ fn keymap(spare: Option<char>) -> String {
     )
 }
 
-/// Removes the sockets of this user's earlier runs whose process is gone. A
-/// socket is unlinked once its client connects, so only a run that ended
-/// before GTK connected leaves one behind.
-fn remove_stale_sockets(runtime: &Path) {
-    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
-    let Ok(entries) = std::fs::read_dir(runtime) else {
-        return;
-    };
-    let uid = rustix::process::getuid().as_raw();
-    for entry in entries.flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.strip_prefix(SOCKET_PREFIX))
-            .and_then(|pid| pid.parse().ok())
-            .and_then(rustix::process::Pid::from_raw)
-        else {
-            continue;
-        };
-        let Ok(metadata) = entry.path().symlink_metadata() else {
-            continue;
-        };
-        let gone = matches!(
-            rustix::process::test_kill_process(pid),
-            Err(rustix::io::Errno::SRCH)
-        );
-        if metadata.file_type().is_socket() && metadata.uid() == uid && gone {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
-/// Runs the compositor; returns only if it cannot start.
+/// Runs the compositor until the handle is dropped with no client connected,
+/// or the event loop fails.
 fn run(
     listener: UnixListener,
     path: PathBuf,
+    display: HostPtr,
+    sender: Sender<Command>,
     commands: Channel<Command>,
     events: async_channel::Sender<Event>,
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
-) -> io::Result<Infallible> {
+) -> io::Result<()> {
     let mut event_loop: EventLoop<State> = EventLoop::try_new().map_err(io::Error::other)?;
-    let display: Display<State> = Display::new().map_err(io::Error::other)?;
-    let mut state = State::new(display.handle(), events)?;
+    let handle = event_loop.handle();
+    let server: Display<State> = Display::new().map_err(io::Error::other)?;
+    // SAFETY: the caller of `Nest::start` keeps the display alive until
+    // `Nest::leave_host` returns, which is when the host is dropped.
+    let host = unsafe { Host::join(display, &handle) }?;
+    let mut state = State::new(server.handle(), handle.clone(), host, sender, events)?;
     let keyboard = state.keyboard.clone();
     keyboard
         .set_keymap_from_string(&mut state, keymap(None))
         .map_err(|error| io::Error::other(format!("the nest's keymap: {error:?}")))?;
-    let handle = event_loop.handle();
     handle
         .insert_source(
-            Generic::new(display, Interest::READ, Mode::Level),
-            |_, display, state| {
+            Generic::new(server, Interest::READ, Mode::Level),
+            |_, server, state| {
                 // SAFETY: the display is only dropped with this source.
-                let display = unsafe { display.get_mut() };
-                let mut dispatched = catch_panic(|| display.dispatch_clients(state));
-                // What the client sent after the request that panicked is
-                // already read from its socket, so readiness will not report
-                // it; it is dispatched from the client's buffer instead.
-                while dispatched.is_none()
-                    && let Some(client) = state.client.clone()
-                {
-                    dispatched =
-                        catch_panic(|| display.backend().dispatch_single_client(state, client));
-                }
-                if let Some(Err(error)) = dispatched
-                    && error.kind() != io::ErrorKind::WouldBlock
-                {
-                    log::warn!("wayland nest: dispatching the client failed: {error}");
-                }
+                unsafe { server.get_mut() }.dispatch_clients(state)?;
                 Ok(PostAction::Continue)
             },
         )
@@ -327,75 +333,41 @@ fn run(
         .insert_source(
             Generic::new(listener, Interest::READ, Mode::Level),
             move |_, listener, state| {
-                let stream = match listener.accept() {
-                    Ok((stream, _)) => stream,
-                    Err(error) => {
-                        if error.kind() != io::ErrorKind::WouldBlock {
-                            log::warn!("wayland nest: accepting the client failed: {error}");
-                        }
+                let (stream, _) = match listener.accept() {
+                    Ok(accepted) => accepted,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         return Ok(PostAction::Continue);
                     }
+                    Err(error) => return Err(error),
                 };
-                let inserted = stream.set_nonblocking(true).and_then(|()| {
-                    state
-                        .dh
-                        .insert_client(stream, Arc::new(ClientState::default()))
-                });
-                match inserted {
-                    Ok(client) => {
-                        state.client = Some(client.id());
-                        let _ = std::fs::remove_file(&path);
-                        Ok(PostAction::Remove)
-                    }
-                    Err(error) => {
-                        log::warn!("wayland nest: adding the client failed: {error}");
-                        Ok(PostAction::Continue)
-                    }
-                }
+                stream.set_nonblocking(true)?;
+                let client = state
+                    .dh
+                    .insert_client(stream, Arc::new(ClientState::default()))?;
+                state.client = Some(client.id());
+                let _ = std::fs::remove_file(&path);
+                Ok(PostAction::Remove)
             },
         )
         .map_err(|error| io::Error::other(error.error))?;
     handle
-        .insert_source(commands, |event, _, state| {
-            if let channel::Event::Msg(command) = event {
-                state.handle(command);
-            }
+        .insert_source(commands, |event, _, state| match event {
+            channel::Event::Msg(command) => state.handle(command),
+            channel::Event::Closed => state.abandoned = true,
         })
         .map_err(|error| io::Error::other(error.error))?;
 
     let _ = ready.send(Ok(()));
-    loop {
-        let turn = catch_panic(|| {
-            let dispatched = event_loop.dispatch(None, &mut state);
-            state.read_selection();
-            state.flush_frames();
-            if let Err(error) = state.dh.flush_clients() {
-                log::debug!("wayland nest: flushing the client failed: {error}");
-            }
-            dispatched
-        });
-        if let Some(Err(error)) = turn {
-            log::warn!("wayland nest: the event loop failed: {error}");
-            std::thread::sleep(ERROR_PAUSE);
-        }
+    // With a client connected the thread must go on: see [`Nest`].
+    while !(state.abandoned && state.client.is_none()) {
+        event_loop
+            .dispatch(None, &mut state)
+            .map_err(io::Error::other)?;
+        state.read_selection();
+        state.draw_views();
+        state.dh.flush_clients()?;
     }
-}
-
-/// Runs `f`, logging a panic instead of letting it end the compositor thread,
-/// which would drop the display (see [`Nest`]).
-fn catch_panic<T>(f: impl FnOnce() -> T) -> Option<T> {
-    match std::panic::catch_unwind(AssertUnwindSafe(f)) {
-        Ok(value) => Some(value),
-        Err(panic) => {
-            let message = panic
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
-                .unwrap_or("unknown panic");
-            log::error!("wayland nest: a handler panicked: {message}");
-            None
-        }
-    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -418,22 +390,47 @@ struct Popup {
     grab: bool,
 }
 
+struct Dialog {
+    toplevel: ToplevelSurface,
+    /// The size it was last asked to take to fit the view, if it had to be.
+    fitted: Option<Size<i32, Logical>>,
+}
+
 struct View {
     toplevel: ToplevelSurface,
     size: Option<Size<i32, Logical>>,
-    /// Bottom to top.
+    /// The client's windows that belong to this one (a file chooser, a
+    /// colour chooser), bottom to top. They are drawn in the middle of the
+    /// view, over its toplevel.
+    dialogs: Vec<Dialog>,
+    /// Bottom to top, over the dialogs.
     popups: Vec<Popup>,
-    /// Frame callbacks for content not yet sent to the host.
+    /// Frame callbacks for content not yet drawn on the host.
     callbacks: Vec<WlCallback>,
-    /// Frame callbacks of the frame the host has not yet presented.
-    in_flight: Option<Vec<WlCallback>>,
+    /// Frame callbacks of content drawn on the host, answered when the
+    /// session asks for the next frame.
+    in_flight: Vec<WlCallback>,
     dirty: bool,
 }
 
-struct State {
+/// A surface's committed buffer, held until the client replaces it and read
+/// where it lies.
+struct Contents {
+    surface: WlSurface,
+    buffer: WlBuffer,
+    width: i32,
+    height: i32,
+}
+
+pub(crate) struct State {
     dh: DisplayHandle,
+    handle: LoopHandle<'static, State>,
+    /// The session's side; `None` once the host has left.
+    pub(crate) host: Option<Host>,
     /// The one client the socket accepted.
     client: Option<ClientId>,
+    /// Whether the [`Nest`] handle is gone.
+    abandoned: bool,
     compositor: CompositorState,
     xdg_shell: XdgShellState,
     shm: ShmState,
@@ -449,21 +446,26 @@ struct State {
     unclaimed: Vec<ToplevelSurface>,
     /// Sizes asked for before the view's toplevel appeared.
     requested: HashMap<ViewId, Size<i32, Logical>>,
-    images: HashMap<ObjectId, (WlSurface, Image)>,
+    contents: HashMap<ObjectId, Contents>,
     keyboard_view: Option<ViewId>,
     /// The character [`SPARE_KEY`] types, if it was rebound.
     spare: Option<char>,
     text_inputs: text_input::TextInputs,
-    /// The clipboard text the host last offered, while it is the selection.
-    clipboard: Option<Arc<str>>,
     /// The seat and type of a selection the client set, to be read.
     copied: Option<(Seat<State>, &'static str)>,
+    commands: Sender<Command>,
     events: async_channel::Sender<Event>,
     epoch: Instant,
 }
 
 impl State {
-    fn new(dh: DisplayHandle, events: async_channel::Sender<Event>) -> io::Result<Self> {
+    fn new(
+        dh: DisplayHandle,
+        handle: LoopHandle<'static, State>,
+        host: Host,
+        commands: Sender<Command>,
+        events: async_channel::Sender<Event>,
+    ) -> io::Result<Self> {
         let compositor = CompositorState::new::<Self>(&dh);
         let xdg_shell = XdgShellState::new::<Self>(&dh);
         let shm = ShmState::new::<Self>(&dh, Vec::new());
@@ -509,9 +511,12 @@ impl State {
             )
             .map_err(|error| io::Error::other(format!("{error:?}")))?;
 
-        Ok(Self {
+        let state = Self {
             dh,
+            handle,
+            host: Some(host),
             client: None,
+            abandoned: false,
             compositor,
             xdg_shell,
             shm,
@@ -525,61 +530,98 @@ impl State {
             views: HashMap::new(),
             unclaimed: Vec::new(),
             requested: HashMap::new(),
-            images: HashMap::new(),
+            contents: HashMap::new(),
             keyboard_view: None,
             spare: None,
             text_inputs: text_input::TextInputs::default(),
-            clipboard: None,
             copied: None,
+            commands,
             events,
             epoch: Instant::now(),
-        })
+        };
+        state.offer_clipboard();
+        Ok(state)
     }
 
-    fn time(&self) -> u32 {
+    pub(crate) fn time(&self) -> u32 {
         self.epoch.elapsed().as_millis() as u32
     }
 
     fn handle(&mut self, command: Command) {
         match command {
-            Command::Configure { view, size } => match self.views.get_mut(&view) {
-                Some(entry) => {
-                    if entry.size != Some(size) {
-                        entry.size = Some(size);
-                        configure(&entry.toplevel, entry.size);
-                    }
+            Command::Attach { view, surface } => {
+                let Some(host) = self.host.as_mut() else {
+                    return;
+                };
+                // SAFETY: guaranteed by the caller of `Nest::attach`.
+                if let Err(error) = unsafe { host.attach(view, surface) } {
+                    log::error!("wayland nest: cannot draw on the host's surface: {error}");
                 }
-                None => {
-                    self.requested.insert(view, size);
+            }
+            Command::Place { view, placement } => {
+                if let Some(placement) = placement {
+                    self.resize(
+                        view,
+                        Size::from((
+                            placement.width.max(1) as i32,
+                            placement.height.max(1) as i32,
+                        )),
+                    );
                 }
-            },
-            Command::Pointer { view, event } => self.pointer_event(view, event),
+                if let Some(target) = self
+                    .host
+                    .as_mut()
+                    .and_then(|host| host.targets.get_mut(&view))
+                {
+                    target.place(placement);
+                }
+            }
+            Command::Detach { view, done } => {
+                if let Some(host) = self.host.as_mut() {
+                    host.targets.remove(&view);
+                    host.flush();
+                }
+                let _ = done.send(());
+            }
+            Command::LeaveHost { done } => {
+                if let Some(host) = self.host.take() {
+                    host.leave(&self.handle);
+                }
+                let _ = done.send(());
+            }
             Command::Key { code, pressed } => self.key(code, pressed),
             Command::Type(c) => self.type_char(c),
             Command::Focus(view) => {
                 self.keyboard_view = view;
                 self.refocus();
             }
-            Command::Clipboard(text) => {
-                if self.clipboard.as_deref() != Some(text.as_str()) {
-                    let text: Arc<str> = text.into();
-                    self.clipboard = Some(text.clone());
-                    let mime_types = TEXT_MIME_TYPES.map(String::from).to_vec();
-                    set_data_device_selection(&self.dh, &self.seat, mime_types, text);
-                }
-            }
             Command::CommitText(text) => self.commit_text(text),
             Command::ComposeText { text, cursor } => self.compose_text(text, cursor),
-            Command::Presented(view) => {
-                let time = self.time();
-                if let Some(callbacks) = self.views.get_mut(&view).and_then(|v| v.in_flight.take())
-                {
-                    for callback in callbacks {
-                        callback.done(time);
-                    }
+            Command::OfferClipboard => self.offer_clipboard(),
+        }
+    }
+
+    fn resize(&mut self, view: ViewId, size: Size<i32, Logical>) {
+        match self.views.get_mut(&view) {
+            Some(entry) => {
+                if entry.size != Some(size) {
+                    entry.size = Some(size);
+                    configure(&entry.toplevel, entry.size);
                 }
             }
+            None => {
+                self.requested.insert(view, size);
+            }
         }
+    }
+
+    /// Makes the nest's own selection the clipboard: one that asks the host
+    /// for its clipboard's text each time the client pastes. The nest cannot
+    /// watch the session's clipboard, and this way it never holds a copy
+    /// that could be out of date.
+    fn offer_clipboard(&self) {
+        let mime_types = TEXT_MIME_TYPES.map(String::from).to_vec();
+        set_data_device_selection(&self.dh, &self.seat, mime_types, ());
     }
 
     fn key(&mut self, code: u32, pressed: bool) {
@@ -612,7 +654,7 @@ impl State {
         if self.spare != Some(c) {
             let keyboard = self.keyboard.clone();
             if let Err(error) = keyboard.set_keymap_from_string(self, keymap(Some(c))) {
-                log::warn!("wayland nest: no keymap types {c:?}: {error:?}");
+                log::error!("wayland nest: no keymap types {c:?}: {error:?}");
                 return;
             }
             self.spare = Some(c);
@@ -632,21 +674,35 @@ impl State {
         });
         match buffer {
             Some(BufferAssignment::NewBuffer(buffer)) => {
-                match shm::with_buffer_contents(&buffer, Image::import) {
-                    Ok(Some(image)) => {
-                        self.images.insert(surface.id(), (surface.clone(), image));
+                match shm::with_buffer_contents(&buffer, |_, _, data| (data.width, data.height)) {
+                    Ok((width, height)) => {
+                        let contents = Contents {
+                            surface: surface.clone(),
+                            buffer,
+                            width,
+                            height,
+                        };
+                        if let Some(old) = self.contents.insert(surface.id(), contents)
+                            && self.contents[&surface.id()].buffer != old.buffer
+                        {
+                            old.buffer.release();
+                        }
                     }
-                    Ok(None) => log::debug!("wayland nest: unsupported shm buffer"),
-                    Err(error) => log::debug!("wayland nest: unreadable buffer: {error}"),
+                    Err(error) => {
+                        log::error!("wayland nest: a buffer that is not wl_shm: {error}");
+                        buffer.release();
+                    }
                 }
-                buffer.release();
             }
             Some(BufferAssignment::Removed) => {
-                self.images.remove(&surface.id());
+                if let Some(old) = self.contents.remove(&surface.id()) {
+                    old.buffer.release();
+                }
             }
             None => {}
         }
         self.send_initial_configure(surface);
+        self.fit_dialog(surface);
 
         let mut root = surface.clone();
         while let Some(parent) = compositor::get_parent(&root) {
@@ -657,12 +713,40 @@ impl State {
                 view.callbacks.extend(callbacks);
                 view.dirty = true;
             }
+            // A surface of no view is drawn nowhere, so nothing paces it.
             None => {
                 let time = self.time();
                 for callback in callbacks {
                     callback.done(time);
                 }
             }
+        }
+    }
+
+    /// Asks a dialog larger than its view to be the view's size, so that all
+    /// of it can be reached: the view is all of the dialog that is shown.
+    fn fit_dialog(&mut self, surface: &WlSurface) {
+        let Some(id) = self.view_of(surface) else {
+            return;
+        };
+        let Some(size) = self.window_geometry(surface).map(|geometry| geometry.size) else {
+            return;
+        };
+        let bounds = self.view_size(&self.views[&id]);
+        let Some(dialog) = self.views.get_mut(&id).and_then(|view| {
+            view.dialogs
+                .iter_mut()
+                .find(|d| d.toplevel.wl_surface() == surface)
+        }) else {
+            return;
+        };
+        let fitted = Size::from((size.w.min(bounds.w), size.h.min(bounds.h)));
+        if fitted != size && dialog.fitted != Some(fitted) {
+            dialog.fitted = Some(fitted);
+            dialog
+                .toplevel
+                .with_pending_state(|state| state.size = Some(fitted));
+            dialog.toplevel.send_pending_configure();
         }
     }
 
@@ -682,21 +766,33 @@ impl State {
                 }
                 return;
             }
+            for dialog in &view.dialogs {
+                if dialog.toplevel.wl_surface() == surface {
+                    if !dialog.toplevel.is_initial_configure_sent() {
+                        dialog.toplevel.send_configure();
+                    }
+                    return;
+                }
+            }
             for popup in &view.popups {
                 if popup.surface.wl_surface() == surface
                     && !popup.surface.is_initial_configure_sent()
                     && let Err(error) = popup.surface.send_configure()
                 {
-                    log::debug!("wayland nest: popup configure failed: {error:?}");
+                    log::error!("wayland nest: popup configure failed: {error:?}");
                 }
             }
         }
     }
 
-    /// The view whose toplevel or popup is `surface`.
+    /// The view whose toplevel, dialog or popup is `surface`.
     fn view_of(&self, surface: &WlSurface) -> Option<ViewId> {
         self.views.iter().find_map(|(id, view)| {
             (view.toplevel.wl_surface() == surface
+                || view
+                    .dialogs
+                    .iter()
+                    .any(|d| d.toplevel.wl_surface() == surface)
                 || view
                     .popups
                     .iter()
@@ -716,7 +812,29 @@ impl State {
                     .and_then(|data| data.lock().ok()?.title.clone())
             });
             let Some(id) = title.as_deref().and_then(ViewId::from_title) else {
-                index += 1;
+                // A window the client opened for one of a view's windows is
+                // that view's dialog.
+                let owner = self.unclaimed[index]
+                    .parent()
+                    .and_then(|parent| self.view_of(&parent));
+                match owner.and_then(|id| self.views.get_mut(&id)) {
+                    Some(view) => {
+                        let toplevel = self.unclaimed.swap_remove(index);
+                        toplevel.with_pending_state(|state| {
+                            state.states.set(xdg_toplevel::State::Activated);
+                        });
+                        if toplevel.is_initial_configure_sent() {
+                            toplevel.send_pending_configure();
+                        }
+                        view.dialogs.push(Dialog {
+                            toplevel,
+                            fitted: None,
+                        });
+                        view.dirty = true;
+                        self.refocus();
+                    }
+                    None => index += 1,
+                }
                 continue;
             };
             let toplevel = self.unclaimed.swap_remove(index);
@@ -725,9 +843,10 @@ impl State {
             let view = View {
                 toplevel,
                 size,
+                dialogs: Vec::new(),
                 popups: Vec::new(),
                 callbacks: Vec::new(),
-                in_flight: None,
+                in_flight: Vec::new(),
                 dirty: true,
             };
             self.views.insert(id, view);
@@ -737,8 +856,8 @@ impl State {
         }
     }
 
-    /// The size frames of `view` have: what it was configured to once its
-    /// client has drawn, otherwise whatever it drew.
+    /// The size of `view`: what it was configured to once its client has
+    /// drawn, otherwise whatever it drew.
     fn view_size(&self, view: &View) -> Size<i32, Logical> {
         self.window_geometry(view.toplevel.wl_surface())
             .map(|geometry| geometry.size)
@@ -755,17 +874,33 @@ impl State {
                 .current()
                 .geometry
         });
-        match declared {
-            Some(geometry) => Some(Rectangle::new(clamp_point(geometry.loc), geometry.size)),
-            None => self.images.get(&surface.id()).map(|(_, image)| {
-                Rectangle::new((0, 0).into(), (image.width, image.height).into())
-            }),
-        }
+        declared.or_else(|| {
+            self.contents.get(&surface.id()).map(|contents| {
+                Rectangle::new((0, 0).into(), (contents.width, contents.height).into())
+            })
+        })
     }
 
-    /// Where the window geometry of `surface` (the view's toplevel or one of
-    /// its popups) starts, in the view's coordinates.
+    /// Where the window geometry of `surface` (the view's toplevel, or one of
+    /// its dialogs or popups) starts, in the view's coordinates.
     fn window_origin(&self, view: &View, surface: &WlSurface) -> Point<i32, Logical> {
+        if view
+            .dialogs
+            .iter()
+            .any(|d| d.toplevel.wl_surface() == surface)
+        {
+            // In the middle of the view; one larger than the view keeps its
+            // top left corner, where its title bar is, in sight.
+            let size = self
+                .window_geometry(surface)
+                .map(|geometry| geometry.size)
+                .unwrap_or_default();
+            let view = self.view_size(view);
+            return Point::from((
+                ((view.w - size.w) / 2).max(0),
+                ((view.h - size.h) / 2).max(0),
+            ));
+        }
         let Some(popup) = view
             .popups
             .iter()
@@ -781,8 +916,8 @@ impl State {
         parent + popup.geometry.loc
     }
 
-    /// Where `surface` (the view's toplevel or one of its popups) has its
-    /// origin, in the view's coordinates.
+    /// Where `surface` (the view's toplevel, or one of its dialogs or popups)
+    /// has its origin, in the view's coordinates.
     fn surface_origin(&self, view: &View, surface: &WlSurface) -> Point<i32, Logical> {
         let own = self
             .window_geometry(surface)
@@ -793,10 +928,9 @@ impl State {
 
     /// Places a popup inside the view, letting the positioner's constraint
     /// adjustments flip, slide or shrink it to fit (GTK scrolls a shrunken
-    /// menu). A view is one frame, cropped by the host to where the view is
-    /// shown, so a popup reaching past it would be cut off; showing it beyond
-    /// the view would take a host surface of its own, with its own frames
-    /// and input.
+    /// menu). A view is drawn on one host surface, cropped to where the view
+    /// is shown, so a popup reaching past it would be cut off; showing it
+    /// beyond the view would take a host surface of its own.
     fn place_popup(
         &self,
         view: &View,
@@ -808,8 +942,7 @@ impl State {
             .map(|parent| self.window_origin(view, &parent))
             .unwrap_or_default();
         let bounds = Rectangle::new(Point::from((-parent.x, -parent.y)), self.view_size(view));
-        let geometry = positioner.get_unconstrained_geometry(bounds);
-        Rectangle::new(clamp_point(geometry.loc), geometry.size)
+        positioner.get_unconstrained_geometry(bounds)
     }
 
     /// Reads the text the client last copied and hands it to the host.
@@ -820,95 +953,132 @@ impl State {
         let (read, write) = match rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC) {
             Ok(pipe) => pipe,
             Err(error) => {
-                log::debug!("wayland nest: clipboard pipe failed: {error}");
+                log::error!("wayland nest: clipboard pipe failed: {error}");
                 return;
             }
         };
         if let Err(error) =
             request_data_device_client_selection(&seat, mime_type.to_string(), write)
         {
-            log::debug!("wayland nest: clipboard request failed: {error:?}");
+            log::error!("wayland nest: clipboard request failed: {error:?}");
             return;
         }
         // The client writes from its own thread of control; reading here
         // would block the compositor it is waiting on.
         let events = self.events.clone();
+        let commands = self.commands.clone();
         std::thread::spawn(move || {
             let mut text = String::new();
-            let read = std::fs::File::from(read).read_to_string(&mut text);
-            if read.is_ok() && !text.is_empty() {
-                let _ = events.try_send(Event::Clipboard(text));
+            match std::fs::File::from(read).read_to_string(&mut text) {
+                Ok(_) => {
+                    let _ = events.try_send(Event::Copied(text));
+                }
+                Err(error) => log::error!("wayland nest: reading the client's copy: {error}"),
             }
+            // Only now: a client whose selection is replaced drops what it
+            // copied, read or not.
+            let _ = commands.send(Command::OfferClipboard);
         });
     }
 
-    fn flush_frames(&mut self) {
-        let ready: Vec<ViewId> = self
-            .views
-            .iter()
-            .filter(|(_, view)| view.dirty && view.in_flight.is_none())
-            .map(|(id, _)| *id)
-            .collect();
-        for id in ready {
-            let Some(frame) = self.composite(id) else {
+    /// Draws every view that has something new to show and whose host
+    /// surface is due a frame.
+    fn draw_views(&mut self) {
+        let ids: Vec<ViewId> = self.views.keys().copied().collect();
+        for id in ids {
+            let Some(mut target) = self.host.as_mut().and_then(|host| host.targets.remove(&id))
+            else {
                 continue;
             };
-            let Some(view) = self.views.get_mut(&id) else {
-                continue;
-            };
-            view.dirty = false;
-            view.in_flight = Some(std::mem::take(&mut view.callbacks));
-            // With no host to present it, the frame stays in flight and the
-            // client is not asked to draw again.
-            if self
-                .events
-                .try_send(Event::Frame { view: id, frame })
-                .is_err()
-            {
-                log::debug!("wayland nest: no host to present frames");
+            self.draw_view(id, &mut target);
+            if let Some(host) = self.host.as_mut() {
+                host.targets.insert(id, target);
             }
         }
-        self.images.retain(|_, (surface, _)| surface.is_alive());
-    }
-
-    fn composite(&self, id: ViewId) -> Option<Frame> {
-        let view = self.views.get(&id)?;
-        let toplevel = view.toplevel.wl_surface();
-        let geometry = self.window_geometry(toplevel)?;
-        let mut canvas = Canvas::new(geometry.size.w, geometry.size.h);
-        self.draw_tree(
-            &mut canvas,
-            toplevel,
-            Point::from((-geometry.loc.x, -geometry.loc.y)),
-        );
-        for popup in &view.popups {
-            let surface = popup.surface.wl_surface();
-            let origin = self.window_origin(view, surface);
-            let Some(own) = self.window_geometry(surface) else {
-                continue;
-            };
-            self.draw_tree(&mut canvas, surface, origin - own.loc);
+        if let Some(host) = &self.host {
+            host.flush();
         }
-        Some(Frame {
-            width: canvas.width as u32,
-            height: canvas.height as u32,
-            pixels: canvas.pixels,
-        })
+        self.contents.retain(|_, contents| {
+            let alive = contents.surface.is_alive();
+            if !alive {
+                contents.buffer.release();
+            }
+            alive
+        });
     }
 
-    fn draw_tree(&self, canvas: &mut Canvas, surface: &WlSurface, origin: Point<i32, Logical>) {
+    fn draw_view(&mut self, id: ViewId, target: &mut crate::host::Target) {
+        let (Some(host), Some(view), Some(placement)) =
+            (&self.host, self.views.get(&id), target.placement)
+        else {
+            return;
+        };
+        // New content waits for the session to ask for a frame; a view shown
+        // somewhere else is drawn there at once.
+        let due = target.stale || (view.dirty && !target.awaits_session());
+        if !due || placement.crop.width <= 0 || placement.crop.height <= 0 {
+            return;
+        }
+        let toplevel = view.toplevel.wl_surface();
+        let Some(geometry) = self.window_geometry(toplevel) else {
+            return;
+        };
+        let drawn = target.present(host, id, placement, |canvas| {
+            self.draw_tree(
+                canvas,
+                toplevel,
+                Point::from((-geometry.loc.x, -geometry.loc.y)),
+            );
+            let dialogs = view.dialogs.iter().map(|d| d.toplevel.wl_surface());
+            let popups = view.popups.iter().map(|p| p.surface.wl_surface());
+            for surface in dialogs.chain(popups) {
+                let origin = self.window_origin(view, surface);
+                if let Some(own) = self.window_geometry(surface) {
+                    self.draw_tree(canvas, surface, origin - own.loc);
+                }
+            }
+        });
+        if let Err(error) = drawn {
+            log::error!("wayland nest: cannot draw a view on the host: {error}");
+            return;
+        }
+        if let Some(view) = self.views.get_mut(&id) {
+            view.dirty = false;
+            view.in_flight.append(&mut view.callbacks);
+        }
+    }
+
+    fn draw_tree(&self, canvas: &mut Canvas<'_>, surface: &WlSurface, origin: Point<i32, Logical>) {
         compositor::with_surface_tree_upward(
             surface,
             origin,
             |_, states, parent| TraversalAction::DoChildren(*parent + subsurface_offset(states)),
             |surface, states, parent| {
                 let location = *parent + subsurface_offset(states);
-                if let Some((_, image)) = self.images.get(&surface.id()) {
-                    canvas.draw(image, location.x, location.y);
+                let Some(contents) = self.contents.get(&surface.id()) else {
+                    return;
+                };
+                let drawn = shm::with_buffer_contents(&contents.buffer, |ptr, len, data| {
+                    // SAFETY: smithay keeps the pool mapped for this call.
+                    unsafe { canvas.draw(ptr, len, data, location.x, location.y) }
+                });
+                if let Err(error) = drawn {
+                    log::error!("wayland nest: a surface's buffer cannot be read: {error}");
                 }
             },
             |_, _, _| true,
         );
+    }
+
+    /// The session asked for the next frame of `id`: its client may draw
+    /// again.
+    pub(crate) fn session_wants_frame(&mut self, id: ViewId) {
+        let time = self.time();
+        if let Some(view) = self.views.get_mut(&id) {
+            for callback in view.in_flight.drain(..) {
+                callback.done(time);
+            }
+        }
     }
 
     /// The topmost surface of `id` at `location`, with that surface's origin.
@@ -928,6 +1098,18 @@ impl State {
                 return Some((surface.clone(), self.surface_origin(view, surface).to_f64()));
             }
         }
+        for dialog in view.dialogs.iter().rev() {
+            let surface = dialog.toplevel.wl_surface();
+            let Some(geometry) = self.window_geometry(surface) else {
+                continue;
+            };
+            if Rectangle::new(self.window_origin(view, surface), geometry.size)
+                .to_f64()
+                .contains(location)
+            {
+                return Some((surface.clone(), self.surface_origin(view, surface).to_f64()));
+            }
+        }
         let toplevel = view.toplevel.wl_surface();
         Some((
             toplevel.clone(),
@@ -935,93 +1117,60 @@ impl State {
         ))
     }
 
-    fn pointer_event(&mut self, id: ViewId, event: PointerEvent) {
+    /// The session's pointer is at `(x, y)` of `id`.
+    pub(crate) fn pointer_motion(&mut self, id: ViewId, x: f64, y: f64) {
+        let location = Point::from((x, y));
+        let focus = self.surface_under(id, location);
+        let event = MotionEvent {
+            location,
+            serial: SERIAL_COUNTER.next_serial(),
+            time: self.time(),
+        };
+        self.pointer.clone().motion(self, focus, &event);
+    }
+
+    /// The session's pointer left the view it was over.
+    pub(crate) fn pointer_leave(&mut self) {
         let pointer = self.pointer.clone();
-        let serial = SERIAL_COUNTER.next_serial();
-        let time = self.time();
-        match event {
-            PointerEvent::Motion { x, y } => {
-                let location = Point::from((x, y));
-                let focus = self.surface_under(id, location);
-                pointer.motion(
-                    self,
-                    focus,
-                    &MotionEvent {
-                        location,
-                        serial,
-                        time,
-                    },
-                );
-            }
-            PointerEvent::Leave => {
-                let location = pointer.current_location();
-                pointer.motion(
-                    self,
-                    None,
-                    &MotionEvent {
-                        location,
-                        serial,
-                        time,
-                    },
-                );
-            }
-            // A press outside a grabbing popup still goes to the client, as
-            // an xdg_popup grab delivers presses on the client's own
-            // surfaces, and the client closes the popup itself. After
-            // popup_done instead, a page whose <select> popup it closed
-            // takes no more clicks or keys (WebKitGTK 2.52, GTK 3.24.41).
-            PointerEvent::Button { button, pressed } => {
-                let state = if pressed {
-                    ButtonState::Pressed
-                } else {
-                    ButtonState::Released
-                };
-                pointer.button(
-                    self,
-                    &ButtonEvent {
-                        serial,
-                        time,
-                        button,
-                        state,
-                    },
-                );
-            }
-            PointerEvent::Scroll {
-                dx,
-                dy,
-                source,
-                discrete,
-                stop,
-            } => {
-                let mut frame = AxisFrame::new(time).source(match source {
-                    ScrollSource::Wheel => AxisSource::Wheel,
-                    ScrollSource::Finger => AxisSource::Finger,
-                });
-                if dx != 0.0 {
-                    frame = frame.value(Axis::Horizontal, dx);
-                }
-                if dy != 0.0 {
-                    frame = frame.value(Axis::Vertical, dy);
-                }
-                if let Some((horizontal, vertical)) = discrete {
-                    if horizontal != 0 {
-                        frame = frame.v120(Axis::Horizontal, horizontal);
-                    }
-                    if vertical != 0 {
-                        frame = frame.v120(Axis::Vertical, vertical);
-                    }
-                }
-                if stop {
-                    frame = frame.stop(Axis::Horizontal).stop(Axis::Vertical);
-                }
-                pointer.axis(self, frame);
-            }
+        let event = MotionEvent {
+            location: pointer.current_location(),
+            serial: SERIAL_COUNTER.next_serial(),
+            time: self.time(),
+        };
+        pointer.motion(self, None, &event);
+        pointer.frame(self);
+    }
+
+    /// A press outside a grabbing popup still goes to the client, as an
+    /// xdg_popup grab delivers presses on the client's own surfaces, and the
+    /// client closes the popup itself. After popup_done instead, a page whose
+    /// `<select>` popup it closed takes no more clicks or keys (WebKitGTK
+    /// 2.52, GTK 3.24.41).
+    pub(crate) fn pointer_button(&mut self, button: u32, pressed: bool) {
+        let event = ButtonEvent {
+            serial: SERIAL_COUNTER.next_serial(),
+            time: self.time(),
+            button,
+            state: if pressed {
+                ButtonState::Pressed
+            } else {
+                ButtonState::Released
+            },
+        };
+        self.pointer.clone().button(self, &event);
+    }
+
+    /// Ends a group of the session's pointer events, with its scrolling.
+    pub(crate) fn pointer_frame(&mut self, scroll: Option<AxisFrame>) {
+        let pointer = self.pointer.clone();
+        if let Some(scroll) = scroll {
+            pointer.axis(self, scroll);
         }
         pointer.frame(self);
     }
 
-    /// Gives the keyboard to the focused view's topmost grabbing popup, or to
-    /// its toplevel.
+    /// Gives the keyboard to the focused view's topmost grabbing popup, else
+    /// to its topmost dialog, else to its toplevel.
     fn refocus(&mut self) {
         let target = self.keyboard_view.and_then(|id| {
             let view = self.views.get(&id)?;
@@ -1030,8 +1179,10 @@ impl State {
                     .iter()
                     .rev()
                     .find(|p| p.grab)
-                    .map(|p| p.surface.wl_surface().clone())
-                    .unwrap_or_else(|| view.toplevel.wl_surface().clone()),
+                    .map(|p| p.surface.wl_surface())
+                    .or_else(|| view.dialogs.last().map(|d| d.toplevel.wl_surface()))
+                    .unwrap_or_else(|| view.toplevel.wl_surface())
+                    .clone(),
             )
         });
         let keyboard = self.keyboard.clone();
@@ -1043,24 +1194,14 @@ impl State {
 
 fn subsurface_offset(states: &SurfaceData) -> Point<i32, Logical> {
     if states.role == Some("subsurface") {
-        clamp_point(
-            states
-                .cached_state
-                .get::<SubsurfaceCachedState>()
-                .current()
-                .location,
-        )
+        states
+            .cached_state
+            .get::<SubsurfaceCachedState>()
+            .current()
+            .location
     } else {
         Point::from((0, 0))
     }
-}
-
-/// Bounds a position the client chose to [`MAX_COORDINATE`].
-fn clamp_point(point: Point<i32, Logical>) -> Point<i32, Logical> {
-    Point::from((
-        point.x.clamp(-MAX_COORDINATE, MAX_COORDINATE),
-        point.y.clamp(-MAX_COORDINATE, MAX_COORDINATE),
-    ))
 }
 
 /// Sets the pending configure of a view's toplevel. The tiled states keep GTK
@@ -1101,10 +1242,9 @@ impl CompositorHandler for State {
 }
 
 impl BufferHandler for State {
-    fn buffer_destroyed(
-        &mut self,
-        _buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
-    ) {
+    fn buffer_destroyed(&mut self, buffer: &WlBuffer) {
+        self.contents
+            .retain(|_, contents| contents.buffer != *buffer);
     }
 }
 
@@ -1136,7 +1276,7 @@ impl SeatHandler for State {
 }
 
 impl SelectionHandler for State {
-    type SelectionUserData = Arc<str>;
+    type SelectionUserData = ();
 
     fn new_selection(
         &mut self,
@@ -1147,20 +1287,23 @@ impl SelectionHandler for State {
         if ty != SelectionTarget::Clipboard {
             return;
         }
-        let Some(source) = source else {
-            return;
-        };
-        self.clipboard = None;
-        let offered = source.mime_types();
-        let Some(mime_type) = TEXT_MIME_TYPES
-            .iter()
-            .find(|mime| offered.iter().any(|offer| offer == *mime))
-        else {
-            return;
-        };
+        let text = source.and_then(|source| {
+            let offered = source.mime_types();
+            TEXT_MIME_TYPES
+                .iter()
+                .find(|mime| offered.iter().any(|offer| offer == *mime))
+        });
         // smithay stores the new selection only after this returns, so it is
-        // read once the request is dispatched (see [`State::read_selection`]).
-        self.copied = Some((seat, *mime_type));
+        // read once the request is dispatched (see
+        // [`State::read_selection`]). A copy with no text in it has nothing
+        // for the host's clipboard, and the nest's selection takes its place
+        // at once.
+        match text {
+            Some(mime_type) => self.copied = Some((seat, *mime_type)),
+            None => {
+                let _ = self.commands.send(Command::OfferClipboard);
+            }
+        }
     }
 
     fn send_selection(
@@ -1169,12 +1312,9 @@ impl SelectionHandler for State {
         _mime_type: String,
         fd: OwnedFd,
         _seat: Seat<Self>,
-        text: &Arc<str>,
+        (): &(),
     ) {
-        let text = text.clone();
-        std::thread::spawn(move || {
-            let _ = std::fs::File::from(fd).write_all(text.as_bytes());
-        });
+        let _ = self.events.try_send(Event::Paste(Paste(fd)));
     }
 }
 
@@ -1204,6 +1344,10 @@ impl XdgShellHandler for State {
     }
 
     fn title_changed(&mut self, _surface: ToplevelSurface) {
+        self.claim();
+    }
+
+    fn parent_changed(&mut self, _surface: ToplevelSurface) {
         self.claim();
     }
 
@@ -1269,22 +1413,21 @@ impl XdgShellHandler for State {
         view.dirty = true;
         surface.send_repositioned(token);
         if let Err(error) = surface.send_configure() {
-            log::debug!("wayland nest: popup configure failed: {error:?}");
+            log::error!("wayland nest: popup configure failed: {error:?}");
         }
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         self.unclaimed.retain(|toplevel| *toplevel != surface);
-        let closed: Vec<ViewId> = self
-            .views
-            .iter()
-            .filter(|(_, view)| view.toplevel == surface)
-            .map(|(id, _)| *id)
-            .collect();
-        for id in closed {
-            self.views.remove(&id);
-            let _ = self.events.try_send(Event::Closed { view: id });
+        self.views.retain(|_, view| view.toplevel != surface);
+        for view in self.views.values_mut() {
+            let before = view.dialogs.len();
+            view.dialogs.retain(|dialog| dialog.toplevel != surface);
+            if view.dialogs.len() != before {
+                view.dirty = true;
+            }
         }
+        self.refocus();
     }
 
     fn popup_destroyed(&mut self, surface: PopupSurface) {

@@ -12,25 +12,24 @@ use common::page::*;
 
 #[test]
 fn input_method_text_reaches_the_page_whatever_gtk_im_module_names() {
-    let _runtime = common::runtime_dir();
-    // SAFETY: see `common::runtime_dir`; no other thread is running yet.
+    // SAFETY: no other thread is running yet.
     unsafe { std::env::set_var("GTK_IM_MODULE", "ipa") };
     let mut page = Page::open();
     page.focus_field();
 
     page.nest.compose_text("にほ".into(), Some(6..6));
-    page.run_until("a composition", |state, _| {
+    page.run_until("a composition", |state| {
         state["composed"]
             .as_array()
             .is_some_and(|composed| composed.iter().any(|text| text == "にほ"))
     });
     page.nest.commit_text("日本".into());
-    page.run_until("committed text", |state, _| state["value"] == "日本");
+    page.run_until("committed text", |state| state["value"] == "日本");
 
     let typed = " Ünïcödé 漢字!";
     page.type_mixed(typed);
     let expected = format!("日本{typed}");
-    page.run_until("the mixed text", |state, _| {
+    page.run_until("the mixed text", |state| {
         state["value"]
             .as_str()
             .is_some_and(|value| value.chars().count() >= expected.chars().count())

@@ -1,8 +1,13 @@
-//! GTK, started in this process on a nest.
+//! GTK, started in this process on a nest and run from the host's own loop.
 
+use std::convert::Infallible;
 use std::ffi::{CString, c_char, c_int};
 use std::sync::OnceLock;
 
+use gtk::glib::ffi::{
+    GPollFD, g_main_context_acquire, g_main_context_check, g_main_context_default,
+    g_main_context_dispatch, g_main_context_prepare, g_main_context_query,
+};
 use gtk::glib::gobject_ffi::{GObject, GObjectClass, g_type_class_ref};
 use gtk::glib::translate::IntoGlib as _;
 use gtk::prelude::*;
@@ -45,6 +50,103 @@ impl Nest {
         }
         use_text_input_v3();
         Ok(())
+    }
+}
+
+/// Runs GTK on the thread that started it, for the life of the process.
+///
+/// The thread's own loop keeps running: this future is ready to be polled
+/// again only when GTK has something to do. GLib splits one turn of its main
+/// loop into the steps used here so that another loop can do the waiting;
+/// the waiting itself happens on a thread of its own, which wakes this
+/// future when one of GLib's descriptors is ready or its next timer is due.
+pub async fn run_gtk() -> Infallible {
+    let (requests, waits) = std::sync::mpsc::channel::<(Vec<libc::pollfd>, c_int)>();
+    let (answers, woken) = async_channel::bounded::<Vec<libc::pollfd>>(1);
+    std::thread::Builder::new()
+        .name("gtk-wait".into())
+        .spawn(move || {
+            for (mut descriptors, timeout) in waits {
+                // SAFETY: `descriptors` is a valid array of its own length.
+                // A failed poll (EINTR) reports nothing ready, and the next
+                // turn asks again.
+                unsafe {
+                    libc::poll(
+                        descriptors.as_mut_ptr(),
+                        descriptors.len() as libc::nfds_t,
+                        timeout,
+                    )
+                };
+                if answers.send_blocking(descriptors).is_err() {
+                    return;
+                }
+            }
+        })
+        .expect("spawn the thread that waits for GTK");
+
+    // SAFETY: the default context is GTK's, and this is GTK's thread.
+    let context = unsafe { g_main_context_default() };
+    // SAFETY: as above. No other thread runs this context, so it is free.
+    assert!(
+        unsafe { g_main_context_acquire(context) } != 0,
+        "GTK's main context is run by another thread"
+    );
+    let mut descriptors: Vec<GPollFD> = Vec::new();
+    loop {
+        let mut priority = 0;
+        let mut timeout = 0;
+        // SAFETY: the context is acquired by this thread, and `descriptors`
+        // is valid for the length passed.
+        let count = unsafe {
+            g_main_context_prepare(context, &mut priority);
+            loop {
+                let count = g_main_context_query(
+                    context,
+                    priority,
+                    &mut timeout,
+                    descriptors.as_mut_ptr(),
+                    descriptors.len() as c_int,
+                ) as usize;
+                if count <= descriptors.len() {
+                    break count;
+                }
+                descriptors.resize(
+                    count,
+                    GPollFD {
+                        fd: -1,
+                        events: 0,
+                        revents: 0,
+                    },
+                );
+            }
+        };
+        let wait = descriptors[..count]
+            .iter()
+            .map(|descriptor| libc::pollfd {
+                fd: descriptor.fd,
+                events: descriptor.events as libc::c_short,
+                revents: 0,
+            })
+            .collect();
+        requests
+            .send((wait, timeout))
+            .expect("the thread that waits for GTK is running");
+        let ready = woken
+            .recv()
+            .await
+            .expect("the thread that waits for GTK is running");
+        for (descriptor, ready) in descriptors.iter_mut().zip(&ready) {
+            descriptor.revents = ready.revents as u16;
+        }
+        // SAFETY: as above. GLib notices by itself when its sources changed
+        // while this future waited, and then dispatches nothing this turn.
+        unsafe {
+            if g_main_context_check(context, priority, descriptors.as_mut_ptr(), count as c_int)
+                != 0
+            {
+                g_main_context_dispatch(context);
+            }
+        }
     }
 }
 
