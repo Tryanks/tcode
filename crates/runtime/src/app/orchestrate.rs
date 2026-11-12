@@ -124,7 +124,7 @@ impl AppState {
             .mcp
             .control_registrations
             .contains_key(id)
-            .then(|| control_mcp::instructions(id, meta.is_dispatched()));
+            .then(|| control_mcp::instructions(meta.is_dispatched()));
         instructions.extend(
             servers
                 .into_iter()

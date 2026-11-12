@@ -12,6 +12,11 @@ mod tools;
 pub use params::*;
 pub use tools::{instructions, tool_descriptions};
 
+/// How a call names the thread making it. Which thread that is comes from the connection: the
+/// model cannot be told its id, since a fork's conversation is its source's and a harness
+/// shows a server's instructions and its own system prompt once per conversation.
+pub const OWN_THREAD: &str = "self";
+
 /// One call of a `tcode_control` tool, with its parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlOp {
@@ -311,6 +316,52 @@ impl ControlOp {
             | Self::PatchSettings(_)
             | Self::ReportResult(_)
             | Self::RequestGrant(_) => Vec::new(),
+        }
+    }
+
+    /// Put the calling thread's id wherever the call names it as [`OWN_THREAD`].
+    pub fn name_caller(&mut self, caller: &str) {
+        let ids: Vec<&mut String> = match self {
+            Self::GetThread(p) => vec![&mut p.thread_id],
+            Self::Search(p) => p.thread_ids.iter_mut().flatten().collect(),
+            Self::Outline(p) => vec![&mut p.thread_id],
+            Self::FileHistory(p) => vec![&mut p.thread_id],
+            Self::GetGit(p) => p.thread_id.iter_mut().collect(),
+            Self::GetPullRequest(p) => vec![&mut p.thread_id],
+            Self::UpdateThreads(p) => p.changes.iter_mut().map(|c| &mut c.thread_id).collect(),
+            Self::RecordReview(p) => p.items.iter_mut().map(|i| &mut i.thread_id).collect(),
+            Self::SendMessage(p) => p.thread_ids.iter_mut().collect(),
+            Self::ControlThread(p) => p.changes.iter_mut().map(|c| &mut c.thread_id).collect(),
+            Self::PullRequest(p) => vec![&mut p.thread_id],
+            Self::Git(p) => vec![&mut p.thread_id],
+            Self::MoveThread(p) => vec![&mut p.thread_id],
+            Self::NotifyWhen(p) => p.thread_ids.iter_mut().collect(),
+            Self::Reference(p) => vec![&mut p.thread_id],
+            Self::RespondInput(p) => vec![&mut p.thread_id],
+            Self::RespondApproval(p) => vec![&mut p.thread_id],
+            Self::Terminal(p) => vec![&mut p.thread_id],
+            Self::DeleteThreads(p) => p.thread_ids.iter_mut().collect(),
+            Self::Rewind(p) => vec![&mut p.thread_id],
+            Self::Read(_)
+            | Self::SearchInItem(_)
+            | Self::ListProjects(_)
+            | Self::ListThreads(_)
+            | Self::ListProviders(_)
+            | Self::GetSettings(_)
+            | Self::ReadTerminal(_)
+            | Self::ReviewCandidates(_)
+            | Self::SettleSelf(_)
+            | Self::StartThread(_)
+            | Self::CreateProject(_)
+            | Self::CancelNotify(_)
+            | Self::PatchSettings(_)
+            | Self::ReportResult(_)
+            | Self::RequestGrant(_) => Vec::new(),
+        };
+        for id in ids {
+            if id == OWN_THREAD {
+                *id = caller.to_owned();
+            }
         }
     }
 
