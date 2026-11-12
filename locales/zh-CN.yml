@@ -231,7 +231,7 @@ background:
   running: "%{harness} · %{count} 项运行中"
   stop: "停止"
   stop_task: "停止这一项"
-  stop_all: "全部停止"
+  stop_all: "停止全部后台任务"
   stop_confirm_title: "停止这 %{count} 项后台工作？"
   stop_confirm_description: "将停止：\n%{names}"
   stop_confirm: "停止"
