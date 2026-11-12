@@ -208,10 +208,10 @@ const fn span(width: f32) -> f32 {
 }
 
 /// The narrowest the column gets for the rail beside it: what a new window
-/// leaves it with the sidebar at its narrowest, so the cards show there. A
-/// wider window keeps the widest column.
+/// leaves it with the sidebar at its width there, so the cards show as it
+/// opens. A wider window keeps the widest column.
 const RAIL_COLUMN_MIN: f32 = crate::shell::DEFAULT_WINDOW_WIDTH
-    - crate::shell::SIDEBAR_MIN_WIDTH
+    - crate::shell::SIDEBAR_WIDTH
     - CHAT_CONTENT_MIN_PADDING
     - span(CHAT_RAIL_NARROWEST);
 
