@@ -11,10 +11,10 @@ use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use agent::{ItemContent, ItemStatus};
 use gpui::{
-    AnyElement, App, Bounds, ContentMask, FocusHandle, Hsla, InteractiveElement as _,
-    IntoElement as _, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement as _, Pixels, Point, Rgba, ScrollEvent, Styled as _, Window, canvas, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, App, Bounds, ContentMask, FocusHandle, HitboxBehavior, Hsla,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement as _, Pixels, Point, Rgba, ScrollEvent, Styled as _, Window,
+    canvas, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{ElementExt as _, v_flex};
 use tcode_core::session::{EntryContent, TimelineEntry};
@@ -268,6 +268,31 @@ fn output_handlers(id: &str, ctx: &mut ToolCtx<'_, '_>) -> OutputHandlers {
         release: Box::new(release),
         copy: Box::new(copy),
     }
+}
+
+/// Takes the wheel over an output for `wheel` before the timeline around it
+/// does: the timeline's bounce takes a wheel event as it is captured, ahead
+/// of anything the output would hear as it bubbles.
+///
+/// Gap: gpui-base's `ScrollableMask` is that capture for a `ScrollbarHandle`,
+/// which is read and moved without a context; an output's rows are the
+/// view's, scrolled through it.
+fn wheel_capture(wheel: Handler<ScrollEvent>) -> impl IntoElement {
+    canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        move |_, hitbox, window, _| {
+            let hitbox = hitbox.id;
+            window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
+                if phase.capture() && hitbox.should_handle_scroll(window) {
+                    wheel(event, window, cx);
+                }
+            });
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 const DEFAULT_COLS: u16 = 80;
@@ -646,16 +671,17 @@ impl Panel {
                             "command-output-{output_id}"
                         )))
                         .debug_selector(move || format!("command-output-{output_id}"))
+                        .relative()
                         .overflow_hidden()
                         .cursor_text()
                         .when_some(focus, |output, focus| output.track_focus(&focus))
                         .on_prepaint(move |bounds, _, _| output_bounds.set(Some(bounds)))
-                        .on_scroll(wheel)
                         .on_mouse_down(MouseButton::Left, press)
                         .on_mouse_move(drag)
                         .on_mouse_up(MouseButton::Left, release)
                         .on_action(copy)
-                        .child(output),
+                        .child(output)
+                        .child(wheel_capture(wheel)),
                 )
             })
             .when_some(on_cols_change, |panel, on_cols_change| {

@@ -81,11 +81,24 @@ pub(crate) fn page_viewport<H: ScrollbarHandle + Clone>(
 /// leaves it. Twice that pixel clears it with room for rounding.
 const TAIL_ESCAPE: Pixels = px(2.);
 
+/// The room to scroll a list that fits its viewport reports to its bounce.
+///
+/// gpui-base's `ScrollBounce` stretches only an area that has somewhere to
+/// scroll, and has no setting for one that always bounces: with no room it
+/// neither takes the gesture nor keeps a stretch. This is room the bounce
+/// can see and a pan cannot feel: the list never moves by it, so all of
+/// every packet is left over and stretches the edge.
+const FITTING_ROOM: Pixels = px(0.005);
+
 /// A list following its tail, as the handle its [`page_viewport`] scrolls:
 /// the packets that rise from the end add up until they reach
 /// [`TAIL_ESCAPE`], then move the list by all of them, so a scroll up leaves
 /// the tail however slowly it comes. Remove it once a wheel packet that
 /// rises from the end of a gpui-fast list pauses its following.
+///
+/// A list that fits its viewport bounces at its edges as a longer one does,
+/// by [`FITTING_ROOM`]. Remove that once gpui-base's bounce can stretch an
+/// area with nowhere to scroll.
 #[derive(Clone)]
 pub(crate) struct FollowedList {
     list: ListState,
@@ -100,6 +113,12 @@ impl FollowedList {
             rise: Rc::default(),
         }
     }
+
+    /// Whether the list's rows fit its viewport, leaving it nowhere to
+    /// scroll.
+    fn fits(&self) -> bool {
+        self.list.max_offset_for_scrollbar().y <= px(0.)
+    }
 }
 
 impl ScrollbarHandle for FollowedList {
@@ -112,6 +131,9 @@ impl ScrollbarHandle for FollowedList {
     }
 
     fn set_offset(&self, mut offset: gpui::Point<Pixels>) {
+        if self.fits() {
+            return;
+        }
         if !self.list.is_following_tail() {
             self.rise.set(px(0.));
             self.list.set_offset_from_scrollbar(offset);
@@ -133,7 +155,11 @@ impl ScrollbarHandle for FollowedList {
     }
 
     fn content_size(&self) -> gpui::Size<Pixels> {
-        ScrollbarHandle::content_size(&self.list)
+        let mut size = ScrollbarHandle::content_size(&self.list);
+        if self.fits() {
+            size.height += FITTING_ROOM;
+        }
+        size
     }
 
     fn start_drag(&self) {
