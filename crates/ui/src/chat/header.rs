@@ -1239,7 +1239,7 @@ impl ChatView {
                     labelled && !overflow,
                     window,
                     cx,
-                    |this, labelled, cx| this.render_git_button(labelled, cx),
+                    |this, labelled, cx| this.render_git_button(labelled, &this.motion, cx),
                 ))
             });
         // A change of tier cross-fades the controls after the git button:
@@ -1292,6 +1292,7 @@ impl ChatView {
                                 zed,
                                 host.clone(),
                                 labelled,
+                                &this.motion,
                                 cx,
                             ))
                         },
@@ -1460,11 +1461,14 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let host = self.workspace_store.read(cx).host_key();
+        // Clocks of their own: on the header's, these buttons, which no
+        // pointer is ever over, would glide the drawn ones' hover back to rest.
+        let motion = self.motion.scope("measure-labels");
         let mut pairs: Vec<[Option<AnyElement>; 2]> =
-            vec![[true, false].map(|labelled| self.render_git_button(labelled, cx))];
+            vec![[true, false].map(|labelled| self.render_git_button(labelled, &motion, cx))];
         if let Some((cwd, zed)) = cwd.zip(zed) {
             pairs.push([true, false].map(|labelled| {
-                Some(self.render_open_button(cwd.clone(), zed, host.clone(), labelled, cx))
+                Some(self.render_open_button(cwd.clone(), zed, host.clone(), labelled, &motion, cx))
             }));
         }
         let measured = self.header_label_width.clone();
@@ -1618,12 +1622,17 @@ impl ChatView {
     /// follow the current git status.
     /// Unlabelled, the main part is its icon, named by its tooltip (or the
     /// disabled hint) and its accessibility label.
-    fn render_git_button(&self, labelled: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_git_button(
+        &self,
+        labelled: bool,
+        motion: &crate::motion::owned::Owned,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let store = self.workspace_store.read(cx);
         let session_id = self.session_id.as_deref();
         let Some((quick, items)) = store.chat_git_controls_for(session_id, cx) else {
             let error = store.chat_git_error_for(session_id, cx)?;
-            return Some(self.render_git_error(error, cx));
+            return Some(self.render_git_error(error, motion, cx));
         };
         let border = cx.theme().border;
 
@@ -1635,7 +1644,7 @@ impl ChatView {
             .map(git_action_icon)
             .unwrap_or_else(|| Icon::empty().path("icons/git-branch.svg"));
         let mut main = Button::new("git-main")
-            .motion(&self.motion)
+            .motion(motion)
             .debug_selector(|| "git-main".into())
             .ghost()
             .small()
@@ -1664,7 +1673,7 @@ impl ChatView {
             .anchor(Anchor::TopRight)
             .trigger(
                 Button::new("git-menu-trigger")
-                    .motion(&self.motion)
+                    .motion(motion)
                     .ghost()
                     .small()
                     .rounded_corners(segment_corners(false, cx))
@@ -1749,7 +1758,12 @@ impl ChatView {
 
     /// The git button when git could not read the status: disabled, named by
     /// git's own error.
-    fn render_git_error(&self, error: String, cx: &mut Context<Self>) -> AnyElement {
+    fn render_git_error(
+        &self,
+        error: String,
+        motion: &crate::motion::owned::Owned,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         h_flex()
             .flex_none()
             .items_center()
@@ -1759,7 +1773,7 @@ impl ChatView {
             .overflow_hidden()
             .child(
                 Button::new("git-main")
-                    .motion(&self.motion)
+                    .motion(motion)
                     .debug_selector(|| "git-main".into())
                     .ghost()
                     .small()
@@ -1824,13 +1838,14 @@ impl ChatView {
         zed: &'static str,
         host: crate::store::HostKey,
         labelled: bool,
+        motion: &crate::motion::owned::Owned,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let border = cx.theme().border;
         let main_cwd = cwd.clone();
         let menu_cwd = cwd.to_string_lossy().into_owned();
         let chevron = Button::new("open-menu-trigger")
-            .motion(&self.motion)
+            .motion(motion)
             .ghost()
             .small()
             .rounded_corners(segment_corners(false, cx))
@@ -1849,7 +1864,7 @@ impl ChatView {
             .overflow_hidden()
             .child(
                 Button::new("open-main")
-                    .motion(&self.motion)
+                    .motion(motion)
                     .ghost()
                     .small()
                     .rounded_corners(segment_corners(true, cx))
