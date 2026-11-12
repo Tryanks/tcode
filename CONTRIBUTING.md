@@ -170,7 +170,9 @@ Platform prerequisites:
 
   On a Wayland session the preview runs GTK on a nested compositor of its
   own (experimental); `WAYLAND_DISPLAY= cargo run` embeds it into an X11
-  window through XWayland instead.
+  window through XWayland instead. That compositor's tests
+  (`crates/platform/wayland-nest`) start a headless `sway` to be hosted in,
+  so they need `sway` installed.
 
   The build needs the GTK and WebKitGTK development files, but the binary does
   not link them: `crates/platform/gtk-dlopen` loads them when the preview is

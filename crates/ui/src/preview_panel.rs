@@ -13,8 +13,8 @@
 //! macOS, Windows, Linux, Android and iOS, and only with the `native-preview`
 //! feature (`cfg(preview_backend)`, set by the build script). On Linux
 //! `gpui-webview` embeds WebKitGTK as an X11 child and drives GTK from GPUI;
-//! when GPUI runs on Wayland, GTK runs on a nested compositor whose frames are
-//! shown on a native composition surface instead (see [`wayland`]).
+//! when GPUI runs on Wayland, GTK runs on a nested compositor that draws each
+//! page on a native composition surface instead (see [`wayland`]).
 //! Android hosts activity-owned WebViews through JNI; iOS adds a `gpui-webview`
 //! child to the GPUI host view and places it itself (see [`ios`]); Windows
 //! drives a WebView2 composition controller itself (see [`webview2`]). A client
@@ -75,29 +75,12 @@ const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 /// Whether this client can embed a browser. Views ask before offering an action
 /// that needs one, so nothing renders an enabled control that cannot work.
 ///
-/// On Linux `gpui-webview` parents WebKitGTK to an X11 window; a client that
-/// GPUI connected to Wayland hosts it through [`wayland`] instead, which needs
-/// a runtime directory for its socket. GPUI picks Wayland whenever
-/// `WAYLAND_DISPLAY` names one, and `guess_compositor` reports that same choice;
-/// a window cannot change display server once open. WebKitGTK itself is loaded
-/// only when the first page is built (`gtk_dlopen`), so a machine without it
-/// still offers the Preview and says there why no page opens.
+/// A build with a backend offers the Preview wherever it runs; what the
+/// machine lacks for it (WebKitGTK, which `gtk_dlopen` loads when the first
+/// page is built, or a runtime directory for the Wayland nest's socket) is
+/// said in the panel when no page opens.
 pub(crate) fn preview_backend() -> bool {
-    #[cfg(all(preview_backend, target_os = "linux"))]
-    {
-        static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *AVAILABLE.get_or_init(
-            || match gpui::GraphicalEnvironment::detect().guess_compositor() {
-                "X11" => true,
-                "Wayland" => wayland::supported(),
-                _ => false,
-            },
-        )
-    }
-    #[cfg(not(all(preview_backend, target_os = "linux")))]
-    {
-        cfg!(preview_backend)
-    }
+    cfg!(preview_backend)
 }
 
 #[cfg(preview_backend)]

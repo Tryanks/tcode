@@ -288,6 +288,29 @@ From the round that worked through what was carried forward:
   whatever its own setters did not set. Every plugin listing read nothing
   for a round, and no test could have said so.
 
+From the round over the Wayland preview (the nested compositor):
+
+- **A timer where the peer has a signal**: a view's next frame released by a
+  16 ms timer, when the session's compositor sends a frame callback for
+  exactly that; GTK's loop polled every 16 ms, when GLib names the
+  descriptors and the timeout to wait on. Every hop of an interaction waited
+  out a tick.
+- **A dependency's conversion undone by constants**: scroll deltas divided
+  by the factors GPUI was read to multiply by. The session's own pointer
+  events were there to be passed on unchanged.
+- **Guessing when the source will ask**: the clipboard copied in before the
+  keys that usually paste. A selection that fetches when the client asks
+  needs no guess.
+- **A misbehaving peer only a test can be**: positions clamped, buffer edges
+  capped and handler panics caught for a hand-written client sending what
+  the one real client, GTK in the same process, never sends.
+- **A window nobody shows**: the client's file chooser was a toplevel the
+  compositor kept and never drew, and being modal it took the page's input
+  for good. Found by pressing the button in the running app, not by reading.
+- **A link fix that held only for optimized builds**: a release binary
+  linked, the unoptimized one did not. A change to how a binary links is
+  built both ways before it merges.
+
 ## What the audit did wrong
 
 - **It reported in place of verifying.** Four rounds merged with every
@@ -349,6 +372,15 @@ From the round that worked through what was carried forward:
   while the maintainer could not restart the app the conversation ran in.
   A round has an end stated at its start: the last merge. What is found
   after that is listed.
+
+- **It tied a state to a signal nothing redraws for.** A page's keyboard
+  focus was made to follow the window being active, read during a paint;
+  nothing paints when the window comes back, so keys were dropped. Only the
+  running app showed it.
+- **It wrote a test that waited on its own fixture.** A new control was put
+  where an earlier step of the same test sampled the background, and the
+  wait never ended. A wait with no bound of its own is looked at running
+  before it is pushed.
 
 ## Families beyond the defence
 
