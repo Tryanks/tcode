@@ -122,6 +122,21 @@ jobs:
           elapsed=$((SECONDS - start))
           echo "### ${{ matrix.label }} build: ${elapsed}s" >> "$GITHUB_STEP_SUMMARY"
 
+      # The preview's libraries are loaded at run time (crates/platform/gtk-dlopen)
+      # so Tcode starts where they are missing; a DT_NEEDED on any of them
+      # would stop it starting again.
+      - name: Check the Linux binary does not link GTK or WebKitGTK
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          needed=$(readelf -d "target/${{ matrix.target }}/release/tcode" | grep NEEDED)
+          echo "$needed"
+          if grep -E 'lib(webkit2gtk|javascriptcoregtk|soup|gtk|gdk|cairo|gio|gobject|glib|pango|atk|harfbuzz)' <<<"$needed"; then
+            echo "::error::tcode links a GTK/WebKitGTK library directly; add it to crates/platform/gtk-dlopen"
+            exit 1
+          fi
+
       - name: Build unsigned iOS app
         if: matrix.platform == 'ios'
         shell: bash
@@ -373,7 +388,7 @@ jobs:
             `xattr -dr com.apple.quarantine /Applications/Tcode.app`
 
           - **Windows 11+**: the embedded preview uses the WebView2 runtime that ships with Windows.
-          - **Linux**: requires ALSA, Fontconfig, Wayland/X11 client libraries, libgbm, the Vulkan loader, a working Vulkan ICD/graphics driver, GTK 3 and WebKitGTK 4.1 (`libwebkit2gtk-4.1-0`; `webkit2gtk-4.1` on Arch). On a Wayland session the embedded preview runs WebKitGTK on a nested compositor of its own (experimental); start Tcode with `WAYLAND_DISPLAY` unset to embed it through XWayland instead.
+          - **Linux**: requires ALSA, Fontconfig, Wayland/X11 client libraries, libgbm, the Vulkan loader and a working Vulkan ICD/graphics driver. The side-panel preview browser is optional and needs WebKitGTK 4.1, which brings GTK 3 (`libwebkit2gtk-4.1-0`; `webkit2gtk-4.1` on Arch); without it everything else works and the preview panel says it is unavailable. On a Wayland session the embedded preview runs WebKitGTK on a nested compositor of its own (experimental); start Tcode with `WAYLAND_DISPLAY` unset to embed it through XWayland instead.
           - **Android**: the arm64 APK is signed with the project's release key and installs over previous releases signed with it. A build signed with a different key (a local build, or a release from before the key existed) must be uninstalled first.
           - **iOS / iPadOS 27+**: the arm64 IPA is unsigned. Re-sign it with your own Apple ID, or install it with a sideloading tool such as AltStore or Sideloadly, before it runs on a device.
 

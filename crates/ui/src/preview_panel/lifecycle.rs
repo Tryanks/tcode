@@ -1217,6 +1217,13 @@ mod platform {
         window: &mut Window,
         cx: &mut Context<BrowserLifecycle>,
     ) -> Availability {
+        // Tcode does not link WebKitGTK, so it starts where it is missing;
+        // the first page loads it, and without it the panel says why.
+        #[cfg(target_os = "linux")]
+        if let Err(error) = gtk_dlopen::load() {
+            lifecycle.record_unavailable(format!("WebKitGTK 4.1 could not be loaded: {error}"), cx);
+            return Availability::Unavailable;
+        }
         // No first document: lb-wry holds evaluations back until a
         // navigation commits, and the page's evaluations wait for its first
         // document (`PageEvents`).

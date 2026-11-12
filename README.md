@@ -169,18 +169,26 @@ guide.
 [Releases](https://github.com/Tryanks/tcode/releases) — macOS 27+ (Apple
 silicon), Windows 11+ (x64 / ARM64), Linux (x64 / ARM64) — and run it. Check the
 release notes for runtime requirements and signing status. Linux needs ALSA,
-Fontconfig, the Wayland/X11 client libraries, libgbm, a Vulkan loader with a
-working Vulkan driver, and GTK 3 with WebKitGTK 4.1 for the embedded preview:
+Fontconfig, the Wayland/X11 client libraries, libgbm and a Vulkan loader with a
+working Vulkan driver:
 
 ```sh
 # Debian / Ubuntu
-sudo apt install libwebkit2gtk-4.1-0 libgtk-3-0 libasound2 libfontconfig1 \
-  libgbm1 libwayland-client0 libxkbcommon0 libxkbcommon-x11-0 libvulkan1 \
-  mesa-vulkan-drivers
+sudo apt install libasound2 libfontconfig1 libgbm1 libwayland-client0 \
+  libxkbcommon0 libxkbcommon-x11-0 libvulkan1 mesa-vulkan-drivers
 # Arch Linux (also install your GPU's Vulkan driver: vulkan-radeon,
 # vulkan-intel or nvidia-utils)
-sudo pacman -S --needed webkit2gtk-4.1 gtk3 alsa-lib fontconfig mesa wayland \
-  libxkbcommon libxkbcommon-x11 vulkan-icd-loader
+sudo pacman -S --needed alsa-lib fontconfig mesa wayland libxkbcommon \
+  libxkbcommon-x11 vulkan-icd-loader
+```
+
+The side-panel preview browser is optional on Linux and needs WebKitGTK 4.1
+(it brings GTK 3). Without it everything else works, and the preview panel says
+it is unavailable:
+
+```sh
+sudo apt install libwebkit2gtk-4.1-0      # Debian / Ubuntu
+sudo pacman -S --needed webkit2gtk-4.1    # Arch Linux
 ```
 
 For an unsigned macOS build, remove quarantine after installing the app with

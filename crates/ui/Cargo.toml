@@ -53,6 +53,7 @@ native-preview = [
     "dep:gdk",
     "dep:gtk",
     "dep:wayland-nest",
+    "dep:gtk-dlopen",
     "dep:windows-core",
     "dep:windows",
     "dep:gpui-windows-core",
@@ -167,6 +168,9 @@ gdk = { version = "0.18.2", optional = true }
 # The GTK windows that hold webviews on a Wayland session.
 gtk = { version = "0.18.2", optional = true }
 wayland-nest = { path = "../platform/wayland-nest", optional = true }
+# Loads the libraries above when the preview is first asked for, so Tcode starts
+# without them and only the preview goes missing.
+gtk-dlopen = { path = "../platform/gtk-dlopen", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tempfile = { version = "3", optional = true }

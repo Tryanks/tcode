@@ -172,6 +172,11 @@ Platform prerequisites:
   own (experimental); `WAYLAND_DISPLAY= cargo run` embeds it into an X11
   window through XWayland instead.
 
+  The build needs the GTK and WebKitGTK development files, but the binary does
+  not link them: `crates/platform/gtk-dlopen` loads them when the preview is
+  first asked for, and on a machine without them the Preview says why it is
+  unavailable.
+
 Provider CLIs are resolved from `PATH` (`claude`, `codex`, `pi`, `opencode`,
 `cursor-agent`, `grok`) and can be overridden in **Settings → Harnesses**.
 

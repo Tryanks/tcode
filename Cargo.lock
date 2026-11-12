@@ -5206,6 +5206,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gtk-dlopen"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "object",
+ "pkg-config",
+]
+
+[[package]]
 name = "gtk-sys"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12404,6 +12413,7 @@ dependencies = [
  "gpui-pre-reqwest-client",
  "gpui-webview",
  "gtk",
+ "gtk-dlopen",
  "image",
  "imara-diff",
  "latex-rust",
