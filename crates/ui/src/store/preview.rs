@@ -72,11 +72,12 @@ struct HeldPreview {
 }
 
 impl PreviewReplica {
-    pub(super) fn new(name: String) -> Self {
+    pub(super) fn new(name: String, on_host: bool) -> Self {
         Self {
             client: PreviewClient {
                 id: uuid::Uuid::new_v4().to_string(),
                 name,
+                on_host,
             },
             offered: false,
             sessions: HashMap::new(),
@@ -132,7 +133,11 @@ impl WorkspaceStore {
             return;
         }
         let id = self.preview.client.id.clone();
-        let old = std::mem::replace(&mut self.preview.client, PreviewClient { id, name });
+        let on_host = self.preview.client.on_host;
+        let old = std::mem::replace(
+            &mut self.preview.client,
+            PreviewClient { id, name, on_host },
+        );
         self.offer_preview();
         let _ = self.host.unsubscribe(Subscription {
             known_index: None,

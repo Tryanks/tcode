@@ -92,6 +92,11 @@ pub struct PreviewClient {
     pub id: String,
     /// The device's name, as the user sees it.
     pub name: String,
+    /// The client runs in the host's own process, on the machine the agent
+    /// works on: it opens that machine's loopback addresses and files
+    /// directly and is not suspended when another app is in front.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub on_host: bool,
 }
 
 /// One page of a thread's preview.

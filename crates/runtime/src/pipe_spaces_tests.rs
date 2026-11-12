@@ -523,6 +523,7 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
             client: tcode_protocol::PreviewClient {
                 id: "member-device".into(),
                 name: "Member device".into(),
+                on_host: false,
             },
         },
         Topic::PreviewSession {

@@ -97,11 +97,13 @@ pub(super) fn next(
     super::tests::next_event(events, |event| predicate(&event.event)).event
 }
 
-/// Subscribe `link` to its preview channel as a client that renders pages.
-fn preview_client(link: &HostLink, name: &str) -> tcode_protocol::PreviewClient {
+/// Subscribe `link` to its preview channel as a client that renders pages,
+/// in the host's own process when `on_host`.
+fn preview_client(link: &HostLink, name: &str, on_host: bool) -> tcode_protocol::PreviewClient {
     let client = tcode_protocol::PreviewClient {
         id: format!("{name}-id"),
         name: name.into(),
+        on_host,
     };
     link.subscribe(Subscription {
         known_index: None,
@@ -356,8 +358,8 @@ fn an_agent_preview_request_reaches_only_the_client_rendering_its_thread() {
     let laptop = linked(&mux);
     let desk_events = observed_events(&desk);
     let laptop_events = observed_events(&laptop);
-    let desk_client = preview_client(&desk, "Desk");
-    preview_client(&laptop, "Laptop");
+    let desk_client = preview_client(&desk, "Desk", true);
+    preview_client(&laptop, "Laptop", false);
     show_here(&desk, &session_id, &desk_client, false);
 
     let answered = agent_call(
@@ -413,7 +415,7 @@ fn an_agent_preview_request_reaches_only_the_client_rendering_its_thread() {
 fn a_preview_call_given_up_is_cancelled_on_the_rendering_client() {
     let (_host, _mux, desk, session_id, preview) = preview_fixture();
     let desk_events = observed_events(&desk);
-    let desk_client = preview_client(&desk, "Desk");
+    let desk_client = preview_client(&desk, "Desk", true);
     show_here(&desk, &session_id, &desk_client, false);
 
     let answer = agent_call(&preview, preview_mcp::PreviewOp::Status);
@@ -456,8 +458,8 @@ fn show_here_moves_rendering_and_the_page_with_it() {
     let laptop = linked(&mux);
     let desk_events = observed_events(&desk);
     let laptop_events = observed_events(&laptop);
-    let desk_client = preview_client(&desk, "Desk");
-    let laptop_client = preview_client(&laptop, "Laptop");
+    let desk_client = preview_client(&desk, "Desk", true);
+    let laptop_client = preview_client(&laptop, "Laptop", false);
     show_here(&desk, &session_id, &desk_client, false);
     let tab = tcode_protocol::PreviewTab {
         url: Some("http://localhost:5173/settings".into()),
@@ -539,11 +541,44 @@ fn show_here_moves_rendering_and_the_page_with_it() {
     desk.command_blocking(Command::ShutdownAllAndFlush).unwrap();
 }
 
+/// A phone that connects after the host's own window does not take an
+/// agent's preview: the window opens what the agent serves on its machine.
+#[test]
+fn an_agent_preview_nobody_renders_opens_in_the_host_window_before_a_later_device() {
+    let (_host, mux, desk, session_id, preview) = preview_fixture();
+    let phone = linked(&mux);
+    let desk_events = observed_events(&desk);
+    let phone_events = observed_events(&phone);
+    let desk_client = preview_client(&desk, "Desk", true);
+    preview_client(&phone, "Phone", false);
+
+    let answered = agent_call(&preview, preview_mcp::PreviewOp::Status);
+    let request_id = request_id(next(&desk_events, |event| {
+        matches!(event, ServerEvent::PreviewRequest { .. })
+    }));
+    // Subscribing now answers after anything the host sent the phone before.
+    watch_session(&phone, &session_id);
+    let seen = next(&phone_events, |event| {
+        matches!(
+            event,
+            ServerEvent::PreviewRequest { .. } | ServerEvent::PreviewSessionReplaced(_)
+        )
+    });
+    assert_eq!(
+        session_replaced(&seen).and_then(|session| session.renderer.clone()),
+        Some(desk_client),
+        "the phone neither renders the thread nor receives the request"
+    );
+    answer(&desk, request_id, serde_json::json!({}));
+    assert!(answered.recv_blocking().unwrap().is_ok());
+    desk.command_blocking(Command::ShutdownAllAndFlush).unwrap();
+}
+
 #[test]
 fn a_rendering_client_that_goes_away_releases_its_threads() {
     let (_host, mux, desk, session_id, preview) = preview_fixture();
     let desk_events = observed_events(&desk);
-    let desk_client = preview_client(&desk, "Desk");
+    let desk_client = preview_client(&desk, "Desk", true);
     // The phone is a raw attachment so the test can close its link, as a
     // phone does when it goes to the background.
     let connection = mux.attach(
@@ -555,7 +590,7 @@ fn a_rendering_client_that_goes_away_releases_its_threads() {
     let pump = phone.clone();
     smol::spawn(async move { pump.pump().await }).detach();
     let phone_events = observed_events(&phone);
-    let phone_client = preview_client(&phone, "Phone");
+    let phone_client = preview_client(&phone, "Phone", false);
     show_here(&phone, &session_id, &phone_client, true);
     let tab = tcode_protocol::PreviewTab {
         url: Some("http://localhost:3000/".into()),
@@ -607,8 +642,8 @@ fn user_input_on_the_rendering_page_reaches_the_agent_until_it_snapshots() {
     let laptop = linked(&mux);
     let desk_events = observed_events(&desk);
     let laptop_events = observed_events(&laptop);
-    let desk_client = preview_client(&desk, "Desk");
-    let laptop_client = preview_client(&laptop, "Laptop");
+    let desk_client = preview_client(&desk, "Desk", true);
+    let laptop_client = preview_client(&laptop, "Laptop", false);
     show_here(&desk, &session_id, &desk_client, false);
     watch_session(&laptop, &session_id);
     let status = |expected: bool| {

@@ -476,9 +476,10 @@ impl WorkspaceStore {
             _device_name: device_name,
             terminals: HashMap::new(),
             remote_preview: async_channel::unbounded(),
-            preview: preview::PreviewReplica::new(crate::device::DevicePreferences::device_name(
-                cx,
-            )),
+            preview: preview::PreviewReplica::new(
+                crate::device::DevicePreferences::device_name(cx),
+                !remote,
+            ),
             import_statuses: HashMap::new(),
             connection_state: if remote {
                 host.connection_state()
@@ -5494,6 +5495,7 @@ pub(crate) mod tests {
                         client: tcode_protocol::PreviewClient {
                             id: "this-client".into(),
                             name: "This client".into(),
+                            on_host: false,
                         },
                     },
                     event: ServerEvent::PreviewRequest {

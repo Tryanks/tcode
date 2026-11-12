@@ -3,8 +3,10 @@
 //! A client that can render pages subscribes to its own [`Topic::Preview`],
 //! naming itself. Each thread's preview is rendered by at most one of those
 //! clients: the one that last showed it here, or, when an agent asks and no
-//! client renders the thread, the client that most recently subscribed or
-//! showed a preview. Only that client receives the thread's requests. A
+//! client renders the thread, a client in the host's own process, which
+//! reaches what the agent serves on that machine and is never suspended in
+//! the background, else the client that most recently subscribed or showed
+//! a preview. Only that client receives the thread's requests. A
 //! client whose subscription ends — it disconnected, or a phone closed its
 //! link in the background — renders nothing any more.
 
@@ -52,10 +54,10 @@ impl Previews {
     }
 
     /// The client that renders a thread nobody renders when its agent asks.
-    fn latest_client(&self) -> Option<PreviewClient> {
+    fn agent_client(&self) -> Option<PreviewClient> {
         self.clients
             .values()
-            .max_by_key(|(_, seen)| *seen)
+            .max_by_key(|(client, seen)| (client.on_host, *seen))
             .map(|(client, _)| client.clone())
     }
 }
@@ -83,7 +85,7 @@ impl AppState {
         // client that can render it, nothing would answer.
         let renderer = match self.previews.renderer_of(&session_id).cloned() {
             Some(renderer) => renderer,
-            None => match self.previews.latest_client() {
+            None => match self.previews.agent_client() {
                 Some(client) => {
                     self.render_preview_on(&session_id, client.clone(), cx);
                     client
