@@ -25,6 +25,19 @@ mod linux {
         slots = sym SLOTS,
     );
 
+    /// GObject's table of parameter types: the one variable, where everything
+    /// else is a function, that a binding reads from these libraries (glib
+    /// 0.18's `param_spec.rs` declares it itself; no `-sys` crate does). A
+    /// trampoline cannot stand for a variable, so this is the binary's own
+    /// copy of the pointer, taken once the library is loaded. GObject sets
+    /// it when the library initializes and never again.
+    #[unsafe(no_mangle)]
+    #[allow(
+        non_upper_case_globals,
+        reason = "the name is the library's symbol, which the binding links by"
+    )]
+    static g_param_spec_types: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
     /// What a trampoline runs when its library was never loaded, or the loaded
     /// one lacks the function the build machine's had.
     extern "C" fn unloaded() -> ! {
@@ -62,6 +75,14 @@ mod linux {
                 }
             }
         }
+        // SAFETY: every library is loaded globally by now; the name is
+        // NUL-terminated.
+        let types = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"g_param_spec_types".as_ptr()) };
+        if types.is_null() {
+            return Err("libgobject-2.0 has no g_param_spec_types".into());
+        }
+        // SAFETY: the symbol is a pointer GObject's initializer has set.
+        g_param_spec_types.store(unsafe { *types.cast::<*mut c_void>() }, Ordering::Release);
         Ok(())
     }
 
