@@ -393,20 +393,10 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Option<(gpui::SharedString, AnyElement)> {
         let composer = self.composer_state(cx);
-        let descriptors = composer
-            .active_option_descriptors
-            .iter()
-            .filter(|descriptor| {
-                !matches!(
-                    descriptor_role(descriptor),
-                    agent::OptionRole::Permission | agent::OptionRole::ContextWindow
-                )
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+        let spec = traits_spec(&composer);
         let states = OptionStates::of(&composer);
         if composer.conversation_read_only {
-            let label = match effort_descriptor(&descriptors) {
+            let label = match effort_descriptor(&spec.options) {
                 Some(OptionDescriptor::Select { id, options, .. }) => states
                     .shown_str(id)
                     .map(|value| select_value_label(options, value)),
@@ -426,18 +416,9 @@ impl Composer {
                     .into_any_element(),
             ));
         }
-        if descriptors.is_empty() {
+        if spec.options.is_empty() {
             return None;
         }
-        let spec = ModelSpec {
-            options: descriptors,
-            ..composer.active_model_spec.clone().unwrap_or(ModelSpec {
-                id: String::new(),
-                display_name: String::new(),
-                is_default: false,
-                options: Vec::new(),
-            })
-        };
         // Keep the effort value readable on phones; the sheet still exposes
         // every parameter, including context capacity and service tier.
         let mut chip_spec = spec.clone();
@@ -726,28 +707,34 @@ impl Composer {
             .into_any_element()
     }
 
-    pub(in super::super) fn render_overflow_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// Whether a folded row has anything to keep behind its "⋯": the model's
+    /// traits, or the permission or what the provider says in its place.
+    pub(in super::super) fn has_overflow_controls(&self, cx: &App) -> bool {
         let composer = self.composer_state(cx);
-        let usage = composer.token_usage;
-        let permission = PermissionControl::from_composer(&composer).map(|control| {
-            if control.requested.is_some() {
-                format!(
-                    "{} · {}",
-                    control.shown_label(),
-                    crate::tr!("permission.pending")
-                )
-            } else {
-                control.shown_label()
-            }
-        });
+        !traits_spec(&composer).options.is_empty()
+            || PermissionControl::from_composer(&composer).is_some()
+            || composer
+                .provider
+                .and_then(agent::permission_notice)
+                .is_some()
+    }
+
+    /// The "⋯" a folded row has in place of its traits chip and permission
+    /// picker: one popover holding both panes, so what the row has no room
+    /// for can still be changed.
+    pub(in super::super) fn render_overflow_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let trigger = crate::material::toolbar_icon_button(
             "overflow-controls",
             IconName::Ellipsis,
             crate::tr!("composer.more_controls"),
             self.compact,
         )
+        .disabled(!self.interactive(cx))
         .debug_selector(|| "overflow-controls".into());
 
+        let store_entity = self.workspace_store.clone();
+        let session_id = self.session_id.clone();
+        let compact = self.compact;
         crate::material::overlay_popover("overflow-popover", cx)
             .anchor(Anchor::BottomLeft)
             .when(self.compact, |popover| {
@@ -755,9 +742,35 @@ impl Composer {
             })
             .trigger(trigger)
             .content(move |_, window, cx| {
-                render_overflow_pane(usage, permission.clone(), window, cx)
+                render_overflow_pane(compact, &store_entity, session_id.clone(), window, cx)
             })
             .into_any_element()
+    }
+}
+
+/// The model's descriptors the traits pane lists, as its spec. The
+/// permission has a picker of its own and the context window is the context
+/// meter's, so neither is among them.
+fn traits_spec(composer: &crate::store::ComposerState) -> ModelSpec {
+    let options = composer
+        .active_option_descriptors
+        .iter()
+        .filter(|descriptor| {
+            !matches!(
+                descriptor_role(descriptor),
+                agent::OptionRole::Permission | agent::OptionRole::ContextWindow
+            )
+        })
+        .cloned()
+        .collect();
+    ModelSpec {
+        options,
+        ..composer.active_model_spec.clone().unwrap_or(ModelSpec {
+            id: String::new(),
+            display_name: String::new(),
+            is_default: false,
+            options: Vec::new(),
+        })
     }
 }
 
@@ -2145,33 +2158,68 @@ fn render_fast_mode_bolt(
 }
 
 fn render_overflow_pane(
-    usage: Option<TokenUsage>,
-    permission: Option<String>,
-    window: &Window,
+    compact: bool,
+    store_entity: &Entity<WorkspaceStore>,
+    session_id: Option<String>,
+    window: &mut Window,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
-    let muted = cx.theme().muted_foreground;
-    let compact = crate::window_seam::window_is_compact(window, cx);
-    let item = |icon: Icon, label: String| -> AnyElement {
-        crate::material::menu_item_frame(compact, crate::material::ItemFill::Inert, cx)
+    let composer = store_entity
+        .read(cx)
+        .composer_state_for(session_id.as_deref(), cx);
+    let popover = cx.entity();
+    let spec = traits_spec(&composer);
+    let traits = (!spec.options.is_empty()).then(|| {
+        render_traits_pane(
+            &spec,
+            &OptionStates::of(&composer),
+            compact,
+            composer.options_pending_restart,
+            store_entity,
+            session_id.clone(),
+            &popover,
+            window,
+            cx,
+        )
+    });
+    // Under the traits the permission's rows need their name, which the
+    // chip they open from carries elsewhere.
+    let permission = match PermissionControl::from_composer(&composer) {
+        Some(control) => v_flex()
             .w_full()
-            .items_center()
-            .text_body(compact, cx)
-            .text_color(muted)
-            .child(icon)
-            .child(crate::widgets::fade_text(label))
-            .into_any_element()
+            .child(
+                div()
+                    .flex_none()
+                    .px_3()
+                    .pt_3()
+                    .text_caption(cx)
+                    .child(crate::widgets::fade_text(control.label.clone())),
+            )
+            .child(render_permission_pane(
+                &control,
+                compact,
+                store_entity,
+                session_id,
+                &popover,
+                cx,
+            ))
+            .into_any_element(),
+        None => permission_notice(&composer, cx),
     };
-
+    let divided = traits.is_some();
     v_flex()
+        .debug_selector(|| "overflow-pane".into())
         .w_full()
-        .when(!compact, |pane| pane.w(px(220.)))
-        .p_1()
-        .gap_0p5()
-        .child(item(Icon::new(IconName::Info), context_label(usage)))
-        .when_some(permission, |pane, label| {
-            pane.child(item(Icon::empty().path("icons/lock.svg"), label))
-        })
+        .when(!compact, |pane| pane.w(px(280.)))
+        .children(traits)
+        .child(
+            div()
+                .w_full()
+                .when(divided, |section| {
+                    section.border_t_1().border_color(cx.theme().border)
+                })
+                .child(permission),
+        )
         .into_any_element()
 }
 

@@ -1,11 +1,10 @@
 use agent::{
-    FileChangeKind, ModelSpec, OptionDescriptor, ProviderCommand, ProviderCommandKind, TokenUsage,
+    FileChangeKind, ModelSpec, OptionDescriptor, ProviderCommand, ProviderCommandKind,
     UserInputQuestion,
 };
 use chrono::{DateTime, Local, LocalResult, NaiveTime, TimeZone as _};
 use tcode_core::ui::ConversationDestination;
 
-use crate::context_meter;
 use crate::palette::fuzzy_score;
 
 pub(super) enum SlashIntent {
@@ -515,30 +514,6 @@ pub(super) fn current_model_name_resolved(
         .find(|m| m.id == id)
         .map(|m| m.name.clone())
         .unwrap_or_else(|| current_model_name(catalog, Some(id)))
-}
-
-/// The context chip label: "42k / 200k" when both known, "200k" when only the
-/// window is known, "Context" when nothing is known.
-pub(super) fn context_label(usage: Option<TokenUsage>) -> String {
-    match usage {
-        Some(u) => {
-            let window = u.context_window;
-            let used = u.used_tokens;
-            match (used, window) {
-                (Some(used), Some(window)) => {
-                    format!(
-                        "{} / {}",
-                        context_meter::format_tokens(Some(used)),
-                        context_meter::format_tokens(Some(window))
-                    )
-                }
-                (Some(used), None) => context_meter::format_tokens(Some(used)),
-                (None, Some(window)) => context_meter::format_tokens(Some(window)),
-                (None, None) => crate::tr!("composer.context").into_owned(),
-            }
-        }
-        None => crate::tr!("composer.context").into_owned(),
-    }
 }
 
 pub(super) fn file_change_kind_label(kind: FileChangeKind) -> std::borrow::Cow<'static, str> {

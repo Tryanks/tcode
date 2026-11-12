@@ -1135,7 +1135,6 @@ composer:
   context_window_invalid_up_to: "Enter at most %{max} tokens"
   context_window_custom_placeholder_any: "Tokens, e.g. 200k"
   context_window_invalid_any: "Enter a number of tokens, e.g. 200k"
-  context: "Context"
   context_window_title: "Context Window"
   context_window_edit: "Change context window"
   context_window_apply: "Apply"

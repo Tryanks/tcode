@@ -1135,7 +1135,6 @@ composer:
   context_window_invalid_up_to: "%{max} 以下のトークン数を入力してください"
   context_window_custom_placeholder_any: "トークン数（例: 200k）"
   context_window_invalid_any: "トークン数を入力してください（例: 200k）"
-  context: "コンテキスト"
   context_window_title: "コンテキストウィンドウ"
   context_window_edit: "コンテキストウィンドウを変更"
   context_window_apply: "適用"
