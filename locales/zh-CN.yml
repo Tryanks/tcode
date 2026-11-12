@@ -1128,7 +1128,6 @@ composer:
   context_window_invalid_up_to: "请输入不超过 %{max} 的 token 数"
   context_window_custom_placeholder_any: "token 数，例如 200k"
   context_window_invalid_any: "请输入 token 数，例如 200k"
-  context: "上下文"
   context_window_title: "上下文窗口"
   context_window_edit: "修改上下文窗口"
   context_window_apply: "应用"

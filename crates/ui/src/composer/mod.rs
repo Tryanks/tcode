@@ -1896,7 +1896,7 @@ impl Composer {
             );
             let overflow = fold(
                 "overflow",
-                folded,
+                folded && self.has_overflow_controls(cx),
                 &mut |cx| self.render_overflow_menu(cx),
                 window,
                 cx,
