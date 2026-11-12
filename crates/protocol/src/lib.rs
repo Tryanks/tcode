@@ -345,8 +345,8 @@ pub use wire::{
 // SourceTool, HostingAction new_code, WorktreeSeeded limit_reached,
 // RewindStatus running_turn or full group rejection.
 //
-// Unreleased: PreviewClient's on_host.
-pub const PROTOCOL_VERSION: u32 = 28;
+// Version 29 (v0.4.2): PreviewClient's on_host.
+pub const PROTOCOL_VERSION: u32 = 29;
 
 #[cfg(test)]
 mod tests;
