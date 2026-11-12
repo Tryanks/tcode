@@ -6,10 +6,6 @@
 //! rather than as a gradient laid over them, because an overlay has to match
 //! whatever is behind the text: a hovered or selected row, or a translucent
 //! material.
-//!
-//! A line may instead first shrink to fit, as a fixed-width label in a game
-//! does ([`FadeText::shrink_to`]); gpui-base has no text that scales to its
-//! width either.
 
 use std::ops::Range;
 
@@ -40,14 +36,12 @@ const MAX_CHARS: usize = 1000;
 pub struct FadeText {
     text: SharedString,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
-    smallest: f32,
 }
 
 pub fn fade_text(text: impl Into<SharedString>) -> FadeText {
     FadeText {
         text: text.into(),
         highlights: Vec::new(),
-        smallest: 1.,
     }
 }
 
@@ -61,14 +55,6 @@ impl FadeText {
         self.highlights = highlights.into_iter().collect();
         self
     }
-
-    /// Given less width than the line, scale the text down to fit, to no
-    /// less than `smallest` of its size, and fade only what still does not
-    /// fit at that size. The line still asks layout for its full width.
-    pub fn shrink_to(mut self, smallest: f32) -> Self {
-        self.smallest = smallest;
-        self
-    }
 }
 
 pub struct FadeTextLayout {
@@ -77,8 +63,6 @@ pub struct FadeTextLayout {
     line_height: Pixels,
     /// How far down the line is painted to stand on its own font's baseline.
     drop: Pixels,
-    /// The style's own font, which [`Self::drop`] is measured against.
-    own: TextRun,
 }
 
 impl IntoElement for FadeText {
@@ -122,11 +106,14 @@ impl Element for FadeText {
             self.text.clone()
         };
         let runs = runs(&style, text.len(), &self.highlights);
-        let own = style.to_run(1);
+        let own = window
+            .text_system()
+            .shape_line("x".into(), font_size, &[style.to_run(1)], None);
         let line = window
             .text_system()
             .shape_line(text, font_size, &runs, None);
-        let drop = own_baseline_drop(&line, &own, window);
+        let drop = crate::typography::line_below_centre(&own, window)
+            - crate::typography::line_below_centre(&line, window);
         // Whole pixels, as GPUI measures text: layout rounds sizes to the
         // pixel grid, which would otherwise leave a fitting line a fraction
         // too wide and fade it.
@@ -150,7 +137,6 @@ impl Element for FadeText {
                 runs,
                 line_height,
                 drop,
-                own,
             },
         )
     }
@@ -181,24 +167,9 @@ impl Element for FadeText {
             runs,
             line_height,
             drop,
-            own,
         } = layout;
         let line_height = *line_height;
-        let scale = (bounds.size.width / line.width()).max(self.smallest);
-        let scaled;
-        let (line, drop) = if scale < 1. {
-            scaled = window.text_system().shape_line(
-                line.text.clone(),
-                line.font_size * scale,
-                runs,
-                None,
-            );
-            let drop = own_baseline_drop(&scaled, own, window);
-            (&scaled, drop)
-        } else {
-            (&*line, *drop)
-        };
-        let origin = point(bounds.left(), bounds.top() + drop);
+        let origin = point(bounds.left(), bounds.top() + *drop);
         if line.width() <= bounds.size.width {
             let align = window.text_style().text_align;
             line.paint(
@@ -272,19 +243,6 @@ impl Element for FadeText {
             left = right;
         }
     }
-}
-
-/// How far below where it would stand `line` is painted so it stands on the
-/// baseline of `own`, the style's own font, at the line's size.
-fn own_baseline_drop(line: &ShapedLine, own: &TextRun, window: &Window) -> Pixels {
-    let own = window.text_system().shape_line(
-        "x".into(),
-        line.font_size,
-        std::slice::from_ref(own),
-        None,
-    );
-    crate::typography::line_below_centre(&own, window)
-        - crate::typography::line_below_centre(line, window)
 }
 
 fn runs(

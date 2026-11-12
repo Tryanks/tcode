@@ -1,4 +1,4 @@
-//! The rewind panel a message opens, and the undo its divider offers.
+//! The rewind dialog a message opens, and the undo its divider offers.
 use super::*;
 use crate::chat::components::rewind::{Panel, PanelActions, PreviewState};
 use agent::{RewindMode, RewindPreviewKind, RewindPreviewResult};
@@ -17,14 +17,16 @@ pub(in crate::chat) struct RewindPanelState {
 }
 
 impl TimelineView {
-    /// Open the panel for the message `key`, the prompt that opened `turn`
+    /// Open the dialog for the message `key`, the prompt that opened `turn`
     /// or the steer `steer` in it, and ask the Harness what each file scope
-    /// would restore where it can tell.
+    /// would restore where it can tell. Nothing is rewound until the reader
+    /// agrees to it there.
     pub(in crate::chat) fn open_rewind(
         &mut self,
         key: String,
         turn: usize,
         steer: Option<String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(session_id) = self.session_id.clone() else {
@@ -76,6 +78,15 @@ impl TimelineView {
                 }));
             }
         }
+        let this = cx.entity().downgrade();
+        let compact = self.window_state.read(cx).compact;
+        let shown = key.clone();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let panel = this
+                .upgrade()
+                .and_then(|timeline| timeline.read(cx).rewind_panel_for(&shown, cx));
+            components::rewind::dialog(dialog, panel, panel_actions(this.clone()), compact, cx)
+        });
         self.rewind_panel = Some(RewindPanelState {
             key,
             turn,
@@ -157,33 +168,40 @@ impl TimelineView {
             store.undo_rewind_for(session_id, checkpoint_id)
         });
     }
+}
 
-    /// The panel's handlers, which reach this timeline from the popover.
-    pub(in crate::chat) fn rewind_panel_actions(&self, cx: &mut Context<Self>) -> PanelActions {
-        let this = cx.entity().downgrade();
-        PanelActions {
-            select: Rc::new({
-                let this = this.clone();
-                move |mode, _, cx| {
-                    let _ = this.update(cx, |timeline, cx| timeline.select_rewind_mode(mode, cx));
-                }
-            }),
-            toggle_files: Rc::new({
-                let this = this.clone();
-                move |_, cx| {
-                    let _ = this.update(cx, |timeline, cx| timeline.toggle_rewind_files(cx));
-                }
-            }),
-            confirm: Rc::new({
-                let this = this.clone();
-                move |_, cx| {
-                    let _ = this.update(cx, |timeline, cx| timeline.confirm_rewind(cx));
-                }
-            }),
-            cancel: Rc::new(move |_, cx| {
+/// The dialog's handlers, which reach `this` timeline from it.
+fn panel_actions(this: WeakEntity<TimelineView>) -> PanelActions {
+    PanelActions {
+        select: Rc::new({
+            let this = this.clone();
+            move |mode, _, cx| {
+                let _ = this.update(cx, |timeline, cx| timeline.select_rewind_mode(mode, cx));
+            }
+        }),
+        toggle_files: Rc::new({
+            let this = this.clone();
+            move |_, cx| {
+                let _ = this.update(cx, |timeline, cx| timeline.toggle_rewind_files(cx));
+            }
+        }),
+        confirm: Rc::new({
+            let this = this.clone();
+            move |window, cx| {
+                let _ = this.update(cx, |timeline, cx| timeline.confirm_rewind(cx));
+                window.close_dialog(cx);
+            }
+        }),
+        cancel: Rc::new({
+            let this = this.clone();
+            move |window, cx| {
                 let _ = this.update(cx, |timeline, cx| timeline.close_rewind(cx));
-            }),
-        }
+                window.close_dialog(cx);
+            }
+        }),
+        closed: Rc::new(move |_, cx| {
+            let _ = this.update(cx, |timeline, cx| timeline.close_rewind(cx));
+        }),
     }
 }
 

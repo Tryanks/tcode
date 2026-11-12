@@ -557,7 +557,22 @@ impl TimelineView {
         // the actions of the message it ends on, and its time row.
         let finished_at = turn.end_ts.or(entries.last().and_then(|e| e.ts));
         let mut status = None;
-        if turn.running || finished_at.is_some() || ending.is_some() {
+        // The stop for all the harness still runs in the background stands
+        // in the footer of the thread's last turn once that has finished,
+        // and goes when the next turn starts; a turn that would have had no
+        // footer has one for it.
+        let last = self
+            .rows
+            .last()
+            .is_some_and(|last| last.identity == row.identity);
+        let stops_background = last
+            && !turn.running
+            && crate::chat::background::stops_any(
+                self.workspace_store.read(cx),
+                self.session_id.as_deref(),
+                cx,
+            );
+        if turn.running || finished_at.is_some() || ending.is_some() || stops_background {
             let requested_model = self
                 .workspace_store
                 .read(cx)
@@ -587,6 +602,22 @@ impl TimelineView {
                 cx,
             );
             let indicator_motion = motion.clone();
+            let (store, session_id) = (self.workspace_store.clone(), self.session_id.clone());
+            let touch = self.window_state.read(cx).compact;
+            let stop_motion = self.motion.clone();
+            let stop_background = move |window: &mut Window, cx: &mut App| {
+                last.then(|| {
+                    crate::chat::background::stop_all(
+                        &store,
+                        session_id.as_deref(),
+                        touch,
+                        &stop_motion,
+                        window,
+                        cx,
+                    )
+                })
+                .flatten()
+            };
             let hover = self.hover.clone();
             // The footer is one hover with the message whose actions it
             // draws, the gap above it included when it leads the trailer:
@@ -631,6 +662,7 @@ impl TimelineView {
                             &turn,
                             served_model.as_deref(),
                             actions,
+                            stop_background(window, cx),
                             window,
                             cx,
                         )
@@ -753,32 +785,59 @@ impl TimelineView {
     pub(in crate::chat) fn on_open_rewind(
         &mut self,
         action: &OpenRewind,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let OpenRewind { key, turn, steer } = action.clone();
-        self.open_rewind(key, turn, steer, cx);
+        self.open_rewind(key, turn, steer, window, cx);
     }
 
+    /// The fork an answer's context menu offers: it carries over the words
+    /// the reader has selected, when any are.
     pub(in crate::chat) fn on_fork_through_turn(
         &mut self,
         action: &ForkThroughTurn,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.fork_through_turn(action.turn, cx);
+        let quote = Some(self.selection.read(cx).selected_text(cx))
+            .filter(|selected| !selected.trim().is_empty());
+        self.fork_through_turn(action.turn, quote, window, cx);
     }
 
-    fn fork_through_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
+    /// Fork the thread through `turn` once the reader agrees to.
+    fn fork_through_turn(
+        &mut self,
+        turn: usize,
+        quote: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(session_id) = self.session_id.clone() else {
             return;
         };
-        self.workspace_store.update(cx, |store, cx| {
-            let target = store
-                .chat_fork_target_for(Some(&session_id), turn, cx)
-                .filter(|target| !target.blocked);
-            if let Some(target) = target {
-                store.fork_through_turn(session_id, target.turn, target.checkpoint_id, cx);
-            }
+        let store = self.workspace_store.clone();
+        let of = if quote.is_some() {
+            crate::chat::ForkOf::TurnWithQuote
+        } else {
+            crate::chat::ForkOf::Turn
+        };
+        crate::chat::confirm_fork(of, window, cx, move |cx| {
+            let (session_id, quote) = (session_id.clone(), quote.clone());
+            store.update(cx, |store, cx| {
+                let target = store
+                    .chat_fork_target_for(Some(&session_id), turn, cx)
+                    .filter(|target| !target.blocked);
+                if let Some(target) = target {
+                    store.fork_through_turn(
+                        session_id,
+                        target.turn,
+                        target.checkpoint_id,
+                        quote,
+                        cx,
+                    );
+                }
+            });
         });
     }
 
@@ -797,8 +856,10 @@ impl TimelineView {
         Some(components::assistant::TurnFork {
             turn,
             blocked: target.blocked,
-            on_fork: Rc::new(move |turn, cx| {
-                let _ = this.update(cx, |timeline, cx| timeline.fork_through_turn(turn, cx));
+            on_fork: Rc::new(move |turn, window, cx| {
+                let _ = this.update(cx, |timeline, cx| {
+                    timeline.fork_through_turn(turn, None, window, cx)
+                });
             }),
         })
     }
@@ -886,8 +947,8 @@ impl TimelineView {
         )
     }
 
-    /// The message's rewind: its action opening the panel (a popover, a
-    /// sheet on a phone), or what shows while the rewind is made.
+    /// The message's rewind: its action opening the dialog, or what shows
+    /// while the rewind is made.
     fn compose_rewind(
         &self,
         menu: &components::bubble::RewindMenu,
@@ -897,32 +958,11 @@ impl TimelineView {
             return components::bubble::rewind_in_progress(&menu.key, cx);
         }
         let compact = self.window_state.read(cx).compact;
-        let trigger = components::bubble::rewind_button(menu, compact, &self.motion, cx);
-        let panel = self.rewind_panel_for(&menu.key, cx);
-        let open = panel.is_some();
-        let actions = self.rewind_panel_actions(cx);
-        let this = cx.entity().downgrade();
         let (key, turn, steer) = (menu.key.clone(), menu.turn, menu.steer.clone());
-        crate::material::overlay_popover(SharedString::from(format!("rewind-panel-{key}")), cx)
-            .anchor(Anchor::TopRight)
-            .when(compact, |popover| {
-                popover.bottom_sheet(crate::tr!("rewind.title"))
-            })
-            .open(open)
-            .on_open_change(move |opened, _, cx| {
-                let _ = this.update(cx, |timeline, cx| {
-                    if *opened {
-                        timeline.open_rewind(key.clone(), turn, steer.clone(), cx);
-                    } else {
-                        timeline.close_rewind(cx);
-                    }
-                });
-            })
-            .trigger(trigger)
-            .content(move |_, _, cx| match panel {
-                Some(panel) => components::rewind::panel_body(panel, actions, compact, cx),
-                None => div().into_any_element(),
-            })
+        components::bubble::rewind_button(menu, compact, &self.motion, cx)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_rewind(key.clone(), turn, steer.clone(), window, cx);
+            }))
             .into_any_element()
     }
 
@@ -2524,9 +2564,10 @@ mod tests {
             // A preview the panel asks for starts a scripted provider.
             let (workspace_store, window_state, session_id, _driver, _scripted) =
                 seed_chat_scripted(cx, log_of(&timeline), false, Some(provider), true);
-            let (_view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-                ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
-            });
+            let (_view, window) =
+                crate::chat::tests::add_chat_window_hosting_dialogs(cx, |window, cx| {
+                    ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
+                });
             let window: &mut VisualTestContext = window;
             // The preview's spinner turns while the Harness is asked.
             window.update(|_, cx| cx.set_reduce_motion(true));
@@ -2602,9 +2643,10 @@ mod tests {
                 true,
             );
             let (commands, events) = scripted.unwrap();
-            let (_view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-                ChatView::new(store.clone(), window_state, Some(session_id), window, cx)
-            });
+            let (_view, window) =
+                crate::chat::tests::add_chat_window_hosting_dialogs(cx, |window, cx| {
+                    ChatView::new(store.clone(), window_state, Some(session_id), window, cx)
+                });
             let window: &mut VisualTestContext = window;
             // The preview's spinner turns while the Harness is asked.
             window.update(|_, cx| cx.set_reduce_motion(true));
@@ -2897,15 +2939,16 @@ mod tests {
                 driver.wait_until(cx, "the running turn", |cx| sent(cx).is_some());
                 user = sent(cx).unwrap();
             }
-            let (_view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-                ChatView::new(
-                    store.clone(),
-                    window_state.clone(),
-                    Some(session_id.clone()),
-                    window,
-                    cx,
-                )
-            });
+            let (_view, window) =
+                crate::chat::tests::add_chat_window_hosting_dialogs(cx, |window, cx| {
+                    ChatView::new(
+                        store.clone(),
+                        window_state.clone(),
+                        Some(session_id.clone()),
+                        window,
+                        cx,
+                    )
+                });
             let window: &mut VisualTestContext = window;
             window.simulate_resize(size(px(1_024.), px(700.)));
             draw_settled(window);
@@ -2937,6 +2980,12 @@ mod tests {
                 .expect("the fork is beside Copy");
 
             window.simulate_click(action.center(), Modifiers::default());
+            draw_settled(window);
+            assert!(
+                window.update(|window, cx| crate::overlay::dialog_open(window, cx)),
+                "the fork asks first"
+            );
+            window.simulate_keystrokes("enter");
             let fork = |cx: &App| {
                 store
                     .read(cx)

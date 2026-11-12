@@ -162,56 +162,66 @@ impl Place {
     }
 }
 
-/// How small the stop for all's label may scale, of its size, to fit the half
-/// of its row it may take; past that its end fades.
-const STOP_ALL_SMALLEST: f32 = 0.7;
-
-/// The stop for every piece at once, wherever the harness stops them: a chip
-/// at the end of the row over the composer, there whether or not the rail
-/// lists the work. More than one piece asks first: a stop takes a dev server
-/// down along with what the reader meant to end.
-pub(in crate::chat) fn stop_all(
-    background: &Background,
-    place: &Place,
+/// Whether a stop reaches any of `session_id`'s background work now.
+pub(in crate::chat) fn stops_any(
+    store: &WorkspaceStore,
+    session_id: Option<&str>,
     cx: &App,
+) -> bool {
+    session_id
+        .and_then(|id| Background::of(store, id, cx))
+        .is_some_and(|background| !background.stoppable().is_empty())
+}
+
+/// The stop for every piece of the thread's background work at once, where
+/// its harness stops them: it stands in the footer of the thread's last
+/// turn once that has finished, before the turn's timing, so it is there
+/// whether or not the rail lists the work, scrolls with the timeline, and
+/// takes no height of its own. It asks first, naming what it stops: a stop
+/// takes a dev server down along with what the reader meant to end.
+pub(in crate::chat) fn stop_all(
+    store: &Entity<WorkspaceStore>,
+    session_id: Option<&str>,
+    touch: bool,
+    motion: &crate::motion::owned::Owned,
+    window: &mut Window,
+    cx: &mut App,
 ) -> Option<AnyElement> {
-    let stoppable = background.stoppable();
-    if stoppable.is_empty() {
-        return None;
-    }
-    let names: Vec<String> = stoppable
+    let names: Vec<String> = session_id
+        .and_then(|id| Background::of(store.read(cx), id, cx))
         .iter()
+        .flat_map(Background::stoppable)
         .map(|row| crate::chat::model::one_line(&row.task.name))
         .collect();
-    let (store, session_id) = (place.store.clone(), place.session_id.clone());
-    Some(
-        Button::new(SharedString::from(format!(
-            "{}-background-stop-all",
-            place.key
-        )))
+    // It narrows away, drawn as it was, once nothing is left to stop.
+    let shown = motion.shown(
+        "background-stop-all",
+        (!names.is_empty()).then_some(()),
+        ROWS,
+        window,
+        cx,
+    )?;
+    let (store, session_id) = (store.clone(), session_id.map(str::to_owned));
+    let stop = Button::new("background-stop-all")
         .debug_selector(|| "background-stop-all".into())
         .ghost()
-        .outline()
-        .chip()
-        .text_body(false, cx)
-        .shrink_label_to(STOP_ALL_SMALLEST)
+        .xsmall()
+        .touch(touch)
+        .text_secondary(touch, cx)
         .label(crate::tr!("background.stop_all").into_owned())
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
-            let (store, session_id, names) = (store.clone(), session_id.clone(), names.clone());
-            if names.len() < 2 {
-                store.update(cx, |store, _| {
-                    store.stop_background_task(session_id.clone(), None)
-                });
+            let (Some(session_id), false) = (session_id.clone(), names.is_empty()) else {
                 return;
-            }
+            };
+            let (store, names) = (store.clone(), names.clone());
             window.open_alert_dialog(cx, move |alert, _, _| {
                 let (store, session_id) = (store.clone(), session_id.clone());
                 alert
-                    .title(crate::tr!(
-                        "background.stop_confirm_title",
-                        count = names.len()
-                    ))
+                    .title(match names.len() {
+                        1 => crate::tr!("background.stop_confirm_title_one"),
+                        count => crate::tr!("background.stop_confirm_title", count = count),
+                    })
                     .description(crate::tr!(
                         "background.stop_confirm_description",
                         names = names.join("\n")
@@ -230,9 +240,8 @@ pub(in crate::chat) fn stop_all(
                         true
                     })
             });
-        })
-        .into_any_element(),
-    )
+        });
+    Some(shown.fold_across(div().flex_none().child(stop)))
 }
 
 /// The list: a row for each piece, folding in and out as the harness
@@ -938,17 +947,17 @@ mod tests {
     }
 
     /// The stop for all of the background work stands while a single piece
-    /// can be stopped, and stops it without asking.
+    /// can be stopped, and asks before stopping it too.
     #[gpui::test]
-    fn stop_all_stands_for_a_single_piece(cx: &mut TestAppContext) {
+    fn stop_all_stands_for_a_single_piece_and_asks(cx: &mut TestAppContext) {
         let (thread, _chat, cx) = backgrounded(
             cx,
             vec![task("98412", Some("call_1"), "npm run dev")],
             1_400.,
         );
         click(cx, "background-stop-all");
-        assert!(!cx.update(|window, cx| crate::overlay::dialog_open(window, cx)));
-        assert_eq!(stops(&thread), [None]);
+        assert!(cx.update(|window, cx| crate::overlay::dialog_open(window, cx)));
+        assert!(stops(&thread).is_empty(), "nothing stops before the answer");
     }
 
     /// A running command can be moved into the background where the

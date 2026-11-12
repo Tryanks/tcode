@@ -414,22 +414,26 @@ impl WorkspaceStore {
         self.dispatch(Command::CancelTitleGeneration { session_id });
     }
     pub fn fork_thread(&mut self, id: String, cx: &mut Context<Self>) {
-        self.create_and_show(Command::ForkThread { id, at: None }, true, cx);
+        self.create_and_show(Command::ForkThread { id, at: None }, true, None, cx);
     }
 
     /// A new thread holding everything through the finished absolute `turn`.
+    /// With a `quote`, the words the reader selected to carry over, it opens
+    /// beside the thread it forks, the quote in its composer.
     pub fn fork_through_turn(
         &mut self,
         id: String,
         turn: usize,
         checkpoint_id: Option<String>,
+        quote: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let at = Some(tcode_protocol::ForkAt {
             turn,
             checkpoint_id,
         });
-        self.create_and_show(Command::ForkThread { id, at }, true, cx);
+        let beside = quote.map(|quote| (id.clone(), quote));
+        self.create_and_show(Command::ForkThread { id, at }, true, beside, cx);
     }
 
     /// Show the thread going on in the branch the rewind of the divider at
@@ -448,6 +452,7 @@ impl WorkspaceStore {
                 checkpoint_id,
             },
             true,
+            None,
             cx,
         );
     }
@@ -713,11 +718,28 @@ impl WorkspaceStore {
         self.place_thread(session_id, None, false, cx);
     }
 
+    /// Show a thread the user asked for in a pane of its own beside the one
+    /// showing `from`.
+    fn place_thread_beside(&mut self, session_id: String, from: String, cx: &mut Context<Self>) {
+        self.place(session_id, None, true, Some(from), cx);
+    }
+
     pub(super) fn place_thread(
         &mut self,
         session_id: String,
         replacing: Option<String>,
         asked: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.place(session_id, replacing, asked, None, cx);
+    }
+
+    fn place(
+        &mut self,
+        session_id: String,
+        replacing: Option<String>,
+        asked: bool,
+        beside: Option<String>,
         cx: &mut Context<Self>,
     ) {
         self.selection_generation = self.selection_generation.wrapping_add(1);
@@ -729,6 +751,7 @@ impl WorkspaceStore {
             session_id,
             replacing,
             asked,
+            beside,
         });
     }
 
@@ -968,10 +991,10 @@ impl WorkspaceStore {
     }
     pub fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut Context<Self>) {
         self.remember_project(Some(project_id.clone()));
-        self.create_and_show(Command::StartDraft { project_id, cwd }, true, cx);
+        self.create_and_show(Command::StartDraft { project_id, cwd }, true, None, cx);
     }
     pub fn start_scratch_draft(&mut self, cx: &mut Context<Self>) {
-        self.create_and_show(Command::StartScratchDraft, true, cx);
+        self.create_and_show(Command::StartScratchDraft, true, None, cx);
     }
     /// A project's draft for a workspace left with nothing to show, unasked:
     /// it leaves the compact stack, and any keyboard something holds, alone.
@@ -982,7 +1005,7 @@ impl WorkspaceStore {
         cx: &mut Context<Self>,
     ) {
         self.remember_project(Some(project_id.clone()));
-        self.create_and_show(Command::StartDraft { project_id, cwd }, false, cx);
+        self.create_and_show(Command::StartDraft { project_id, cwd }, false, None, cx);
     }
     /// Start a draft in the project `session_id` belongs to, or a scratch
     /// draft when it belongs to none. Beside a draft nothing starts: the host
@@ -1013,8 +1036,15 @@ impl WorkspaceStore {
         }
     }
     /// Ask the host for a thread and show what it answers, unless the user
-    /// has moved on by then.
-    fn create_and_show(&mut self, command: Command, asked: bool, cx: &mut Context<Self>) {
+    /// has moved on by then. `beside` names the thread it opens beside and
+    /// the text its composer starts with.
+    fn create_and_show(
+        &mut self,
+        command: Command,
+        asked: bool,
+        beside: Option<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
         self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
         let request_generation = self.creation_request_generation;
         let selection_generation = self.selection_generation;
@@ -1045,7 +1075,13 @@ impl WorkspaceStore {
                 if store.selection_generation == selection_generation
                     && let Some(id) = created
                 {
-                    store.place_thread(id, None, asked, cx);
+                    match beside {
+                        Some((from, text)) => {
+                            store.append_to_composer(id.clone(), text, cx);
+                            store.place_thread_beside(id, from, cx);
+                        }
+                        None => store.place_thread(id, None, asked, cx),
+                    }
                 }
             });
         })
