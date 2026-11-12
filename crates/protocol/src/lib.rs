@@ -344,6 +344,8 @@ pub use wire::{
 // background_commands_on_steer settings, and no unknown GitDiffScope or
 // SourceTool, HostingAction new_code, WorktreeSeeded limit_reached,
 // RewindStatus running_turn or full group rejection.
+//
+// Unreleased: PreviewClient's on_host.
 pub const PROTOCOL_VERSION: u32 = 28;
 
 #[cfg(test)]
