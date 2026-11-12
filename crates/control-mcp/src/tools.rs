@@ -18,10 +18,11 @@ const INSTRUCTIONS: &str = "tcode_control lets you observe and operate Tcode wit
 /// What a subagent's connection adds to [`INSTRUCTIONS`].
 const SUBAGENT_INSTRUCTIONS: &str = "Another thread started you as its subagent: report this thread's final result to it with report_result; besides that it sees only your approval requests and questions, and your final message if you never report.";
 
-/// The `instructions` one thread's connection reads.
-pub fn instructions(thread_id: &str, subagent: bool) -> String {
+/// The `instructions` a thread's connection reads.
+pub fn instructions(subagent: bool) -> String {
     let mut text = format!(
-        "{INSTRUCTIONS} You are thread {thread_id}; pass that id wherever a tool asks about your own thread."
+        "{INSTRUCTIONS} Pass \"{}\" as the thread id wherever a tool asks about your own thread; get_thread on it answers with its id.",
+        crate::OWN_THREAD
     );
     if subagent {
         text.push(' ');
@@ -67,7 +68,8 @@ impl ControlTools {
 
     /// Route one op through the broker. A call the harness cancels drops its
     /// request, and the host stops working on it.
-    async fn run(&self, ct: &CancellationToken, op: ControlOp) -> CallToolResult {
+    async fn run(&self, ct: &CancellationToken, mut op: ControlOp) -> CallToolResult {
+        op.name_caller(&self.thread_id);
         let reply = ct.run_until_cancelled(self.broker.invoke(|reply| crate::BrokerRequest {
             thread_id: self.thread_id.clone(),
             op,
@@ -495,7 +497,7 @@ impl ServerHandler for ControlTools {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::from_build_env())
-            .with_instructions(instructions(&self.thread_id, self.subagent))
+            .with_instructions(instructions(self.subagent))
     }
 }
 
@@ -564,6 +566,41 @@ mod tests {
         });
         let names: Vec<&str> = subagent.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["report_result", "request_grant"]);
+    }
+
+    /// A fork is told its source's id as its own, so a thread names itself as "self".
+    #[tokio::test]
+    async fn a_call_about_the_callers_own_thread_reaches_the_host_with_its_id() {
+        let (tx, rx) = async_channel::unbounded::<crate::BrokerRequest>();
+        let broker = Broker::new(
+            tx,
+            mcp_host::BrokerErrors {
+                unavailable: "unavailable",
+                dropped: "dropped",
+            },
+        );
+        let tools = ControlTools::new(broker, "thread-a".into(), &ThreadAccess::none());
+        let params: UpdateThreadsParams = serde_json::from_value(serde_json::json!({
+            "changes": [
+                {"thread_id": "self", "op": {"rename": {"title": "Mine"}}},
+                {"thread_id": "thread-b", "op": "pin"},
+            ],
+        }))
+        .unwrap();
+        let host = async {
+            let request = rx.recv().await.unwrap();
+            request
+                .reply
+                .send(Ok(serde_json::Value::Null))
+                .await
+                .unwrap();
+            request.op
+        };
+        let (_, op) = tokio::join!(
+            tools.update_threads(CancellationToken::new(), Parameters(params)),
+            host
+        );
+        assert_eq!(op.target_thread_ids(), ["thread-a", "thread-b"]);
     }
 
     /// A call the harness cancels before the host answers closes its reply
