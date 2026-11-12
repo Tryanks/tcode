@@ -5393,12 +5393,17 @@ impl AppShell {
             .as_ref()
             .map(|pending| pending.panel.id());
         let terminal = selected_panel.map_or(self.panel_shows_terminal, |id| id == "terminal");
-        let show_agents = session.is_some_and(|id| {
-            !crate::agents_panel::Agents::of(store, &id, cx).is_empty()
+        let show_agents = session.as_deref().is_some_and(|id| {
+            !crate::agents_panel::Agents::of(store, id, cx).is_empty()
                 || panel.right_tab == RightTab::Agents
                 || selected_panel == Some("agents")
         });
         let show_preview = store.offers_preview();
+        let composer = store.composer_state_for(session.as_deref(), cx);
+        let checkout = composer
+            .checkout
+            .filter(|_| !composer.conversation_read_only);
+        let workspace_store = link.store.clone();
         let page_pane = column.page().clone();
         page_pane.update(cx, |pane, cx| {
             pane.select_compact_preview(
@@ -5503,6 +5508,27 @@ impl AppShell {
             })
             .collect();
         let body = fade.fill().render(layers).size_full();
+        // The thread's workspace and branch, which a compact window's
+        // composer leaves to this page; the row carries the space under it.
+        let checkout = crate::motion::shown("compact-panel-checkout", checkout, SHOW, window, cx)
+            .map(|shown| {
+                let row = crate::composer::checkout_row(
+                    &workspace_store,
+                    session.as_deref(),
+                    &shown.value,
+                    true,
+                    crate::composer::CheckoutRowAt::PanelsHead,
+                    cx,
+                );
+                shown.fold(
+                    div()
+                        .debug_selector(|| "compact-panel-checkout".into())
+                        .w_full()
+                        .px(px(crate::material::COMPACT_PAGE_INSET))
+                        .pb(cx.theme().tokens.spacing.sm)
+                        .child(row),
+                )
+            });
 
         page_surface(window, cx)
             .child(nav_bar(
@@ -5520,6 +5546,7 @@ impl AppShell {
                     .py(cx.theme().tokens.spacing.sm)
                     .child(segments),
             )
+            .children(checkout)
             .child(div().flex_1().min_h_0().child(body))
             .into_any_element()
     }

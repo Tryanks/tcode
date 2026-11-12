@@ -1,5 +1,5 @@
 mod approval;
-mod checkout;
+pub(super) mod checkout;
 mod context_window;
 mod control;
 pub(super) mod files;

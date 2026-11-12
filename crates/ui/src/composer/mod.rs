@@ -11,6 +11,7 @@ pub(crate) use components::goal_strip::{
     status_label as goal_status_label, usage_line as goal_usage_line,
 };
 
+pub(crate) use components::checkout::{CheckoutRowAt, checkout_row};
 use components::images::PendingImage;
 use components::steer_gesture::SteerGesture;
 #[cfg(feature = "voice")]
@@ -2166,24 +2167,36 @@ impl Composer {
         }
         panels.extend(self.render_force_terminate(window, cx));
         panels.extend(self.render_queue_strip(window, cx));
-        // The checkout row under the card carries the space above it, at
-        // every width: a phone switches branches and starts worktrees too.
+        // The checkout row under the card carries the space above it. A
+        // compact window keeps that height for the thread: its Panels page
+        // has the row instead.
         let checkout = self
             .motion
             .shown(
                 self.motion_key("checkout"),
-                composer_state.checkout.clone().filter(|_| !subagent),
+                composer_state
+                    .checkout
+                    .clone()
+                    .filter(|_| !subagent && !self.compact),
                 SHOW,
                 window,
                 cx,
             )
             .map(|shown| {
-                let row = self.render_checkout_row(&shown.value, cx);
+                let row = checkout_row(
+                    &self.workspace_store,
+                    self.session_id.as_deref(),
+                    &shown.value,
+                    self.compact,
+                    CheckoutRowAt::ComposerFoot,
+                    cx,
+                );
                 shown.fold(
                     div()
                         .debug_selector(|| "composer-checkout".into())
                         .w_full()
                         .pt_2()
+                        .px_2()
                         .child(row),
                 )
             });
