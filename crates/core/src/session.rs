@@ -2079,18 +2079,14 @@ impl Timeline {
     }
 
     fn apply_delta(&mut self, ts: Option<u64>, item_id: &str, kind: DeltaKind, text: &str) {
-        // A stream continues the item in the turn being streamed. Some
-        // providers reuse a placeholder id for every turn's stream, so an
-        // earlier turn's entry with the same id is a different item.
+        // Background output belongs to its original call across turns.
+        // Other streams can reuse a placeholder id in each new turn.
         let current_turn = self.boundaries.current();
-        if let Some(entry) = self
-            .entries
-            .iter_mut()
-            .rev()
-            .take_while(|e| Some(e.turn) == current_turn)
-            .find(|e| e.id == item_id)
-        {
-            let entry = Arc::make_mut(entry);
+        if let Some(position) = self.last_entry(item_id).filter(|&position| {
+            let entry = &self.entries[position];
+            entry.background || Some(entry.turn) == current_turn
+        }) {
+            let entry = Arc::make_mut(&mut self.entries[position]);
             match (&mut entry.content, kind) {
                 (
                     EntryContent::Item(ItemContent::AssistantMessage { text: existing, .. }),
@@ -4198,7 +4194,7 @@ mod tests {
     /// different message, and a suffix of the log (as history pages load)
     /// must fold its turns exactly like the whole log does.
     #[test]
-    fn streamed_deltas_continue_the_open_turn_not_an_earlier_turn_with_the_same_id() {
+    fn streamed_deltas_follow_background_items_and_keep_reused_replies_in_their_turns() {
         let turn = |n: u64| {
             [
                 StoredEvent {
@@ -4237,7 +4233,42 @@ mod tests {
                 },
             ]
         };
-        let log: Vec<StoredEvent> = [turn(1), turn(2), turn(3)].concat();
+        let command = |status, output: &str| ThreadItem {
+            id: "background-command".into(),
+            parent_item_id: None,
+            content: ItemContent::CommandExecution {
+                command: "serve".into(),
+                input: Vec::new(),
+                output: output.into(),
+                exit_code: None,
+                status,
+            },
+        };
+        let mut log = Vec::new();
+        for n in 1..=3 {
+            let events = turn(n);
+            log.extend_from_slice(&events[..3]);
+            if n == 1 {
+                log.push(AgentEvent::ItemStarted(command(ItemStatus::InProgress, "")).into());
+                log.push(
+                    AgentEvent::ItemBackgrounded {
+                        item_id: "background-command".into(),
+                        parent_item_id: None,
+                    }
+                    .into(),
+                );
+            }
+            log.push(
+                AgentEvent::Delta {
+                    item_id: "background-command".into(),
+                    kind: DeltaKind::CommandOutput,
+                    text: format!("output {n}\n"),
+                }
+                .into(),
+            );
+            log.push(events[3].clone());
+        }
+        log.push(AgentEvent::ItemCompleted(command(ItemStatus::Interrupted, "")).into());
         let full = Timeline::fold_events(log.iter().cloned());
         assert_eq!(
             full.entries
@@ -4253,6 +4284,23 @@ mod tests {
             "each turn keeps its own streamed message"
         );
 
+        assert_eq!(
+            full.entries
+                .iter()
+                .filter(|entry| entry.id == "background-command")
+                .map(|entry| match &entry.content {
+                    EntryContent::Item(ItemContent::CommandExecution {
+                        output, status, ..
+                    }) => (entry.turn, output.as_str(), *status),
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>(),
+            [(0, "output 1\noutput 2\noutput 3\n", ItemStatus::Interrupted)],
+            "later output and completion belong to the original background command"
+        );
+
+        let log: Vec<StoredEvent> = [turn(1), turn(2), turn(3)].concat();
+        let full = Timeline::fold_events(log.iter().cloned());
         let suffix = Timeline::fold_events(log[4..].iter().cloned());
         let entries = |timeline: &Timeline, skip: usize| {
             timeline.entries[skip..]
