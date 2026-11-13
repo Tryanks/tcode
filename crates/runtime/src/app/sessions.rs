@@ -1216,29 +1216,9 @@ impl AppState {
         }
         let hosts_changed = self.settings.source_control.hosts != settings.source_control.hosts;
         let control_changed = self.settings.control != settings.control;
-        let disabled_queues: Vec<String> = self
-            .residents
-            .live
-            .iter()
-            .chain(self.residents.parked.iter())
-            .filter(|(_, session)| {
-                !session.queue.is_empty()
-                    && self
-                        .profile_disabled(session.meta.provider, session.meta.profile_id.as_deref())
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
         self.settings = settings;
-        for id in disabled_queues {
-            if self.resident(&id).is_some_and(|session| {
-                !self.profile_disabled(session.meta.provider, session.meta.profile_id.as_deref())
-            }) {
-                self.ensure_session_started(&id, cx);
-                if self.dispatch_next_queued(&id, cx).is_err() {
-                    self.report_error(RuntimeError::ProcessGone, cx);
-                }
-            }
-        }
+        self.executions.settings_changed(&self.settings);
+        self.resume_provider_queues(cx);
         if control_changed {
             self.refresh_control_grants();
         }

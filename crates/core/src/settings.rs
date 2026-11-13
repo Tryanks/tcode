@@ -260,7 +260,7 @@ pub struct EnvVar {
 /// Per-provider configuration (Settings → Harnesses card).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderSettings {
-    /// Whether the provider may be used for new sessions.
+    /// Whether this account may accept new model input.
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Optional label shown in the provider list (falls back to the driver name).

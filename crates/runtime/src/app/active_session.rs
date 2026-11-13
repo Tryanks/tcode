@@ -139,7 +139,7 @@ pub(super) enum Runtime {
     /// `start_session` is in flight; queued turns flush when it completes.
     Starting { generation: u64 },
     /// Live child process.
-    Live(smol::channel::Sender<SessionCommand>),
+    Live(ProviderCommands),
 }
 
 pub struct ActiveSession {
@@ -439,7 +439,8 @@ impl ActiveSession {
     }
 
     pub(super) fn launch_settings_changed_while_live(&self) -> bool {
-        self.model_changed_while_live()
+        matches!(&self.runtime, Runtime::Live(commands) if commands.configuration_changed())
+            || self.model_changed_while_live()
             || self.options_changed_while_live()
             || self.cwd_changed_while_live()
             || self.profile_changed_while_live()
@@ -460,6 +461,7 @@ impl ActiveSession {
             && !self.cwd_changed_while_live()
             && !self.profile_changed_while_live()
             && !self.permission_restart_pending()
+            && !matches!(&self.runtime, Runtime::Live(commands) if commands.configuration_changed())
             && self.settings_refused.as_ref() != Some(&self.selected_settings())
     }
 
@@ -573,9 +575,12 @@ impl ActiveSession {
         TurnOptions { effort }
     }
 
-    /// Tear down the live provider and return to `Idle` so the next
-    /// `ensure_started` respawns it (with the current model + resume cursor).
-    /// Queued sends are preserved so they flush once the new process is up.
+    pub(super) fn restart_to_idle(&mut self) {
+        let pending = self.requested_command.take();
+        self.shutdown_to_idle();
+        self.requested_command = pending;
+    }
+
     pub(super) fn shutdown_to_idle(&mut self) {
         self.stop_provider();
         self.runtime = Runtime::Idle;

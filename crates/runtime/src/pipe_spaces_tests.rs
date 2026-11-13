@@ -22,6 +22,10 @@ struct SpaceHost {
 
 impl SpaceHost {
     fn new() -> Self {
+        Self::with_titles(false)
+    }
+
+    fn with_titles(ai_title_generation: bool) -> Self {
         let root = std::env::temp_dir().join(format!("tcode-spaces-{}", uuid::Uuid::new_v4()));
         let a = Project::from_root(root.join("A"));
         let b = Project::from_root(root.join("B"));
@@ -111,6 +115,7 @@ impl SpaceHost {
         let host = spawn_host(
             store.clone(),
             HostServices {
+                ai_title_generation,
                 provider_launcher: provider.launcher.clone(),
                 ..HostServices::default()
             },
@@ -1405,6 +1410,291 @@ fn disabled_accounts_refuse_old_thread_messages_and_hold_queued_turns() {
         );
         host.command(Principal::Full, toggle(true, true));
         assert_eq!(host.start_next_turn("resumed"), "queued");
+        host.finish();
+    }
+}
+
+#[test]
+fn deleting_an_account_refuses_its_old_threads_without_rebinding_them() {
+    for running in [false, true] {
+        let mut host = SpaceHost::new();
+        host.subscribe(
+            Principal::Full,
+            Topic::SessionEvents {
+                session_id: "a".into(),
+            },
+        );
+        host.command(
+            Principal::Full,
+            Command::SetActiveModel {
+                session_id: "a".into(),
+                provider: ProviderKind::Codex,
+                profile_id: Some("shared-profile".into()),
+                model: Some("team-model".into()),
+            },
+        );
+        let send = |text: &str| Command::SendTurn {
+            session_id: "a".into(),
+            text: text.into(),
+            attachment_paths: Vec::new(),
+        };
+        if running {
+            host.command(Principal::Full, send("first"));
+            assert_eq!(host.start_next_turn("first"), "first");
+        }
+        host.command(
+            Principal::Full,
+            Command::DeleteProfile {
+                profile_id: "shared-profile".into(),
+            },
+        );
+        let response = host.request(
+            Principal::Full,
+            ClientPayload::Command(send("after deletion")),
+        );
+        assert!(
+            matches!(response, HostMessage::Ack { result: Err(ref error), .. }
+            if error.code == "unknown_profile"),
+            "{response:?}"
+        );
+        if running {
+            host.command(
+                Principal::Full,
+                Command::Interrupt {
+                    session_id: "a".into(),
+                },
+            );
+            assert!(matches!(
+                crate::app::next_command_blocking(&host.provider.commands).unwrap(),
+                SessionCommand::Interrupt
+            ));
+        }
+        host.finish();
+    }
+}
+
+#[test]
+fn an_account_environment_change_restarts_before_delivering_its_queue() {
+    use tcode_core::settings::ProfileSettingsPatch;
+    let mut host = SpaceHost::new();
+    host.subscribe(
+        Principal::Full,
+        Topic::SessionEvents {
+            session_id: "a".into(),
+        },
+    );
+    host.command(
+        Principal::Full,
+        Command::SetActiveModel {
+            session_id: "a".into(),
+            provider: ProviderKind::Codex,
+            profile_id: Some("shared-profile".into()),
+            model: Some("team-model".into()),
+        },
+    );
+    let send = |text: &str| Command::SendTurn {
+        session_id: "a".into(),
+        text: text.into(),
+        attachment_paths: Vec::new(),
+    };
+    host.command(Principal::Full, send("first"));
+    assert_eq!(host.start_next_turn("first"), "first");
+    let initial = host.provider.launches.recv_blocking().unwrap();
+    assert!(
+        initial
+            .launch_env
+            .env
+            .contains(&("BASE_URL".into(), "https://private-endpoint.invalid".into()))
+    );
+    host.command(Principal::Full, send("queued"));
+    host.command(
+        Principal::Full,
+        Command::UpdateProfileSettings {
+            profile_id: "shared-profile".into(),
+            patch: ProfileSettingsPatch::SetEnv(vec![EnvVar {
+                name: "BASE_URL".into(),
+                value: "https://updated-endpoint.invalid".into(),
+                sensitive: false,
+            }]),
+        },
+    );
+    host.provider
+        .events
+        .send_blocking(AgentEvent::TurnCompleted {
+            turn_id: "first".into(),
+            status: TurnStatus::Completed,
+            usage: None,
+        })
+        .unwrap();
+    let next = crate::app::next_command_blocking(&host.provider.commands).unwrap();
+    assert!(
+        matches!(next, SessionCommand::Shutdown),
+        "old configuration received {next:?}"
+    );
+    assert_eq!(host.start_next_turn("second"), "queued");
+    let restarted = host.provider.launches.recv_blocking().unwrap();
+    assert!(
+        restarted
+            .launch_env
+            .env
+            .contains(&("BASE_URL".into(), "https://updated-endpoint.invalid".into()))
+    );
+    assert!(
+        !restarted
+            .launch_env
+            .env
+            .contains(&("BASE_URL".into(), "https://private-endpoint.invalid".into()))
+    );
+    host.provider
+        .events
+        .send_blocking(AgentEvent::TurnCompleted {
+            turn_id: "second".into(),
+            status: TurnStatus::Completed,
+            usage: None,
+        })
+        .unwrap();
+    host.event(|event| matches!(&event.event, ServerEvent::SessionEvent(record)
+        if matches!(&record.event, AgentEvent::TurnCompleted { turn_id, .. } if turn_id == "second")));
+    host.command(
+        Principal::Full,
+        Command::UpdateProfileSettings {
+            profile_id: "shared-profile".into(),
+            patch: ProfileSettingsPatch::SetEnv(vec![EnvVar {
+                name: "BASE_URL".into(),
+                value: "https://compaction-endpoint.invalid".into(),
+                sensitive: false,
+            }]),
+        },
+    );
+    host.command(
+        Principal::Full,
+        Command::CompactContext {
+            session_id: "a".into(),
+        },
+    );
+    assert!(matches!(
+        crate::app::next_command_blocking(&host.provider.commands).unwrap(),
+        SessionCommand::Shutdown
+    ));
+    assert!(matches!(
+        crate::app::next_command_blocking(&host.provider.commands).unwrap(),
+        SessionCommand::Compact
+    ));
+    assert!(
+        host.provider
+            .launches
+            .recv_blocking()
+            .unwrap()
+            .launch_env
+            .env
+            .contains(&(
+                "BASE_URL".into(),
+                "https://compaction-endpoint.invalid".into()
+            ))
+    );
+    host.finish();
+}
+
+#[test]
+fn title_generation_refuses_an_account_disabled_or_deleted_after_selection() {
+    use tcode_core::settings::{ProfileSettingsPatch, SettingsPatch};
+    for deleted in [false, true] {
+        let mut host = SpaceHost::with_titles(true);
+        host.subscribe(Principal::Full, Topic::Index);
+        host.command(
+            Principal::Full,
+            Command::PatchSettings {
+                patch: SettingsPatch::TitleGenerationProfileId(Some("shared-profile".into())),
+            },
+        );
+        let regenerate = || Command::RegenerateSessionTitle {
+            session_id: "a".into(),
+        };
+        host.command(Principal::Full, regenerate());
+        assert!(matches!(
+            crate::app::next_command_blocking(&host.provider.commands).unwrap(),
+            SessionCommand::SendTurn { .. }
+        ));
+        let launch = host.provider.launches.recv_blocking().unwrap();
+        assert!(
+            launch
+                .launch_env
+                .env
+                .contains(&("BASE_URL".into(), "https://private-endpoint.invalid".into()))
+        );
+        host.provider
+            .events
+            .send_blocking(AgentEvent::ItemCompleted(ThreadItem {
+                id: "title".into(),
+                parent_item_id: None,
+                content: ItemContent::AssistantMessage {
+                    text: "Selected account title".into(),
+                    summarized: false,
+                },
+            }))
+            .unwrap();
+        host.provider
+            .events
+            .send_blocking(AgentEvent::TurnCompleted {
+                turn_id: "title".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            crate::app::next_command_blocking(&host.provider.commands).unwrap(),
+            SessionCommand::Shutdown
+        ));
+        host.provider
+            .events
+            .send_blocking(AgentEvent::SessionClosed { reason: None })
+            .unwrap();
+        host.event(|event| {
+            matches!(&event.event, ServerEvent::IndexUpsertSession(meta)
+            if meta.id == "a" && meta.title == "Selected account title")
+        });
+        let member = host.member_under(
+            "one",
+            1,
+            SpacePolicy {
+                agents: SpaceAgents::Only(vec![AgentGrant {
+                    profile_id: "codex".into(),
+                    models: ModelGrant::Every,
+                    acp_agents: Vec::new(),
+                }]),
+                ..SpacePolicy::unrestricted()
+            },
+        );
+        let response = host.request(member, ClientPayload::Command(regenerate()));
+        assert!(
+            matches!(response, HostMessage::Ack { result: Err(ref error), .. }
+            if error.code == "space_policy"),
+            "{response:?}"
+        );
+        host.command(
+            Principal::Full,
+            if deleted {
+                Command::DeleteProfile {
+                    profile_id: "shared-profile".into(),
+                }
+            } else {
+                Command::UpdateProfileSettings {
+                    profile_id: "shared-profile".into(),
+                    patch: ProfileSettingsPatch::SetEnabled { enabled: false },
+                }
+            },
+        );
+        let expected = if deleted {
+            "unknown_profile"
+        } else {
+            "provider_disabled"
+        };
+        let response = host.request(Principal::Full, ClientPayload::Command(regenerate()));
+        assert!(
+            matches!(response, HostMessage::Ack { result: Err(ref error), .. }
+            if error.code == expected),
+            "{response:?}"
+        );
         host.finish();
     }
 }

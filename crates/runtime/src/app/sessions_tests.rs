@@ -141,7 +141,7 @@ fn provider_in_real_directories() -> (
             ))))) as ProviderLaunchFuture;
         }
         launched_tx.try_send(options.clone()).unwrap();
-        scripted_launcher.launch(kind, options)
+        (scripted_launcher.0)(kind, options)
     }));
     (launcher, scripted, launched)
 }

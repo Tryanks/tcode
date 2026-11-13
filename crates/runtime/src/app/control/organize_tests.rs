@@ -73,7 +73,14 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
         );
         done.pull_requests[0].watch = Some(PullRequestWatch::new(1));
         let mut session = ActiveSession::new(done.clone(), false, Vec::new());
-        session.runtime = Runtime::Live(commands);
+        let settings = state.settings.clone();
+        session.runtime = Runtime::Live(
+            state
+                .executions
+                .prepare(&settings, &session.meta)
+                .unwrap()
+                .connect(commands),
+        );
         session.push_or_merge_orchestrate_callback("[orchestrate] a child finished".into());
         state.sessions.push(done);
         state.residents.parked.insert("done".into(), session);

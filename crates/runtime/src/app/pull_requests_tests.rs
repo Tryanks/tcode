@@ -169,7 +169,7 @@ fn instructions_reach_the_provider_at_launch_and_no_turn_carries_them() {
     let scripted_launcher = scripted.launcher.clone();
     let launcher = ProviderLauncher(Arc::new(move |kind, options: agent::SessionOptions| {
         launched_tx.try_send(options.clone()).unwrap();
-        scripted_launcher.launch(kind, options)
+        (scripted_launcher.0)(kind, options)
     }));
     let mut cx = TestAppContext::default();
     let state = cx.new_entity({

@@ -1753,40 +1753,6 @@ fn deleting_a_thread_deletes_every_descendant_in_one_command() {
 }
 
 #[test]
-fn title_session_uses_configured_model_with_low_effort() {
-    let defaults = title_session_meta(&Settings::default(), PathBuf::from("/tmp/project"));
-    assert_eq!(defaults.provider, ProviderKind::Codex);
-    assert_eq!(defaults.model.as_deref(), Some("gpt-5.6-luna"));
-    assert_eq!(
-        defaults.option_selections,
-        vec![OptionSelection {
-            id: "reasoningEffort".into(),
-            value: serde_json::json!("low"),
-        }]
-    );
-
-    let mut settings = Settings::default();
-    settings.title_generation.provider = ProviderKind::ClaudeCode;
-    settings.title_generation.model = "claude-haiku-4-5".into();
-    settings.profiles.insert(
-        "work-claude".into(),
-        ProviderProfile {
-            kind: ProviderKind::ClaudeCode,
-            settings: ProviderSettings::default(),
-        },
-    );
-    settings.title_generation.profile_id = Some("work-claude".into());
-    let custom = title_session_meta(&settings, PathBuf::from("/tmp/project"));
-    assert_eq!(custom.provider, ProviderKind::ClaudeCode);
-    assert_eq!(custom.model.as_deref(), Some("claude-haiku-4-5"));
-    assert_eq!(custom.profile_id.as_deref(), Some("work-claude"));
-
-    settings.title_generation.profile_id = Some("deleted-profile".into());
-    let fallback = title_session_meta(&settings, PathBuf::from("/tmp/project"));
-    assert_eq!(fallback.profile_id, None);
-}
-
-#[test]
 fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
     let cases = [
         (
@@ -9280,7 +9246,7 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
         } else {
             second.launcher.clone()
         };
-        Box::pin(async move { launcher.launch(kind, options).await })
+        Box::pin(async move { (launcher.0)(kind, options).await })
     }));
     let host = spawn_host(
         (*root).clone(),
@@ -13711,4 +13677,29 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
             None,
         )
     );
+}
+
+#[test]
+fn a_disabled_leads_child_report_waits_instead_of_steering() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("disabled-lead-report");
+    let fleet = Fleet::new(cx, &store, ProviderKind::Codex, &["child"], |_| {});
+    let toggle = |enabled| tcode_protocol::Command::UpdateProfileSettings {
+        profile_id: Settings::builtin_profile_id(ProviderKind::Codex).into(),
+        patch: ProfileSettingsPatch::SetEnabled { enabled },
+    };
+    fleet.state.command(cx, toggle(false)).unwrap();
+    fleet.child("child").play([
+        report_result_event("report", "retained report"),
+        completed_turn("turn-1"),
+    ]);
+    fleet.child("child").fence(cx, "child");
+    let queued = &cx.seen().status("parent").queued_messages;
+    assert_eq!(queued.len(), 1);
+    assert!(queued[0].text.ends_with("retained report"));
+    assert!(next_command(&fleet.lead.commands).is_err());
+    fleet.lead.play([completed_turn("turn")]);
+    fleet.lead.fence(cx, "parent");
+    fleet.state.command(cx, toggle(true)).unwrap();
+    assert!(fleet.lead.next_turn(cx).1.ends_with("retained report"));
 }

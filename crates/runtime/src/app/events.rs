@@ -1,6 +1,13 @@
 use super::*;
 use tcode_core::control::WatchEvent;
 
+struct TitleRequest {
+    thread: String,
+    run: RuntimeOperationId,
+    selection: SessionMeta,
+    space: Option<String>,
+}
+
 /// A title being generated in a scratch session of its own.
 pub(super) struct TitleGeneration {
     run: RuntimeOperationId,
@@ -93,6 +100,11 @@ impl AppState {
                 // Background work ending without a follow-up turn is the
                 // child's last chance to have gone quiet owing a report.
                 if *count == 0 {
+                    if self.resident(session_id).is_some_and(|session| {
+                        !session.queue.is_empty() || session.requested_command.is_some()
+                    }) {
+                        self.resume_provider_queue(session_id, cx);
+                    }
                     self.settle_child_expectation(session_id, TurnStatus::Completed, cx);
                 }
                 return;
@@ -577,7 +589,7 @@ impl AppState {
                 // whether or not anything waits to go.
                 let moved = restartable && active.cwd_changed_while_live();
                 if restart || moved {
-                    active.shutdown_to_idle();
+                    active.restart_to_idle();
                 }
                 true
             } else {
@@ -594,6 +606,13 @@ impl AppState {
             if !is_active {
                 self.on_background_turn_completed(session_id, cx);
             }
+        }
+        if matches!(event, AgentEvent::TurnCompleted { .. })
+            && self
+                .resident(session_id)
+                .is_some_and(|session| session.requested_command.is_some())
+        {
+            self.resume_provider_queue(session_id, cx);
         }
         // After the turn's bookkeeping, so the child's flight state and queue
         // describe what comes next, not the turn that just ended.
@@ -832,6 +851,23 @@ impl AppState {
         if !self.ai_title_generation_enabled || self.title_generating.contains_key(&meta.id) {
             return;
         }
+        let title_meta = title_session_meta(&self.settings, meta.cwd.clone());
+        let space = if first_message.is_some() {
+            self.turn_space_of(&meta.id)
+        } else {
+            cx.space.clone()
+        };
+        if let Err(error) = self.title_setup_allowed(&title_meta, space.as_deref()) {
+            self.report_error(RuntimeError::External(error.message), cx);
+            return;
+        }
+        let execution = match self.executions.prepare(&self.settings, &title_meta) {
+            Ok(execution) => execution,
+            Err(error) => {
+                self.report_error(RuntimeError::External(error.message), cx);
+                return;
+            }
+        };
         let run = self.next_operation_id();
         let processes = agent::SessionProcesses::default();
         self.title_generating.insert(
@@ -842,9 +878,14 @@ impl AppState {
             },
         );
 
+        let request = TitleRequest {
+            thread: meta.id.clone(),
+            run,
+            selection: title_meta.clone(),
+            space,
+        };
         let session_id = meta.id;
         let previous_title = meta.title;
-        let title_meta = title_session_meta(&self.settings, meta.cwd);
         let regenerate = first_message.is_none();
         // The cache includes accepted messages whose writes are still queued;
         // without it the store is read once they are written.
@@ -948,8 +989,9 @@ impl AppState {
                         options.processes = processes;
                         options.clock = agent::Clock::new(host_cx.clock().clone());
                         generate_ai_title(
+                            request,
+                            execution,
                             provider_launcher,
-                            title_meta.provider,
                             options,
                             prompt,
                             attachments,
@@ -957,26 +999,42 @@ impl AppState {
                         )
                         .await
                     }
-                    Err(error) => {
-                        log::debug!("no AI title for session {session_id}: {error}");
-                        None
-                    }
+                    Err(error) => Err(error),
                 };
             host_cx.enqueue(move |state, cx| {
                 if !state.title_generation_ended(&session_id, run) {
                     return;
                 }
-                if let Some(title) = title {
-                    state.apply_generated_title(&session_id, &previous_title, &title, cx);
-                } else if regenerate && state.sessions.iter().any(|meta| meta.id == session_id) {
-                    state.report_error(RuntimeError::TitleGenerationFailed, cx);
-                } else if !regenerate {
-                    log::debug!(
-                        "AI title generation failed for session {session_id}; keeping fallback"
-                    );
+                match title {
+                    Ok(Some(title)) => {
+                        state.apply_generated_title(&session_id, &previous_title, &title, cx)
+                    }
+                    Ok(None)
+                        if regenerate
+                            && state.sessions.iter().any(|meta| meta.id == session_id) =>
+                    {
+                        state.report_error(RuntimeError::TitleGenerationFailed, cx);
+                    }
+                    Ok(None) => {}
+                    Err(error) => state.report_error(RuntimeError::External(error), cx),
                 }
             });
         });
+    }
+
+    fn title_setup_allowed(
+        &self,
+        meta: &SessionMeta,
+        space: Option<&str>,
+    ) -> Result<(), ProtocolError> {
+        if let Some(space) = space {
+            let policy = self
+                .space_policies
+                .get(space)
+                .ok_or_else(|| space_policy::policy_error("This space is no longer available."))?;
+            self.setup_allowed(policy, meta)?;
+        }
+        Ok(())
     }
 
     /// Whether `run` was still the thread's title generation, which ends with
@@ -1034,10 +1092,7 @@ pub(super) fn title_session_meta(settings: &Settings, cwd: PathBuf) -> SessionMe
     let title = &settings.title_generation;
     let model = (!title.model.trim().is_empty()).then(|| title.model.trim().to_string());
     let mut meta = SessionMeta::new(title.provider, cwd, model);
-    meta.profile_id = title
-        .profile_id
-        .clone()
-        .filter(|id| settings.resolved_profile(id).is_some());
+    meta.profile_id = title.profile_id.clone();
     meta.option_selections.push(OptionSelection {
         id: agent::EFFORT_OPTION_ID.into(),
         value: serde_json::Value::String(AI_TITLE_REASONING_EFFORT.into()),
@@ -1051,52 +1106,93 @@ pub(super) fn title_turn_options() -> TurnOptions {
     }
 }
 
-pub(super) async fn generate_ai_title(
+async fn generate_ai_title(
+    request: TitleRequest,
+    execution: provider_execution::PreparedExecution,
     provider_launcher: ProviderLauncher,
-    provider: ProviderKind,
     mut options: SessionOptions,
     prompt: String,
     attachments: Vec<Attachment>,
     executor: HostCx,
-) -> Option<String> {
+) -> Result<Option<String>, String> {
     let scratch = std::env::temp_dir().join(format!("tcode-title-{}", uuid::Uuid::new_v4()));
     let scratch_for_create = scratch.clone();
     if let Err(err) = executor
         .unblock(move || std::fs::create_dir_all(&scratch_for_create))
         .await
     {
-        log::debug!("could not create AI title scratch directory: {err}");
-        return None;
+        return Err(format!(
+            "could not create AI title scratch directory: {err}"
+        ));
     }
     options.cwd = scratch.clone();
 
-    let generated =
-        generate_ai_title_inner(provider_launcher, provider, options, prompt, attachments).await;
+    let generated = generate_ai_title_inner(
+        request,
+        execution,
+        provider_launcher,
+        options,
+        prompt,
+        attachments,
+        executor.clone(),
+    )
+    .await;
     let _ = executor
         .unblock(move || std::fs::remove_dir_all(scratch))
         .await;
     generated
 }
 
-pub(super) async fn generate_ai_title_inner(
+async fn generate_ai_title_inner(
+    request: TitleRequest,
+    execution: provider_execution::PreparedExecution,
     provider_launcher: ProviderLauncher,
-    provider: ProviderKind,
     options: SessionOptions,
     prompt: String,
     attachments: Vec<Attachment>,
-) -> Option<String> {
+    executor: HostCx,
+) -> Result<Option<String>, String> {
     let processes = options.processes.clone();
-    let handle = provider_launcher.launch(provider, options).await.ok()?;
-    handle
-        .commands
-        .send(SessionCommand::SendTurn {
-            delivery_id: 0,
-            text: prompt,
-            options: Some(title_turn_options()),
-            attachments,
-        })
+    let handle = execution
+        .launch(provider_launcher, options)
         .await
-        .ok()?;
+        .map_err(|error| error.to_string())?;
+    let (reply, delivered) = smol::channel::bounded(1);
+    let commands = handle.commands.clone();
+    executor.enqueue(move |state, _| {
+        let result = if state
+            .title_generating
+            .get(&request.thread)
+            .is_some_and(|title| title.run == request.run)
+        {
+            state
+                .title_setup_allowed(&request.selection, request.space.as_deref())
+                .and_then(|()| {
+                    commands.try_send(SessionCommand::SendTurn {
+                        delivery_id: 0,
+                        text: prompt,
+                        options: Some(title_turn_options()),
+                        attachments,
+                    })
+                })
+        } else {
+            Err(ProtocolError {
+                code: "title_cancelled".into(),
+                message: "Title generation was cancelled.".into(),
+            })
+        };
+        let _ = reply.try_send(result);
+    });
+    let result = delivered
+        .recv()
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|result| result.map_err(|error| error.message));
+    if let Err(error) = result {
+        let _ = handle.commands.try_send(SessionCommand::Shutdown);
+        processes.stop();
+        return Err(error);
+    }
 
     let mut completed_text = String::new();
     let mut streamed_text = String::new();
@@ -1137,14 +1233,14 @@ pub(super) async fn generate_ai_title_inner(
     };
     // The scratch session has nothing left to keep: its harness is killed
     // rather than waited on, and its directory goes once the session closed.
-    let _ = handle.commands.send(SessionCommand::Shutdown).await;
+    let _ = handle.commands.try_send(SessionCommand::Shutdown);
     processes.stop();
     while let Ok(event) = handle.events.recv().await {
         if matches!(event, AgentEvent::SessionClosed { .. }) {
             break;
         }
     }
-    raw_title
+    Ok(raw_title)
 }
 
 pub(super) fn title_turn_generated_output(

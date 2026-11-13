@@ -59,7 +59,7 @@ impl AppState {
                 request_id: request_id.clone(),
                 decision,
             })
-            .map_err(|err| format!("failed to respond to approval: {err}"))?;
+            .map_err(|err| format!("failed to respond to approval: {}", err.message))?;
         self.clear_approval(session_id, &request_id);
         Ok(())
     }
@@ -86,11 +86,21 @@ mod tests {
         }
     }
 
-    fn live_session(id: &str, commands: smol::channel::Sender<SessionCommand>) -> ActiveSession {
+    fn live_session(
+        state: &mut AppState,
+        id: &str,
+        commands: smol::channel::Sender<SessionCommand>,
+    ) -> ActiveSession {
         let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp"), None);
         meta.id = id.into();
         let mut session = ActiveSession::new(meta, false, Vec::new());
-        session.runtime = Runtime::Live(commands);
+        session.runtime = Runtime::Live(
+            state
+                .executions
+                .prepare(&state.settings, &session.meta)
+                .unwrap()
+                .connect(commands),
+        );
         session
     }
 
@@ -105,7 +115,7 @@ mod tests {
         for parked in [false, true] {
             let (_store, mut state) = state("approval-authority");
             let (commands, receiver) = smol::channel::unbounded();
-            let mut child = live_session("child", commands);
+            let mut child = live_session(&mut state, "child", commands);
             child.meta.parent_session_id = Some("parent".into());
             child.turn_in_flight = true;
             state.sessions.push(child.meta.clone());
