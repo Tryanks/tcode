@@ -324,6 +324,21 @@ impl AppState {
                 "This thread is no longer available on the host.",
             )
         })?;
+        if matches!(
+            command,
+            Command::SendTurn { .. }
+                | Command::ScheduleTurn { .. }
+                | Command::ConfirmRelayAndSend { .. }
+                | Command::Steer { .. }
+                | Command::SteerQueued { .. }
+                | Command::RetryTurn { .. }
+        ) && self.profile_disabled(active.meta.provider, active.meta.profile_id.as_deref())
+        {
+            return Err(error(
+                "provider_disabled",
+                "This account is disabled. Enable it in Harness settings before sending.",
+            ));
+        }
         match command {
             Command::SetDraftWorkspace { .. } if !active.draft => {
                 return Err(error("not_a_draft", "Only a draft can change workspace."));

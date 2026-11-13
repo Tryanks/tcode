@@ -1314,3 +1314,97 @@ fn drafts_follow_account_model_settings_and_refuse_an_empty_selection() {
     assert_eq!(status.requested_model.as_deref(), Some("native-other"));
     host.finish();
 }
+
+#[test]
+fn disabled_accounts_refuse_old_thread_messages_and_hold_queued_turns() {
+    use tcode_core::settings::ProfileSettingsPatch;
+    for profile_id in [
+        Settings::builtin_profile_id(ProviderKind::Codex),
+        "shared-profile",
+    ] {
+        let mut host = SpaceHost::new();
+        host.subscribe(
+            Principal::Full,
+            Topic::SessionEvents {
+                session_id: "a".into(),
+            },
+        );
+        host.subscribe(
+            Principal::Full,
+            Topic::SessionStatus {
+                session_id: "a".into(),
+            },
+        );
+        if profile_id == "shared-profile" {
+            host.command(
+                Principal::Full,
+                Command::SetActiveModel {
+                    session_id: "a".into(),
+                    provider: ProviderKind::Codex,
+                    profile_id: Some(profile_id.into()),
+                    model: Some("team-model".into()),
+                },
+            );
+        }
+        let toggle = |enabled, harness| Command::UpdateProfileSettings {
+            profile_id: profile_id.into(),
+            patch: if harness {
+                ProfileSettingsPatch::SetHarnessEnabled { enabled }
+            } else {
+                ProfileSettingsPatch::SetEnabled { enabled }
+            },
+        };
+        let send = |text: &str| Command::SendTurn {
+            session_id: "a".into(),
+            text: text.into(),
+            attachment_paths: Vec::new(),
+        };
+        host.command(Principal::Full, toggle(false, false));
+        let refused = host.request(
+            Principal::Full,
+            ClientPayload::Command(send("disabled cold")),
+        );
+        assert!(
+            matches!(refused, HostMessage::Ack { result: Err(ref error), .. } if error.code == "provider_disabled"),
+            "{refused:?}"
+        );
+        host.command(Principal::Full, toggle(true, false));
+        host.command(Principal::Full, send("first"));
+        assert_eq!(host.start_next_turn("first"), "first");
+        host.command(Principal::Full, send("queued"));
+        host.command(Principal::Full, toggle(false, true));
+        for command in [
+            send("disabled live"),
+            Command::Steer {
+                session_id: "a".into(),
+                text: "disabled steer".into(),
+                attachment_paths: Vec::new(),
+            },
+        ] {
+            let refused = host.request(Principal::Full, ClientPayload::Command(command));
+            assert!(
+                matches!(refused, HostMessage::Ack { result: Err(ref error), .. } if error.code == "provider_disabled"),
+                "{refused:?}"
+            );
+        }
+        host.provider
+            .events
+            .send_blocking(AgentEvent::TurnCompleted {
+                turn_id: "first".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            })
+            .unwrap();
+        host.event(|event| {
+            matches!(&event.event, ServerEvent::SessionStatusReplaced(status)
+        if status.running_turn.is_none() && status.queued_messages.len() == 1)
+        });
+        assert!(
+            !std::iter::from_fn(|| host.provider.commands.try_recv().ok())
+                .any(|command| matches!(command, SessionCommand::SendTurn { .. }))
+        );
+        host.command(Principal::Full, toggle(true, true));
+        assert_eq!(host.start_next_turn("resumed"), "queued");
+        host.finish();
+    }
+}

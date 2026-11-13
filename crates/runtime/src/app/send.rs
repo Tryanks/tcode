@@ -608,6 +608,13 @@ impl AppState {
         let Some(active) = self.resident(target_id) else {
             return Ok(false);
         };
+        if self.profile_disabled(active.meta.provider, active.meta.profile_id.as_deref())
+            || (matches!(active.runtime, Runtime::Live(_))
+                && active.restart_required()
+                && self.profile_disabled(active.meta.provider, active.live_profile_id.as_deref()))
+        {
+            return Ok(false);
+        }
         // A message sent while a rewind is made goes to the conversation the
         // rewind leaves.
         if active.turn_in_flight

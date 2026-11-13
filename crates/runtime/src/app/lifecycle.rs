@@ -20,6 +20,11 @@ impl AppState {
 
     /// Spawn a provider for either the foreground session or a parked child.
     pub(super) fn ensure_session_started(&mut self, session_id: &str, cx: &mut HostCx) {
+        if self.resident(session_id).is_some_and(|session| {
+            self.profile_disabled(session.meta.provider, session.meta.profile_id.as_deref())
+        }) {
+            return;
+        }
         let idle = self
             .residents
             .live

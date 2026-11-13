@@ -488,8 +488,16 @@ impl AppState {
             .collect()
     }
 
-    /// Apply a serializable edit to one profile's card settings, routing built-in
-    /// ids to their `providers` card and user ids to the `profiles` map.
+    pub(super) fn profile_disabled(
+        &self,
+        provider: ProviderKind,
+        profile_id: Option<&str>,
+    ) -> bool {
+        self.settings
+            .resolved_profile(profile_id.unwrap_or_else(|| Settings::builtin_profile_id(provider)))
+            .is_some_and(|profile| !profile.settings.enabled)
+    }
+
     pub fn update_profile_settings(
         &mut self,
         id: &str,
