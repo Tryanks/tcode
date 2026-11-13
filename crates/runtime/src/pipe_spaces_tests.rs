@@ -88,6 +88,25 @@ impl SpaceHost {
         SettingsStore::new(store.root().clone())
             .save(&settings)
             .unwrap();
+        store
+            .save_models(
+                ProviderKind::Codex,
+                &[
+                    agent::ModelSpec {
+                        id: "native-default".into(),
+                        display_name: "Native default".into(),
+                        is_default: true,
+                        options: Vec::new(),
+                    },
+                    agent::ModelSpec {
+                        id: "native-other".into(),
+                        display_name: "Native other".into(),
+                        is_default: false,
+                        options: Vec::new(),
+                    },
+                ],
+            )
+            .unwrap();
         let provider = crate::app::scripted_provider(ProviderKind::Codex);
         let host = spawn_host(
             store.clone(),
@@ -1171,5 +1190,127 @@ fn a_members_draft_starts_on_what_the_space_allows() {
             attachment_paths: Vec::new(),
         },
     );
+    host.finish();
+}
+
+#[test]
+fn drafts_follow_account_model_settings_and_refuse_an_empty_selection() {
+    use tcode_core::settings::ProfileSettingsPatch;
+    let mut host = SpaceHost::new();
+    let patch = |profile: &str, patch| Command::UpdateProfileSettings {
+        profile_id: profile.into(),
+        patch,
+    };
+    host.command(
+        Principal::Full,
+        patch(
+            "shared-profile",
+            ProfileSettingsPatch::SetEnv(vec![EnvVar {
+                name: "OPENAI_API_KEY".into(),
+                value: String::new(),
+                sensitive: true,
+            }]),
+        ),
+    );
+    host.command(
+        Principal::Full,
+        patch(
+            "shared-profile",
+            ProfileSettingsPatch::SetCustomModels(vec!["team-model".into(), "team-next".into()]),
+        ),
+    );
+    let project = host.a.clone();
+    let draft = host.draft(Principal::Full, project.clone(), project.root.clone());
+    host.command(
+        Principal::Full,
+        Command::SetActiveModel {
+            session_id: draft.clone(),
+            provider: ProviderKind::Codex,
+            model: Some("team-model".into()),
+            profile_id: Some("shared-profile".into()),
+        },
+    );
+    host.command(
+        Principal::Full,
+        patch(
+            "shared-profile",
+            ProfileSettingsPatch::SetHiddenModels(vec!["team-model".into()]),
+        ),
+    );
+    let reopened = host.draft(Principal::Full, project.clone(), project.root.clone());
+    host.subscribe(
+        Principal::Full,
+        Topic::SessionStatus {
+            session_id: reopened.clone(),
+        },
+    );
+    let ServerEvent::SessionStatusReplaced(status) = host.event(|event| event.request_id.is_some() && matches!(&event.event, ServerEvent::SessionStatusReplaced(status) if status.session_id == reopened)).event else { panic!("draft status") };
+    assert_eq!(
+        status.requested_profile_id.as_deref(),
+        Some("shared-profile")
+    );
+    assert_eq!(status.requested_model.as_deref(), Some("team-next"));
+    for provider in ProviderKind::NATIVE {
+        host.command(
+            Principal::Full,
+            patch(
+                Settings::builtin_profile_id(provider),
+                ProfileSettingsPatch::SetEnabled { enabled: false },
+            ),
+        );
+    }
+    host.command(
+        Principal::Full,
+        patch(
+            "shared-profile",
+            ProfileSettingsPatch::SetHiddenModels(vec!["team-model".into(), "team-next".into()]),
+        ),
+    );
+    for cwd in [project.root.clone(), project.root.join("new")] {
+        let reply = host.request(
+            Principal::Full,
+            ClientPayload::Command(Command::StartDraft {
+                project_id: project.id.clone(),
+                cwd,
+            }),
+        );
+        assert!(
+            matches!(reply, HostMessage::Ack { result: Err(ref error), .. } if error.code == "no_available_model"),
+            "{reply:?}"
+        );
+    }
+    host.command(
+        Principal::Full,
+        patch("codex", ProfileSettingsPatch::SetEnabled { enabled: true }),
+    );
+    host.command(
+        Principal::Full,
+        patch(
+            "codex",
+            ProfileSettingsPatch::SetHiddenModels(vec!["native-default".into()]),
+        ),
+    );
+    host.command(
+        Principal::Full,
+        patch(
+            "shared-profile",
+            ProfileSettingsPatch::SetEnabled { enabled: false },
+        ),
+    );
+    let new_draft = host.draft(
+        Principal::Full,
+        project.clone(),
+        project.root.join("another"),
+    );
+    host.subscribe(
+        Principal::Full,
+        Topic::SessionStatus {
+            session_id: new_draft.clone(),
+        },
+    );
+    let ServerEvent::SessionStatusReplaced(status) = host.event(|event| event.request_id.is_some() && matches!(&event.event, ServerEvent::SessionStatusReplaced(status) if status.session_id == new_draft)).event else { panic!("draft status") };
+    assert_eq!(status.provider, ProviderKind::Codex);
+    assert_eq!(status.requested_profile_id, None);
+    assert_eq!(status.requested_model.as_deref(), Some("native-other"));
     host.finish();
 }

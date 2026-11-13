@@ -1027,24 +1027,8 @@ impl AppState {
                     .filter(|profile| profile.settings.enabled)
                     .filter_map(move |profile| {
                         let access = policy.agent(&profile.id)?;
-                        let mut models: Vec<_> = self
-                            .models_for(kind)
-                            .iter()
-                            .filter(|m| !profile.settings.hidden_models.contains(&m.id))
-                            .cloned()
-                            .collect();
-                        for id in &profile.settings.custom_models {
-                            if !models.iter().any(|m| &m.id == id)
-                                && !profile.settings.hidden_models.contains(id)
-                            {
-                                models.push(ModelSpec {
-                                    id: id.clone(),
-                                    display_name: id.clone(),
-                                    is_default: false,
-                                    options: Vec::new(),
-                                });
-                            }
-                        }
+                        let mut models = self.profile_models(&profile);
+                        models.retain(|model| !profile.settings.hidden_models.contains(&model.id));
                         models.retain(|model| access.allows_model(Some(&model.id)));
                         // A catalog not read yet still leaves a profile
                         // granted with every model.

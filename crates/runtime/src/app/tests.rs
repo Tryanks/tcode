@@ -2686,6 +2686,20 @@ fn draft_defaults_follow_project_history_then_global_history_without_persisting_
     let codex = history(ProviderKind::Codex, "target", "gpt-5.2-codex", 500);
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-draft-defaults");
+    let mut settings = Settings::default();
+    settings.profiles.insert(
+        "klaude-kode".into(),
+        tcode_core::settings::ProviderProfile {
+            kind: ProviderKind::ClaudeCode,
+            settings: tcode_core::settings::ProviderSettings {
+                custom_models: vec!["k3[1m]".into()],
+                ..Default::default()
+            },
+        },
+    );
+    tcode_services::settings::SettingsStore::new(store.root().clone())
+        .save(&settings)
+        .unwrap();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     for (name, sessions, provider, model, agent, profile, effort) in [
         (
@@ -9463,7 +9477,8 @@ fn archived_revision_invalidates_sharing_facts_when_another_thread_or_draft_leav
         assert!(!after.worktree_shared.contains("owner"));
         let draft = state
             .host
-            .start_draft(project.id.clone(), owner.cwd.clone(), cx);
+            .start_draft(project.id.clone(), owner.cwd.clone(), cx)
+            .unwrap();
         let shared = state.archived_sessions();
         assert!(shared.revision > after.revision);
         assert!(shared.worktree_shared.contains("owner"));

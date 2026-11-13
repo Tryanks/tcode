@@ -1099,7 +1099,10 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             through,
         } => app.mark_session_read(&session_id, through, cx),
         Command::StartDraft { project_id, cwd } => {
-            let id = app.start_draft(project_id, cwd, cx);
+            let id = match app.start_draft(project_id, cwd, cx) {
+                Ok(id) => id,
+                Err(error) => return CommandOutcome::Immediate(Err(error)),
+            };
             app.fit_draft_to_space(&id, cx);
             response = CommandResponse::SessionId(Some(id));
         }

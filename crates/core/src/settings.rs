@@ -443,6 +443,10 @@ pub struct ResolvedProfile {
 }
 
 impl ResolvedProfile {
+    pub fn uses_native_model_catalog(&self) -> bool {
+        Settings::is_builtin_profile_id(&self.id) || self.supports_account_usage()
+    }
+
     /// Whether Tcode signs this profile in and out of its native account
     /// through the CLI.
     pub fn supports_account_login(&self) -> bool {

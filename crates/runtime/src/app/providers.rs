@@ -1727,6 +1727,25 @@ impl AppState {
             .collect()
     }
 
+    pub(super) fn profile_models(&self, profile: &ResolvedProfile) -> Vec<ModelSpec> {
+        let mut models = if profile.uses_native_model_catalog() {
+            self.models_for(profile.kind).to_vec()
+        } else {
+            Vec::new()
+        };
+        for id in &profile.settings.custom_models {
+            if !models.iter().any(|model| &model.id == id) {
+                models.push(ModelSpec {
+                    id: id.clone(),
+                    display_name: id.clone(),
+                    is_default: false,
+                    options: Vec::new(),
+                });
+            }
+        }
+        models
+    }
+
     /// The cached model catalog for `provider` (empty when never fetched).
     pub(crate) fn models_for(&self, provider: ProviderKind) -> &[ModelSpec] {
         self.providers

@@ -975,6 +975,7 @@ providers:
     add_account_help: "这个账号使用独立的配置目录，登录与其他账号互不影响。"
     add_endpoint: "添加配置档"
     advanced: "高级"
+    account_enabled: "启用此账号"
     all_accounts: "所有账号共用"
     binary: "可执行文件"
     binary_path: "可执行文件路径"

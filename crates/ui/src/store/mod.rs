@@ -2230,9 +2230,7 @@ impl WorkspaceStore {
         }
         self.settings_replica
             .resolved_profile(profile_id)
-            .filter(|profile| {
-                Settings::is_builtin_profile_id(profile_id) || profile.supports_account_usage()
-            })
+            .filter(ResolvedProfile::uses_native_model_catalog)
             .map(|profile| self.provider_model_catalog(profile.kind))
             .unwrap_or_default()
     }

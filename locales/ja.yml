@@ -982,6 +982,7 @@ providers:
     add_account_help: "このアカウントは専用の設定ディレクトリを使うため、ログインは他のアカウントと分かれたままです。"
     add_endpoint: "プロファイルを追加"
     advanced: "詳細"
+    account_enabled: "このアカウントを有効にする"
     all_accounts: "すべてのアカウントで共有"
     binary: "実行ファイル"
     binary_path: "実行ファイルのパス"

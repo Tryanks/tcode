@@ -828,7 +828,7 @@ impl TestClientState {
     }
     pub(super) fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut HostCx) {
         self.park_active(cx);
-        self.selected = Some(self.host.start_draft(project_id, cwd, cx));
+        self.selected = Some(self.host.start_draft(project_id, cwd, cx).unwrap());
     }
 }
 

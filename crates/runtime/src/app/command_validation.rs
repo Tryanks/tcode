@@ -637,7 +637,9 @@ mod tests {
         let mut state = AppState::new((*store).clone()).unwrap();
         let mut context = TestAppContext::default();
         let mut cx = context.host_cx();
-        let id = state.start_draft("fixture".into(), std::env::temp_dir(), &mut cx);
+        let id = state
+            .start_draft("fixture".into(), std::env::temp_dir(), &mut cx)
+            .unwrap();
         let (commands, _receiver) = smol::channel::bounded(1);
         commands.try_send(SessionCommand::Interrupt).unwrap();
         let active = state.resident_mut(&id).unwrap();
@@ -715,7 +717,9 @@ mod tests {
         let mut state = AppState::new((*store).clone()).unwrap();
         let mut context = TestAppContext::default();
         let mut cx = context.host_cx();
-        let id = state.start_draft("fixture".into(), std::env::temp_dir(), &mut cx);
+        let id = state
+            .start_draft("fixture".into(), std::env::temp_dir(), &mut cx)
+            .unwrap();
         let (commands, receiver) = smol::channel::unbounded();
         state.resident_mut(&id).unwrap().runtime = Runtime::Live(commands);
         state.record_approval_event(
