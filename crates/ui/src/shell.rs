@@ -31,8 +31,8 @@ use gpui::{
     AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Div,
     ElementId, Entity, EntityId, Focusable as _, Global, HitboxBehavior, InteractiveElement as _,
     IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, TouchPhase, WeakEntity,
-    Window, actions, canvas, div, prelude::FluentBuilder as _, px,
+    Styled as _, Subscription, Task, TouchPhase, WeakEntity, Window, actions, canvas, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{
     NavMotion, NavOperation, NavStack, NavStackState, ResizableState, h_flex, h_resizable,
@@ -243,6 +243,9 @@ struct Column {
     /// Collapsed-only overlay visibility. Purely transient and never persisted;
     /// expanded/non-workspace renders clear it synchronously.
     sidebar_overlay_visible: bool,
+    sidebar_focus: gpui::FocusHandle,
+    // Native exit events leave Window::mouse_position at its last inside position.
+    sidebar_pointer_in_window: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -813,36 +816,6 @@ pub const DEFAULT_WINDOW_WIDTH: f32 = 1200.;
 const SIDEBAR_HOVER_EDGE: f32 = 12.;
 /// Compact push/pop duration.
 const NAV_TRANSITION: Duration = Duration::from_millis(200);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SidebarHoverTransition {
-    Trigger(bool),
-    Overlay(bool),
-}
-
-/// Apply the asymmetric sibling-hover contract. The fixed trigger can open the
-/// overlay but cannot close it; once mounted, the overlay owns closing itself.
-fn next_sidebar_overlay_visibility(
-    currently_visible: bool,
-    transition: SidebarHoverTransition,
-    collapsed: bool,
-    route: Route,
-    popover_open: bool,
-) -> bool {
-    if !collapsed || route != Route::Chat {
-        return false;
-    }
-
-    match transition {
-        SidebarHoverTransition::Trigger(true) | SidebarHoverTransition::Overlay(true) => true,
-        SidebarHoverTransition::Trigger(false) => currently_visible,
-        // A menu spawned from the sidebar (new-thread dropdown, row context
-        // menu) is an occluding deferred layer: hovering it reads as leaving
-        // the overlay. Treat an open popover's lifetime as continued hover;
-        // the render pass reaps the overlay once the popover dismisses.
-        SidebarHoverTransition::Overlay(false) => currently_visible && popover_open,
-    }
-}
 
 impl AppShell {
     pub fn new(
@@ -1907,7 +1880,8 @@ impl AppShell {
             area.set_center(DockLayout::tabs().panel(thread_panel.clone()), window, cx);
             area
         });
-        let subscriptions = vec![cx.subscribe_in(
+        let sidebar_focus = cx.focus_handle();
+        let mut subscriptions = vec![cx.subscribe_in(
             &thread_panes,
             window,
             |this, _, event: &DockEvent, window, cx| {
@@ -1922,6 +1896,16 @@ impl AppShell {
                 }
             },
         )];
+        subscriptions.push(cx.observe(&self.sidebar, |this, _, cx| {
+            if this
+                .column
+                .as_ref()
+                .is_some_and(|column| column.sidebar_overlay_visible)
+            {
+                cx.notify();
+            }
+        }));
+        subscriptions.push(cx.on_focus_out(&sidebar_focus, window, |_, _, _, cx| cx.notify()));
         self.column = Some(Column {
             thread_panes,
             glides: Default::default(),
@@ -1945,6 +1929,8 @@ impl AppShell {
             ),
             sidebar_width,
             sidebar_overlay_visible: false,
+            sidebar_focus,
+            sidebar_pointer_in_window: true,
             _subscriptions: subscriptions,
         });
         self.remember_host(cx);
@@ -6453,6 +6439,8 @@ impl AppShell {
         let remembered_sidebar = column.sidebar_width.clone();
         let sidebar = match draw_sidebar {
             Some(opacity) => div()
+                .id("sidebar-focus-scope")
+                .track_focus(&column.sidebar_focus)
                 .size_full()
                 .opacity(opacity)
                 .child(self.layout_part("sidebar", self.sidebar.clone()))
@@ -6472,23 +6460,7 @@ impl AppShell {
         // The sidebar is drawn once a frame: in its panel while that shows
         // it, gliding out included, and in the overlay only after.
         let sidebar_docked = glide.shows(0);
-        // A popover keeps the overlay alive through its occluded-hover false
-        // transition (see next_sidebar_overlay_visibility). When the popover
-        // dismisses with the pointer already outside the overlay, no hover
-        // event follows — reap the stale overlay here instead (dismissal
-        // refreshes the window, so this pass always runs).
-        let overlay_visible = if collapsed
-            && overlay_visible
-            && !gpui_base::GlobalState::is_in_deferred_context(cx)
-            && window.mouse_position().x > overlay_width
-        {
-            if let Some(column) = &mut self.column {
-                column.sidebar_overlay_visible = false;
-            }
-            false
-        } else {
-            overlay_visible && !sidebar_docked
-        };
+        let overlay_visible = overlay_visible && !sidebar_docked;
         let (docked_sidebar, overlay_sidebar) = match sidebar_docked {
             true => (Some(sidebar), None),
             false => (None, Some(sidebar)),
@@ -6519,31 +6491,7 @@ impl AppShell {
                     )
                     .child(chat_panel),
             )
-            // Collapsed, the group runs to the window's left edge. This fixed
-            // transparent strip only opens the overlay, an independent
-            // absolute sibling, so neither reflows the columns. Its inevitable
-            // false transition when the overlay occludes it is deliberately
-            // ignored by the state machine.
-            .when(collapsed, |this| {
-                this.child(
-                    div()
-                        .id("sidebar-hover-trigger")
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .h_full()
-                        .w(px(SIDEBAR_HOVER_EDGE))
-                        .occlude()
-                        .on_hover(crate::motion::pointer_hover(cx.listener(
-                            |this, hovered: &bool, _, cx| {
-                                this.update_sidebar_overlay(
-                                    SidebarHoverTransition::Trigger(*hovered),
-                                    cx,
-                                );
-                            },
-                        ))),
-                )
-            })
+            .child(self.sidebar_overlay_presence(overlay_width, collapsed, cx))
             .when_some(
                 overlay_sidebar.filter(|_| overlay_visible || overlay_leaving),
                 |this, sidebar| {
@@ -6559,17 +6507,7 @@ impl AppShell {
                         .top_0()
                         .h_full()
                         .w(overlay_width)
-                        // The blocker and hover listener share this hitbox: the
-                        // overlay owns its full visible lifetime.
                         .occlude()
-                        .on_hover(crate::motion::pointer_hover(cx.listener(
-                            |this, hovered: &bool, _, cx| {
-                                this.update_sidebar_overlay(
-                                    SidebarHoverTransition::Overlay(*hovered),
-                                    cx,
-                                );
-                            },
-                        )))
                         .child(sidebar)
                         .when(overlay_leaving, |overlay| {
                             overlay.child(crate::motion::shield())
@@ -6613,26 +6551,95 @@ impl AppShell {
             .into_any_element()
     }
 
+    // Ordinary hover is suppressed during scrolling, keyboard input and native
+    // drag/drop. It cannot own the lifetime of the panel containing those interactions.
+    fn sidebar_overlay_presence(
+        &self,
+        width: Pixels,
+        collapsed: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let shell = cx.entity().downgrade();
+        canvas(
+            move |bounds, window, _| {
+                let edge = gpui::Bounds::new(
+                    bounds.origin,
+                    gpui::size(px(SIDEBAR_HOVER_EDGE), bounds.size.height),
+                );
+                window.insert_hitbox(
+                    edge,
+                    if collapsed {
+                        HitboxBehavior::BlockMouse
+                    } else {
+                        HitboxBehavior::Normal
+                    },
+                )
+            },
+            move |bounds, edge, window, cx| {
+                let panel = gpui::Bounds::new(bounds.origin, gpui::size(width, bounds.size.height));
+                let update = Rc::new(
+                    move |presence: Option<bool>, window: &mut Window, cx: &mut App| {
+                        let _ = shell.update(cx, |shell, cx| {
+                            if let Some(presence) = presence
+                                && let Some(column) = &mut shell.column
+                            {
+                                column.sidebar_pointer_in_window = presence;
+                            }
+                            shell.update_sidebar_overlay(panel, &edge, window, cx);
+                        });
+                    },
+                );
+                window.defer(cx, {
+                    let update = update.clone();
+                    move |window, cx| update(None, window, cx)
+                });
+                window.on_mouse_event({
+                    let update = update.clone();
+                    move |_: &gpui::MouseMoveEvent, phase, window, cx| {
+                        if phase.capture() {
+                            update(Some(true), window, cx);
+                        }
+                    }
+                });
+                window.on_mouse_event({
+                    let update = update.clone();
+                    move |event: &gpui::FileDropEvent, phase, window, cx| {
+                        if phase.capture() && matches!(event, gpui::FileDropEvent::Exited) {
+                            update(Some(false), window, cx);
+                        }
+                    }
+                });
+                window.on_mouse_event(move |_: &gpui::MouseExitEvent, phase, window, cx| {
+                    if phase.capture() {
+                        update(Some(false), window, cx);
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element()
+    }
+
     fn update_sidebar_overlay(
         &mut self,
-        transition: SidebarHoverTransition,
+        bounds: gpui::Bounds<Pixels>,
+        edge: &gpui::Hitbox,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (collapsed, route) = (
-            DevicePreferences::sidebar_collapsed(cx),
-            self.window_state.read(cx).route(),
-        );
-        let popover_open = gpui_base::GlobalState::is_in_deferred_context(cx);
+        let held = self.sidebar.read(cx).holds_overlay(cx);
         let Some(column) = &mut self.column else {
             return;
         };
-        let visible = next_sidebar_overlay_visibility(
-            column.sidebar_overlay_visible,
-            transition,
-            collapsed,
-            route,
-            popover_open,
-        );
+        let pointer = column.sidebar_pointer_in_window && !window.last_input_was_touch();
+        let visible = DevicePreferences::sidebar_collapsed(cx)
+            && self.window_state.read(cx).route() == Route::Chat
+            && ((pointer && edge.is_hovered_at(window.mouse_position(), window))
+                || (column.sidebar_overlay_visible
+                    && ((pointer && bounds.contains(&window.mouse_position()))
+                        || held
+                        || column.sidebar_focus.contains_focused(window, cx))));
         if column.sidebar_overlay_visible != visible {
             column.sidebar_overlay_visible = visible;
             cx.notify();
@@ -16288,14 +16295,8 @@ pub(crate) mod tests {
         assert!(cx.debug_bounds("diff-line-new-stale.rs-1").is_none());
     }
 
-    /// With the sidebar collapsed, the pointer at the window's left edge
-    /// brings the sidebar in over the chat; it stays while the pointer is on
-    /// it and goes once the pointer leaves it. Expanded, the sidebar is in
-    /// its column and the edge brings nothing.
     #[gpui::test]
-    fn a_collapsed_sidebar_comes_in_from_the_edge_while_the_pointer_is_on_it(
-        cx: &mut TestAppContext,
-    ) {
+    fn a_collapsed_sidebar_stays_available_through_its_interactions(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (_shell, _host, cx) = mount_panes(cx);
         let none = gpui::Modifiers::default();
@@ -16318,9 +16319,79 @@ pub(crate) mod tests {
         crate::test_frames::draw_settled(cx);
         assert!(overlay(cx).is_some(), "it stays while the pointer is on it");
 
+        cx.simulate_event(gpui::ScrollEvent {
+            position: shown.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-30.))),
+            ..Default::default()
+        });
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            overlay(cx).is_some(),
+            "scrolling keeps the sidebar available"
+        );
+
+        cx.simulate_keystrokes("tab");
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            overlay(cx).is_some(),
+            "keyboard navigation keeps the sidebar available"
+        );
+        let row = cx
+            .debug_bounds("sidebar-thread-thread-1")
+            .expect("a draggable thread");
+        cx.simulate_mouse_move(row.center(), None, none);
+        cx.simulate_mouse_down(row.center(), MouseButton::Left, none);
+        let outside = gpui::point(shown.right() + px(200.), px(400.));
+        cx.simulate_mouse_move(outside, Some(MouseButton::Left), none);
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            overlay(cx).is_some(),
+            "the sidebar owns its drag until release"
+        );
+        cx.simulate_mouse_up(outside, MouseButton::Left, none);
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(overlay(cx), None, "releasing outside ends the interaction");
+        cx.simulate_mouse_move(edge, None, none);
+        crate::test_frames::draw_settled(cx);
+
         cx.simulate_mouse_move(gpui::point(shown.right() + px(200.), px(400.)), None, none);
         crate::test_frames::draw_settled(cx);
         assert_eq!(overlay(cx), None, "it goes once the pointer leaves it");
+
+        cx.simulate_mouse_move(edge, None, none);
+        crate::test_frames::draw_settled(cx);
+        let row = cx.debug_bounds("sidebar-thread-thread-1").unwrap();
+        cx.simulate_mouse_down(row.center(), MouseButton::Right, none);
+        cx.simulate_mouse_up(row.center(), MouseButton::Right, none);
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            cx.debug_bounds("menu-item-2").is_some(),
+            "the thread menu opens"
+        );
+        cx.simulate_mouse_move(outside, None, none);
+        crate::test_frames::draw_settled(cx);
+        assert!(overlay(cx).is_some(), "the sidebar owns its focused menu");
+        cx.simulate_keystrokes("escape");
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(
+            overlay(cx),
+            None,
+            "dismissing the menu outside releases the sidebar"
+        );
+        cx.simulate_event(gpui::FileDropEvent::Entered {
+            position: edge,
+            paths: gpui::ExternalPaths(
+                vec![std::path::PathBuf::from("/tmp/sidebar-drag.txt")].into(),
+            ),
+        });
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            overlay(cx).is_some(),
+            "dragging to the edge opens the sidebar"
+        );
+        cx.simulate_event(gpui::FileDropEvent::Exited);
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(overlay(cx), None, "leaving the window releases the sidebar");
     }
 
     /// The host serves thread-1 as a running turn holding a question, a

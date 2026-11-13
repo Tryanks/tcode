@@ -1655,6 +1655,19 @@ impl SessionsSidebar {
     fn track_hover<R: gpui::ParentElement>(&self, row: R, group: &str) -> R {
         row.child(self.hover.hitbox(group.to_owned()))
     }
+    pub(crate) fn holds_overlay(&self, cx: &App) -> bool {
+        self.renaming.is_some()
+            || (self.drag.is_some() && cx.has_active_drag())
+            || [
+                &self.flat_list_state,
+                &self.grouped_list_state,
+                &self.compact_list_state,
+                &self.arrange_list_state,
+            ]
+            .iter()
+            .any(|list| list.is_scrollbar_dragging())
+    }
+
     pub fn new(
         stores: Vec<Entity<WorkspaceStore>>,
         window_state: Entity<WindowState>,
