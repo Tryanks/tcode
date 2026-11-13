@@ -328,10 +328,16 @@ impl AppState {
                 Command::RetryTurn { session_id, .. }
                 | Command::CompactContext { session_id }
                 | Command::SetGoal { session_id, .. }
-                | Command::ClearGoal { session_id }
-                | Command::RegenerateSessionTitle { session_id } => {
+                | Command::ClearGoal { session_id } => {
                     session(session_id)?;
                     setup(session_id)
+                }
+                Command::RegenerateSessionTitle { session_id } => {
+                    session(session_id)?;
+                    self.setup_allowed(
+                        policy,
+                        &super::events::title_session_meta(&self.settings, PathBuf::new()),
+                    )
                 }
                 Command::SetActiveModel {
                     session_id,

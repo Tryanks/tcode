@@ -31,11 +31,24 @@ fn acked(
 use crate::app::{Runtime, scripted_provider};
 
 /// A thread of `provider`, installed and selected.
-fn install(state: &mut AppState, provider: ProviderKind, cwd: PathBuf, runtime: Runtime) {
+fn install(
+    state: &mut AppState,
+    provider: ProviderKind,
+    cwd: PathBuf,
+    commands: Option<smol::channel::Sender<SessionCommand>>,
+) {
     let mut session = ActiveSession::new(SessionMeta::new(provider, cwd, None), false, Vec::new());
     session.meta.id = "rewound-thread".into();
     session.meta.resume_cursor = Some(agent::ResumeCursor(json!({ "session_id": "native" })));
-    session.runtime = runtime;
+    if let Some(commands) = commands {
+        session.runtime = Runtime::Live(
+            state
+                .executions
+                .prepare(&state.settings, &session.meta)
+                .unwrap()
+                .connect(commands),
+        );
+    }
     state.sessions.push(session.meta.clone());
     state
         .residents
@@ -122,7 +135,7 @@ fn a_cold_rewind_answers_the_client_that_asked_and_lets_the_provider_go() {
         state
     });
     state.update(cx, |state, cx| {
-        install(state, ProviderKind::ClaudeCode, cwd, Runtime::Idle);
+        install(state, ProviderKind::ClaudeCode, cwd, None);
         checkpoint_two_turns(state, cx);
     });
     state.deliver(
@@ -198,7 +211,7 @@ fn a_send_waits_for_the_rewind_and_a_stale_target_or_refusal_changes_nothing() {
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let (sender, commands) = smol::channel::unbounded();
     state.update(cx, |state, cx| {
-        install(state, ProviderKind::ClaudeCode, cwd, Runtime::Live(sender));
+        install(state, ProviderKind::ClaudeCode, cwd, Some(sender));
         checkpoint_two_turns(state, cx);
     });
     let status = |state: &TestEntity| {
@@ -310,7 +323,7 @@ fn a_fork_offers_none_of_its_parents_restore_points() {
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let (sender, _commands) = smol::channel::unbounded();
     state.update(cx, |state, cx| {
-        install(state, ProviderKind::ClaudeCode, cwd, Runtime::Live(sender));
+        install(state, ProviderKind::ClaudeCode, cwd, Some(sender));
         let meta = state.sessions[0].clone();
         state.persist_meta(&meta, cx);
         checkpoint_two_turns(state, cx);
@@ -358,12 +371,7 @@ fn a_control_rewind_answers_with_the_harness_outcome() {
     let (sender, commands) = smol::channel::unbounded();
     let (reply, answer) = smol::channel::bounded(1);
     state.update(cx, |state, cx| {
-        install(
-            state,
-            ProviderKind::ClaudeCode,
-            cwd.clone(),
-            Runtime::Live(sender),
-        );
+        install(state, ProviderKind::ClaudeCode, cwd.clone(), Some(sender));
         state.sessions[0].project_id = Some("project".into());
         checkpoint_two_turns(state, cx);
         let mut caller = SessionMeta::new(ProviderKind::ClaudeCode, cwd, None);
@@ -422,7 +430,7 @@ fn a_rewind_during_a_running_turn_keeps_the_queued_message_waiting() {
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let (sender, commands) = smol::channel::unbounded();
     state.update(cx, |state, cx| {
-        install(state, ProviderKind::ClaudeCode, cwd, Runtime::Live(sender));
+        install(state, ProviderKind::ClaudeCode, cwd, Some(sender));
         checkpoint_two_turns(state, cx);
         state.on_event(
             "rewound-thread",
@@ -507,7 +515,7 @@ fn a_rewind_answered_without_the_prompt_refills_the_one_tcode_stored() {
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let (sender, commands) = smol::channel::unbounded();
     state.update(cx, |state, cx| {
-        install(state, ProviderKind::Codex, cwd, Runtime::Live(sender));
+        install(state, ProviderKind::Codex, cwd, Some(sender));
         for (index, prompt) in [(1, "the first prompt"), (2, "the second prompt")] {
             state.record_user_message("rewound-thread", prompt, &[], None, &[], cx);
             for event in [
@@ -583,7 +591,7 @@ fn a_history_window_never_begins_inside_turns_a_rewind_took_out() {
         })
     };
     state.update(cx, |state, cx| {
-        install(state, ProviderKind::ClaudeCode, cwd, Runtime::Live(sender));
+        install(state, ProviderKind::ClaudeCode, cwd, Some(sender));
         for index in 1..=3 {
             let turn_id = format!("turn-{index}");
             state.record_event("rewound-thread", &user(&format!("prompt-{index}")), cx);

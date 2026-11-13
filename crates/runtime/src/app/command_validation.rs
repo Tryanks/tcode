@@ -36,6 +36,16 @@ impl AppState {
             message: message.into(),
         };
         self.validate_plugin_command(command)?;
+        if matches!(command, Command::RegenerateSessionTitle { .. }) {
+            let title = &self.settings.title_generation;
+            provider_execution::resolve_selection(
+                &self.settings,
+                title.provider,
+                title.profile_id.as_deref(),
+                None,
+            )?;
+        }
+
         if let Command::PatchSettings { patch } = command {
             if let SettingsPatch::ProjectSettlement { project_id, .. }
             | SettingsPatch::ProjectMergeMethod { project_id, .. }
@@ -324,6 +334,30 @@ impl AppState {
                 "This thread is no longer available on the host.",
             )
         })?;
+        if matches!(
+            command,
+            Command::SendTurn { .. }
+                | Command::ScheduleTurn { .. }
+                | Command::ConfirmRelayAndSend { .. }
+                | Command::Steer { .. }
+                | Command::SteerQueued { .. }
+                | Command::RetryTurn { .. }
+                | Command::CompactContext { .. }
+        ) || matches!(command, Command::SetGoal { objective, status, .. }
+            if objective.is_some() || *status == Some(agent::GoalStatus::Active))
+        {
+            provider_execution::resolve_selection(
+                &self.settings,
+                active.meta.provider,
+                active.meta.profile_id.as_deref(),
+                active.meta.acp_agent_id.as_deref(),
+            )?;
+            if matches!(command, Command::RetryTurn { .. })
+                && let Runtime::Live(commands) = &active.runtime
+            {
+                commands.input_allowed()?;
+            }
+        }
         match command {
             Command::SetDraftWorkspace { .. } if !active.draft => {
                 return Err(error("not_a_draft", "Only a draft can change workspace."));
@@ -637,9 +671,17 @@ mod tests {
         let mut state = AppState::new((*store).clone()).unwrap();
         let mut context = TestAppContext::default();
         let mut cx = context.host_cx();
-        let id = state.start_draft("fixture".into(), std::env::temp_dir(), &mut cx);
+        let id = state
+            .start_draft("fixture".into(), std::env::temp_dir(), &mut cx)
+            .unwrap();
         let (commands, _receiver) = smol::channel::bounded(1);
         commands.try_send(SessionCommand::Interrupt).unwrap();
+        let meta = state.resident(&id).unwrap().meta.clone();
+        let commands = state
+            .executions
+            .prepare(&state.settings, &meta)
+            .unwrap()
+            .connect(commands);
         let active = state.resident_mut(&id).unwrap();
         active.runtime = Runtime::Live(commands);
         active.turn_in_flight = true;
@@ -715,8 +757,16 @@ mod tests {
         let mut state = AppState::new((*store).clone()).unwrap();
         let mut context = TestAppContext::default();
         let mut cx = context.host_cx();
-        let id = state.start_draft("fixture".into(), std::env::temp_dir(), &mut cx);
+        let id = state
+            .start_draft("fixture".into(), std::env::temp_dir(), &mut cx)
+            .unwrap();
         let (commands, receiver) = smol::channel::unbounded();
+        let meta = state.resident(&id).unwrap().meta.clone();
+        let commands = state
+            .executions
+            .prepare(&state.settings, &meta)
+            .unwrap()
+            .connect(commands);
         state.resident_mut(&id).unwrap().runtime = Runtime::Live(commands);
         state.record_approval_event(
             &id,

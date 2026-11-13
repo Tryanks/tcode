@@ -828,7 +828,7 @@ impl TestClientState {
     }
     pub(super) fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut HostCx) {
         self.park_active(cx);
-        self.selected = Some(self.host.start_draft(project_id, cwd, cx));
+        self.selected = Some(self.host.start_draft(project_id, cwd, cx).unwrap());
     }
 }
 
@@ -1265,12 +1265,16 @@ impl AppState {
         event: AgentEvent,
         cx: &mut HostCx,
     ) {
-        if let Some(session) = self.resident_mut(session_id)
-            && matches!(session.runtime, Runtime::Idle)
+        if let Some(meta) = self
+            .resident(session_id)
+            .filter(|session| matches!(session.runtime, Runtime::Idle))
+            .map(|session| session.meta.clone())
         {
+            let execution = self.executions.prepare(&self.settings, &meta).unwrap();
             let (commands, receiver) = smol::channel::unbounded();
             smol::spawn(async move { while receiver.recv().await.is_ok() {} }).detach();
-            session.runtime = Runtime::Live(commands);
+            self.resident_mut(session_id).unwrap().runtime =
+                Runtime::Live(execution.connect(commands));
         }
         self.on_event(session_id, event, cx);
     }

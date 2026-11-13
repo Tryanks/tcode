@@ -701,7 +701,7 @@ impl AppState {
             let (root, cwd) = task.await.map_err(project_directory_error)?;
             host.enqueue_and_wait(move |app, cx| {
                 let project_id = app.create_project(root, cx)?;
-                Ok(app.start_draft(project_id, cwd, cx))
+                app.start_draft(project_id, cwd, cx)
             })
             .await
             .map_err(|_| ProtocolError {
@@ -1217,6 +1217,8 @@ impl AppState {
         let hosts_changed = self.settings.source_control.hosts != settings.source_control.hosts;
         let control_changed = self.settings.control != settings.control;
         self.settings = settings;
+        self.executions.settings_changed(&self.settings);
+        self.resume_provider_queues(cx);
         if control_changed {
             self.refresh_control_grants();
         }
@@ -2194,7 +2196,12 @@ impl AppState {
     /// Switch the main area into a draft for `project_id` (rooted at `cwd`): an
     /// empty timeline with a focused, functional composer. The session is
     /// created lazily on the first send (see `send_turn`/`commit_draft`).
-    pub fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut HostCx) -> String {
+    pub fn start_draft(
+        &mut self,
+        project_id: String,
+        cwd: PathBuf,
+        cx: &mut HostCx,
+    ) -> Result<String, ProtocolError> {
         let device_id = match &cx.principal {
             tcode_protocol::Principal::Full => None,
             tcode_protocol::Principal::Space { device_id, .. } => Some(device_id.clone()),
@@ -2212,6 +2219,8 @@ impl AppState {
             })
             .map(|active| active.meta.id.clone());
         if let Some(session_id) = standing {
+            let selection = self
+                .draft_model_selection(self.current_meta(&session_id).expect("standing draft"))?;
             if let Some(mut parked) = self.residents.adopt(&session_id) {
                 self.restore_terminal_workspace(&mut parked);
                 if self.archived_sharing_affected(&parked.meta) {
@@ -2219,8 +2228,11 @@ impl AppState {
                 }
                 self.residents.live.insert(session_id.clone(), parked);
             }
+            if let Some((profile, model)) = selection {
+                self.set_active_model(&session_id, profile.kind, model, Some(profile.id), cx);
+            }
             self.refresh_git_status(&session_id, cx);
-            return session_id;
+            return Ok(session_id);
         }
         let (provider, model, acp_agent_id, profile_id, reasoning_effort, permission) =
             self.draft_defaults(&project_id);
@@ -2244,6 +2256,7 @@ impl AppState {
         ) {
             draft.meta.option_selections.push(selection);
         }
+        let selection = self.draft_model_selection(&draft.meta)?;
         self.restore_terminal_workspace(&mut draft);
         let session_id = draft.meta.id.clone();
         self.thread_activity
@@ -2252,11 +2265,73 @@ impl AppState {
             self.archived_revision += 1;
         }
         self.residents.live.insert(session_id.clone(), draft);
+        if let Some((profile, model)) = selection {
+            self.set_active_model(&session_id, profile.kind, model, Some(profile.id), cx);
+        }
         if let Some(active) = self.resident(&session_id) {
             self.refresh_session_git_branch(active.meta.id.clone(), active.meta.cwd.clone(), cx);
         }
         self.refresh_git_status(&session_id, cx);
-        session_id
+        Ok(session_id)
+    }
+
+    fn draft_model_selection(
+        &self,
+        meta: &SessionMeta,
+    ) -> Result<Option<(ResolvedProfile, Option<String>)>, ProtocolError> {
+        let profile_id = meta
+            .profile_id
+            .as_deref()
+            .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider));
+        let profile = self.settings.resolved_profile(profile_id);
+        let hidden = profile.as_ref().is_some_and(|profile| {
+            let model = meta.model.clone().or_else(|| {
+                self.profile_models(profile)
+                    .iter()
+                    .find(|model| model.is_default)
+                    .map(|model| model.id.clone())
+            });
+            model.as_ref().map_or_else(
+                || {
+                    !profile.settings.hidden_models.is_empty()
+                        && self
+                            .profile_models(profile)
+                            .iter()
+                            .all(|model| profile.settings.hidden_models.contains(&model.id))
+                },
+                |model| profile.settings.hidden_models.contains(model),
+            )
+        });
+        if profile
+            .as_ref()
+            .is_some_and(|profile| profile.settings.enabled)
+            && !hidden
+        {
+            return Ok(None);
+        }
+        let mut profiles: Vec<_> = ProviderKind::NATIVE
+            .into_iter()
+            .flat_map(|kind| self.settings.profiles_for_kind(kind))
+            .filter(|profile| profile.settings.enabled)
+            .collect();
+        profiles.sort_by_key(|profile| (profile.id != profile_id, profile.kind != meta.provider));
+        let choice = profiles.into_iter().find_map(|profile| {
+            let models = self.profile_models(&profile);
+            let model = models
+                .iter()
+                .filter(|model| !profile.settings.hidden_models.contains(&model.id))
+                .min_by_key(|model| !model.is_default)
+                .map(|model| model.id.clone());
+            if model.is_none() && (!models.is_empty() || !profile.settings.hidden_models.is_empty())
+            {
+                return None;
+            }
+            Some((profile, model))
+        });
+        let Some((profile, model)) = choice else {
+            return Err(ProtocolError { code: "no_available_model".into(), message: "Enable an account and a model in Harness settings before starting a new thread.".into() });
+        };
+        Ok(Some((profile, model)))
     }
 
     /// Persist the active draft as a real session.

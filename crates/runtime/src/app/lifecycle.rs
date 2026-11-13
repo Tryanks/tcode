@@ -3,7 +3,17 @@ use super::*;
 impl AppState {
     /// The command asked for while the provider was starting; clears it.
     fn take_requested_command(&mut self, session_id: &str) -> Option<SessionCommand> {
-        self.resident_mut(session_id)?.requested_command.take()
+        let session = self.resident_mut(session_id)?;
+        if session
+            .requested_command
+            .as_ref()
+            .is_some_and(provider_execution::command_uses_model)
+            && let Runtime::Live(commands) = &session.runtime
+            && commands.input_allowed().is_err()
+        {
+            return None;
+        }
+        session.requested_command.take()
     }
 
     /// Spawn the provider process for the active session if it isn't running.
@@ -36,6 +46,16 @@ impl AppState {
         if !idle {
             return;
         }
+        let Some(meta) = self
+            .resident(session_id)
+            .map(|session| session.meta.clone())
+        else {
+            return;
+        };
+        let execution = match self.executions.prepare(&self.settings, &meta) {
+            Ok(execution) => execution,
+            Err(_) => return,
+        };
         self.requeue_unconfirmed_steers(session_id, cx);
         self.next_start_generation = self
             .next_start_generation
@@ -151,7 +171,7 @@ impl AppState {
                     opts.resume = None;
                     opts.fork = None;
                 }
-                provider_launcher.launch(meta.provider, opts).await
+                execution.launch(provider_launcher, opts).await
             }
             .await;
             host_cx.enqueue(move |state, cx| {
@@ -229,6 +249,10 @@ impl AppState {
                                 }
                             }
                         }
+                        if commands.configuration_changed() && !state.rewind_requests.contains_key(&session_id) {
+                            state.resume_provider_queue(&session_id, cx);
+                            return;
+                        }
                         // A rewind waiting for the start takes the place of
                         // the queue's next message.
                         if state.send_waiting_rewinds(&session_id, &commands, cx) {
@@ -245,6 +269,13 @@ impl AppState {
                         }
                     }
                     Err(err) => {
+                        if (matches_active || matches_parked) && execution.allowed().is_err() {
+                            if let Some(session) = state.resident_mut(&session_id) {
+                                session.runtime = Runtime::Idle;
+                            }
+                            state.resume_provider_queue(&session_id, cx);
+                            return;
+                        }
                         if matches_active || matches_parked {
                             // The queue is deliberately KEPT in both cases: it
                             // holds text the user typed but that was never
@@ -321,7 +352,7 @@ impl AppState {
     pub(super) fn on_event_stream_ended(
         &mut self,
         session_id: &str,
-        pump_commands: &smol::channel::Sender<SessionCommand>,
+        pump_commands: &ProviderCommands,
         cx: &mut HostCx,
     ) {
         let still_owned = self

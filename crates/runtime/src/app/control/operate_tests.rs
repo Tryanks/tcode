@@ -402,7 +402,14 @@ fn send_message_queues_steers_and_schedules_as_the_agent() {
             false,
             Vec::new(),
         );
-        running.runtime = Runtime::Live(commands);
+        let settings = state.settings.clone();
+        running.runtime = Runtime::Live(
+            state
+                .executions
+                .prepare(&settings, &running.meta)
+                .unwrap()
+                .connect(commands),
+        );
         running.turn_in_flight = true;
         park(state, running);
         park(
@@ -935,7 +942,14 @@ fn move_thread_moves_the_caller_within_its_grant_and_keeps_its_turn() {
         let mut caller = thread("caller", &quick_id, ProviderKind::ClaudeCode);
         caller.cwd = quick.clone();
         let mut session = ActiveSession::new(caller, false, Vec::new());
-        session.runtime = Runtime::Live(commands);
+        let settings = state.settings.clone();
+        session.runtime = Runtime::Live(
+            state
+                .executions
+                .prepare(&settings, &session.meta)
+                .unwrap()
+                .connect(commands),
+        );
         session.turn_in_flight = true;
         park(state, session);
         (demo_id, taken_id)

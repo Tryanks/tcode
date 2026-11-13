@@ -982,6 +982,7 @@ providers:
     add_account_help: "The account gets a config directory of its own, so its sign-in stays apart from the others'."
     add_endpoint: "Add profile"
     advanced: "Advanced"
+    account_enabled: "Enable this account"
     all_accounts: "Shared by all accounts"
     binary: "Binary"
     binary_path: "Binary path"

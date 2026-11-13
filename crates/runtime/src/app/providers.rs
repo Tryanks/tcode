@@ -488,8 +488,6 @@ impl AppState {
             .collect()
     }
 
-    /// Apply a serializable edit to one profile's card settings, routing built-in
-    /// ids to their `providers` card and user ids to the `profiles` map.
     pub fn update_profile_settings(
         &mut self,
         id: &str,
@@ -569,6 +567,7 @@ impl AppState {
             self.report_error(RuntimeError::FileUnreadable { error }, cx);
             return;
         }
+        self.executions.secret_changed(id);
         self.providers.invalidate_profile_reads(id);
         if let Some(kind) = ProviderKind::NATIVE
             .into_iter()
@@ -613,6 +612,7 @@ impl AppState {
         } else {
             names.remove(name);
         }
+        self.resume_provider_queues(cx);
     }
 
     /// Create an endpoint profile of `provider`: a named API endpoint (a
@@ -777,7 +777,10 @@ impl AppState {
         inherit: bool,
         cx: &HostCx,
     ) -> impl std::future::Future<Output = Result<PreparedHome, String>> + use<> {
-        let mut ids = self.settings.profile_id_candidates(name);
+        // Deleted accounts can still be referenced by threads, titles and space grants.
+        let mut ids = self
+            .settings
+            .profile_id_candidates(&format!("{name}-{}", uuid::Uuid::new_v4()));
         let homes = self.store.root().join("profile-homes");
         let builtin =
             inherit.then(|| self.prepare_profile_env(Settings::builtin_profile_id(provider), cx));
@@ -816,11 +819,6 @@ impl AppState {
         }
     }
 
-    /// Delete a user profile: remove its card, its secrets, and detach any
-    /// sessions still pointing at it (they fall back to the built-in profile).
-    /// Built-in ids are ignored. The task returned ends once the config
-    /// directory Tcode made for it is gone, or its removal failed and was
-    /// reported.
     pub fn delete_profile(&mut self, id: &str, cx: &mut HostCx) -> HostTask<()> {
         if Settings::is_builtin_profile_id(id) || self.settings_change_refused(cx) {
             return cx.spawn_background(async {});
@@ -829,7 +827,6 @@ impl AppState {
         let Some(profile) = settings.profiles.remove(id) else {
             return cx.spawn_background(async {});
         };
-        // A later profile of the same name gets this id and owns none of its stars.
         settings.favorite_models.retain(|favorite| {
             !matches!(favorite, FavoriteModel::Row { profile_id: Some(starred), .. } if starred == id)
         });
@@ -1184,7 +1181,7 @@ impl AppState {
         &mut self,
         profile: ResolvedProfile,
         stale_only: bool,
-        live: Option<smol::channel::Sender<SessionCommand>>,
+        live: Option<ProviderCommands>,
         cx: &mut HostCx,
     ) {
         let profile_id = profile.id.clone();
@@ -1727,6 +1724,25 @@ impl AppState {
             .collect()
     }
 
+    pub(super) fn profile_models(&self, profile: &ResolvedProfile) -> Vec<ModelSpec> {
+        let mut models = if profile.uses_native_model_catalog() {
+            self.models_for(profile.kind).to_vec()
+        } else {
+            Vec::new()
+        };
+        for id in &profile.settings.custom_models {
+            if !models.iter().any(|model| &model.id == id) {
+                models.push(ModelSpec {
+                    id: id.clone(),
+                    display_name: id.clone(),
+                    is_default: false,
+                    options: Vec::new(),
+                });
+            }
+        }
+        models
+    }
+
     /// The cached model catalog for `provider` (empty when never fetched).
     pub(crate) fn models_for(&self, provider: ProviderKind) -> &[ModelSpec] {
         self.providers
@@ -1935,17 +1951,6 @@ pub(super) fn computer_use_attaches(provider: ProviderKind, settings: &Settings)
     settings.computer_use.enabled && !provider.caps().native_computer_use
 }
 
-pub(super) fn session_provider_settings(
-    meta: &SessionMeta,
-    settings: &Settings,
-) -> tcode_core::settings::ProviderSettings {
-    meta.profile_id
-        .as_deref()
-        .and_then(|id| settings.resolved_profile(id))
-        .map(|profile| profile.settings)
-        .unwrap_or_else(|| settings.provider(meta.provider))
-}
-
 /// The in-process MCP servers a session was registered with; each attaches only where the
 /// session's provider and settings take it.
 #[derive(Default)]
@@ -1961,10 +1966,14 @@ pub(super) fn session_options(
     launch_env: LaunchEnv,
     servers: McpServers,
 ) -> Result<SessionOptions, String> {
-    // A session's binary / launch-args come from its selected profile (built-in
-    // or user-created), so a third-party profile can point at its own CLI while
-    // sharing the protocol adapter. Falls back to the kind's built-in card.
-    let provider_settings = session_provider_settings(meta, settings);
+    let provider_settings = provider_execution::resolve_selection(
+        settings,
+        meta.provider,
+        meta.profile_id.as_deref(),
+        meta.acp_agent_id.as_deref(),
+    )
+    .map_err(|error| error.message)?
+    .settings;
     // For an ACP session, which agent to launch (and how) comes from the
     // installed-agent list, keyed by the id the session was created with.
     let acp_agent: Option<InstalledAgent> = meta

@@ -260,7 +260,7 @@ pub struct EnvVar {
 /// Per-provider configuration (Settings → Harnesses card).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderSettings {
-    /// Whether the provider may be used for new sessions.
+    /// Whether this account may accept new model input.
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Optional label shown in the provider list (falls back to the driver name).
@@ -443,6 +443,10 @@ pub struct ResolvedProfile {
 }
 
 impl ResolvedProfile {
+    pub fn uses_native_model_catalog(&self) -> bool {
+        Settings::is_builtin_profile_id(&self.id) || self.supports_account_usage()
+    }
+
     /// Whether Tcode signs this profile in and out of its native account
     /// through the CLI.
     pub fn supports_account_login(&self) -> bool {

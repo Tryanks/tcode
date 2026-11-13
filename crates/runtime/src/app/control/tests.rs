@@ -571,7 +571,13 @@ fn install_live(
 ) -> smol::channel::Receiver<agent::SessionCommand> {
     let (commands, receiver) = smol::channel::unbounded();
     let mut session = ActiveSession::new(meta.clone(), false, Vec::new());
-    session.runtime = Runtime::Live(commands);
+    session.runtime = Runtime::Live(
+        state
+            .executions
+            .prepare(&state.settings, &session.meta)
+            .unwrap()
+            .connect(commands),
+    );
     session.turn_in_flight = true;
     state.residents.live.insert(meta.id.clone(), session);
     receiver

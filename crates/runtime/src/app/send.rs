@@ -179,7 +179,7 @@ impl AppState {
                 .unwrap_or((false, false, false));
             if restart {
                 if let Some(parked) = self.residents.parked.get_mut(&session_id) {
-                    parked.shutdown_to_idle();
+                    parked.restart_to_idle();
                 }
                 self.ensure_session_started(&session_id, cx);
             } else if is_live {
@@ -276,7 +276,7 @@ impl AppState {
                         "launch-time setting changed while live; restarting provider before next turn"
                     );
                 }
-                active.shutdown_to_idle();
+                active.restart_to_idle();
             }
         }
         let should_start = matches!(active.runtime, Runtime::Idle);
@@ -304,7 +304,7 @@ impl AppState {
             // Match ordinary sends when a launch-time selection changed while
             // the provider was live.
             if session.restart_required() && !session.settings_restart_deferred() {
-                session.shutdown_to_idle();
+                session.restart_to_idle();
             }
             let should_start = matches!(session.runtime, Runtime::Idle);
             if self.dispatch_next_queued(id, cx).is_err() {
@@ -585,6 +585,59 @@ impl AppState {
         true
     }
 
+    pub(super) fn resume_provider_queues(&mut self, cx: &mut HostCx) {
+        let queued: Vec<String> = self
+            .residents
+            .live
+            .iter()
+            .chain(self.residents.parked.iter())
+            .filter(|(_, session)| !session.queue.is_empty() || session.requested_command.is_some())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in queued {
+            self.resume_provider_queue(&id, cx);
+        }
+    }
+
+    pub(super) fn resume_provider_queue(&mut self, id: &str, cx: &mut HostCx) {
+        if self.rewind_requests.contains_key(id) {
+            return;
+        }
+        let Some(active) = self.resident(id) else {
+            return;
+        };
+        if active.queue.is_empty() && active.requested_command.is_none() {
+            return;
+        }
+        if provider_execution::resolve_selection(
+            &self.settings,
+            active.meta.provider,
+            active.meta.profile_id.as_deref(),
+            active.meta.acp_agent_id.as_deref(),
+        )
+        .is_err()
+        {
+            return;
+        }
+        if active.restart_required() && !active.settings_restart_deferred() {
+            self.resident_mut(id).unwrap().restart_to_idle();
+        }
+        self.ensure_session_started(id, cx);
+        if let Some(active) = self.resident_mut(id)
+            && let Runtime::Live(commands) = &active.runtime
+            && commands.input_allowed().is_ok()
+            && let Some(command) = active.requested_command.take()
+        {
+            if let Err(error) = commands.try_send(command) {
+                self.report_error(RuntimeError::External(error.message), cx);
+            }
+            return;
+        }
+        if self.dispatch_next_queued(id, cx).is_err() {
+            self.report_error(RuntimeError::ProcessGone, cx);
+        }
+    }
+
     /// Submit the first eligible queue entry when the live provider can accept
     /// a turn. It remains queued until the adapter emits its correlated `TurnAccepted`;
     /// only that provider-boundary acknowledgement persists the user bubble.
@@ -608,6 +661,11 @@ impl AppState {
         let Some(active) = self.resident(target_id) else {
             return Ok(false);
         };
+        if let Runtime::Live(commands) = &active.runtime
+            && commands.input_allowed().is_err()
+        {
+            return Ok(false);
+        }
         // A message sent while a rewind is made goes to the conversation the
         // rewind leaves.
         if active.turn_in_flight
@@ -679,13 +737,13 @@ impl AppState {
         parked.turn_in_flight = false;
         let waiting = !parked.queue.is_empty() && !parked.queue_held;
         if waiting && parked.restart_required() && parked.background_task_count == 0 {
-            parked.shutdown_to_idle();
+            parked.restart_to_idle();
             self.ensure_session_started(session_id, cx);
             return;
         }
         if !waiting {
             if parked.cwd_changed_while_live() && parked.background_task_count == 0 {
-                parked.shutdown_to_idle();
+                parked.restart_to_idle();
             }
             if parked.background_task_count > 0 {
                 log::info!(
@@ -799,6 +857,12 @@ impl AppState {
         let Some(active) = self.resident(target_id) else {
             return;
         };
+        if let Runtime::Live(commands) = &active.runtime
+            && commands.input_allowed().is_err()
+        {
+            self.send_turn_assembled(target_id, text, attachments, cx);
+            return;
+        }
         match active.route(true) {
             // Nothing is running, so there is nothing to steer into: an ordinary
             // send is exactly the right thing.
@@ -969,9 +1033,7 @@ impl AppState {
         let Runtime::Live(commands) = &active.runtime else {
             return Err(provider_command_error("The provider is no longer running."));
         };
-        commands
-            .try_send(SessionCommand::RetryTurn { turn_id })
-            .map_err(provider_command_error)?;
+        commands.try_send(SessionCommand::RetryTurn { turn_id })?;
         active.turn_in_flight = true;
         self.enter_member_turn(target_id, cx);
         Ok(())
@@ -1045,9 +1107,7 @@ impl AppState {
         // interrupted all the same: each adapter holds the interrupt until its
         // harness can take it (Codex until turn/started; Claude Code and pi
         // read it from stdin after the message, in order, once they are up).
-        commands
-            .try_send(SessionCommand::Interrupt)
-            .map_err(provider_command_error)?;
+        commands.try_send(SessionCommand::Interrupt)?;
         if let Some(active) = self.resident_mut(target_id) {
             active.interrupt_requested = true;
             active
@@ -1148,9 +1208,7 @@ impl AppState {
         let Runtime::Live(commands) = &active.runtime else {
             return Err(provider_command_error("The provider is no longer running."));
         };
-        commands
-            .try_send(SessionCommand::MoveToBackground { item_id })
-            .map_err(provider_command_error)
+        commands.try_send(SessionCommand::MoveToBackground { item_id })
     }
 
     /// Stop one piece of the thread's background work, or all of it with `None`.
@@ -1177,11 +1235,9 @@ impl AppState {
         let Runtime::Live(commands) = &active.runtime else {
             return Err(provider_command_error("The provider is no longer running."));
         };
-        commands
-            .try_send(SessionCommand::StopBackgroundTask {
-                task_id: task_id.clone(),
-            })
-            .map_err(provider_command_error)?;
+        commands.try_send(SessionCommand::StopBackgroundTask {
+            task_id: task_id.clone(),
+        })?;
         active
             .background
             .stopping(task_id.as_deref(), cx.clock().unix_millis());
@@ -1205,15 +1261,7 @@ impl AppState {
         {
             return Err(provider_command_error("A turn is still running."));
         }
-        match &active.runtime {
-            Runtime::Live(commands) => commands
-                .try_send(SessionCommand::Compact)
-                .map_err(provider_command_error)?,
-            Runtime::Idle | Runtime::Starting { .. } => {
-                active.requested_command = Some(SessionCommand::Compact);
-                self.ensure_started(target_id, cx);
-            }
-        }
+        self.send_provider_operation(target_id, SessionCommand::Compact, cx)?;
         self.enter_member_turn(target_id, cx);
         Ok(())
     }
@@ -1242,18 +1290,30 @@ impl AppState {
             return Err(provider_command_error("A turn is still running."));
         }
         let turn = !control.live;
-        match &active.runtime {
-            Runtime::Live(commands) => {
-                commands.try_send(command).map_err(provider_command_error)?
-            }
-            Runtime::Idle | Runtime::Starting { .. } => {
-                active.requested_command = Some(command);
-                self.ensure_started(target_id, cx);
-            }
-        }
+        self.send_provider_operation(target_id, command, cx)?;
         if turn {
             self.enter_member_turn(target_id, cx);
         }
+        Ok(())
+    }
+
+    fn send_provider_operation(
+        &mut self,
+        id: &str,
+        command: SessionCommand,
+        cx: &mut HostCx,
+    ) -> Result<(), ProtocolError> {
+        let active = self
+            .resident_mut(id)
+            .ok_or_else(|| provider_command_error("The thread is not open."))?;
+        if let Runtime::Live(commands) = &active.runtime
+            && (!provider_execution::command_uses_model(&command)
+                || !commands.configuration_changed())
+        {
+            return commands.try_send(command);
+        }
+        active.requested_command = Some(command);
+        self.resume_provider_queue(id, cx);
         Ok(())
     }
 
@@ -1291,12 +1351,10 @@ impl AppState {
         else {
             return Err(provider_command_error("The provider is no longer running."));
         };
-        commands
-            .try_send(SessionCommand::RespondUserInput {
-                request_id: request_id.clone(),
-                answers,
-            })
-            .map_err(provider_command_error)?;
+        commands.try_send(SessionCommand::RespondUserInput {
+            request_id: request_id.clone(),
+            answers,
+        })?;
         self.decision_authors
             .remove(&(target_id.to_string(), request_id.clone()));
         if let Some(author) = &cx.author {

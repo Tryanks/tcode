@@ -300,7 +300,7 @@ impl AppState {
     pub(super) fn send_waiting_rewinds(
         &mut self,
         session_id: &str,
-        commands: &smol::channel::Sender<SessionCommand>,
+        commands: &ProviderCommands,
         cx: &mut HostCx,
     ) -> bool {
         for preview in self.rewind_previews.get(session_id).into_iter().flatten() {
@@ -464,9 +464,7 @@ impl AppState {
             return;
         }
         // Sends made while the rewind was made waited for it.
-        if self.dispatch_next_queued(session_id, cx).is_err() {
-            self.report_error(RuntimeError::ProcessGone, cx);
-        }
+        self.resume_provider_queue(session_id, cx);
         // A provider started only to rewind goes back to idle like one that
         // finished a turn, so its process is reaped after the grace.
         self.mark_resident_idle(session_id, cx);

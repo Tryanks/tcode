@@ -95,31 +95,11 @@ const MAX_IDLE_RESIDENTS: usize = 16;
 const MAX_IDLE_REPLAY_RESIDENTS: usize = 4;
 const MAX_IDLE_REPLAY_BYTES: usize = 32 * 1024 * 1024;
 
-type ProviderLaunchFuture =
-    Pin<Box<dyn Future<Output = Result<SessionHandle, AgentError>> + Send + 'static>>;
-
-/// Internal seam for starting a provider adapter.
-///
-/// Production uses [`agent::start_session`]; runtime tests install a scripted
-/// adapter while exercising the same command and event paths.
-#[derive(Clone)]
-pub struct ProviderLauncher(
-    Arc<dyn Fn(ProviderKind, SessionOptions) -> ProviderLaunchFuture + Send + Sync>,
-);
-
-impl ProviderLauncher {
-    fn launch(&self, provider: ProviderKind, options: SessionOptions) -> ProviderLaunchFuture {
-        (self.0)(provider, options)
-    }
-}
-
-impl Default for ProviderLauncher {
-    fn default() -> Self {
-        Self(Arc::new(|provider, options| {
-            Box::pin(agent::start_session(provider, options))
-        }))
-    }
-}
+#[cfg(test)]
+use provider_execution::ProviderLaunchFuture;
+pub use provider_execution::ProviderLauncher;
+use provider_execution::{ProviderCommands, ProviderExecutions};
+mod provider_execution;
 
 /// Test-controlled provider adapter paired with its launcher.
 ///
@@ -151,7 +131,7 @@ impl Scripts {
         let scripts = self.0.clone();
         ProviderLauncher(Arc::new(move |provider, options| {
             match scripts.lock().unwrap().clone() {
-                Some(script) => script.launch(provider, options),
+                Some(script) => (script.0)(provider, options),
                 None => Box::pin(async {
                     Err(AgentError::Protocol("no provider is scripted yet".into()))
                 }),
@@ -460,6 +440,7 @@ pub struct AppState {
     /// item id): their streamed deltas carry no parent and follow them there.
     native_subagent_streams: HashMap<(String, String), String>,
     pub settings: Settings,
+    executions: ProviderExecutions,
     pub providers: Revisioned<ProviderCatalog>,
     next_terminal_spawn_id: u64,
     pending_terminal_spawns: HashMap<String, HashMap<u64, TerminalSpawnAction>>,
@@ -720,6 +701,7 @@ impl AppState {
             ai_title_generation_enabled,
             title_generating: Default::default(),
             provider_launcher: ProviderLauncher::default(),
+            executions: ProviderExecutions::default(),
             acp_registry: None.into(),
             acp_registry_loading: false,
             acp_registry_error: None,
@@ -871,6 +853,8 @@ impl AppState {
     }
 
     fn persist_settings(&mut self, cx: &mut HostCx) {
+        self.executions.settings_changed(&self.settings);
+        self.resume_provider_queues(cx);
         let settings = self.settings.clone();
         self.enqueue_settings(&settings, cx);
     }

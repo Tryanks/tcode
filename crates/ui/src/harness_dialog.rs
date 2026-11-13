@@ -2811,6 +2811,29 @@ impl HarnessDialog {
         } else {
             self.render_sign_in(&description, &profile_id, window, cx)
         });
+        let enabled_profile = profile_id.clone();
+        column = column.child(crate::material::grouped(
+            vec![
+                ToggleRow::new(
+                    "harness-account-enabled",
+                    crate::tr!("providers.harness.account_enabled").into_owned(),
+                    self.store
+                        .read(cx)
+                        .provider_profile_settings(&profile_id)
+                        .enabled,
+                    self.compact(),
+                    cx.listener(move |this, checked: &bool, _, cx| {
+                        this.update_profile(
+                            enabled_profile.clone(),
+                            ProfileSettingsPatch::SetEnabled { enabled: *checked },
+                            cx,
+                        );
+                    }),
+                )
+                .into_any_element(),
+            ],
+            cx,
+        ));
         column = column.child(self.render_identity(&profile_id, window, cx));
         if !endpoint {
             column = column.child(self.render_models(&profile_id, window, cx));

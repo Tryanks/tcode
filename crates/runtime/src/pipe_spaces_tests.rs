@@ -88,10 +88,30 @@ impl SpaceHost {
         SettingsStore::new(store.root().clone())
             .save(&settings)
             .unwrap();
+        store
+            .save_models(
+                ProviderKind::Codex,
+                &[
+                    agent::ModelSpec {
+                        id: "native-default".into(),
+                        display_name: "Native default".into(),
+                        is_default: true,
+                        options: Vec::new(),
+                    },
+                    agent::ModelSpec {
+                        id: "native-other".into(),
+                        display_name: "Native other".into(),
+                        is_default: false,
+                        options: Vec::new(),
+                    },
+                ],
+            )
+            .unwrap();
         let provider = crate::app::scripted_provider(ProviderKind::Codex);
         let host = spawn_host(
             store.clone(),
             HostServices {
+                ai_title_generation: false,
                 provider_launcher: provider.launcher.clone(),
                 ..HostServices::default()
             },
@@ -965,6 +985,30 @@ fn space_policy_refuses_what_it_withholds() {
         model(ProviderKind::Codex, "team-model", Some("shared-profile")),
     );
     host.command(member.clone(), permission("auto_review"));
+    host.command(
+        Principal::Full,
+        Command::PatchSettings {
+            patch: tcode_core::settings::SettingsPatch::TitleGenerationProfileId(Some(
+                "shared-profile".into(),
+            )),
+        },
+    );
+    for model in ["other-model", "team-model"] {
+        host.command(
+            Principal::Full,
+            Command::PatchSettings {
+                patch: tcode_core::settings::SettingsPatch::TitleGenerationModel(model.into()),
+            },
+        );
+        let title = Command::RegenerateSessionTitle {
+            session_id: "a".into(),
+        };
+        if model == "other-model" {
+            refused_by_policy(host.request(member.clone(), ClientPayload::Command(title)));
+        } else {
+            host.command(member.clone(), title);
+        }
+    }
     // The machine's own user is not bound by it, and a member then cannot
     // send on what the thread was switched to.
     host.command(Principal::Full, permission("full_access"));
@@ -1172,4 +1216,132 @@ fn a_members_draft_starts_on_what_the_space_allows() {
         },
     );
     host.finish();
+}
+
+#[test]
+fn unavailable_accounts_refuse_input_and_retain_pending_turns() {
+    use tcode_core::settings::ProfileSettingsPatch;
+    for (profile_id, deleted) in [
+        ("codex", false),
+        ("shared-profile", false),
+        ("shared-profile", true),
+    ] {
+        for running in [false, true] {
+            let mut host = SpaceHost::new();
+            host.subscribe(
+                Principal::Full,
+                Topic::SessionEvents {
+                    session_id: "a".into(),
+                },
+            );
+            host.subscribe(
+                Principal::Full,
+                Topic::SessionStatus {
+                    session_id: "a".into(),
+                },
+            );
+            if profile_id == "shared-profile" {
+                host.command(
+                    Principal::Full,
+                    Command::SetActiveModel {
+                        session_id: "a".into(),
+                        provider: ProviderKind::Codex,
+                        profile_id: Some(profile_id.into()),
+                        model: Some("team-model".into()),
+                    },
+                );
+            }
+            let send = |text: &str| Command::SendTurn {
+                session_id: "a".into(),
+                text: text.into(),
+                attachment_paths: Vec::new(),
+            };
+            let toggle = |enabled| Command::UpdateProfileSettings {
+                profile_id: profile_id.into(),
+                patch: if running {
+                    ProfileSettingsPatch::SetHarnessEnabled { enabled }
+                } else {
+                    ProfileSettingsPatch::SetEnabled { enabled }
+                },
+            };
+            if running {
+                host.command(Principal::Full, send("first"));
+                assert_eq!(host.start_next_turn("first"), "first");
+                host.command(Principal::Full, send("queued"));
+            }
+            host.command(
+                Principal::Full,
+                if deleted {
+                    Command::DeleteProfile {
+                        profile_id: profile_id.into(),
+                    }
+                } else {
+                    toggle(false)
+                },
+            );
+            let expected = if deleted {
+                "unknown_profile"
+            } else {
+                "provider_disabled"
+            };
+            for command in [
+                send("refused"),
+                Command::Steer {
+                    session_id: "a".into(),
+                    text: "refused steer".into(),
+                    attachment_paths: Vec::new(),
+                },
+            ] {
+                let refused = host.request(Principal::Full, ClientPayload::Command(command));
+                assert!(
+                    matches!(refused, HostMessage::Ack { result: Err(ref error), .. }
+                    if error.code == expected),
+                    "{refused:?}"
+                );
+            }
+            if running {
+                host.command(
+                    Principal::Full,
+                    Command::Interrupt {
+                        session_id: "a".into(),
+                    },
+                );
+                assert!(matches!(
+                    crate::app::next_command_blocking(&host.provider.commands).unwrap(),
+                    SessionCommand::Interrupt
+                ));
+                host.provider
+                    .events
+                    .send_blocking(AgentEvent::TurnCompleted {
+                        turn_id: "first".into(),
+                        status: TurnStatus::Completed,
+                        usage: None,
+                    })
+                    .unwrap();
+                host.event(|event| {
+                    matches!(&event.event, ServerEvent::SessionStatusReplaced(status)
+                    if status.running_turn.is_none() && status.queued_messages.len() == 1)
+                });
+                assert!(
+                    !std::iter::from_fn(|| host.provider.commands.try_recv().ok()).any(
+                        |command| matches!(
+                            command,
+                            SessionCommand::SendTurn { .. } | SessionCommand::Steer { .. }
+                        )
+                    )
+                );
+            }
+            if !deleted {
+                host.command(Principal::Full, toggle(true));
+                if !running {
+                    host.command(Principal::Full, send("resumed"));
+                }
+                assert_eq!(
+                    host.start_next_turn("resumed"),
+                    if running { "queued" } else { "resumed" }
+                );
+            }
+            host.finish();
+        }
+    }
 }
