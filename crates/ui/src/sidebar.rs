@@ -1658,14 +1658,9 @@ impl SessionsSidebar {
     pub(crate) fn holds_overlay(&self, cx: &App) -> bool {
         self.renaming.is_some()
             || (self.drag.is_some() && cx.has_active_drag())
-            || [
-                &self.flat_list_state,
-                &self.grouped_list_state,
-                &self.compact_list_state,
-                &self.arrange_list_state,
-            ]
-            .iter()
-            .any(|list| list.is_scrollbar_dragging())
+            || [&self.flat_list_state, &self.grouped_list_state]
+                .iter()
+                .any(|list| list.is_scrollbar_dragging())
     }
 
     pub fn new(

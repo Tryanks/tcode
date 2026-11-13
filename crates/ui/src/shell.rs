@@ -16365,7 +16365,7 @@ pub(crate) mod tests {
         cx.simulate_mouse_up(row.center(), MouseButton::Right, none);
         crate::test_frames::draw_settled(cx);
         assert!(
-            cx.debug_bounds("menu-item-2").is_some(),
+            cx.debug_bounds("tcode-popup-menu").is_some(),
             "the thread menu opens"
         );
         cx.simulate_mouse_move(outside, None, none);
