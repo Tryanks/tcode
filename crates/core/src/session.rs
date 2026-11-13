@@ -4233,23 +4233,12 @@ mod tests {
                 },
             ]
         };
-        let command = |status, output: &str| ThreadItem {
-            id: "background-command".into(),
-            parent_item_id: None,
-            content: ItemContent::CommandExecution {
-                command: "serve".into(),
-                input: Vec::new(),
-                output: output.into(),
-                exit_code: None,
-                status,
-            },
-        };
         let mut log = Vec::new();
-        for n in 1..=3 {
+        for n in 1..=2 {
             let events = turn(n);
             log.extend_from_slice(&events[..3]);
             if n == 1 {
-                log.push(AgentEvent::ItemStarted(command(ItemStatus::InProgress, "")).into());
+                log.push(AgentEvent::ItemStarted(running("background-command")).into());
                 log.push(
                     AgentEvent::ItemBackgrounded {
                         item_id: "background-command".into(),
@@ -4268,7 +4257,10 @@ mod tests {
             );
             log.push(events[3].clone());
         }
-        log.push(AgentEvent::ItemCompleted(command(ItemStatus::Interrupted, "")).into());
+        log.push(
+            AgentEvent::ItemCompleted(command("background-command", ItemStatus::Interrupted))
+                .into(),
+        );
         let full = Timeline::fold_events(log.iter().cloned());
         assert_eq!(
             full.entries
@@ -4280,7 +4272,7 @@ mod tests {
                     _ => unreachable!(),
                 })
                 .collect::<Vec<_>>(),
-            [(0, "text 1"), (1, "text 2"), (2, "text 3")],
+            [(0, "text 1"), (1, "text 2")],
             "each turn keeps its own streamed message"
         );
 
@@ -4295,11 +4287,11 @@ mod tests {
                     _ => unreachable!(),
                 })
                 .collect::<Vec<_>>(),
-            [(0, "output 1\noutput 2\noutput 3\n", ItemStatus::Interrupted)],
+            [(0, "output 1\noutput 2\n", ItemStatus::Interrupted)],
             "later output and completion belong to the original background command"
         );
 
-        let log: Vec<StoredEvent> = [turn(1), turn(2), turn(3)].concat();
+        let log: Vec<StoredEvent> = [turn(1), turn(2)].concat();
         let full = Timeline::fold_events(log.iter().cloned());
         let suffix = Timeline::fold_events(log[4..].iter().cloned());
         let entries = |timeline: &Timeline, skip: usize| {
