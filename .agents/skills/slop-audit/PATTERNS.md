@@ -313,6 +313,14 @@ From the round over the Wayland preview (the nested compositor):
 
 ## What the audit did wrong
 
+- **It added tests by symptom before finding the contract's owner** (#1096).
+  Separate account-environment and title-refusal tests repeated setup beside
+  existing lifecycle tests. The environment fixture reused one command channel
+  across launches, so observing a new launch did not establish which process
+  received the message. The title test changed settings before admission, so
+  it did not exercise invalidation during an admitted asynchronous start.
+  Existing per-launch channels and held-start fixtures reached both decisions
+  without a new production seam.
 - **It reported in place of verifying.** Four rounds merged with every
   visual change marked "not looked at in the running app". Saying so each
   time did not make it looked at.

@@ -22,10 +22,6 @@ struct SpaceHost {
 
 impl SpaceHost {
     fn new() -> Self {
-        Self::with_titles(false)
-    }
-
-    fn with_titles(ai_title_generation: bool) -> Self {
         let root = std::env::temp_dir().join(format!("tcode-spaces-{}", uuid::Uuid::new_v4()));
         let a = Project::from_root(root.join("A"));
         let b = Project::from_root(root.join("B"));
@@ -115,7 +111,7 @@ impl SpaceHost {
         let host = spawn_host(
             store.clone(),
             HostServices {
-                ai_title_generation,
+                ai_title_generation: false,
                 provider_launcher: provider.launcher.clone(),
                 ..HostServices::default()
             },
@@ -989,6 +985,30 @@ fn space_policy_refuses_what_it_withholds() {
         model(ProviderKind::Codex, "team-model", Some("shared-profile")),
     );
     host.command(member.clone(), permission("auto_review"));
+    host.command(
+        Principal::Full,
+        Command::PatchSettings {
+            patch: tcode_core::settings::SettingsPatch::TitleGenerationProfileId(Some(
+                "shared-profile".into(),
+            )),
+        },
+    );
+    for model in ["other-model", "team-model"] {
+        host.command(
+            Principal::Full,
+            Command::PatchSettings {
+                patch: tcode_core::settings::SettingsPatch::TitleGenerationModel(model.into()),
+            },
+        );
+        let title = Command::RegenerateSessionTitle {
+            session_id: "a".into(),
+        };
+        if model == "other-model" {
+            refused_by_policy(host.request(member.clone(), ClientPayload::Command(title)));
+        } else {
+            host.command(member.clone(), title);
+        }
+    }
     // The machine's own user is not bound by it, and a member then cannot
     // send on what the thread was switched to.
     host.command(Principal::Full, permission("full_access"));
@@ -1199,502 +1219,129 @@ fn a_members_draft_starts_on_what_the_space_allows() {
 }
 
 #[test]
-fn drafts_follow_account_model_settings_and_refuse_an_empty_selection() {
+fn unavailable_accounts_refuse_input_and_retain_pending_turns() {
     use tcode_core::settings::ProfileSettingsPatch;
-    let mut host = SpaceHost::new();
-    let patch = |profile: &str, patch| Command::UpdateProfileSettings {
-        profile_id: profile.into(),
-        patch,
-    };
-    host.command(
-        Principal::Full,
-        patch(
-            "shared-profile",
-            ProfileSettingsPatch::SetEnv(vec![EnvVar {
-                name: "OPENAI_API_KEY".into(),
-                value: String::new(),
-                sensitive: true,
-            }]),
-        ),
-    );
-    host.command(
-        Principal::Full,
-        patch(
-            "shared-profile",
-            ProfileSettingsPatch::SetCustomModels(vec!["team-model".into(), "team-next".into()]),
-        ),
-    );
-    let project = host.a.clone();
-    let draft = host.draft(Principal::Full, project.clone(), project.root.clone());
-    host.command(
-        Principal::Full,
-        Command::SetActiveModel {
-            session_id: draft.clone(),
-            provider: ProviderKind::Codex,
-            model: Some("team-model".into()),
-            profile_id: Some("shared-profile".into()),
-        },
-    );
-    host.command(
-        Principal::Full,
-        patch(
-            "shared-profile",
-            ProfileSettingsPatch::SetHiddenModels(vec!["team-model".into()]),
-        ),
-    );
-    let reopened = host.draft(Principal::Full, project.clone(), project.root.clone());
-    host.subscribe(
-        Principal::Full,
-        Topic::SessionStatus {
-            session_id: reopened.clone(),
-        },
-    );
-    let ServerEvent::SessionStatusReplaced(status) = host.event(|event| event.request_id.is_some() && matches!(&event.event, ServerEvent::SessionStatusReplaced(status) if status.session_id == reopened)).event else { panic!("draft status") };
-    assert_eq!(
-        status.requested_profile_id.as_deref(),
-        Some("shared-profile")
-    );
-    assert_eq!(status.requested_model.as_deref(), Some("team-next"));
-    for provider in ProviderKind::NATIVE {
-        host.command(
-            Principal::Full,
-            patch(
-                Settings::builtin_profile_id(provider),
-                ProfileSettingsPatch::SetEnabled { enabled: false },
-            ),
-        );
-    }
-    host.command(
-        Principal::Full,
-        patch(
-            "shared-profile",
-            ProfileSettingsPatch::SetHiddenModels(vec!["team-model".into(), "team-next".into()]),
-        ),
-    );
-    for cwd in [project.root.clone(), project.root.join("new")] {
-        let reply = host.request(
-            Principal::Full,
-            ClientPayload::Command(Command::StartDraft {
-                project_id: project.id.clone(),
-                cwd,
-            }),
-        );
-        assert!(
-            matches!(reply, HostMessage::Ack { result: Err(ref error), .. } if error.code == "no_available_model"),
-            "{reply:?}"
-        );
-    }
-    host.command(
-        Principal::Full,
-        patch("codex", ProfileSettingsPatch::SetEnabled { enabled: true }),
-    );
-    host.command(
-        Principal::Full,
-        patch(
-            "codex",
-            ProfileSettingsPatch::SetHiddenModels(vec!["native-default".into()]),
-        ),
-    );
-    host.command(
-        Principal::Full,
-        patch(
-            "shared-profile",
-            ProfileSettingsPatch::SetEnabled { enabled: false },
-        ),
-    );
-    let new_draft = host.draft(
-        Principal::Full,
-        project.clone(),
-        project.root.join("another"),
-    );
-    host.subscribe(
-        Principal::Full,
-        Topic::SessionStatus {
-            session_id: new_draft.clone(),
-        },
-    );
-    let ServerEvent::SessionStatusReplaced(status) = host.event(|event| event.request_id.is_some() && matches!(&event.event, ServerEvent::SessionStatusReplaced(status) if status.session_id == new_draft)).event else { panic!("draft status") };
-    assert_eq!(status.provider, ProviderKind::Codex);
-    assert_eq!(status.requested_profile_id, None);
-    assert_eq!(status.requested_model.as_deref(), Some("native-other"));
-    host.finish();
-}
-
-#[test]
-fn disabled_accounts_refuse_old_thread_messages_and_hold_queued_turns() {
-    use tcode_core::settings::ProfileSettingsPatch;
-    for profile_id in [
-        Settings::builtin_profile_id(ProviderKind::Codex),
-        "shared-profile",
+    for (profile_id, deleted) in [
+        ("codex", false),
+        ("shared-profile", false),
+        ("shared-profile", true),
     ] {
-        let mut host = SpaceHost::new();
-        host.subscribe(
-            Principal::Full,
-            Topic::SessionEvents {
-                session_id: "a".into(),
-            },
-        );
-        host.subscribe(
-            Principal::Full,
-            Topic::SessionStatus {
-                session_id: "a".into(),
-            },
-        );
-        if profile_id == "shared-profile" {
-            host.command(
+        for running in [false, true] {
+            let mut host = SpaceHost::new();
+            host.subscribe(
                 Principal::Full,
-                Command::SetActiveModel {
+                Topic::SessionEvents {
                     session_id: "a".into(),
-                    provider: ProviderKind::Codex,
-                    profile_id: Some(profile_id.into()),
-                    model: Some("team-model".into()),
                 },
             );
-        }
-        let toggle = |enabled, harness| Command::UpdateProfileSettings {
-            profile_id: profile_id.into(),
-            patch: if harness {
-                ProfileSettingsPatch::SetHarnessEnabled { enabled }
-            } else {
-                ProfileSettingsPatch::SetEnabled { enabled }
-            },
-        };
-        let send = |text: &str| Command::SendTurn {
-            session_id: "a".into(),
-            text: text.into(),
-            attachment_paths: Vec::new(),
-        };
-        host.command(Principal::Full, toggle(false, false));
-        let refused = host.request(
-            Principal::Full,
-            ClientPayload::Command(send("disabled cold")),
-        );
-        assert!(
-            matches!(refused, HostMessage::Ack { result: Err(ref error), .. } if error.code == "provider_disabled"),
-            "{refused:?}"
-        );
-        host.command(Principal::Full, toggle(true, false));
-        host.command(Principal::Full, send("first"));
-        assert_eq!(host.start_next_turn("first"), "first");
-        host.command(Principal::Full, send("queued"));
-        host.command(Principal::Full, toggle(false, true));
-        for command in [
-            send("disabled live"),
-            Command::Steer {
+            host.subscribe(
+                Principal::Full,
+                Topic::SessionStatus {
+                    session_id: "a".into(),
+                },
+            );
+            if profile_id == "shared-profile" {
+                host.command(
+                    Principal::Full,
+                    Command::SetActiveModel {
+                        session_id: "a".into(),
+                        provider: ProviderKind::Codex,
+                        profile_id: Some(profile_id.into()),
+                        model: Some("team-model".into()),
+                    },
+                );
+            }
+            let send = |text: &str| Command::SendTurn {
                 session_id: "a".into(),
-                text: "disabled steer".into(),
+                text: text.into(),
                 attachment_paths: Vec::new(),
-            },
-        ] {
-            let refused = host.request(Principal::Full, ClientPayload::Command(command));
-            assert!(
-                matches!(refused, HostMessage::Ack { result: Err(ref error), .. } if error.code == "provider_disabled"),
-                "{refused:?}"
-            );
-        }
-        host.provider
-            .events
-            .send_blocking(AgentEvent::TurnCompleted {
-                turn_id: "first".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            })
-            .unwrap();
-        host.event(|event| {
-            matches!(&event.event, ServerEvent::SessionStatusReplaced(status)
-        if status.running_turn.is_none() && status.queued_messages.len() == 1)
-        });
-        assert!(
-            !std::iter::from_fn(|| host.provider.commands.try_recv().ok())
-                .any(|command| matches!(command, SessionCommand::SendTurn { .. }))
-        );
-        host.command(Principal::Full, toggle(true, true));
-        assert_eq!(host.start_next_turn("resumed"), "queued");
-        host.finish();
-    }
-}
-
-#[test]
-fn deleting_an_account_refuses_its_old_threads_without_rebinding_them() {
-    for running in [false, true] {
-        let mut host = SpaceHost::new();
-        host.subscribe(
-            Principal::Full,
-            Topic::SessionEvents {
-                session_id: "a".into(),
-            },
-        );
-        host.command(
-            Principal::Full,
-            Command::SetActiveModel {
-                session_id: "a".into(),
-                provider: ProviderKind::Codex,
-                profile_id: Some("shared-profile".into()),
-                model: Some("team-model".into()),
-            },
-        );
-        let send = |text: &str| Command::SendTurn {
-            session_id: "a".into(),
-            text: text.into(),
-            attachment_paths: Vec::new(),
-        };
-        if running {
-            host.command(Principal::Full, send("first"));
-            assert_eq!(host.start_next_turn("first"), "first");
-        }
-        host.command(
-            Principal::Full,
-            Command::DeleteProfile {
-                profile_id: "shared-profile".into(),
-            },
-        );
-        let response = host.request(
-            Principal::Full,
-            ClientPayload::Command(send("after deletion")),
-        );
-        assert!(
-            matches!(response, HostMessage::Ack { result: Err(ref error), .. }
-            if error.code == "unknown_profile"),
-            "{response:?}"
-        );
-        if running {
+            };
+            let toggle = |enabled| Command::UpdateProfileSettings {
+                profile_id: profile_id.into(),
+                patch: if running {
+                    ProfileSettingsPatch::SetHarnessEnabled { enabled }
+                } else {
+                    ProfileSettingsPatch::SetEnabled { enabled }
+                },
+            };
+            if running {
+                host.command(Principal::Full, send("first"));
+                assert_eq!(host.start_next_turn("first"), "first");
+                host.command(Principal::Full, send("queued"));
+            }
             host.command(
                 Principal::Full,
-                Command::Interrupt {
-                    session_id: "a".into(),
+                if deleted {
+                    Command::DeleteProfile {
+                        profile_id: profile_id.into(),
+                    }
+                } else {
+                    toggle(false)
                 },
             );
-            assert!(matches!(
-                crate::app::next_command_blocking(&host.provider.commands).unwrap(),
-                SessionCommand::Interrupt
-            ));
-        }
-        host.finish();
-    }
-}
-
-#[test]
-fn an_account_environment_change_restarts_before_delivering_its_queue() {
-    use tcode_core::settings::ProfileSettingsPatch;
-    let mut host = SpaceHost::new();
-    host.subscribe(
-        Principal::Full,
-        Topic::SessionEvents {
-            session_id: "a".into(),
-        },
-    );
-    host.command(
-        Principal::Full,
-        Command::SetActiveModel {
-            session_id: "a".into(),
-            provider: ProviderKind::Codex,
-            profile_id: Some("shared-profile".into()),
-            model: Some("team-model".into()),
-        },
-    );
-    let send = |text: &str| Command::SendTurn {
-        session_id: "a".into(),
-        text: text.into(),
-        attachment_paths: Vec::new(),
-    };
-    host.command(Principal::Full, send("first"));
-    assert_eq!(host.start_next_turn("first"), "first");
-    let initial = host.provider.launches.recv_blocking().unwrap();
-    assert!(
-        initial
-            .launch_env
-            .env
-            .contains(&("BASE_URL".into(), "https://private-endpoint.invalid".into()))
-    );
-    host.command(Principal::Full, send("queued"));
-    host.command(
-        Principal::Full,
-        Command::UpdateProfileSettings {
-            profile_id: "shared-profile".into(),
-            patch: ProfileSettingsPatch::SetEnv(vec![EnvVar {
-                name: "BASE_URL".into(),
-                value: "https://updated-endpoint.invalid".into(),
-                sensitive: false,
-            }]),
-        },
-    );
-    host.provider
-        .events
-        .send_blocking(AgentEvent::TurnCompleted {
-            turn_id: "first".into(),
-            status: TurnStatus::Completed,
-            usage: None,
-        })
-        .unwrap();
-    let next = crate::app::next_command_blocking(&host.provider.commands).unwrap();
-    assert!(
-        matches!(next, SessionCommand::Shutdown),
-        "old configuration received {next:?}"
-    );
-    assert_eq!(host.start_next_turn("second"), "queued");
-    let restarted = host.provider.launches.recv_blocking().unwrap();
-    assert!(
-        restarted
-            .launch_env
-            .env
-            .contains(&("BASE_URL".into(), "https://updated-endpoint.invalid".into()))
-    );
-    assert!(
-        !restarted
-            .launch_env
-            .env
-            .contains(&("BASE_URL".into(), "https://private-endpoint.invalid".into()))
-    );
-    host.provider
-        .events
-        .send_blocking(AgentEvent::TurnCompleted {
-            turn_id: "second".into(),
-            status: TurnStatus::Completed,
-            usage: None,
-        })
-        .unwrap();
-    host.event(|event| matches!(&event.event, ServerEvent::SessionEvent(record)
-        if matches!(&record.event, AgentEvent::TurnCompleted { turn_id, .. } if turn_id == "second")));
-    host.command(
-        Principal::Full,
-        Command::UpdateProfileSettings {
-            profile_id: "shared-profile".into(),
-            patch: ProfileSettingsPatch::SetEnv(vec![EnvVar {
-                name: "BASE_URL".into(),
-                value: "https://compaction-endpoint.invalid".into(),
-                sensitive: false,
-            }]),
-        },
-    );
-    host.command(
-        Principal::Full,
-        Command::CompactContext {
-            session_id: "a".into(),
-        },
-    );
-    assert!(matches!(
-        crate::app::next_command_blocking(&host.provider.commands).unwrap(),
-        SessionCommand::Shutdown
-    ));
-    assert!(matches!(
-        crate::app::next_command_blocking(&host.provider.commands).unwrap(),
-        SessionCommand::Compact
-    ));
-    assert!(
-        host.provider
-            .launches
-            .recv_blocking()
-            .unwrap()
-            .launch_env
-            .env
-            .contains(&(
-                "BASE_URL".into(),
-                "https://compaction-endpoint.invalid".into()
-            ))
-    );
-    host.finish();
-}
-
-#[test]
-fn title_generation_refuses_an_account_disabled_or_deleted_after_selection() {
-    use tcode_core::settings::{ProfileSettingsPatch, SettingsPatch};
-    for deleted in [false, true] {
-        let mut host = SpaceHost::with_titles(true);
-        host.subscribe(Principal::Full, Topic::Index);
-        host.command(
-            Principal::Full,
-            Command::PatchSettings {
-                patch: SettingsPatch::TitleGenerationProfileId(Some("shared-profile".into())),
-            },
-        );
-        let regenerate = || Command::RegenerateSessionTitle {
-            session_id: "a".into(),
-        };
-        host.command(Principal::Full, regenerate());
-        assert!(matches!(
-            crate::app::next_command_blocking(&host.provider.commands).unwrap(),
-            SessionCommand::SendTurn { .. }
-        ));
-        let launch = host.provider.launches.recv_blocking().unwrap();
-        assert!(
-            launch
-                .launch_env
-                .env
-                .contains(&("BASE_URL".into(), "https://private-endpoint.invalid".into()))
-        );
-        host.provider
-            .events
-            .send_blocking(AgentEvent::ItemCompleted(ThreadItem {
-                id: "title".into(),
-                parent_item_id: None,
-                content: ItemContent::AssistantMessage {
-                    text: "Selected account title".into(),
-                    summarized: false,
-                },
-            }))
-            .unwrap();
-        host.provider
-            .events
-            .send_blocking(AgentEvent::TurnCompleted {
-                turn_id: "title".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            })
-            .unwrap();
-        assert!(matches!(
-            crate::app::next_command_blocking(&host.provider.commands).unwrap(),
-            SessionCommand::Shutdown
-        ));
-        host.provider
-            .events
-            .send_blocking(AgentEvent::SessionClosed { reason: None })
-            .unwrap();
-        host.event(|event| {
-            matches!(&event.event, ServerEvent::IndexUpsertSession(meta)
-            if meta.id == "a" && meta.title == "Selected account title")
-        });
-        let member = host.member_under(
-            "one",
-            1,
-            SpacePolicy {
-                agents: SpaceAgents::Only(vec![AgentGrant {
-                    profile_id: "codex".into(),
-                    models: ModelGrant::Every,
-                    acp_agents: Vec::new(),
-                }]),
-                ..SpacePolicy::unrestricted()
-            },
-        );
-        let response = host.request(member, ClientPayload::Command(regenerate()));
-        assert!(
-            matches!(response, HostMessage::Ack { result: Err(ref error), .. }
-            if error.code == "space_policy"),
-            "{response:?}"
-        );
-        host.command(
-            Principal::Full,
-            if deleted {
-                Command::DeleteProfile {
-                    profile_id: "shared-profile".into(),
-                }
+            let expected = if deleted {
+                "unknown_profile"
             } else {
-                Command::UpdateProfileSettings {
-                    profile_id: "shared-profile".into(),
-                    patch: ProfileSettingsPatch::SetEnabled { enabled: false },
+                "provider_disabled"
+            };
+            for command in [
+                send("refused"),
+                Command::Steer {
+                    session_id: "a".into(),
+                    text: "refused steer".into(),
+                    attachment_paths: Vec::new(),
+                },
+            ] {
+                let refused = host.request(Principal::Full, ClientPayload::Command(command));
+                assert!(
+                    matches!(refused, HostMessage::Ack { result: Err(ref error), .. }
+                    if error.code == expected),
+                    "{refused:?}"
+                );
+            }
+            if running {
+                host.command(
+                    Principal::Full,
+                    Command::Interrupt {
+                        session_id: "a".into(),
+                    },
+                );
+                assert!(matches!(
+                    crate::app::next_command_blocking(&host.provider.commands).unwrap(),
+                    SessionCommand::Interrupt
+                ));
+                host.provider
+                    .events
+                    .send_blocking(AgentEvent::TurnCompleted {
+                        turn_id: "first".into(),
+                        status: TurnStatus::Completed,
+                        usage: None,
+                    })
+                    .unwrap();
+                host.event(|event| {
+                    matches!(&event.event, ServerEvent::SessionStatusReplaced(status)
+                    if status.running_turn.is_none() && status.queued_messages.len() == 1)
+                });
+                assert!(
+                    !std::iter::from_fn(|| host.provider.commands.try_recv().ok()).any(
+                        |command| matches!(
+                            command,
+                            SessionCommand::SendTurn { .. } | SessionCommand::Steer { .. }
+                        )
+                    )
+                );
+            }
+            if !deleted {
+                host.command(Principal::Full, toggle(true));
+                if !running {
+                    host.command(Principal::Full, send("resumed"));
                 }
-            },
-        );
-        let expected = if deleted {
-            "unknown_profile"
-        } else {
-            "provider_disabled"
-        };
-        let response = host.request(Principal::Full, ClientPayload::Command(regenerate()));
-        assert!(
-            matches!(response, HostMessage::Ack { result: Err(ref error), .. }
-            if error.code == expected),
-            "{response:?}"
-        );
-        host.finish();
+                assert_eq!(
+                    host.start_next_turn("resumed"),
+                    if running { "queued" } else { "resumed" }
+                );
+            }
+            host.finish();
+        }
     }
 }

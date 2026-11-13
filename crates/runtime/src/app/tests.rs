@@ -1838,6 +1838,25 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
     // none but the one whose latest message was just sent is resident when
     // its title is asked for.
     let store = TestStore::new("tcode-regenerate-title");
+    let mut settings = Settings::default();
+    settings.title_generation.profile_id = Some("titles".into());
+    settings.profiles.insert(
+        "titles".into(),
+        ProviderProfile {
+            kind: ProviderKind::Codex,
+            settings: ProviderSettings {
+                env: vec![tcode_core::settings::EnvVar {
+                    name: "BASE_URL".into(),
+                    value: "https://titles.invalid".into(),
+                    sensitive: false,
+                }],
+                ..Default::default()
+            },
+        },
+    );
+    tcode_services::settings::SettingsStore::new(store.root().clone())
+        .save(&settings)
+        .unwrap();
     let image = store.root().join("qr.png");
     fs::write(&image, [1, 2, 3]).unwrap();
     let ids = cases.map(|_| {
@@ -1885,6 +1904,7 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
     });
     state.subscribe(cx, Topic::Index);
     cx.drain_outgoing();
+    let account_thread = ids[0].clone();
     let mut launches = 0;
     for ((outcome, raw_title, status, output_tokens, expected), id) in cases.into_iter().zip(ids) {
         if outcome == "cached" {
@@ -1909,6 +1929,15 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
         }
         let scripted = providers.started(cx, launches);
         launches += 1;
+        if outcome == "generated" {
+            assert!(
+                scripted
+                    .options
+                    .launch_env
+                    .env
+                    .contains(&("BASE_URL".into(), "https://titles.invalid".into(),))
+            );
+        }
         let prompt = match cx.run_until_recv(&scripted.commands) {
             SessionCommand::SendTurn {
                 text, attachments, ..
@@ -2026,6 +2055,67 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
             Ok(SessionCommand::Shutdown)
         ));
         assert!(scripted.commands.try_recv().is_err(), "{outcome}");
+    }
+    for deleted in [false, true] {
+        providers.hold();
+        let regenerate = || Command::RegenerateSessionTitle {
+            session_id: account_thread.clone(),
+        };
+        state.command(cx, regenerate()).unwrap();
+        let starting = providers.started(cx, launches);
+        launches += 1;
+        state
+            .command(
+                cx,
+                if deleted {
+                    Command::DeleteProfile {
+                        profile_id: "titles".into(),
+                    }
+                } else {
+                    Command::UpdateProfileSettings {
+                        profile_id: "titles".into(),
+                        patch: ProfileSettingsPatch::SetEnabled { enabled: false },
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            state.command(cx, regenerate()).unwrap_err().code,
+            if deleted {
+                "unknown_profile"
+            } else {
+                "provider_disabled"
+            }
+        );
+        providers.let_go();
+        assert!(matches!(
+            starting.next_command(cx),
+            SessionCommand::Shutdown
+        ));
+        cx.run_until_seen(|view| !view.title_generating(&account_thread));
+        assert!(starting.commands.try_recv().is_err());
+        assert_eq!(
+            cx.seen().session(&account_thread).unwrap().title,
+            "Improve QR Sharing"
+        );
+        assert!(cx.drain_outgoing().iter().any(|message| matches!(
+            message,
+            HostMessage::Event(EventEnvelope {
+                event: ServerEvent::Runtime(RuntimeEvent::Error(RuntimeError::External(_))),
+                ..
+            })
+        )));
+        if !deleted {
+            state
+                .command(
+                    cx,
+                    Command::UpdateProfileSettings {
+                        profile_id: "titles".into(),
+                        patch: ProfileSettingsPatch::SetEnabled { enabled: true },
+                    },
+                )
+                .unwrap();
+        }
     }
 }
 
@@ -2619,155 +2709,279 @@ fn only_a_loaded_conversation_marks_a_thread_read() {
 }
 
 #[test]
-fn draft_defaults_follow_project_history_then_global_history_without_persisting_a_draft() {
-    let history = |provider, project: &str, model: &str, updated_at| {
-        let mut meta = SessionMeta::new(provider, PathBuf::from("/history"), Some(model.into()));
-        meta.project_id = Some(project.into());
-        meta.updated_at = updated_at;
-        meta.option_selections = vec![
-            OptionSelection {
-                id: "serviceTier".into(),
-                value: serde_json::json!("fast"),
-            },
-            OptionSelection {
-                id: "reasoningEffort".into(),
-                value: serde_json::json!("high"),
-            },
-            OptionSelection {
-                id: "permissions".into(),
-                value: serde_json::json!("ask"),
-            },
-        ];
-        meta
-    };
-    let older = history(ProviderKind::ClaudeCode, "target", "sonnet", 100);
-    let mut archived = history(ProviderKind::Codex, "target", "archived", 1000);
-    archived.archived_at = Some(1001);
-    let mut global = history(ProviderKind::Acp, "other", "global-model", 900);
-    global.acp_agent_id = Some("global-agent".into());
-    let mut acp = history(ProviderKind::Acp, "target", "agent-model", 500);
-    acp.acp_agent_id = Some("agent.example".into());
-    let mut profile = history(ProviderKind::ClaudeCode, "target", "k3[1m]", 500);
-    profile.profile_id = Some("klaude-kode".into());
-    let codex = history(ProviderKind::Codex, "target", "gpt-5.2-codex", 500);
-    let cx = &mut TestAppContext::default();
+fn draft_defaults_follow_history_within_current_account_and_model_settings() {
     let store = TestStore::new("tcode-draft-defaults");
-    let mut settings = Settings::default();
+    let project = Project::from_root(store.root().join("project"));
+    let empty_project = Project::from_root(store.root().join("empty-project"));
+    for project in [&project, &empty_project] {
+        fs::create_dir_all(&project.root).unwrap();
+        store.upsert_project(project).unwrap();
+    }
+    for (id, provider, project_id, model, updated_at) in [
+        (
+            "older",
+            ProviderKind::Codex,
+            project.id.as_str(),
+            "older-model",
+            100,
+        ),
+        (
+            "project",
+            ProviderKind::ClaudeCode,
+            project.id.as_str(),
+            "team-model",
+            500,
+        ),
+        (
+            "global",
+            ProviderKind::Acp,
+            "other-project",
+            "global-model",
+            900,
+        ),
+        (
+            "archived",
+            ProviderKind::Codex,
+            project.id.as_str(),
+            "archived-model",
+            1000,
+        ),
+    ] {
+        stored_thread(&store, id, provider, &project.root, |meta| {
+            meta.project_id = Some(project_id.into());
+            meta.model = Some(model.into());
+            meta.updated_at = updated_at;
+            meta.option_selections = vec![OptionSelection {
+                id: agent::EFFORT_OPTION_ID.into(),
+                value: serde_json::json!("high"),
+            }];
+            match id {
+                "project" => {
+                    meta.profile_id = Some("team".into());
+                    meta.option_selections.extend([
+                        OptionSelection {
+                            id: "permissionMode".into(),
+                            value: serde_json::json!("acceptEdits"),
+                        },
+                        OptionSelection {
+                            id: "serviceTier".into(),
+                            value: serde_json::json!("fast"),
+                        },
+                    ]);
+                }
+                "global" => meta.acp_agent_id = Some("global-agent".into()),
+                "archived" => meta.archived_at = Some(1001),
+                _ => {}
+            }
+        });
+    }
+    let mut settings = Settings {
+        auto_settle_after_days: None,
+        ..Settings::default()
+    };
     settings.profiles.insert(
-        "klaude-kode".into(),
-        tcode_core::settings::ProviderProfile {
+        "team".into(),
+        ProviderProfile {
             kind: ProviderKind::ClaudeCode,
-            settings: tcode_core::settings::ProviderSettings {
-                custom_models: vec!["k3[1m]".into()],
+            settings: ProviderSettings {
+                custom_models: vec!["team-model".into(), "team-next".into()],
+                env: vec![tcode_core::settings::EnvVar {
+                    name: "ANTHROPIC_API_KEY".into(),
+                    value: String::new(),
+                    sensitive: true,
+                }],
                 ..Default::default()
             },
+        },
+    );
+    settings.acp_agents.insert(
+        "global-agent".into(),
+        InstalledAgent {
+            id: "global-agent".into(),
+            name: "Global agent".into(),
+            version: String::new(),
+            icon: None,
+            launch: agent::AcpLaunch::Custom {
+                command: "global-agent".into(),
+                args: Vec::new(),
+                env: Vec::new(),
+            },
+            enabled: true,
+            env: Vec::new(),
+            launch_args: None,
         },
     );
     tcode_services::settings::SettingsStore::new(store.root().clone())
         .save(&settings)
         .unwrap();
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    for (name, sessions, provider, model, agent, profile, effort) in [
-        (
-            "project",
-            vec![global.clone(), older.clone(), archived.clone(), codex],
-            ProviderKind::Codex,
-            Some("gpt-5.2-codex"),
-            None,
-            None,
-            true,
-        ),
-        (
-            "acp",
-            vec![global.clone(), archived.clone(), acp],
-            ProviderKind::Acp,
-            Some("agent-model"),
-            Some("agent.example"),
-            None,
-            true,
-        ),
-        (
-            "profile",
-            vec![global.clone(), older, profile],
+    store
+        .save_models(
             ProviderKind::ClaudeCode,
-            Some("k3[1m]"),
-            None,
-            Some("klaude-kode"),
-            true,
-        ),
-        (
-            "global",
-            vec![global.clone()],
-            ProviderKind::Acp,
-            Some("global-model"),
-            Some("global-agent"),
-            None,
-            false,
-        ),
-        (
-            "archived target",
-            vec![archived.clone(), global],
-            ProviderKind::Acp,
-            Some("global-model"),
-            Some("global-agent"),
-            None,
-            false,
-        ),
-        (
-            "all archived",
-            vec![archived],
-            ProviderKind::ClaudeCode,
-            None,
-            None,
-            None,
-            false,
-        ),
-        (
-            "empty",
-            vec![],
-            ProviderKind::ClaudeCode,
-            None,
-            None,
-            None,
-            false,
-        ),
-    ] {
-        // A draft in a directory of its own, so no row's draft is another's.
-        let cwd = PathBuf::from(format!("/new-project/{name}"));
-        state.update(cx, |state, cx| {
-            state.sessions = sessions.into();
-            state.start_draft("target".into(), cwd.clone(), cx);
-            let draft = state.selected_session().unwrap();
-            assert!(draft.draft, "{name}");
-            assert_eq!(draft.meta.provider, provider, "{name}");
-            assert_eq!(draft.meta.model.as_deref(), model, "{name}");
-            assert_eq!(draft.meta.acp_agent_id.as_deref(), agent, "{name}");
-            assert_eq!(draft.meta.profile_id.as_deref(), profile, "{name}");
-            assert_eq!(draft.meta.cwd, cwd);
-            assert_eq!(draft.meta.project_id.as_deref(), Some("target"));
-            let mut expected = if effort {
-                vec![OptionSelection {
-                    id: "reasoningEffort".into(),
-                    value: serde_json::json!("high"),
-                }]
-            } else {
-                vec![]
-            };
-            expected.extend(
-                match provider {
-                    ProviderKind::ClaudeCode => Some(("permissionMode", "auto")),
-                    // The project's last thread ran Codex at "ask".
-                    ProviderKind::Codex => Some(("permissions", "ask")),
-                    _ => None,
-                }
-                .map(|(id, value)| OptionSelection {
-                    id: id.into(),
-                    value: serde_json::json!(value),
-                }),
-            );
-            assert_eq!(draft.meta.option_selections, expected, "{name}");
-            assert!(state.store.load_index().unwrap().is_empty(), "{name}");
-        });
+            &[
+                agent::ModelSpec {
+                    id: "native-default".into(),
+                    display_name: "Default".into(),
+                    is_default: true,
+                    options: Vec::new(),
+                },
+                agent::ModelSpec {
+                    id: "native-other".into(),
+                    display_name: "Other".into(),
+                    is_default: false,
+                    options: Vec::new(),
+                },
+            ],
+        )
+        .unwrap();
+    let cx = &mut TestAppContext::default();
+    let (state, _) = played_host(cx, &store);
+    let start = |project: &Project, cwd: PathBuf| Command::StartDraft {
+        project_id: project.id.clone(),
+        cwd,
+    };
+    let draft = |response| match response {
+        CommandResponse::SessionId(Some(id)) => id,
+        other => panic!("draft response: {other:?}"),
+    };
+    let project_draft = draft(
+        state
+            .command(cx, start(&project, project.root.clone()))
+            .unwrap(),
+    );
+    state.open(cx, &project_draft);
+    let status = cx.seen().status(&project_draft);
+    assert_eq!(status.provider, ProviderKind::ClaudeCode);
+    assert_eq!(status.requested_profile_id.as_deref(), Some("team"));
+    assert_eq!(status.requested_model.as_deref(), Some("team-model"));
+    assert!(
+        status
+            .provider_option_requested_selections
+            .iter()
+            .any(|option| option.id == agent::EFFORT_OPTION_ID && option.value == "high")
+    );
+    assert!(
+        status
+            .provider_option_requested_selections
+            .iter()
+            .any(|option| option.id == "permissionMode" && option.value == "acceptEdits")
+    );
+    assert!(
+        !status
+            .provider_option_requested_selections
+            .iter()
+            .any(|option| option.id == "serviceTier")
+    );
+    let global_draft = draft(
+        state
+            .command(cx, start(&empty_project, empty_project.root.clone()))
+            .unwrap(),
+    );
+    state.open(cx, &global_draft);
+    let status = cx.seen().status(&global_draft);
+    assert_eq!(status.provider, ProviderKind::Acp);
+    assert_eq!(status.requested_model.as_deref(), Some("global-model"));
+    assert_eq!(status.acp_agent_id.as_deref(), Some("global-agent"));
+    assert!(
+        !status
+            .provider_option_requested_selections
+            .iter()
+            .any(|option| option.id == agent::EFFORT_OPTION_ID)
+    );
+
+    let patch = |profile: &str, patch| Command::UpdateProfileSettings {
+        profile_id: profile.into(),
+        patch,
+    };
+    state
+        .command(
+            cx,
+            patch(
+                "team",
+                ProfileSettingsPatch::SetHiddenModels(vec!["team-model".into()]),
+            ),
+        )
+        .unwrap();
+    let reopened = draft(
+        state
+            .command(cx, start(&project, project.root.clone()))
+            .unwrap(),
+    );
+    assert_eq!(reopened, project_draft);
+    state.open(cx, &reopened);
+    let status = cx.seen().status(&reopened);
+    assert_eq!(status.requested_profile_id.as_deref(), Some("team"));
+    assert_eq!(status.requested_model.as_deref(), Some("team-next"));
+    state
+        .command(
+            cx,
+            Command::UpdateAcpAgent {
+                id: "global-agent".into(),
+                patch: tcode_core::acp::AcpAgentPatch::SetEnabled { enabled: false },
+            },
+        )
+        .unwrap();
+    for provider in ProviderKind::NATIVE {
+        state
+            .command(
+                cx,
+                patch(
+                    Settings::builtin_profile_id(provider),
+                    ProfileSettingsPatch::SetEnabled { enabled: false },
+                ),
+            )
+            .unwrap();
+    }
+    state
+        .command(
+            cx,
+            patch(
+                "team",
+                ProfileSettingsPatch::SetHiddenModels(vec![
+                    "team-model".into(),
+                    "team-next".into(),
+                ]),
+            ),
+        )
+        .unwrap();
+    for cwd in [project.root.clone(), project.root.join("fresh")] {
+        let error = state.command(cx, start(&project, cwd)).unwrap_err();
+        assert_eq!(error.code, "no_available_model");
+    }
+    state
+        .command(
+            cx,
+            patch("claude", ProfileSettingsPatch::SetEnabled { enabled: true }),
+        )
+        .unwrap();
+    state
+        .command(
+            cx,
+            patch(
+                "claude",
+                ProfileSettingsPatch::SetHiddenModels(vec!["native-default".into()]),
+            ),
+        )
+        .unwrap();
+    state
+        .command(
+            cx,
+            patch("team", ProfileSettingsPatch::SetEnabled { enabled: false }),
+        )
+        .unwrap();
+    let fresh = draft(
+        state
+            .command(cx, start(&project, project.root.join("fresh")))
+            .unwrap(),
+    );
+    state.open(cx, &fresh);
+    let status = cx.seen().status(&fresh);
+    assert_eq!(status.provider, ProviderKind::ClaudeCode);
+    assert_eq!(status.requested_profile_id, None);
+    assert_eq!(status.requested_model.as_deref(), Some("native-other"));
+    state.command(cx, Command::ShutdownAllAndFlush).unwrap();
+    let persisted = store.load_index().unwrap();
+    for id in [&project_draft, &global_draft, &fresh] {
+        assert!(!persisted.iter().any(|meta| &meta.id == id));
     }
 }
 
@@ -6841,30 +7055,56 @@ fn resident_idle_lru_evicts_only_oldest_provider() {
 /// names, else at the permission Tcode recommends for that Harness.
 #[test]
 fn a_new_threads_permission_is_its_projects_then_its_harness_then_the_recommended() {
-    let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-permission-default");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let value = |state: &AppState| {
+    let plain = Project::from_root(store.root().join("plain"));
+    let mut configured = Project::from_root(store.root().join("configured"));
+    configured
+        .permission_defaults
+        .insert("claude".into(), "default".into());
+    for project in [&plain, &configured] {
+        fs::create_dir_all(&project.root).unwrap();
+        store.upsert_project(project).unwrap();
+    }
+    let cx = &mut TestAppContext::default();
+    let (state, _) = played_host(cx, &store);
+    for (project, harness, expected) in [
+        (&plain, None, "auto"),
+        (&plain, Some("acceptEdits"), "acceptEdits"),
+        (&configured, Some("acceptEdits"), "default"),
+    ] {
         state
-            .initial_permission_selection(Some("project"), ProviderKind::ClaudeCode, None)
+            .command(
+                cx,
+                Command::UpdateProfileSettings {
+                    profile_id: "claude".into(),
+                    patch: ProfileSettingsPatch::SetDefaultPermission(harness.map(Into::into)),
+                },
+            )
+            .unwrap();
+        let CommandResponse::SessionId(Some(id)) = state
+            .command(
+                cx,
+                Command::StartDraft {
+                    project_id: project.id.clone(),
+                    cwd: project.root.join(expected),
+                },
+            )
             .unwrap()
-            .value
-    };
-    state.update(cx, |state, _| {
-        let mut project = tcode_core::project::Project::from_root("/project".into());
-        project.id = "project".into();
-        state.projects.push(project);
-        assert_eq!(value(state), "auto");
-        state
-            .settings
-            .provider_mut(ProviderKind::ClaudeCode)
-            .default_permission = Some("acceptEdits".into());
-        assert_eq!(value(state), "acceptEdits");
-        state.projects[0]
-            .permission_defaults
-            .insert("claude".into(), "default".into());
-        assert_eq!(value(state), "default");
-    });
+        else {
+            panic!("draft response")
+        };
+        state.open(cx, &id);
+        let status = cx.seen().status(&id);
+        assert_eq!(status.provider, ProviderKind::ClaudeCode);
+        assert_eq!(
+            status
+                .provider_option_requested_selections
+                .iter()
+                .find(|selection| selection.id == "permissionMode")
+                .map(|selection| selection.value.as_str()),
+            Some(Some(expected))
+        );
+    }
 }
 
 /// While a harness runs, an option it reports runs at what it reported and
@@ -7808,43 +8048,104 @@ fn a_steer_lost_with_its_process_goes_back_on_the_queue() {
 /// waits for that turn instead of killing it to restart the provider.
 #[test]
 fn settings_restart_waits_for_the_running_turn() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-running-turn-restart-test");
-    stored_thread(
-        &test_store,
-        "running-turn-restart",
-        ProviderKind::Grok,
-        &test_store.root().join("thread"),
-        |meta| {
-            meta.model = Some("grok-4".into());
-        },
-    );
-    let (state, providers) = played_host(cx, &test_store);
-    let actor = first_turn(&state, cx, &providers, "running-turn-restart", 0);
-    state
-        .command(
-            cx,
-            Command::SetActiveModel {
-                session_id: "running-turn-restart".into(),
-                provider: ProviderKind::Grok,
-                model: Some("grok-5".into()),
-                profile_id: None,
+    use tcode_core::settings::EnvVar;
+    for launch_environment in [false, true] {
+        let cx = &mut TestAppContext::default();
+        let store = TestStore::new("tcode-running-turn-restart-test");
+        let mut settings = Settings::default();
+        settings.profiles.insert(
+            "endpoint".into(),
+            ProviderProfile {
+                kind: ProviderKind::Grok,
+                settings: ProviderSettings {
+                    env: vec![EnvVar {
+                        name: "BASE_URL".into(),
+                        value: "https://old.invalid".into(),
+                        sensitive: false,
+                    }],
+                    ..Default::default()
+                },
             },
-        )
-        .unwrap();
-    state.send(cx, "running-turn-restart", "continue on the new model");
-    assert!(next_command(&actor.commands).is_err());
-    providers.hold();
-    actor.play([completed_turn("turn")]);
-    assert!(matches!(actor.next_command(cx), SessionCommand::Shutdown));
-    assert_eq!(
-        cx.seen()
-            .status("running-turn-restart")
-            .queued_messages
-            .len(),
-        1
-    );
-    providers.let_go();
+        );
+        SettingsStore::new(store.root().clone())
+            .save(&settings)
+            .unwrap();
+        stored_thread(
+            &store,
+            "thread",
+            ProviderKind::Grok,
+            &store.root().join("thread"),
+            |meta| {
+                meta.model = Some("grok-4".into());
+                if launch_environment {
+                    meta.profile_id = Some("endpoint".into());
+                }
+            },
+        );
+        let (state, providers) = played_host(cx, &store);
+        let old = first_turn(&state, cx, &providers, "thread", 0);
+        if launch_environment {
+            assert!(
+                old.options
+                    .launch_env
+                    .env
+                    .contains(&("BASE_URL".into(), "https://old.invalid".into()))
+            );
+        }
+        state
+            .command(
+                cx,
+                if launch_environment {
+                    Command::UpdateProfileSettings {
+                        profile_id: "endpoint".into(),
+                        patch: ProfileSettingsPatch::SetEnv(vec![EnvVar {
+                            name: "BASE_URL".into(),
+                            value: "https://new.invalid".into(),
+                            sensitive: false,
+                        }]),
+                    }
+                } else {
+                    Command::SetActiveModel {
+                        session_id: "thread".into(),
+                        provider: ProviderKind::Grok,
+                        model: Some("grok-5".into()),
+                        profile_id: None,
+                    }
+                },
+            )
+            .unwrap();
+        state.send(cx, "thread", "continue after configuration change");
+        assert!(next_command(&old.commands).is_err());
+        providers.hold();
+        old.play([completed_turn("turn")]);
+        assert!(matches!(old.next_command(cx), SessionCommand::Shutdown));
+        let current = providers.started(cx, 1);
+        assert_eq!(cx.seen().status("thread").queued_messages.len(), 1);
+        if launch_environment {
+            assert!(
+                current
+                    .options
+                    .launch_env
+                    .env
+                    .contains(&("BASE_URL".into(), "https://new.invalid".into()))
+            );
+            assert!(
+                !current
+                    .options
+                    .launch_env
+                    .env
+                    .contains(&("BASE_URL".into(), "https://old.invalid".into()))
+            );
+        } else {
+            assert_eq!(current.options.model.as_deref(), Some("grok-5"));
+        }
+        providers.let_go();
+        assert_eq!(
+            current.next_turn(cx).1,
+            "continue after configuration change"
+        );
+        assert!(next_command(&old.commands).is_err());
+    }
 }
 
 /// A thread forks only while no turn of it runs, background work or not. The
@@ -8367,6 +8668,37 @@ fn compaction_waits_for_the_running_turn() {
         provider.next_command(cx),
         SessionCommand::ClearGoal
     ));
+    state
+        .command(
+            cx,
+            Command::UpdateProfileSettings {
+                profile_id: "claude".into(),
+                patch: ProfileSettingsPatch::SetEnv(vec![tcode_core::settings::EnvVar {
+                    name: "BASE_URL".into(),
+                    value: "https://compaction.invalid".into(),
+                    sensitive: false,
+                }]),
+            },
+        )
+        .unwrap();
+    state.command(cx, compact()).unwrap();
+    assert!(matches!(
+        provider.next_command(cx),
+        SessionCommand::Shutdown
+    ));
+    let restarted = providers.started(cx, 1);
+    assert!(matches!(
+        restarted.next_command(cx),
+        SessionCommand::Compact
+    ));
+    assert!(
+        restarted
+            .options
+            .launch_env
+            .env
+            .contains(&("BASE_URL".into(), "https://compaction.invalid".into()))
+    );
+    assert!(next_command(&provider.commands).is_err());
 }
 
 /// A client that leaves one thread for another before the first's log has
