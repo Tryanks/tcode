@@ -2556,7 +2556,7 @@ fn layout_grid_cached(
     }
 
     let mut rows = Vec::with_capacity(state.rows());
-    for row in 0..state.rows() {
+    for (row, cached_row) in cache.rows.iter_mut().enumerate() {
         let row_key = row_layout_key(
             state,
             row,
@@ -2567,7 +2567,7 @@ fn layout_grid_cached(
             blink_phase,
         );
         let clean = !state.row_damaged(row);
-        let cached = cache.rows[row]
+        let cached = cached_row
             .as_ref()
             .filter(|cached| clean && cached.key == row_key)
             .map(|cached| cached.paint.clone());
@@ -2582,7 +2582,7 @@ fn layout_grid_cached(
                 blink_phase,
                 cursor_cell,
             ));
-            cache.rows[row] = Some(CachedRowLayout {
+            *cached_row = Some(CachedRowLayout {
                 key: row_key,
                 paint: paint.clone(),
             });
