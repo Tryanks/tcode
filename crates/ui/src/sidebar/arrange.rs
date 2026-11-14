@@ -532,7 +532,7 @@ impl SessionsSidebar {
         let landing = self.landing.as_ref().expect("checked above");
         let (section, index) = landing.gap;
         let listed = host_scope(landing.scope.as_ref(), &host).is_some_and(|project| {
-            project_threads(&of.flat, project)
+            project_threads(&of.flat, project, &of.hidden)
                 .section(section)
                 .iter()
                 .position(|meta| meta.id == landing.thread.session_id)
@@ -1142,7 +1142,7 @@ impl SessionsSidebar {
                     let host = self.arranged(
                         &lists.host,
                         scope.as_ref(),
-                        project_threads(&lists.flat, project),
+                        project_threads(&lists.flat, project, &lists.hidden),
                     );
                     Some(tagged_sections(&lists.host, host))
                 })

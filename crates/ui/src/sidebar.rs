@@ -487,15 +487,20 @@ fn keeps_going(state: &ThreadRowState) -> Option<String> {
 }
 
 /// The rows a list shows by section, narrowed to one project when a filter is set.
+/// The threads view's threads: `project`'s, or without one every thread
+/// outside the `hidden` projects.
 fn project_threads<'a>(
     sessions: &'a [SessionMeta],
     project: Option<&str>,
+    hidden: &HashSet<String>,
 ) -> ThreadSections<&'a SessionMeta> {
-    partition_threads(
-        sessions
-            .iter()
-            .filter(|meta| project.is_none_or(|id| meta.project_id.as_deref() == Some(id))),
-    )
+    partition_threads(sessions.iter().filter(|meta| {
+        let of = meta.project_id.as_deref();
+        match project {
+            Some(id) => of == Some(id),
+            None => of.is_none_or(|id| !hidden.contains(id)),
+        }
+    }))
 }
 
 /// A project's threads in the project view: the active ones (pinned
@@ -971,6 +976,9 @@ struct HostLists {
     groups: Rc<Vec<ProjectGroup>>,
     flat: Rc<Vec<SessionMeta>>,
     flags: Rc<HashMap<String, ThreadFlags>>,
+    /// The host's projects a space hides from the threads view, when this
+    /// client manages its spaces; the project view still lists them.
+    hidden: Rc<HashSet<String>>,
 }
 
 /// Each host's [`HostLists`], in the sidebar's order of hosts.
@@ -1110,10 +1118,17 @@ impl SessionsSidebar {
         let cached = self.thread_lists.take().unwrap_or_default();
         let sectioned = self.sectioned();
         let down = |host: &SidebarHost| sectioned && host_down(host.store.read(cx));
+        let hidden = |host: &SidebarHost| {
+            host.spaces_observer
+                .watched()
+                .map(|spaces| spaces.read(cx).hidden_from_threads())
+                .unwrap_or_default()
+        };
         let current = |host: &SidebarHost, lists: &HostLists| {
             lists.host == host.key
                 && lists.revision == host.store.read(cx).thread_list_revision()
                 && lists.down == down(host)
+                && *lists.hidden == hidden(host)
         };
         if cached.len() == self.hosts.len()
             && self
@@ -1125,6 +1140,7 @@ impl SessionsSidebar {
             self.thread_lists = Some(cached.clone());
             return cached;
         }
+        self.compact_model_dirty = true;
         let lists: ThreadLists = self
             .hosts
             .iter()
@@ -1141,6 +1157,7 @@ impl SessionsSidebar {
                             groups: Rc::default(),
                             flat: Rc::default(),
                             flags: Rc::default(),
+                            hidden: Rc::default(),
                         };
                     }
                     HostLists {
@@ -1150,6 +1167,7 @@ impl SessionsSidebar {
                         groups: Rc::new(store.grouped_sessions()),
                         flat: Rc::new(store.flat_sessions()),
                         flags: Rc::new(session_flags(store.sidebar_sessions(), store)),
+                        hidden: Rc::new(hidden(host)),
                     }
                 })
             })
@@ -1227,7 +1245,8 @@ impl SessionsSidebar {
             .iter()
             .filter_map(|lists| {
                 let project = host_scope(scope, &lists.host)?;
-                let host = self.arranged(&lists.host, scope, project_threads(&lists.flat, project));
+                let threads = project_threads(&lists.flat, project, &lists.hidden);
+                let host = self.arranged(&lists.host, scope, threads);
                 Some(tagged_sections(&lists.host, host))
             })
             .collect();
@@ -5353,8 +5372,9 @@ impl SessionsSidebar {
                 } = merged(
                     hosts
                         .iter()
-                        .map(|(host, sessions, _)| {
-                            tagged_sections(host, project_threads(sessions, None))
+                        .zip(lists.iter())
+                        .map(|((host, sessions, _), lists)| {
+                            tagged_sections(host, project_threads(sessions, None, &lists.hidden))
                         })
                         .collect(),
                 );
@@ -6563,8 +6583,9 @@ impl SessionsSidebar {
             self.shelf_factors(&Shelf::Recent, &settled_visible, more.is_some());
         let mut folds = vec![1.; visible.len()];
         if pinned.is_empty() && active.is_empty() && settled_count == 0 {
-            // An active project filter can empty the list while threads
-            // exist; that state gets its own hint, not the no-projects one.
+            // An active project filter, or spaces hiding every project with
+            // threads, can empty the list while threads exist; those states
+            // get their own hint, not the no-projects one.
             let no_threads = lists.iter().all(|lists| lists.flat.is_empty());
             let hint = if !self.full_scope(cx) && no_threads {
                 if self
@@ -6578,6 +6599,8 @@ impl SessionsSidebar {
                 }
             } else if no_threads {
                 crate::tr!("sidebar.empty")
+            } else if scope.is_none() {
+                crate::tr!("sidebar.shared_threads_hidden")
             } else {
                 crate::tr!("sidebar.filter_empty")
             };
@@ -6849,12 +6872,13 @@ impl Render for SessionsSidebar {
             let spaces = spaces::for_store(&host.store, cx);
             host.spaces_observer.watch(spaces.as_ref(), cx);
         }
+        // Read before the compact list so a change of spaces rebuilds it.
+        let thread_lists = self.thread_lists(cx);
         if self.compact(cx) {
             return self.render_compact(window, cx);
         }
 
         let layout = DevicePreferences::sidebar_layout(cx);
-        let thread_lists = self.thread_lists(cx);
         // Flat and Grouped are each their own list; switching cross-fades
         // them, the one left keeping its scroll while it fades. Until the
         // settings and threads load, the layout is only adopted.
@@ -7774,7 +7798,9 @@ mod tests {
 
     /// The sidebar's share item puts the project in a space on the machine the
     /// window shows, and takes it out again, and the project is marked shared
-    /// while it is in one. The machine answers over a scripted transport.
+    /// while it is in one. A space set to hide its projects from the threads
+    /// view leaves their threads to the project view. The machine answers
+    /// over a scripted transport.
     #[gpui::test]
     fn the_share_item_toggles_the_project_in_a_space_on_its_machine(cx: &mut TestAppContext) {
         use tcode_protocol::{
@@ -7842,6 +7868,7 @@ mod tests {
 
         // The machine's spaces: one, holding the projects it was last given.
         let mut shared: Vec<String> = Vec::new();
+        let mut hidden = false;
         let mut asked: Vec<Vec<String>> = Vec::new();
         let mut serve = |cx: &mut VisualTestContext| {
             for _ in 0..4 {
@@ -7849,7 +7876,7 @@ mod tests {
                 cx.run_until_parked();
                 while let Ok(line) = outgoing.try_recv() {
                     let message = decode_client_line(&line).unwrap();
-                    let state = |shared: &Vec<String>| HostingState {
+                    let state = |shared: &Vec<String>, hidden: bool| HostingState {
                         created_space_id: None,
                         spaces: vec![SpaceInfo {
                             id: "design".into(),
@@ -7861,6 +7888,7 @@ mod tests {
                             link_dead: false,
                             members: vec![],
                             policy: tcode_protocol::SpacePolicy::unrestricted(),
+                            hidden_from_threads: hidden,
                         }],
                         enabled: true,
                         expires_in_secs: 0,
@@ -7878,21 +7906,29 @@ mod tests {
                             HostMessage::Event(EventEnvelope {
                                 request_id: Some(message.id),
                                 topic: Topic::Hosting,
-                                event: ServerEvent::HostingReplaced(Box::new(state(&shared))),
+                                event: ServerEvent::HostingReplaced(Box::new(state(
+                                    &shared, hidden,
+                                ))),
                             })
                         }
                         ClientPayload::Query(Query::Hosting { action }) => {
-                            if let HostingAction::Spaces(SpaceAction::SetProjects {
-                                project_ids,
-                                ..
-                            }) = action
-                            {
-                                asked.push(project_ids.clone());
-                                shared = project_ids;
+                            match action {
+                                HostingAction::Spaces(SpaceAction::SetProjects {
+                                    project_ids,
+                                    ..
+                                }) => {
+                                    asked.push(project_ids.clone());
+                                    shared = project_ids;
+                                }
+                                HostingAction::Spaces(SpaceAction::SetHiddenFromThreads {
+                                    hidden: next,
+                                    ..
+                                }) => hidden = next,
+                                _ => {}
                             }
                             HostMessage::QueryResult {
                                 id: message.id,
-                                result: Ok(QueryResponse::Hosting(state(&shared))),
+                                result: Ok(QueryResponse::Hosting(state(&shared, hidden))),
                             }
                         }
                         ClientPayload::Subscribe(_) | ClientPayload::Command(_) => {
@@ -7924,11 +7960,45 @@ mod tests {
             cx.debug_bounds("project-shared-a").is_some(),
             "a shared project is marked"
         );
+        assert!(cx.debug_bounds("sidebar-thread-thread").is_some());
+        cx.update(|_, cx| DevicePreferences::set_sidebar_layout(SidebarLayout::Flat, cx));
+        serve(cx);
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            cx.debug_bounds("sidebar-thread-thread").is_some(),
+            "sharing alone keeps a project in the threads view"
+        );
+
+        let spaces = cx.update(|_, cx| spaces::for_store(&store, cx)).unwrap();
+        spaces
+            .update(cx, |spaces, cx| {
+                spaces.act(
+                    vec![SpaceAction::SetHiddenFromThreads {
+                        id: "design".into(),
+                        hidden: true,
+                    }],
+                    cx,
+                )
+            })
+            .detach();
+        serve(cx);
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            cx.debug_bounds("sidebar-thread-thread").is_none(),
+            "the threads view leaves a hiding space's projects out"
+        );
 
         sidebar.update_in(cx, |sidebar, window, cx| {
             sidebar.on_toggle_share(&share, window, cx)
         });
         serve(cx);
+        assert!(
+            cx.debug_bounds("sidebar-thread-thread").is_some(),
+            "a project out of the hiding space returns to the threads view"
+        );
+        cx.update(|_, cx| DevicePreferences::set_sidebar_layout(SidebarLayout::Grouped, cx));
+        serve(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("project-shared-a").is_none());
         drop(serve);
         assert_eq!(asked, [vec!["a".to_string()], vec![]]);

@@ -355,6 +355,8 @@ pub use wire::{
 // run the harness saw change its files. A file change's kind gains changed,
 // a file the harness reports changed without saying how. A user-input
 // question carries optional, set when the asker accepts it left unanswered.
+// SpaceInfo carries hidden_from_threads, set by SpaceAction
+// set_hidden_from_threads.
 pub const PROTOCOL_VERSION: u32 = 29;
 
 #[cfg(test)]
