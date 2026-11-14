@@ -500,26 +500,15 @@ fn launch_args(
     .into_iter()
     .map(Into::into)
     .collect();
-    for (flag, value) in [("--model", &launch.model_id), ("--effort", &launch.effort)] {
+    for (flag, value) in [
+        ("--model", &launch.model_id),
+        ("--effort", &launch.effort),
+        ("--settings", &launch.settings_json),
+    ] {
         if let Some(value) = value {
             args.extend([flag.into(), value.into()]);
         }
     }
-    // Claude Code records the files a Bash command changed (`bashEditDiff`)
-    // only in auto and bypass modes unless asked to in every mode.
-    let mut settings = serde_json::Map::new();
-    settings.insert("bashEditDiffEnabled".into(), json!(true));
-    settings.extend(
-        launch
-            .settings_json
-            .as_deref()
-            .and_then(|settings| serde_json::from_str::<serde_json::Map<_, _>>(settings).ok())
-            .unwrap_or_default(),
-    );
-    args.extend([
-        "--settings".into(),
-        Value::Object(settings).to_string().into(),
-    ]);
     args.extend(resume.into_iter().map(Into::into));
     // Tokens ride in Authorization headers inside the merged `--mcp-config` JSON.
     args.extend(mcp_args(mcp_servers).into_iter().map(Into::into));
@@ -2149,6 +2138,9 @@ pub(crate) struct Mapper {
     limit_resets_at: Option<u64>,
     /// Warning-bearing stop reason already emitted for this occurrence.
     warned_stop_reason: Option<String>,
+    /// The `apply_flag_settings` turning on `bashEditDiffEnabled`, awaiting
+    /// its answer.
+    pending_edit_diff: Option<String>,
 }
 
 impl Mapper {
@@ -2209,6 +2201,7 @@ impl Mapper {
             last_served_model: None,
             limit_resets_at: None,
             warned_stop_reason: None,
+            pending_edit_diff: None,
         }
     }
 
@@ -2488,6 +2481,22 @@ impl Mapper {
                 value: effort,
             }],
         });
+        // Claude Code records the files a Bash command changed (`bashEditDiff`)
+        // in default modes only when asked. Asked in the flag layer, which
+        // outranks the user's own settings, so only where none of theirs
+        // decides it.
+        if response
+            .pointer("/response/effective")
+            .and_then(Value::as_object)
+            .is_some_and(|effective| !effective.contains_key("bashEditDiffEnabled"))
+        {
+            let message = self.control_request(json!({
+                "subtype": "apply_flag_settings",
+                "settings": { "bashEditDiffEnabled": true },
+            }));
+            self.pending_edit_diff = message["request_id"].as_str().map(str::to_owned);
+            self.outgoing.push(message);
+        }
         events
     }
 
@@ -4058,6 +4067,21 @@ impl Mapper {
         if self.pending_settings_read.as_deref() == Some(request_id) {
             self.pending_settings_read = None;
             return self.on_settings_read(response);
+        }
+        if self.pending_edit_diff.as_deref() == Some(request_id) {
+            self.pending_edit_diff = None;
+            if response.get("subtype").and_then(Value::as_str) == Some("success") {
+                return Vec::new();
+            }
+            let error = response
+                .get("error")
+                .and_then(Value::as_str)
+                .map_or_else(|| response.to_string(), str::to_owned);
+            return vec![AgentEvent::Warning {
+                message: format!(
+                    "claude: could not turn on bashEditDiffEnabled, so the files a command changes are not shown: {error}"
+                ),
+            }];
         }
         if self.pending_background_moves.remove(request_id) {
             let moved = response.get("subtype").and_then(Value::as_str) == Some("success")
@@ -5756,6 +5780,39 @@ mod tests {
         assert_eq!(effort(&answer("low", json!({"effort":null}))), Value::Null);
     }
 
+    /// `get_settings`' `effective` (the merged settings) and the
+    /// `apply_flag_settings` request are Claude Code 2.1.323's control schema;
+    /// the values are made up.
+    #[test]
+    fn bash_edit_diff_is_turned_on_unless_the_users_settings_decide_it() {
+        let read_with = |effective: Value| {
+            let mut mapper = Mapper::new();
+            let read = mapper.settings_read_request();
+            mapper.on_message(json!({"type":"control_response", "response": {
+                "subtype":"success", "request_id":read["request_id"],
+                "response":{"effective":effective, "sources":[], "applied":{"model":"claude-haiku-4-5","effort":null}}
+            }}));
+            mapper
+        };
+        let mut mapper = read_with(json!({"model":"haiku"}));
+        let [apply] = mapper.take_outgoing().try_into().expect("one request");
+        assert_eq!(
+            apply["request"],
+            json!({"subtype":"apply_flag_settings", "settings":{"bashEditDiffEnabled":true}})
+        );
+        let events = mapper.on_message(json!({"type":"control_response", "response": {
+            "subtype":"error", "request_id":apply["request_id"], "error":"flag settings are read-only here"
+        }}));
+        assert!(
+            matches!(events.as_slice(), [AgentEvent::Warning { message }]
+                if message.contains("flag settings are read-only here")),
+            "{events:?}"
+        );
+
+        let mut mapper = read_with(json!({"bashEditDiffEnabled":false}));
+        assert!(mapper.take_outgoing().is_empty());
+    }
+
     #[test]
     fn native_permission_switches_publish_only_confirmed_values() {
         let mut mapper = Mapper::new();
@@ -6245,7 +6302,7 @@ mod tests {
             "--effort",
             "high",
             "--settings",
-            r#"{"bashEditDiffEnabled":true,"fastMode":true}"#,
+            r#"{"fastMode":true}"#,
             "--resume",
             "native",
             &mcp_config[0],
