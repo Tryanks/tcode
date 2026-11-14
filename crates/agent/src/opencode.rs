@@ -2321,9 +2321,13 @@ impl Mapper {
                     self.tools.remove(&item_id);
                     return Ok(mapped);
                 }
+                // A shell the user stopped fails with `metadata.interrupted`
+                // (2.3.0's `shell.ts`).
                 let status = if success {
                     ItemStatus::Completed
-                } else if data.pointer("/error/type") == Some(&json!("aborted")) {
+                } else if data.pointer("/error/type") == Some(&json!("aborted"))
+                    || data.pointer("/metadata/interrupted") == Some(&json!(true))
+                {
                     ItemStatus::Interrupted
                 } else {
                     ItemStatus::Failed
