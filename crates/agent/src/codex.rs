@@ -4080,6 +4080,7 @@ fn parse_elicitation_form(
             question: question.to_owned(),
             options,
             multi_select: matches!(kind, ElicitFieldKind::MultiEnum),
+            optional: false,
             prefill: None,
         });
         fields.push(ElicitField {
@@ -4115,6 +4116,7 @@ fn parse_elicitation_url(
             elicit_option(ELICITATION_URL_CANCEL_LABEL),
         ],
         multi_select: false,
+        optional: false,
         prefill: None,
     };
     let field = ElicitField {
@@ -4173,6 +4175,7 @@ fn parse_codex_user_input(params: &Value) -> Vec<UserInputQuestion> {
                 question: question.to_owned(),
                 options,
                 multi_select: false,
+                optional: false,
                 prefill: None,
             })
         })
@@ -4221,6 +4224,7 @@ fn parse_codex_async_questions(message_id: &str, item: &Value) -> Vec<UserInputQ
                 question: title.to_owned(),
                 options,
                 multi_select: false,
+                optional: false,
                 prefill: None,
             })
         })

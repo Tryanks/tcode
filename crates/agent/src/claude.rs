@@ -2622,7 +2622,8 @@ impl Mapper {
 
     /// The `control_response` giving pending questions the user's `answers`;
     /// `None` for an unknown request id. No answers at all is the user
-    /// dismissing an elicitation, which MCP calls `cancel`.
+    /// dismissing an elicitation, which MCP calls `cancel`; answers that are
+    /// all empty are a form submitted with nothing filled in, an `accept`.
     fn build_user_input_response(
         &mut self,
         request_id: &str,
@@ -5228,6 +5229,7 @@ fn parse_ask_user_questions(input: &Value) -> Vec<UserInputQuestion> {
                 question,
                 options,
                 multi_select,
+                optional: false,
                 prefill: None,
             }
         })
@@ -5282,6 +5284,13 @@ fn elicitation_questions(
         Some(order) => order.iter().filter_map(Value::as_str).collect(),
         None => properties.keys().map(String::as_str).collect(),
     };
+    // A field the schema's `required` does not list may be left out; with no
+    // `required`, none is (JSON Schema).
+    let required: Vec<&str> = request
+        .pointer("/requested_schema/required")
+        .and_then(Value::as_array)
+        .map(|required| required.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
     let text = |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
     let asked_by = format!(
         "{}: {}",
@@ -5379,6 +5388,7 @@ fn elicitation_questions(
                 .collect(),
             multi_select: matches!(kind, ElicitationKind::Choices(_)),
             prefill,
+            optional: !required.contains(&key),
         });
         fields.push(ElicitationField {
             key: key.to_owned(),
@@ -8492,6 +8502,7 @@ mod tests {
                     "tier" => Some("Professional".into()),
                     _ => None,
                 },
+                optional: id != "region",
             };
         let asked_by = "deployer: Where should this go?";
         let [
@@ -8543,6 +8554,28 @@ mod tests {
                 json!({"type":"control_response","response":{"subtype":"success","request_id":"elicit-2","response":{"action":"cancel"}}})
             ),
             "dismissed without an answer"
+        );
+
+        // With no `required`, every field may be left out, and a form left
+        // wholly empty is still accepted.
+        let events = feed(
+            &mut m,
+            &form
+                .replace("REQUEST", "elicit-3")
+                .replace(r#","required":["region"]"#, ""),
+        );
+        let [AgentEvent::UserInputRequested { questions, .. }] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        assert!(questions.iter().all(|question| question.optional));
+        let answers = json!({
+            "region": "", "replicas": "", "public": "", "tier": "", "zones": [],
+        });
+        assert_eq!(
+            m.build_user_input_response("elicit-3", answers.as_object().unwrap()),
+            Some(
+                json!({"type":"control_response","response":{"subtype":"success","request_id":"elicit-3","response":{"action":"accept","content":{}}}})
+            )
         );
     }
 

@@ -622,6 +622,7 @@ impl Questions {
                     })
                     .collect(),
                 multi_select: question.allow_multiple,
+                optional: false,
                 prefill: None,
             })
             .collect()

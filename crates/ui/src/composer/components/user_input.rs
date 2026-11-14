@@ -187,6 +187,14 @@ impl Composer {
                 .text_title(cx)
                 .child(crate::widgets::fade_text(title)),
         )
+        .when(question.optional, |strip| {
+            strip.child(
+                div()
+                    .flex_none()
+                    .text_secondary(self.compact, cx)
+                    .child(crate::tr!("userinput.optional")),
+            )
+        })
         // The question, previewed beside the title while the answer area is
         // shut, fades as it opens; its room stays the strip's spacer.
         .child({
@@ -327,6 +335,8 @@ impl Composer {
             });
         let custom_input = self.user_input_custom.clone();
         let custom_has_text = !custom_input.read(cx).value().trim().is_empty();
+        // Sent empty, an optional question is passed over unanswered.
+        let skips = question.optional && !custom_has_text;
         let custom_answer = h_flex()
             .w_full()
             .items_center()
@@ -350,8 +360,12 @@ impl Composer {
                     .xsmall()
                     .touch(self.compact)
                     .icon(IconName::ArrowUp)
-                    .disabled(!custom_has_text)
-                    .tooltip(crate::tr!("userinput.submit_custom"))
+                    .disabled(!custom_has_text && !skips)
+                    .tooltip(if skips {
+                        crate::tr!("userinput.skip")
+                    } else {
+                        crate::tr!("userinput.submit_custom")
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.submit_custom_user_input(&custom_input, window, cx);
                     })),
@@ -647,9 +661,16 @@ impl Composer {
         };
         let text = input.read(cx).value().trim().to_string();
         if text.is_empty() {
-            return;
+            let index = self
+                .ui_question_index
+                .min(questions.len().saturating_sub(1));
+            let Some(question) = questions.get(index).filter(|question| question.optional) else {
+                return;
+            };
+            self.ui_selections.insert(question.id.clone(), Vec::new());
+        } else {
+            self.record_custom_answer(&questions, text);
         }
-        self.record_custom_answer(&questions, text);
         input.update(cx, |state, cx| state.set_value("", window, cx));
         self.ui_advance_or_submit(&questions, request_id, window, cx);
         cx.notify();
@@ -776,6 +797,7 @@ mod tests {
             }],
             multi_select: false,
             prefill: None,
+            optional: false,
         }
     }
 

@@ -2117,6 +2117,9 @@ pub struct UserInputQuestion {
     pub multi_select: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill: Option<String>,
+    /// The asker accepts this question left unanswered.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

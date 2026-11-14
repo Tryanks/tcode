@@ -2850,6 +2850,7 @@ mod tests {
                 options: Vec::new(),
                 multi_select: false,
                 prefill: None,
+                optional: false,
             }],
             delivery: UserInputDelivery::Blocking,
         };
