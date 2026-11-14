@@ -19,12 +19,12 @@ use smol::future;
 use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
-    ApprovalRequest, AskedQuestion, Attachment, ChangeCompleteness, Compaction, DeltaKind,
-    FileChange, FileChangeKind, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
-    OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
-    ResumeCursor, RewindMode, SearchHit, SearchScope, SelectOption, SessionCommand, SessionHandle,
-    SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput, UserInputDelivery,
-    UserInputOption, UserInputQuestion, WebLink,
+    ApprovalRequest, AskedQuestion, Attachment, BackgroundKind, BackgroundTask, ChangeCompleteness,
+    Compaction, DeltaKind, FileChange, FileChangeKind, ItemContent, ItemStatus, LaunchEnv,
+    ModelSpec, OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderCommand,
+    ProviderCommandKind, ProviderKind, ResumeCursor, RewindMode, SearchHit, SearchScope,
+    SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
+    ToolFamily, ToolOutput, UserInputDelivery, UserInputOption, UserInputQuestion, WebLink,
 };
 
 /// The directory OpenCode launched with `launch_env` keeps its sessions,
@@ -183,6 +183,7 @@ async fn run_actor(
         steers: HashMap::new(),
         prompts: HashSet::new(),
         shell_polls: HashMap::new(),
+        background: Vec::new(),
     };
     actor
         .events
@@ -592,7 +593,18 @@ struct OpenCodeActor {
     steers: HashMap<String, String>,
     /// Inbox ids of the turns Tcode sent; each is a revert boundary.
     prompts: HashSet<String>,
-    shell_polls: HashMap<String, Arc<AtomicBool>>,
+    shell_polls: HashMap<String, Arc<ShellPoll>>,
+    /// The background work as last listed.
+    background: Vec<BackgroundTask>,
+}
+
+/// What the actor tells the thread polling a shell's output.
+#[derive(Default)]
+struct ShellPoll {
+    /// The call ended with its output: nothing more is read.
+    stop: AtomicBool,
+    /// The shell exited: what is left of its output is read, then nothing.
+    exited: AtomicBool,
 }
 
 struct PendingForm {
@@ -723,8 +735,12 @@ impl SessionActor for OpenCodeActor {
                     .post_empty(&self.session_path("move"), &move_body(&cwd))
                     .map_err(|err| err.to_string())?;
             }
+            SessionCommand::StopBackgroundTask { task_id } => {
+                for action in self.mapper.stop_background(task_id.as_deref()) {
+                    self.perform(action).await;
+                }
+            }
             SessionCommand::RetryTurn { .. }
-            | SessionCommand::StopBackgroundTask { .. }
             | SessionCommand::MoveToBackground { .. }
             | SessionCommand::RespondWorktree { .. }
             | SessionCommand::SetGoal { .. }
@@ -741,7 +757,10 @@ impl SessionActor for OpenCodeActor {
     ) -> TransportOutcome {
         match item {
             Ok(Transport::Event(event)) => match self.handle_event(&event).await {
-                Ok(()) => TransportOutcome::Continue,
+                Ok(()) => {
+                    self.list_background().await;
+                    TransportOutcome::Continue
+                }
                 Err(err) => TransportOutcome::Fatal(err),
             },
             Ok(Transport::ShellOutput { item_id, text }) => {
@@ -749,6 +768,15 @@ impl SessionActor for OpenCodeActor {
                 for event in events {
                     self.events.emit(event).await;
                 }
+                TransportOutcome::Continue
+            }
+            Ok(Transport::ShellPollEnded { item_id }) => {
+                self.shell_polls.remove(&item_id);
+                let events = self.mapper.shell_poll_ended(&item_id);
+                for event in events {
+                    self.events.emit(event).await;
+                }
+                self.list_background().await;
                 TransportOutcome::Continue
             }
             Ok(Transport::Error(err)) => TransportOutcome::Fatal(err),
@@ -767,6 +795,35 @@ impl SessionActor for OpenCodeActor {
 impl OpenCodeActor {
     fn session_path(&self, route: &str) -> String {
         format!("/api/session/{}/{route}", self.mapper.root)
+    }
+
+    /// Lists the background work again when it changed; a piece started when
+    /// it was first listed.
+    async fn list_background(&mut self) {
+        let now = crate::now_unix_millis();
+        let tasks: Vec<BackgroundTask> = self
+            .mapper
+            .background()
+            .into_iter()
+            .map(|work| BackgroundTask {
+                started_at: self
+                    .background
+                    .iter()
+                    .find(|known| known.id == work.id)
+                    .map_or(now, |known| known.started_at),
+                id: work.id,
+                name: work.name,
+                kind: work.kind,
+                item_id: Some(work.item_id),
+                started_reported: false,
+            })
+            .collect();
+        if tasks != self.background {
+            self.background.clone_from(&tasks);
+            self.events
+                .emit(AgentEvent::BackgroundTaskList { tasks })
+                .await;
+        }
     }
 
     fn send_turn(
@@ -1298,8 +1355,8 @@ impl OpenCodeActor {
                 shell_id,
                 directory,
             } => {
-                let stop = Arc::new(AtomicBool::new(false));
-                self.shell_polls.insert(item_id.clone(), stop.clone());
+                let poll = Arc::new(ShellPoll::default());
+                self.shell_polls.insert(item_id.clone(), poll.clone());
                 let http = match directory {
                     Some(directory) => self.http.at(Path::new(&directory)),
                     None => self.http.clone(),
@@ -1307,11 +1364,52 @@ impl OpenCodeActor {
                 let sender = self.transport_tx.clone();
                 let _ = std::thread::Builder::new()
                     .name("opencode-shell-output".into())
-                    .spawn(move || poll_shell_output(&http, &shell_id, &item_id, &stop, &sender));
+                    .spawn(move || poll_shell_output(&http, &shell_id, &item_id, &poll, &sender));
             }
             Action::StopShell { item_id } => {
-                if let Some(stop) = self.shell_polls.remove(&item_id) {
-                    stop.store(true, Ordering::Relaxed);
+                if let Some(poll) = self.shell_polls.get(&item_id) {
+                    poll.stop.store(true, Ordering::Relaxed);
+                }
+            }
+            Action::DrainShell { item_id } => {
+                if let Some(poll) = self.shell_polls.get(&item_id) {
+                    poll.exited.store(true, Ordering::Relaxed);
+                }
+            }
+            // Removing a running shell ends it as `killed` (`shell.ts`).
+            Action::RemoveShell {
+                shell_id,
+                directory,
+            } => {
+                let http = match directory {
+                    Some(directory) => self.http.at(Path::new(&directory)),
+                    None => self.http.clone(),
+                };
+                if let Err(err) = http.delete(&format!("/api/shell/{shell_id}")) {
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: format!("OpenCode did not stop shell {shell_id}: {err}"),
+                        })
+                        .await;
+                }
+            }
+            // An interrupted subagent reports itself `cancelled`
+            // (`execution.ts`).
+            Action::InterruptSession { session_id } => {
+                let message = match self
+                    .http
+                    .post(&format!("/api/session/{session_id}/interrupt"), &json!({}))
+                {
+                    Ok(answer) if answer["interrupted"] == false => Some(format!(
+                        "OpenCode had nothing running to interrupt in subagent session {session_id}"
+                    )),
+                    Ok(_) => None,
+                    Err(err) => Some(format!(
+                        "OpenCode did not interrupt subagent session {session_id}: {err}"
+                    )),
+                };
+                if let Some(message) = message {
+                    self.events.emit(AgentEvent::Warning { message }).await;
                 }
             }
             Action::FetchDiff => {
@@ -1475,8 +1573,8 @@ impl OpenCodeActor {
     }
 
     fn shutdown(&mut self) {
-        for stop in self.shell_polls.values() {
-            stop.store(true, Ordering::Relaxed);
+        for poll in self.shell_polls.values() {
+            poll.stop.store(true, Ordering::Relaxed);
         }
         self.server.stop();
     }
@@ -1639,6 +1737,7 @@ fn form_question(field: &Value) -> Option<UserInputQuestion> {
         question,
         options,
         multi_select: field["type"] == "multiselect",
+        optional: field["required"] != true,
         prefill: match &field["default"] {
             Value::String(text) => Some(text.clone()),
             Value::Number(number) => Some(number.to_string()),
@@ -1658,6 +1757,10 @@ fn form_answer(fields: &[(String, String)], answers: &Map<String, Value>) -> Map
                 Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
                 _ => Vec::new(),
             };
+            // A field left empty is left out of the answer, not sent empty.
+            if texts.iter().all(|text| text.is_empty()) {
+                return None;
+            }
             let value = match kind.as_str() {
                 "multiselect" => json!(texts),
                 "boolean" => json!(texts.first().is_some_and(|text| *text == "true")),
@@ -1673,18 +1776,22 @@ fn form_answer(fields: &[(String, String)], answers: &Map<String, Value>) -> Map
         .collect()
 }
 
+/// Reads a shell's output as it grows, and says when it has stopped reading:
+/// a command in the background settles only after all it wrote.
 fn poll_shell_output(
     http: &Http,
     shell_id: &str,
     item_id: &str,
-    stop: &AtomicBool,
+    poll: &ShellPoll,
     sender: &Sender<Transport>,
 ) {
     let mut cursor = 0;
-    while !stop.load(Ordering::Relaxed) {
+    while !poll.stop.load(Ordering::Relaxed) {
+        // Read before asking: once the shell has exited, its output is whole.
+        let exited = poll.exited.load(Ordering::Relaxed);
         let Ok(page) = http.get(&format!("/api/shell/{shell_id}/output?cursor={cursor}")) else {
             // The server drops a shell once its command is settled.
-            return;
+            break;
         };
         let page = &page["data"];
         if let Some(text) = page["output"].as_str().filter(|text| !text.is_empty())
@@ -1698,8 +1805,18 @@ fn poll_shell_output(
             return;
         }
         cursor = page["cursor"].as_u64().unwrap_or(cursor);
+        if exited {
+            // A page holds at most 64 KiB; `size` is all there is to read.
+            if page["size"].as_u64().is_none_or(|size| cursor >= size) {
+                break;
+            }
+            continue;
+        }
         std::thread::sleep(SHELL_POLL_INTERVAL);
     }
+    let _ = sender.send_blocking(Transport::ShellPollEnded {
+        item_id: item_id.to_owned(),
+    });
 }
 
 /// Side effects the actor performs for the mapper.
@@ -1713,7 +1830,30 @@ enum Action {
     StopShell {
         item_id: String,
     },
+    /// The shell exited: its poll reads the rest and ends.
+    DrainShell {
+        item_id: String,
+    },
+    /// Stop a shell in the background, in the location it runs in.
+    RemoveShell {
+        shell_id: String,
+        directory: Option<String>,
+    },
+    /// Stop a subagent in the background.
+    InterruptSession {
+        session_id: String,
+    },
     FetchDiff,
+}
+
+/// A piece of the work OpenCode goes on with in the background.
+struct BackgroundWork {
+    /// OpenCode's own id for it: the shell's, or the subagent's child
+    /// session.
+    id: String,
+    item_id: String,
+    name: String,
+    kind: BackgroundKind,
 }
 
 #[derive(Default)]
@@ -1731,8 +1871,23 @@ struct ToolCall {
     /// The child session a `subagent` call runs, once it reports one.
     child_session: Option<String>,
     child_model: Option<String>,
-    /// The subagent moved to the background; it settles with its session.
+    /// The call returned while its work goes on: a subagent settles with its
+    /// report, a command with its shell's exit.
     background: bool,
+    /// The shell a `shell` call runs, once it reports one.
+    shell_id: Option<String>,
+    /// The location the shell runs in, as the call reported it.
+    shell_directory: Option<String>,
+    /// The shell's output is being polled.
+    polling: bool,
+    /// How the shell ended, once OpenCode says it exited.
+    shell_end: Option<ShellEnd>,
+}
+
+#[derive(Clone, Copy)]
+struct ShellEnd {
+    status: ItemStatus,
+    exit: Option<i32>,
 }
 
 struct Mapper {
@@ -1748,6 +1903,9 @@ struct Mapper {
     active_turn: Option<String>,
     /// The root's inbox items not yet delivered → whether the item is a move.
     undelivered: HashMap<String, bool>,
+    /// Inbox id → a message OpenCode wrote for the model itself, shown once
+    /// it is delivered.
+    synthetic: HashMap<String, ThreadItem>,
     /// An execution started for moves alone, which is no turn: its turn id,
     /// for the turn it starts if it delivers anything else.
     held_turn: Option<String>,
@@ -1772,6 +1930,7 @@ impl Mapper {
             context_window: None,
             active_turn: None,
             undelivered: HashMap::new(),
+            synthetic: HashMap::new(),
             held_turn: None,
             last_turn: None,
             turn_usage: None,
@@ -1821,6 +1980,29 @@ impl Mapper {
             }
             return Ok(mapped);
         }
+        // A shell's events name the shell, not its session.
+        if kind == "shell.exited" {
+            if let Some(item_id) = data["id"].as_str().and_then(|shell_id| {
+                self.tools
+                    .iter()
+                    .find(|(_, tool)| tool.shell_id.as_deref() == Some(shell_id))
+                    .map(|(item_id, _)| item_id.clone())
+            }) && let Some(tool) = self.tools.get_mut(&item_id)
+            {
+                tool.shell_end = Some(ShellEnd {
+                    status: if data["status"] == "killed" {
+                        ItemStatus::Interrupted
+                    } else {
+                        ItemStatus::Completed
+                    },
+                    exit: data["exit"]
+                        .as_i64()
+                        .and_then(|exit| i32::try_from(exit).ok()),
+                });
+                self.settle_background_shell(&item_id, &mut mapped);
+            }
+            return Ok(mapped);
+        }
         let Some(session_id) = data["sessionID"].as_str() else {
             return Ok(mapped);
         };
@@ -1830,18 +2012,47 @@ impl Mapper {
         let root = session_id == self.root;
         let message_id = data["assistantMessageID"].as_str().unwrap_or_default();
         match kind {
-            "session.inbox.enqueued" if root => {
-                if let Some(inbox_id) = data["inboxID"].as_str() {
-                    self.undelivered.insert(
+            "session.inbox.enqueued" => {
+                let Some(inbox_id) = data["inboxID"].as_str() else {
+                    return Ok(mapped);
+                };
+                let item = &data["item"];
+                if root {
+                    self.undelivered
+                        .insert(inbox_id.to_owned(), item["type"] == "move");
+                }
+                if item["type"] == "synthetic" {
+                    let payload = &item["payload"];
+                    self.synthetic.insert(
                         inbox_id.to_owned(),
-                        data.pointer("/item/type") == Some(&json!("move")),
+                        synthetic_item(inbox_id, payload, parent_item_id),
                     );
+                    mapped.events.extend(self.subagent_reported(payload));
                 }
             }
-            "session.inbox.cancelled" if root => {
+            "session.inbox.delivered" => {
+                let delivered = data["inboxID"]
+                    .as_str()
+                    .and_then(|inbox_id| self.synthetic.remove(inbox_id));
+                mapped
+                    .events
+                    .extend(delivered.map(AgentEvent::ItemCompleted));
+            }
+            "session.inbox.cancelled" => {
                 if let Some(inbox_id) = data["inboxID"].as_str() {
                     self.undelivered.remove(inbox_id);
+                    self.synthetic.remove(inbox_id);
                 }
+            }
+            "session.synthetic" => {
+                let Some(id) = event["id"].as_str() else {
+                    return Err("OpenCode wrote the model a message without an event id".into());
+                };
+                mapped.events.push(AgentEvent::ItemCompleted(synthetic_item(
+                    id,
+                    data,
+                    parent_item_id,
+                )));
             }
             "session.execution.started" if root => {
                 self.turn_processed = 0;
@@ -1868,45 +2079,36 @@ impl Mapper {
             }
             "session.execution.succeeded"
             | "session.execution.failed"
-            | "session.execution.interrupted" => {
-                let status = match kind {
-                    "session.execution.succeeded" => ItemStatus::Completed,
-                    "session.execution.failed" => ItemStatus::Failed,
-                    _ => ItemStatus::Interrupted,
-                };
-                if root {
-                    self.held_turn = None;
-                    if status == ItemStatus::Failed {
-                        self.turn_failed = true;
-                        let message = error_message(&data["error"]);
-                        if self.last_error.as_deref() != Some(message.as_str()) {
-                            mapped.events.push(AgentEvent::Error {
-                                message,
-                                fatal: false,
-                            });
-                        }
-                    } else if status == ItemStatus::Interrupted {
-                        self.interrupted = true;
+            | "session.execution.interrupted"
+                if root =>
+            {
+                self.held_turn = None;
+                if kind == "session.execution.failed" {
+                    self.turn_failed = true;
+                    let message = error_message(&data["error"]);
+                    if self.last_error.as_deref() != Some(message.as_str()) {
+                        mapped.events.push(AgentEvent::Error {
+                            message,
+                            fatal: false,
+                        });
                     }
-                    if let Some(turn_id) = &self.active_turn {
-                        self.last_turn = Some(turn_id.clone());
-                    }
-                    let usage = self.turn_usage.map(|usage| TokenUsage {
-                        turn_processed_tokens: Some(self.turn_processed),
-                        cost_usd: self.turn_cost,
-                        ..usage
-                    });
-                    mapped.events.extend(crate::complete_mapped_turn(
-                        &mut self.active_turn,
-                        &mut self.interrupted,
-                        self.turn_failed,
-                        usage,
-                    ));
-                } else {
-                    mapped
-                        .events
-                        .extend(self.settle_background_subagent(session_id, status));
+                } else if kind == "session.execution.interrupted" {
+                    self.interrupted = true;
                 }
+                if let Some(turn_id) = &self.active_turn {
+                    self.last_turn = Some(turn_id.clone());
+                }
+                let usage = self.turn_usage.map(|usage| TokenUsage {
+                    turn_processed_tokens: Some(self.turn_processed),
+                    cost_usd: self.turn_cost,
+                    ..usage
+                });
+                mapped.events.extend(crate::complete_mapped_turn(
+                    &mut self.active_turn,
+                    &mut self.interrupted,
+                    self.turn_failed,
+                    usage,
+                ));
             }
             "session.step.started" => {
                 let model = ModelRef::from_wire(&data["model"]).map(|model| model.id());
@@ -2018,6 +2220,10 @@ impl Mapper {
                         child_session: None,
                         child_model: None,
                         background: false,
+                        shell_id: None,
+                        shell_directory: None,
+                        polling: false,
+                        shell_end: None,
                     },
                 );
                 let item = self.tool_item(&item_id, ItemStatus::InProgress, None, None);
@@ -2037,6 +2243,10 @@ impl Mapper {
                         child_session: None,
                         child_model: None,
                         background: false,
+                        shell_id: None,
+                        shell_directory: None,
+                        polling: false,
+                        shell_end: None,
                     });
                 tool.input = data["input"].clone();
                 let item = self.tool_item(&item_id, ItemStatus::InProgress, None, None);
@@ -2055,13 +2265,16 @@ impl Mapper {
                 if tool.name == "shell"
                     && let Some(shell_id) = metadata["shellID"].as_str()
                 {
+                    tool.shell_id = Some(shell_id.to_owned());
+                    tool.shell_directory = event
+                        .pointer("/location/directory")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    tool.polling = true;
                     mapped.actions.push(Action::PollShell {
                         item_id: item_id.clone(),
                         shell_id: shell_id.to_owned(),
-                        directory: event
-                            .pointer("/location/directory")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
+                        directory: tool.shell_directory.clone(),
                     });
                 }
                 if tool.name == "subagent"
@@ -2073,19 +2286,18 @@ impl Mapper {
             }
             "session.tool.success" | "session.tool.failed" => {
                 let item_id = tool_item_id(message_id, data);
-                mapped.actions.push(Action::StopShell {
-                    item_id: item_id.clone(),
-                });
                 let Some(tool) = self.tools.get_mut(&item_id) else {
                     return Ok(mapped);
                 };
                 let success = kind == "session.tool.success";
+                // The call returned and its work goes on: a subagent (every
+                // one, from 2.3.0) or a command moved to the background.
                 if success
-                    && tool.name == "subagent"
+                    && matches!(tool.name.as_str(), "subagent" | "shell")
                     && data.pointer("/metadata/status") == Some(&json!("running"))
                 {
                     tool.background = true;
-                    let item = self.tool_item(&item_id, ItemStatus::InProgress, Some(data), None);
+                    let item = self.tool_item(&item_id, ItemStatus::InProgress, None, None);
                     if let Some(item) = item {
                         let backgrounded = AgentEvent::ItemBackgrounded {
                             item_id: item.id.clone(),
@@ -2094,8 +2306,12 @@ impl Mapper {
                         mapped.events.push(AgentEvent::ItemUpdated(item));
                         mapped.events.push(backgrounded);
                     }
+                    self.settle_background_shell(&item_id, &mut mapped);
                     return Ok(mapped);
                 }
+                mapped.actions.push(Action::StopShell {
+                    item_id: item_id.clone(),
+                });
                 if tool.name == "todowrite" {
                     let todos = data
                         .pointer("/metadata/todos")
@@ -2110,9 +2326,13 @@ impl Mapper {
                     self.tools.remove(&item_id);
                     return Ok(mapped);
                 }
+                // A shell the user stopped fails with `metadata.interrupted`
+                // (2.3.0's `shell.ts`).
                 let status = if success {
                     ItemStatus::Completed
-                } else if data.pointer("/error/type") == Some(&json!("aborted")) {
+                } else if data.pointer("/error/type") == Some(&json!("aborted"))
+                    || data.pointer("/metadata/interrupted") == Some(&json!(true))
+                {
                     ItemStatus::Interrupted
                 } else {
                     ItemStatus::Failed
@@ -2160,16 +2380,139 @@ impl Mapper {
         }]
     }
 
-    fn settle_background_subagent(&mut self, child: &str, status: ItemStatus) -> Vec<AgentEvent> {
-        let Some(item_id) = self.children.get(child).cloned().flatten() else {
+    /// The calls OpenCode returned while their work goes on and has not
+    /// ended, by when they were made: one piece for each shell that has not
+    /// exited and each subagent that has not reported, however many calls
+    /// joined it.
+    fn background(&self) -> Vec<BackgroundWork> {
+        let mut calls: Vec<(&String, &ToolCall)> = self
+            .tools
+            .iter()
+            .filter(|(_, tool)| tool.background)
+            .collect();
+        calls.sort_by_key(|(item_id, _)| *item_id);
+        let mut seen = HashSet::new();
+        calls
+            .into_iter()
+            .filter_map(|(item_id, tool)| {
+                let input = &tool.input;
+                let (id, kind, name) = match tool.name.as_str() {
+                    "shell" if tool.shell_end.is_none() => (
+                        tool.shell_id.clone()?,
+                        BackgroundKind::Command,
+                        input["command"].as_str().unwrap_or_default(),
+                    ),
+                    "subagent" => (
+                        tool.child_session.clone()?,
+                        BackgroundKind::Agent,
+                        input["description"]
+                            .as_str()
+                            .filter(|description| !description.trim().is_empty())
+                            .or_else(|| input["agent"].as_str())
+                            .unwrap_or_default(),
+                    ),
+                    _ => return None,
+                };
+                seen.insert(id.clone()).then(|| BackgroundWork {
+                    id,
+                    item_id: item_id.clone(),
+                    name: name.to_owned(),
+                    kind,
+                })
+            })
+            .collect()
+    }
+
+    /// What stops the piece `task_id` of the background work, or all of it:
+    /// what OpenCode's own app does for each.
+    fn stop_background(&self, task_id: Option<&str>) -> Vec<Action> {
+        self.background()
+            .into_iter()
+            .filter(|work| task_id.is_none_or(|id| id == work.id))
+            .map(|work| match work.kind {
+                BackgroundKind::Command => Action::RemoveShell {
+                    directory: self
+                        .tools
+                        .get(&work.item_id)
+                        .and_then(|tool| tool.shell_directory.clone()),
+                    shell_id: work.id,
+                },
+                _ => Action::InterruptSession {
+                    session_id: work.id,
+                },
+            })
+            .collect()
+    }
+
+    /// The shell's output poll stopped reading.
+    fn shell_poll_ended(&mut self, item_id: &str) -> Vec<AgentEvent> {
+        let Some(tool) = self.tools.get_mut(item_id) else {
             return Vec::new();
         };
-        if !self.tools.get(&item_id).is_some_and(|tool| tool.background) {
+        tool.polling = false;
+        let mut mapped = Mapped::default();
+        self.settle_background_shell(item_id, &mut mapped);
+        mapped.events
+    }
+
+    /// A command in the background ends when its shell has exited, whichever
+    /// of that and the call's return OpenCode reports first, and its output
+    /// has been read to the end.
+    fn settle_background_shell(&mut self, item_id: &str, mapped: &mut Mapped) {
+        let Some(tool) = self.tools.get(item_id) else {
+            return;
+        };
+        let (true, Some(end)) = (tool.background, tool.shell_end) else {
+            return;
+        };
+        if tool.polling {
+            mapped.actions.push(Action::DrainShell {
+                item_id: item_id.to_owned(),
+            });
+            return;
+        }
+        let item = self.tool_item(item_id, end.status, None, None);
+        self.tools.remove(item_id);
+        mapped.events.extend(item.map(AgentEvent::ItemCompleted));
+    }
+
+    /// A subagent in the background ends with the report OpenCode writes its
+    /// parent, a synthetic message whose metadata names the child session and
+    /// how its job ended (`subagent-completion.ts`). A call naming a child
+    /// that is still running joins that run (`subagent.ts`), so the report
+    /// ends every call waiting on the child.
+    fn subagent_reported(&mut self, payload: &Value) -> Vec<AgentEvent> {
+        let metadata = &payload["metadata"];
+        if metadata["source"] != "subagent" {
             return Vec::new();
         }
-        let item = self.tool_item(&item_id, status, None, None);
-        self.tools.remove(&item_id);
-        item.map(AgentEvent::ItemCompleted).into_iter().collect()
+        let status = match metadata["state"].as_str() {
+            Some("completed") => ItemStatus::Completed,
+            Some("error") => ItemStatus::Failed,
+            Some("cancelled") => ItemStatus::Interrupted,
+            _ => return Vec::new(),
+        };
+        let Some(child) = metadata["childID"].as_str() else {
+            return Vec::new();
+        };
+        let mut calls: Vec<String> = self
+            .tools
+            .iter()
+            .filter(|(_, tool)| tool.background && tool.child_session.as_deref() == Some(child))
+            .map(|(item_id, _)| item_id.clone())
+            .collect();
+        calls.sort();
+        calls
+            .into_iter()
+            .filter_map(|item_id| {
+                let mut item = self.tool_item(&item_id, status, None, None)?;
+                self.tools.remove(&item_id);
+                if let ItemContent::Subagent { summary, .. } = &mut item.content {
+                    *summary = payload["text"].as_str().map(subagent_output);
+                }
+                Some(AgentEvent::ItemCompleted(item))
+            })
+            .collect()
     }
 
     /// The canonical item for a tool call. `result` is the terminal
@@ -2202,7 +2545,9 @@ impl Mapper {
                     .unwrap_or_default(),
                 exit_code: metadata
                     .and_then(|metadata| metadata["exit"].as_i64())
-                    .and_then(|exit| i32::try_from(exit).ok()),
+                    .and_then(|exit| i32::try_from(exit).ok())
+                    // A command in the background has no result but its exit.
+                    .or_else(|| tool.shell_end.and_then(|end| end.exit)),
                 status,
             },
             "edit" | "write" | "patch" => ItemContent::FileChange {
@@ -2213,6 +2558,7 @@ impl Mapper {
                 } else {
                     error.or(text)
                 },
+                command: None,
             },
             "subagent" => ItemContent::Subagent {
                 agent_type: input["agent"].as_str().unwrap_or_default().to_owned(),
@@ -2375,6 +2721,21 @@ fn text_item(
 /// A tool call id is unique only within its assistant message.
 fn tool_item_id(message_id: &str, data: &Value) -> String {
     format!("{message_id}:{}", data["id"].as_str().unwrap_or_default())
+}
+
+/// A message OpenCode wrote for the model itself (a subagent's report, how a
+/// background command ended, a continuation it asks for), as it wrote it:
+/// the `payload` of a `synthetic` inbox item, or a `session.synthetic` event's
+/// data.
+fn synthetic_item(id: &str, payload: &Value, parent_item_id: Option<String>) -> ThreadItem {
+    ThreadItem {
+        id: id.to_owned(),
+        parent_item_id,
+        content: ItemContent::Other {
+            provider_kind: "synthetic".into(),
+            summary: payload["text"].as_str().unwrap_or_default().to_owned(),
+        },
+    }
 }
 
 /// The subagent's reply inside the `<subagent …>` envelope OpenCode hands the
@@ -3124,6 +3485,7 @@ fn http_error(error: ureq::Error) -> AgentError {
 enum Transport {
     Event(Value),
     ShellOutput { item_id: String, text: String },
+    ShellPollEnded { item_id: String },
     Eof,
     Error(String),
 }
@@ -3167,7 +3529,11 @@ async fn wait_for_server_connected(events: &Receiver<Transport>) -> Result<(), A
             Ok(Transport::Event(event)) if event["type"] == "server.connected" => {
                 return Ok(());
             }
-            Ok(Transport::Event(_) | Transport::ShellOutput { .. }) => {}
+            Ok(
+                Transport::Event(_)
+                | Transport::ShellOutput { .. }
+                | Transport::ShellPollEnded { .. },
+            ) => {}
             Ok(Transport::Error(error)) => return Err(AgentError::Protocol(error)),
             Ok(Transport::Eof) | Err(_) => {
                 return Err(AgentError::Protocol(
@@ -3208,28 +3574,44 @@ mod tests {
                 .collect(),
             HashMap::new(),
         );
-        let mut out = Vec::new();
-        for frame in frames(name) {
-            let mapped = mapper.on_event(&frame).unwrap();
-            out.extend(
-                mapped
-                    .events
-                    .iter()
-                    .map(|event| serde_json::to_value(event).unwrap()),
-            );
-            out.extend(mapped.actions.into_iter().map(|action| match action {
-                Action::PollShell {
-                    item_id,
-                    shell_id,
-                    directory,
-                } => json!({"action": "poll_shell", "item_id": item_id, "shell_id": shell_id, "directory": directory}),
-                Action::StopShell { item_id } => {
-                    json!({"action": "stop_shell", "item_id": item_id})
-                }
-                Action::FetchDiff => json!({"action": "fetch_diff"}),
-            }));
-        }
+        frames(name)
+            .iter()
+            .flat_map(|frame| feed(&mut mapper, frame))
+            .collect()
+    }
+
+    fn feed(mapper: &mut Mapper, frame: &Value) -> Vec<Value> {
+        let mapped = mapper.on_event(frame).unwrap();
+        let mut out = wire(&mapped.events);
+        out.extend(mapped.actions.into_iter().map(|action| match action {
+            Action::PollShell {
+                item_id,
+                shell_id,
+                directory,
+            } => json!({"action": "poll_shell", "item_id": item_id, "shell_id": shell_id, "directory": directory}),
+            Action::StopShell { item_id } => {
+                json!({"action": "stop_shell", "item_id": item_id})
+            }
+            Action::DrainShell { item_id } => {
+                json!({"action": "drain_shell", "item_id": item_id})
+            }
+            Action::FetchDiff => json!({"action": "fetch_diff"}),
+            Action::RemoveShell {
+                shell_id,
+                directory,
+            } => json!({"action": "remove_shell", "shell_id": shell_id, "directory": directory}),
+            Action::InterruptSession { session_id } => {
+                json!({"action": "interrupt_session", "session_id": session_id})
+            }
+        }));
         out
+    }
+
+    fn wire(events: &[AgentEvent]) -> Vec<Value> {
+        events
+            .iter()
+            .map(|event| serde_json::to_value(event).unwrap())
+            .collect()
     }
 
     /// The events a turn's bookkeeping adds around its items, and the
@@ -3468,6 +3850,42 @@ mod tests {
         );
     }
 
+    /// A command run in the background returns at once with
+    /// `metadata.status: "running"` and ends with its shell's `shell.exited`,
+    /// after the turn that started it (v2.3.0's `shell.ts`, and `shell.exited`
+    /// in its `/openapi.json`; content invented). It settles once the poll
+    /// of its output has ended.
+    #[test]
+    fn a_command_in_the_background_ends_with_its_shells_exit_once_its_poll_has_ended() {
+        let id = "msg_19c0000a100100000000000a01:call_0000000000000021";
+        let running = json!({"type": "item_updated", "id": id, "content": {"kind": "command_execution", "command": "make build", "output": "", "exit_code": null, "status": "in_progress"}});
+        let mut mapper = Mapper::new("ses_root".into(), Vec::new(), HashMap::new());
+        let out: Vec<Value> = frames("background_shell_turn.jsonl")
+            .iter()
+            .flat_map(|frame| feed(&mut mapper, frame))
+            .collect();
+        assert_eq!(
+            out[2..],
+            [
+                running.clone(),
+                json!({"action": "poll_shell", "item_id": id, "shell_id": "sh_19c0000b100100000000000b01", "directory": "/work/project"}),
+                running,
+                json!({"type": "item_backgrounded", "item_id": id}),
+                json!({"type": "turn_completed", "turn_id": "evt_19c000000200100000000000002", "status": "completed", "usage": null}),
+                json!({"action": "drain_shell", "item_id": id}),
+            ]
+        );
+        let mut settled = wire(&mapper.shell_output(id, "built\n".into()));
+        settled.extend(wire(&mapper.shell_poll_ended(id)));
+        assert_eq!(
+            settled,
+            [
+                json!({"type": "delta", "item_id": id, "kind": "command_output", "text": "built\n"}),
+                json!({"type": "item_completed", "id": id, "content": {"kind": "command_execution", "command": "make build", "output": "built\n", "exit_code": 2, "status": "completed"}}),
+            ]
+        );
+    }
+
     /// Each file tool carries its own diff, the todo list is the plan, and
     /// every step that changed files has the turn's diff read again.
     #[test]
@@ -3535,6 +3953,126 @@ mod tests {
         );
     }
 
+    /// From 2.3.0 every subagent runs in the background: its call returns
+    /// `metadata.status: "running"`, and what the child replied reaches the
+    /// parent as a `synthetic` inbox item naming the child (v2.3.0's
+    /// `subagent.ts` and `subagent-completion.ts`, and
+    /// `Session.Inbox.SyntheticPayload` in its `/openapi.json`; content
+    /// invented). The call ends with that report, and the message is shown as
+    /// OpenCode wrote it where the model receives it.
+    #[test]
+    fn a_subagent_ends_with_its_report_and_the_model_is_shown_what_opencode_wrote_it() {
+        let spawn = "msg_19c0000c100100000000000c01:call_0000000000000022";
+        let child = "msg_19c0000d100100000000000d01:text:0";
+        let running = json!({"type": "item_updated", "id": spawn, "content": {"kind": "subagent", "agent_type": "general", "description": "Name a fruit", "status": "in_progress", "summary": null}});
+        assert_eq!(
+            replay("subagent_report_turn.jsonl", &[])[2..],
+            [
+                running.clone(),
+                running,
+                json!({"type": "item_backgrounded", "item_id": spawn}),
+                json!({"type": "turn_completed", "turn_id": "evt_19c000000200100000000000002", "status": "completed", "usage": null}),
+                json!({"type": "item_started", "id": child, "parent_item_id": spawn, "content": {"kind": "assistant_message", "text": ""}}),
+                json!({"type": "item_completed", "id": child, "parent_item_id": spawn, "content": {"kind": "assistant_message", "text": "KIWI"}}),
+                json!({"type": "item_completed", "id": spawn, "content": {"kind": "subagent", "agent_type": "general", "description": "Name a fruit", "status": "completed", "summary": "KIWI"}}),
+                json!({"type": "turn_started", "turn_id": "evt_19c000001700100000000000017"}),
+                json!({"type": "item_completed", "id": "msg_19c0000e100100000000000e01", "content": {"kind": "other", "provider_kind": "synthetic", "summary": "<subagent sessionID=\"ses_child\" state=\"completed\" description=\"Name a fruit\">\nKIWI\n</subagent>"}}),
+                json!({"type": "turn_completed", "turn_id": "evt_19c000001700100000000000017", "status": "completed", "usage": null}),
+            ]
+        );
+    }
+
+    fn listed(mapper: &Mapper) -> Vec<(String, String, String, BackgroundKind)> {
+        mapper
+            .background()
+            .into_iter()
+            .map(|work| (work.id, work.item_id, work.name, work.kind))
+            .collect()
+    }
+
+    /// A command in the background is listed under its shell's id until the
+    /// shell exits. A stop removes the shell where it runs, as OpenCode's own
+    /// app does; OpenCode then reports it exited `killed` (v2.3.0's
+    /// `shell.ts` `remove`), and the call ends interrupted.
+    #[test]
+    fn a_background_shell_stops_by_removal_and_ends_when_opencode_reports_it_killed() {
+        let id = "msg_19c0000a100100000000000a01:call_0000000000000021";
+        let shell = "sh_19c0000b100100000000000b01";
+        let mut mapper = Mapper::new("ses_root".into(), Vec::new(), HashMap::new());
+        let frames = frames("background_shell_turn.jsonl");
+        let (exited, running) = frames.split_last().unwrap();
+        assert_eq!(exited["type"], "shell.exited");
+        for frame in running {
+            mapper.on_event(frame).unwrap();
+        }
+        assert_eq!(
+            listed(&mapper),
+            [(
+                shell.to_owned(),
+                id.to_owned(),
+                "make build".to_owned(),
+                BackgroundKind::Command
+            )]
+        );
+        assert_eq!(
+            mapper.stop_background(Some(shell)),
+            [Action::RemoveShell {
+                shell_id: shell.into(),
+                directory: Some("/work/project".into()),
+            }]
+        );
+        let killed = json!({"id": "evt_19c000001000100000000000010", "created": 1_794_000_000_070_u64, "type": "shell.exited", "location": {"directory": "/work/project"}, "data": {"id": shell, "status": "killed"}});
+        let mut out = feed(&mut mapper, &killed);
+        assert!(listed(&mapper).is_empty());
+        out.extend(wire(&mapper.shell_poll_ended(id)));
+        assert_eq!(
+            out,
+            [
+                json!({"action": "drain_shell", "item_id": id}),
+                json!({"type": "item_completed", "id": id, "content": {"kind": "command_execution", "command": "make build", "output": "", "exit_code": null, "status": "interrupted"}}),
+            ]
+        );
+    }
+
+    /// A subagent is listed under its child session until it reports. A stop
+    /// interrupts that session, as OpenCode's own app does; OpenCode then
+    /// reports the subagent `cancelled` (v2.3.0's `execution.ts` and
+    /// `subagent-completion.ts`), and the call ends interrupted.
+    #[test]
+    fn a_subagent_is_stopped_by_interrupting_its_session_and_ends_with_its_cancelled_report() {
+        let spawn = "msg_19c0000c100100000000000c01:call_0000000000000022";
+        let mut mapper = Mapper::new("ses_root".into(), Vec::new(), HashMap::new());
+        for frame in frames("subagent_report_turn.jsonl")
+            .iter()
+            .take_while(|frame| frame["type"] != "session.execution.succeeded")
+        {
+            mapper.on_event(frame).unwrap();
+        }
+        assert_eq!(
+            listed(&mapper),
+            [(
+                "ses_child".to_owned(),
+                spawn.to_owned(),
+                "Name a fruit".to_owned(),
+                BackgroundKind::Agent
+            )]
+        );
+        assert_eq!(
+            mapper.stop_background(None),
+            [Action::InterruptSession {
+                session_id: "ses_child".into(),
+            }]
+        );
+        let report = json!({"id": "evt_19c000001600100000000000016", "created": 1_794_000_000_112_u64, "type": "session.inbox.enqueued", "data": {"inboxID": "msg_19c0000e100100000000000e01", "sessionID": "ses_root", "item": {"type": "synthetic", "payload": {"text": "<subagent sessionID=\"ses_child\" state=\"cancelled\" description=\"Name a fruit\">\nSubagent cancelled\n</subagent>", "description": "Name a fruit", "metadata": {"source": "subagent", "childID": "ses_child", "agent": "General", "state": "cancelled"}}, "delivery": "steer"}}, "durable": {"aggregateID": "ses_root", "seq": 7, "version": 1}});
+        assert_eq!(
+            feed(&mut mapper, &report),
+            [
+                json!({"type": "item_completed", "id": spawn, "content": {"kind": "subagent", "agent_type": "general", "description": "Name a fruit", "status": "interrupted", "summary": "Subagent cancelled"}}),
+            ]
+        );
+        assert!(listed(&mapper).is_empty());
+    }
+
     #[test]
     fn an_image_read_carries_the_image_it_read() {
         let read = "msg_198ad176700100000000000062:chatcmpl-tool-0000000000000004";
@@ -3584,7 +4122,8 @@ mod tests {
     }
 
     /// A question tool's form is a question per field, and the answer goes
-    /// back as OpenCode recorded it.
+    /// back as OpenCode recorded it. The field names no `required`, which
+    /// OpenCode 2.3.0's `form.ts` reads as answerable empty.
     #[test]
     fn a_question_arrives_as_a_form_and_the_answer_is_what_opencode_recorded() {
         let frames = frames("question_turn.jsonl");
@@ -3597,7 +4136,7 @@ mod tests {
             json!([{
                 "id": "q0", "header": "Preferred color", "question": "Which color do you prefer?",
                 "options": [{"label": "Red", "description": "Prefer red"}, {"label": "Blue", "description": "Prefer blue"}],
-                "multi_select": false,
+                "multi_select": false, "optional": true,
             }])
         );
         let kinds: Vec<(String, String)> = fields

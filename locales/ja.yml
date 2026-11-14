@@ -1303,6 +1303,7 @@ diff:
   modified: "変更"
   deleted: "削除"
   renamed: "名前変更"
+  changed: "変更あり"
   unmodified_lines: "変更のない %{count} 行"
   empty: "この範囲にファイルの変更はありません"
   loading: "差分を読み込み中…"
@@ -1332,6 +1333,8 @@ userinput:
   dismiss: "非表示"
   answer: "回答"
   collapse: "折りたたむ"
+  optional: "任意"
+  skip: "スキップ"
 terminal:
   title: "ターミナル"
   tabs: "ターミナルのタブ"
@@ -3094,6 +3097,10 @@ tools:
       running: "閲覧中"
       done: "閲覧済み"
       asked: "閲覧"
+    change:
+      running: "変更中"
+      done: "変更済み"
+      asked: "変更"
     edit:
       running: "編集中"
       done: "編集済み"

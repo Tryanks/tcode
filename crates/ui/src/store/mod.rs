@@ -6717,6 +6717,7 @@ pub(crate) mod tests {
                 options: Vec::new(),
                 multi_select: false,
                 prefill: None,
+                optional: false,
             }],
             delivery: agent::UserInputDelivery::Blocking,
         }

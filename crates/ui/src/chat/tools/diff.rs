@@ -42,6 +42,9 @@ pub(in crate::chat) struct Edit<'a> {
     pub(in crate::chat) files: Vec<EditedFile>,
     pub(in crate::chat) status: ItemStatus,
     pub(in crate::chat) output: Option<&'a str>,
+    /// The files were seen to change while a command ran: one change of
+    /// several files, not an edit asked for file by file.
+    pub(in crate::chat) by_command: bool,
 }
 
 /// The edit `entry` made, when it is a file change.
@@ -50,6 +53,7 @@ pub(in crate::chat) fn edit<'a>(entry: &'a TimelineEntry, cwd: &Path) -> Option<
         changes,
         status,
         output,
+        command,
     }) = &entry.content
     else {
         return None;
@@ -67,7 +71,26 @@ pub(in crate::chat) fn edit<'a>(entry: &'a TimelineEntry, cwd: &Path) -> Option<
             .collect(),
         status: *status,
         output: output.as_deref().filter(|output| !output.trim().is_empty()),
+        by_command: command.is_some(),
     })
+}
+
+/// The header of the one window several files changed by a command share:
+/// how many, and the lines of those a diff came for.
+pub(in crate::chat) fn files_header(edit: &Edit) -> Header {
+    let (added, deleted) = edit
+        .files
+        .iter()
+        .filter_map(|file| file.row.counts)
+        .fold((0, 0), |(added, deleted), (more, fewer)| {
+            (added + more, deleted + fewer)
+        });
+    Header::new(IconName::Files, Verb("change"))
+        .argument(Argument::plain(super::counted(
+            "diff.files_changed",
+            edit.files.len(),
+        )))
+        .chip((added != 0 || deleted != 0).then_some(Chip::Lines { added, deleted }))
 }
 
 /// What the harness gave back for an edit: why it failed, as its error, or
@@ -93,6 +116,7 @@ pub(in crate::chat) fn file_header(file: &EditedFile, status: ItemStatus) -> Hea
         FileChangeKind::Modify => (IconName::Pencil, Verb("edit")),
         FileChangeKind::Delete => (IconName::Trash, Verb("delete")),
         FileChangeKind::Rename => (IconName::Replace, Verb("rename")),
+        FileChangeKind::Changed => (IconName::File, Verb("change")),
     };
     let applied = !matches!(status, ItemStatus::Failed | ItemStatus::Declined);
     Header::new(icon, verb)

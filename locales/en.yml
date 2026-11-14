@@ -1303,6 +1303,7 @@ diff:
   modified: "modified"
   deleted: "deleted"
   renamed: "renamed"
+  changed: "changed"
   unmodified_lines: "%{count} unmodified lines"
   empty: "No file changes in this scope"
   loading: "Loading diff…"
@@ -1332,6 +1333,8 @@ userinput:
   dismiss: "Hide"
   answer: "Answer"
   collapse: "Collapse"
+  optional: "Optional"
+  skip: "Skip"
 terminal:
   title: "Terminal"
   tabs: "Terminal tabs"
@@ -3094,6 +3097,10 @@ tools:
       running: "Viewing"
       done: "Viewed"
       asked: "View"
+    change:
+      running: "Changing"
+      done: "Changed"
+      asked: "Change"
     edit:
       running: "Editing"
       done: "Edited"

@@ -1592,6 +1592,13 @@ fn control_response(request_id: &str, body: Value) -> Value {
     })
 }
 
+fn control_error(request_id: &str, error: &str) -> Value {
+    json!({
+        "type": "control_response",
+        "response": { "subtype": "error", "request_id": request_id, "error": error },
+    })
+}
+
 async fn write_turn_message<W: AsyncWrite + Unpin>(
     stdin: &mut W,
     message: &Value,
@@ -1819,6 +1826,7 @@ impl ToolItem {
                     changes,
                     status: ItemStatus::InProgress,
                     output: None,
+                    command: None,
                 },
             )
         } else {
@@ -1887,6 +1895,7 @@ impl ToolItem {
                     changes,
                     status,
                     output: (!text.is_empty()).then_some(text),
+                    command: None,
                 }
             }
             ToolItem::Tool { name, input } => {
@@ -2052,9 +2061,8 @@ pub(crate) struct Mapper {
     /// reopen a completed item.
     child_items: HashMap<String, ChildItemStage>,
     pending_approvals: HashMap<String, PendingApproval>,
-    /// Pending `AskUserQuestion` prompts: control request_id → the original
-    /// `questions` array, echoed back verbatim in the allow response.
-    pending_user_input: HashMap<String, Value>,
+    /// The questions the user has open, by control request_id.
+    pending_user_input: HashMap<String, PendingUserInput>,
     /// Set when we send an `interrupt` control_request; the next non-success
     /// `result` is then attributed to the interrupt rather than a failure
     /// (the CLI's result carries no reliable interrupt marker).
@@ -2130,6 +2138,9 @@ pub(crate) struct Mapper {
     limit_resets_at: Option<u64>,
     /// Warning-bearing stop reason already emitted for this occurrence.
     warned_stop_reason: Option<String>,
+    /// The `apply_flag_settings` turning on `bashEditDiffEnabled`, awaiting
+    /// its answer.
+    pending_edit_diff: Option<String>,
 }
 
 impl Mapper {
@@ -2190,6 +2201,7 @@ impl Mapper {
             last_served_model: None,
             limit_resets_at: None,
             warned_stop_reason: None,
+            pending_edit_diff: None,
         }
     }
 
@@ -2469,6 +2481,22 @@ impl Mapper {
                 value: effort,
             }],
         });
+        // Claude Code records the files a Bash command changed (`bashEditDiff`)
+        // in default modes only when asked. Asked in the flag layer, which
+        // outranks the user's own settings, so only where none of theirs
+        // decides it.
+        if response
+            .pointer("/response/effective")
+            .and_then(Value::as_object)
+            .is_some_and(|effective| !effective.contains_key("bashEditDiffEnabled"))
+        {
+            let message = self.control_request(json!({
+                "subtype": "apply_flag_settings",
+                "settings": { "bashEditDiffEnabled": true },
+            }));
+            self.pending_edit_diff = message["request_id"].as_str().map(str::to_owned);
+            self.outgoing.push(message);
+        }
         events
     }
 
@@ -2592,22 +2620,59 @@ impl Mapper {
         Some(control_response(request_id, response))
     }
 
-    /// Build the `control_response` allowing a pending `AskUserQuestion` prompt,
-    /// echoing the original `questions` alongside the collected `answers`.
-    /// Returns `None` for an unknown request id.
+    /// The `control_response` giving pending questions the user's `answers`;
+    /// `None` for an unknown request id. No answers at all is the user
+    /// dismissing an elicitation, which MCP calls `cancel`; answers that are
+    /// all empty are a form submitted with nothing filled in, an `accept`.
     fn build_user_input_response(
         &mut self,
         request_id: &str,
         answers: &serde_json::Map<String, Value>,
     ) -> Option<Value> {
-        let questions = self.pending_user_input.remove(request_id)?;
-        Some(control_response(
-            request_id,
-            json!({
+        let response = match self.pending_user_input.remove(request_id)? {
+            PendingUserInput::AskUserQuestion { questions } => json!({
                 "behavior": "allow",
                 "updatedInput": { "questions": questions, "answers": answers }
             }),
-        ))
+            PendingUserInput::Elicitation { .. } if answers.is_empty() => {
+                json!({ "action": "cancel" })
+            }
+            PendingUserInput::Elicitation { fields } => json!({
+                "action": "accept",
+                "content": elicitation_content(&fields, answers),
+            }),
+        };
+        Some(control_response(request_id, response))
+    }
+
+    /// An `elicitation` control request: an MCP server asking the user for
+    /// input. A form is asked as questions. What questions cannot ask (a URL
+    /// to visit, a field of another shape) is declined, as the Agent SDK
+    /// answers for a host with no elicitation handler, and the user is told.
+    fn on_elicitation(&mut self, request_id: String, request: &Value) -> Vec<AgentEvent> {
+        let Some((questions, fields)) = elicitation_questions(request) else {
+            self.outgoing.push(control_response(
+                &request_id,
+                json!({ "action": "decline" }),
+            ));
+            let text = |key: &str| request.get(key).and_then(Value::as_str).unwrap_or_default();
+            let mut message = format!(
+                "The MCP server {} asked for input Tcode cannot show, and was declined: {}",
+                text("mcp_server_name"),
+                text("message")
+            );
+            if let Some(url) = request.get("url").and_then(Value::as_str) {
+                message.push_str(&format!(" ({url})"));
+            }
+            return vec![AgentEvent::Warning { message }];
+        };
+        self.pending_user_input
+            .insert(request_id.clone(), PendingUserInput::Elicitation { fields });
+        vec![AgentEvent::UserInputRequested {
+            request_id,
+            questions,
+            delivery: UserInputDelivery::Blocking,
+        }]
     }
 
     /// The `initialize` control request registering the worktree hooks.
@@ -2667,12 +2732,7 @@ impl Mapper {
         answer: &WorktreeAnswer,
     ) -> Option<(Value, WorktreeRequest)> {
         let request = self.pending_worktrees.remove(request_id)?;
-        let refusal = |error: &str| {
-            json!({
-                "type": "control_response",
-                "response": { "subtype": "error", "request_id": request_id, "error": error },
-            })
-        };
+        let refusal = |error: &str| control_error(request_id, error);
         let response = match (&request, answer) {
             (WorktreeRequest::Create { cwd, name }, WorktreeAnswer::Ready { path, .. }) => {
                 self.worktrees.push(path.clone());
@@ -3959,6 +4019,9 @@ impl Mapper {
                 AgentEvent::ItemCompleted
             };
             let is_subagent = matches!(content, ItemContent::Subagent { .. });
+            let changed = matches!(content, ItemContent::CommandExecution { .. })
+                .then(|| command_changes(&tool_use_id, msg.get("tool_use_result")))
+                .flatten();
             let event = event(ThreadItem {
                 id: tool_use_id.clone(),
                 parent_item_id,
@@ -3969,6 +4032,7 @@ impl Mapper {
             } else {
                 out.push(event);
             }
+            out.extend(changed.map(AgentEvent::ItemCompleted));
             if backgrounded {
                 out.push(AgentEvent::ItemBackgrounded {
                     item_id: tool_use_id.clone(),
@@ -4004,6 +4068,21 @@ impl Mapper {
         if self.pending_settings_read.as_deref() == Some(request_id) {
             self.pending_settings_read = None;
             return self.on_settings_read(response);
+        }
+        if self.pending_edit_diff.as_deref() == Some(request_id) {
+            self.pending_edit_diff = None;
+            if response.get("subtype").and_then(Value::as_str) == Some("success") {
+                return Vec::new();
+            }
+            let error = response
+                .get("error")
+                .and_then(Value::as_str)
+                .map_or_else(|| response.to_string(), str::to_owned);
+            return vec![AgentEvent::Warning {
+                message: format!(
+                    "claude: could not turn on bashEditDiffEnabled, so the files a command changes are not shown: {error}"
+                ),
+            }];
         }
         if self.pending_background_moves.remove(request_id) {
             let moved = response.get("subtype").and_then(Value::as_str) == Some("success")
@@ -4233,22 +4312,34 @@ impl Mapper {
             Some(r) => r,
             None => return Vec::new(),
         };
-        if request.get("subtype").and_then(Value::as_str) == Some("hook_callback")
-            && let Some(request_id) = msg.get("request_id").and_then(Value::as_str)
-        {
-            return self.on_hook_callback(request_id.to_owned(), request);
-        }
-        if request.get("subtype").and_then(Value::as_str) != Some("can_use_tool") {
-            log::debug!(
-                "claude: ignoring control_request/{:?}",
-                request.get("subtype").and_then(Value::as_str)
-            );
-            return Vec::new();
-        }
         let request_id = match msg.get("request_id").and_then(Value::as_str) {
             Some(id) => id.to_string(),
             None => return Vec::new(),
         };
+        match request.get("subtype").and_then(Value::as_str) {
+            Some("can_use_tool") => {}
+            Some("hook_callback") => return self.on_hook_callback(request_id, request),
+            Some("elicitation") => return self.on_elicitation(request_id, request),
+            // A dialog kind the host never declared is left unanswered: the
+            // control schema has Claude Code discard an error and take any
+            // other answer for the user's (2.1.323, `request_user_dialog`).
+            Some("request_user_dialog") => return Vec::new(),
+            // The Agent SDK's answer to a request it has no handler for
+            // (0.3.323, `sdk.mjs`), which the control schema names a designed
+            // refusal by its `error_code`.
+            subtype => {
+                let mut refusal = control_error(
+                    &request_id,
+                    &format!(
+                        "Unsupported control request subtype: {}",
+                        subtype.unwrap_or_default()
+                    ),
+                );
+                refusal["response"]["error_code"] = json!("unsupported_request");
+                self.outgoing.push(refusal);
+                return Vec::new();
+            }
+        }
         let tool_name = request
             .get("tool_name")
             .and_then(Value::as_str)
@@ -4269,8 +4360,12 @@ impl Mapper {
         if tool_name == "AskUserQuestion" {
             let questions_raw = input.get("questions").cloned().unwrap_or_else(|| json!([]));
             let questions = parse_ask_user_questions(&input);
-            self.pending_user_input
-                .insert(request_id.clone(), questions_raw);
+            self.pending_user_input.insert(
+                request_id.clone(),
+                PendingUserInput::AskUserQuestion {
+                    questions: questions_raw,
+                },
+            );
             return vec![AgentEvent::UserInputRequested {
                 request_id,
                 questions,
@@ -5134,8 +5229,212 @@ fn parse_ask_user_questions(input: &Value) -> Vec<UserInputQuestion> {
                 question,
                 options,
                 multi_select,
+                optional: false,
                 prefill: None,
             }
+        })
+        .collect()
+}
+
+/// Questions the user has open, and what their answer has to carry back.
+enum PendingUserInput {
+    /// `AskUserQuestion`: its `questions` input, echoed with the answers.
+    AskUserQuestion { questions: Value },
+    /// A form-mode MCP elicitation: its fields, in the order asked.
+    Elicitation { fields: Vec<ElicitationField> },
+}
+
+/// One field of an MCP elicitation form: its property name and how the answer
+/// to its question becomes the property's value.
+struct ElicitationField {
+    key: String,
+    kind: ElicitationKind,
+}
+
+enum ElicitationKind {
+    Text,
+    Number,
+    Boolean,
+    /// Each option's label and the value it stands for.
+    Choice(Vec<(String, String)>),
+    Choices(Vec<(String, String)>),
+}
+
+/// The questions asking a form-mode `elicitation` control request's fields
+/// (Claude Code 2.1.323 control schema; the field shapes are MCP 2025-11-25's
+/// `PrimitiveSchemaDefinition`), each naming the server and its message.
+/// `None` when the request is not a form or a field is of a shape a question
+/// cannot ask.
+fn elicitation_questions(
+    request: &Value,
+) -> Option<(Vec<UserInputQuestion>, Vec<ElicitationField>)> {
+    if !matches!(
+        request.get("mode").and_then(Value::as_str),
+        None | Some("form")
+    ) {
+        return None;
+    }
+    let properties = request
+        .pointer("/requested_schema/properties")
+        .and_then(Value::as_object)
+        .filter(|properties| !properties.is_empty())?;
+    // `property_order` is the order the server listed them in, which the
+    // parsed object no longer has.
+    let keys: Vec<&str> = match request.get("property_order").and_then(Value::as_array) {
+        Some(order) => order.iter().filter_map(Value::as_str).collect(),
+        None => properties.keys().map(String::as_str).collect(),
+    };
+    // A field the schema's `required` does not list may be left out; with no
+    // `required`, none is (JSON Schema).
+    let required: Vec<&str> = request
+        .pointer("/requested_schema/required")
+        .and_then(Value::as_array)
+        .map(|required| required.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let text = |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
+    let asked_by = format!(
+        "{}: {}",
+        text(request, "mcp_server_name").unwrap_or_default(),
+        text(request, "message").unwrap_or_default()
+    );
+    let titled = |choices: &Value| -> Option<Vec<(String, String)>> {
+        choices
+            .as_array()?
+            .iter()
+            .map(|choice| Some((text(choice, "title")?, text(choice, "const")?)))
+            .collect()
+    };
+    let named = |values: &Value, names: &Value| -> Option<Vec<(String, String)>> {
+        values
+            .as_array()?
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let value = value.as_str()?;
+                let name = names.get(index).and_then(Value::as_str).unwrap_or(value);
+                Some((name.to_owned(), value.to_owned()))
+            })
+            .collect()
+    };
+    let mut questions = Vec::new();
+    let mut fields = Vec::new();
+    for key in keys {
+        let schema = properties.get(key)?;
+        let mut prefill = None;
+        let kind = match schema.get("type").and_then(Value::as_str)? {
+            "string" if schema.get("enum").is_some() => {
+                ElicitationKind::Choice(named(&schema["enum"], &schema["enumNames"])?)
+            }
+            "string" if schema.get("oneOf").is_some() => {
+                ElicitationKind::Choice(titled(&schema["oneOf"])?)
+            }
+            "string" => {
+                prefill = text(schema, "default");
+                ElicitationKind::Text
+            }
+            "number" | "integer" => {
+                prefill = schema
+                    .get("default")
+                    .and_then(Value::as_number)
+                    .map(ToString::to_string);
+                ElicitationKind::Number
+            }
+            "boolean" => {
+                prefill = schema
+                    .get("default")
+                    .and_then(Value::as_bool)
+                    .map(|default| default.to_string());
+                ElicitationKind::Boolean
+            }
+            "array" => {
+                let items = schema.get("items")?;
+                ElicitationKind::Choices(match items.get("anyOf") {
+                    Some(choices) => titled(choices)?,
+                    None => named(items.get("enum")?, &Value::Null)?,
+                })
+            }
+            _ => return None,
+        };
+        // A choice's default is offered as its option's label, which the
+        // answer maps back to the value.
+        if let ElicitationKind::Choice(choices) = &kind
+            && let Some(default) = text(schema, "default")
+        {
+            prefill = choices
+                .iter()
+                .find(|(_, value)| *value == default)
+                .map(|(label, _)| label.clone());
+        }
+        let labels: Vec<&str> = match &kind {
+            ElicitationKind::Text | ElicitationKind::Number => Vec::new(),
+            ElicitationKind::Boolean => vec!["true", "false"],
+            ElicitationKind::Choice(choices) | ElicitationKind::Choices(choices) => {
+                choices.iter().map(|(label, _)| label.as_str()).collect()
+            }
+        };
+        questions.push(UserInputQuestion {
+            id: key.to_owned(),
+            header: text(schema, "title").unwrap_or_else(|| key.to_owned()),
+            question: match text(schema, "description") {
+                Some(description) => format!("{asked_by}\n\n{description}"),
+                None => asked_by.clone(),
+            },
+            options: labels
+                .into_iter()
+                .map(|label| UserInputOption {
+                    label: label.to_owned(),
+                    description: String::new(),
+                })
+                .collect(),
+            multi_select: matches!(kind, ElicitationKind::Choices(_)),
+            prefill,
+            optional: !required.contains(&key),
+        });
+        fields.push(ElicitationField {
+            key: key.to_owned(),
+            kind,
+        });
+    }
+    Some((questions, fields))
+}
+
+/// The `content` of an accepted elicitation: each answered field's value in
+/// the type its schema asks for. A field left empty is left out, and an answer
+/// that is none of a field's options or not of its type goes as the user gave
+/// it, for the server to judge.
+fn elicitation_content(
+    fields: &[ElicitationField],
+    answers: &serde_json::Map<String, Value>,
+) -> serde_json::Map<String, Value> {
+    let value_of = |choices: &[(String, String)], answer: &str| {
+        let value = choices.iter().find(|(label, _)| label == answer);
+        json!(value.map_or(answer, |(_, value)| value))
+    };
+    fields
+        .iter()
+        .filter_map(|field| {
+            let answer: Vec<&str> = match answers.get(&field.key)? {
+                Value::String(text) => vec![text.as_str()],
+                Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+                _ => Vec::new(),
+            };
+            let first = *answer.first().filter(|text| !text.is_empty())?;
+            let value = match &field.kind {
+                ElicitationKind::Text => json!(first),
+                ElicitationKind::Number => serde_json::from_str::<serde_json::Number>(first.trim())
+                    .map_or_else(|_| json!(first), Value::Number),
+                ElicitationKind::Boolean => match first {
+                    "true" => json!(true),
+                    "false" => json!(false),
+                    other => json!(other),
+                },
+                ElicitationKind::Choice(choices) => value_of(choices, first),
+                ElicitationKind::Choices(choices) => answer
+                    .iter()
+                    .map(|answer| value_of(choices, answer))
+                    .collect(),
+            };
+            Some((field.key.clone(), value))
         })
         .collect()
 }
@@ -5196,6 +5495,56 @@ fn file_changes(name: &str, input: &Value) -> Vec<FileChange> {
             diff: None,
         }],
     }
+}
+
+/// The file change that follows a command whose Bash result carries
+/// `bashEditDiff`: the files Claude Code saw change while it ran. Those it
+/// gives a diff for come first (`files`), then the rest of `changedFiles`,
+/// whose operation it does not say.
+pub fn command_changes(command_id: &str, tool_use_result: Option<&Value>) -> Option<ThreadItem> {
+    let edit_diff = tool_use_result?.get("bashEditDiff")?;
+    let list = |key: &str| edit_diff.get(key).and_then(Value::as_array);
+    let flag = |file: &Value, key: &str| file.get(key).and_then(Value::as_bool) == Some(true);
+    let mut changes: Vec<FileChange> = list("files")
+        .into_iter()
+        .flatten()
+        .filter_map(|file| {
+            Some(FileChange {
+                path: file.get("filePath")?.as_str()?.to_owned(),
+                kind: if flag(file, "created") {
+                    FileChangeKind::Create
+                } else if flag(file, "deleted") {
+                    FileChangeKind::Delete
+                } else {
+                    FileChangeKind::Modify
+                },
+                diff: file.get("hunks").and_then(render_structured_patch),
+            })
+        })
+        .collect();
+    for path in list("changedFiles")
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if !changes.iter().any(|change| change.path == path) {
+            changes.push(FileChange {
+                path: path.to_owned(),
+                kind: FileChangeKind::Changed,
+                diff: None,
+            });
+        }
+    }
+    (!changes.is_empty()).then(|| ThreadItem {
+        id: format!("{command_id}:changes"),
+        parent_item_id: None,
+        content: ItemContent::FileChange {
+            changes,
+            status: ItemStatus::Completed,
+            output: None,
+            command: Some(command_id.to_owned()),
+        },
+    })
 }
 
 /// Render Claude's structured edit hunks as a unified diff body.
@@ -5459,6 +5808,39 @@ mod tests {
             json!("xhigh")
         );
         assert_eq!(effort(&answer("low", json!({"effort":null}))), Value::Null);
+    }
+
+    /// `get_settings`' `effective` (the merged settings) and the
+    /// `apply_flag_settings` request are Claude Code 2.1.323's control schema;
+    /// the values are made up.
+    #[test]
+    fn bash_edit_diff_is_turned_on_unless_the_users_settings_decide_it() {
+        let read_with = |effective: Value| {
+            let mut mapper = Mapper::new();
+            let read = mapper.settings_read_request();
+            mapper.on_message(json!({"type":"control_response", "response": {
+                "subtype":"success", "request_id":read["request_id"],
+                "response":{"effective":effective, "sources":[], "applied":{"model":"claude-haiku-4-5","effort":null}}
+            }}));
+            mapper
+        };
+        let mut mapper = read_with(json!({"model":"haiku"}));
+        let [apply] = mapper.take_outgoing().try_into().expect("one request");
+        assert_eq!(
+            apply["request"],
+            json!({"subtype":"apply_flag_settings", "settings":{"bashEditDiffEnabled":true}})
+        );
+        let events = mapper.on_message(json!({"type":"control_response", "response": {
+            "subtype":"error", "request_id":apply["request_id"], "error":"flag settings are read-only here"
+        }}));
+        assert!(
+            matches!(events.as_slice(), [AgentEvent::Warning { message }]
+                if message.contains("flag settings are read-only here")),
+            "{events:?}"
+        );
+
+        let mut mapper = read_with(json!({"bashEditDiffEnabled":false}));
+        assert!(mapper.take_outgoing().is_empty());
     }
 
     #[test]
@@ -6937,6 +7319,7 @@ mod tests {
                 }],
                 status: ItemStatus::Completed,
                 output: Some("The file /home/user/project/a.txt has been updated successfully. (file state is current in your context — no need to Read it back)".into()),
+                command: None,
             }
         );
         // A subagent's tool result comes without the output object, so its
@@ -6986,6 +7369,67 @@ mod tests {
                 status: ItemStatus::Failed,
             }
         );
+    }
+
+    /// A Bash result's `bashEditDiff` names the files the command changed:
+    /// `files` with hunks and `created`/`deleted`, and `changedFiles` for
+    /// those it gives no diff (the Bash `tool_response` table of the hooks
+    /// reference, as Claude Code 2.1.323 writes it on the stream; content
+    /// invented). They follow the command as one file change that names it.
+    #[test]
+    fn the_files_a_command_changed_follow_it_as_one_file_change() {
+        let mut mapper = Mapper::new();
+        feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg_sed","content":[{"type":"tool_use","id":"toolu_sed","name":"Bash","input":{"command":"./regenerate.sh"}}]}}"#,
+        );
+        let completed = feed(
+            &mut mapper,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_sed","content":"","is_error":false}]},"tool_use_result":{"stdout":"","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false,"bashEditDiff":{"files":[{"filePath":"/work/src/lib.rs","hunks":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":2,"lines":[" one","+two"]}]},{"filePath":"/work/new.rs","hunks":[{"oldStart":0,"oldLines":0,"newStart":1,"newLines":1,"lines":["+new"]}],"created":true},{"filePath":"/work/old.rs","hunks":[{"oldStart":1,"oldLines":1,"newStart":0,"newLines":0,"lines":["-old"]}],"deleted":true}],"moreFiles":1,"changedFiles":["/work/src/lib.rs","/work/new.rs","/work/old.rs","/work/generated.rs"]}}}"#,
+        );
+        let [
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: command_id,
+                content: ItemContent::CommandExecution { .. },
+                ..
+            }),
+            AgentEvent::ItemCompleted(changed),
+        ] = completed.as_slice()
+        else {
+            panic!("{completed:?}");
+        };
+        let change = |path: &str, kind, diff: Option<&str>| FileChange {
+            path: path.into(),
+            kind,
+            diff: diff.map(str::to_owned),
+        };
+        assert_eq!(
+            changed.content,
+            ItemContent::FileChange {
+                changes: vec![
+                    change(
+                        "/work/src/lib.rs",
+                        FileChangeKind::Modify,
+                        Some("@@ -1,1 +1,2 @@\n one\n+two"),
+                    ),
+                    change(
+                        "/work/new.rs",
+                        FileChangeKind::Create,
+                        Some("@@ -0,0 +1,1 @@\n+new"),
+                    ),
+                    change(
+                        "/work/old.rs",
+                        FileChangeKind::Delete,
+                        Some("@@ -1,1 +0,0 @@\n-old"),
+                    ),
+                    change("/work/generated.rs", FileChangeKind::Changed, None),
+                ],
+                status: ItemStatus::Completed,
+                output: None,
+                command: Some(command_id.clone()),
+            }
+        );
+        assert_ne!(&changed.id, command_id);
     }
 
     /// A Read is a read of the file it names: its lines as the output object
@@ -8028,6 +8472,152 @@ mod tests {
         );
         // Consumed once.
         assert!(m.build_user_input_response("ctrl-9", &answers).is_none());
+    }
+
+    /// The `elicitation` control request and its `{action, content}` answer
+    /// are Claude Code 2.1.323's SDK control schema; the fields are MCP
+    /// 2025-11-25 `PrimitiveSchemaDefinition`s (schema.ts).
+    #[test]
+    fn an_mcp_form_is_asked_as_questions_with_its_defaults_and_answered_in_its_types() {
+        let form = r#"{"type":"control_request","request_id":"REQUEST","request":{"subtype":"elicitation","mcp_server_name":"deployer","message":"Where should this go?","mode":"form","requested_schema":{"type":"object","properties":{"public":{"type":"boolean","title":"Public","default":true},"region":{"type":"string","title":"Region","description":"A region code","default":"eu-west"},"replicas":{"type":"integer","minimum":1},"tier":{"type":"string","title":"Tier","oneOf":[{"const":"std","title":"Standard"},{"const":"pro","title":"Professional"}],"default":"pro"},"zones":{"type":"array","title":"Zones","items":{"type":"string","enum":["a","b","c"]}}},"required":["region"]},"property_order":["region","replicas","public","tier","zones"]}}"#;
+        let mut m = Mapper::new();
+        m.start_turn();
+        let events = feed(&mut m, &form.replace("REQUEST", "elicit-1"));
+        let question =
+            |id: &str, header: &str, question: &str, options: &[&str]| UserInputQuestion {
+                id: id.into(),
+                header: header.into(),
+                question: question.into(),
+                options: options
+                    .iter()
+                    .map(|label| UserInputOption {
+                        label: (*label).into(),
+                        description: String::new(),
+                    })
+                    .collect(),
+                multi_select: id == "zones",
+                prefill: match id {
+                    "region" => Some("eu-west".into()),
+                    "public" => Some("true".into()),
+                    "tier" => Some("Professional".into()),
+                    _ => None,
+                },
+                optional: id != "region",
+            };
+        let asked_by = "deployer: Where should this go?";
+        let [
+            AgentEvent::UserInputRequested {
+                request_id,
+                questions,
+                delivery: UserInputDelivery::Blocking,
+            },
+        ] = events.as_slice()
+        else {
+            panic!("{events:?}");
+        };
+        assert_eq!(request_id, "elicit-1");
+        assert_eq!(
+            questions,
+            &[
+                question(
+                    "region",
+                    "Region",
+                    &format!("{asked_by}\n\nA region code"),
+                    &[]
+                ),
+                question("replicas", "replicas", asked_by, &[]),
+                question("public", "Public", asked_by, &["true", "false"]),
+                question("tier", "Tier", asked_by, &["Standard", "Professional"]),
+                question("zones", "Zones", asked_by, &["a", "b", "c"]),
+            ]
+        );
+        assert!(m.take_outgoing().is_empty());
+
+        let answers = json!({
+            "region": "us-east", "replicas": "3", "public": "true",
+            "tier": "Professional", "zones": ["a", "c"],
+        });
+        assert_eq!(
+            m.build_user_input_response("elicit-1", answers.as_object().unwrap()),
+            Some(
+                json!({"type":"control_response","response":{"subtype":"success","request_id":"elicit-1","response":{
+                    "action":"accept",
+                    "content":{"region":"us-east","replicas":3,"public":true,"tier":"pro","zones":["a","c"]},
+                }}})
+            )
+        );
+
+        feed(&mut m, &form.replace("REQUEST", "elicit-2"));
+        assert_eq!(
+            m.build_user_input_response("elicit-2", &serde_json::Map::new()),
+            Some(
+                json!({"type":"control_response","response":{"subtype":"success","request_id":"elicit-2","response":{"action":"cancel"}}})
+            ),
+            "dismissed without an answer"
+        );
+
+        // With no `required`, every field may be left out, and a form left
+        // wholly empty is still accepted.
+        let events = feed(
+            &mut m,
+            &form
+                .replace("REQUEST", "elicit-3")
+                .replace(r#","required":["region"]"#, ""),
+        );
+        let [AgentEvent::UserInputRequested { questions, .. }] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        assert!(questions.iter().all(|question| question.optional));
+        let answers = json!({
+            "region": "", "replicas": "", "public": "", "tier": "", "zones": [],
+        });
+        assert_eq!(
+            m.build_user_input_response("elicit-3", answers.as_object().unwrap()),
+            Some(
+                json!({"type":"control_response","response":{"subtype":"success","request_id":"elicit-3","response":{"action":"accept","content":{}}}})
+            )
+        );
+    }
+
+    /// A URL-mode `elicitation` and `mcp_message` are requests of Claude Code
+    /// 2.1.323's SDK control schema that Tcode has no way to serve. The Agent
+    /// SDK of that version declines an elicitation it has no handler for and
+    /// answers the error "Unsupported control request subtype: …", code
+    /// `unsupported_request`, to a request it does not know (0.3.323,
+    /// `sdk.mjs`); a request with no answer holds its tool call open for good.
+    #[test]
+    fn a_control_request_tcode_cannot_serve_is_answered() {
+        let mut m = Mapper::new();
+        m.start_turn();
+        let events = feed(
+            &mut m,
+            r#"{"type":"control_request","request_id":"elicit-url","request":{"subtype":"elicitation","mcp_server_name":"tracker","message":"Sign in to continue","mode":"url","url":"https://tracker.example/authorize","elicitation_id":"el-7"}}"#,
+        );
+        assert_eq!(
+            m.take_outgoing(),
+            [
+                json!({"type":"control_response","response":{"subtype":"success","request_id":"elicit-url","response":{"action":"decline"}}})
+            ]
+        );
+        assert!(
+            matches!(events.as_slice(), [AgentEvent::Warning { message }]
+                if ["tracker", "Sign in to continue", "https://tracker.example/authorize"]
+                    .iter()
+                    .all(|said| message.contains(said))),
+            "the user is told who asked and what: {events:?}"
+        );
+
+        let events = feed(
+            &mut m,
+            r#"{"type":"control_request","request_id":"mcp-1","request":{"subtype":"mcp_message","server_name":"tracker","message":{"jsonrpc":"2.0","id":1,"method":"ping"}}}"#,
+        );
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(
+            m.take_outgoing(),
+            [
+                json!({"type":"control_response","response":{"subtype":"error","request_id":"mcp-1","error":"Unsupported control request subtype: mcp_message","error_code":"unsupported_request"}})
+            ]
+        );
     }
 
     #[test]

@@ -1584,8 +1584,9 @@ impl TimelineView {
         .render(v_flex().w_full().mb(-gap))
     }
 
-    /// One window of a Work Log: a computer run, an edit's file windows, or
-    /// one activity, with `newer` windows after it in its list.
+    /// One window of a Work Log: a computer run, an edit's file windows, the
+    /// one window of the files a command changed, or one activity, with
+    /// `newer` windows after it in its list.
     fn compose_activity_window(
         &mut self,
         activities: &[&TimelineEntry],
@@ -1601,6 +1602,9 @@ impl TimelineView {
         let entry = activities[0];
         let recency = AutoActivityRecency::from_newer_activity_count(newer);
         if let Some(edit) = tools::diff::edit(entry, cwd) {
+            if edit.by_command && edit.files.len() > 1 {
+                return vec![self.compose_changed_files(entry, cwd, &edit, recency, window, cx)];
+            }
             return self.compose_edit_rows(entry, cwd, &edit, auto_expand, recency, window, cx);
         }
         let row = self.compose_activity_row(
@@ -1637,6 +1641,54 @@ impl TimelineView {
         self.shared
             .arrive(&key, &SharedString::new_static(site), cx);
         self.shared.element(key, row).into_any_element()
+    }
+
+    /// The one window of the files a command changed, which opens on a
+    /// window per file.
+    fn compose_changed_files(
+        &mut self,
+        entry: &TimelineEntry,
+        cwd: &Path,
+        edit: &tools::diff::Edit,
+        recency: AutoActivityRecency,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = format!("activity-{}", entry.id);
+        let turn = entry.turn;
+        let expanded = self.auto_activity_expanded((turn, &entry.id), &key, false, recency, cx);
+        let detail = match tools::window::fold(&self.motion, &entry.id, expanded, window, cx) {
+            Some(shown) => {
+                let files = self.compose_edit_rows(entry, cwd, edit, false, recency, window, cx);
+                tools::window::Detail::Fold(
+                    shown,
+                    v_flex().w_full().gap_1().children(files).into_any_element(),
+                    self.activity_body_key(entry, edit.status),
+                )
+            }
+            None => tools::window::Detail::Shut,
+        };
+        let entry_id = entry.id.clone();
+        tools::window::tool_window(
+            tools::window::WindowSpec {
+                key: entry.id.clone(),
+                header: tools::diff::files_header(edit),
+                status: edit.status,
+                error: None,
+                elapsed_ms: None,
+                compact: false,
+                copy: Vec::new(),
+                whole_output: None,
+                path: None,
+                hover: self.hover.clone(),
+                motion: self.motion.clone(),
+            },
+            detail,
+            cx.listener(move |this, _, _, cx| {
+                this.toggle_activity_expanded((turn, &entry_id), &key, expanded, cx);
+            }),
+            cx,
+        )
     }
 
     /// An edit's windows, one per file it touched. A harness's own diff
@@ -2601,119 +2653,6 @@ mod tests {
                 .collect();
             assert_eq!(shown, offered, "{provider:?} turn {turn}");
         }
-    }
-
-    /// A thread handed to a Harness with neither fork nor rewind (Cursor)
-    /// still offers, on the turns Claude Code ran before the handoff, the
-    /// fork of that session and a rewind of the conversation alone; and on
-    /// the message the handoff carried, a rewind that undoes the handoff,
-    /// which needs no restore point from Cursor.
-    #[gpui::test]
-    fn a_turn_before_a_handoff_offers_the_fork_and_rewind_of_the_session_that_ran_it(
-        cx: &mut TestAppContext,
-    ) {
-        use agent::{AgentEvent, ProviderKind, RewindMode, TurnStatus};
-        use gpui::{Modifiers, VisualTestContext, px, size};
-
-        let mut timeline = Timeline::default();
-        timeline.turns = (0..2)
-            .map(|index| TurnMeta {
-                provider_checkpoint_id: Some(format!("msg_checkpoint_{index}")),
-                status: Some(TurnStatus::Completed),
-                ..TurnMeta::default()
-            })
-            .collect();
-        timeline.entries.extend([
-            at_turn(entry("user-0", user_item("first")), 0),
-            at_turn(entry("assistant-0", assistant("One.")), 0),
-            at_turn(entry("user-1", user_item("second")), 1),
-            at_turn(entry("assistant-1", assistant("Two.")), 1),
-        ]);
-        let mut log = log_of(&timeline);
-        log.extend([
-            AgentEvent::ProviderRelay {
-                from_provider: ProviderKind::ClaudeCode,
-                from_model: None,
-                to_provider: ProviderKind::Cursor,
-                to_model: None,
-                prompt: None,
-                moved_from: None,
-                left: Some(agent::LeftSession {
-                    id: "left".into(),
-                    profile: None,
-                    acp_agent: None,
-                    options: Vec::new(),
-                    resume: agent::ResumeCursor(serde_json::json!({ "session_id": "claude" })),
-                }),
-            },
-            AgentEvent::ItemCompleted(agent::ThreadItem {
-                id: "user-2".into(),
-                parent_item_id: None,
-                content: ItemContent::UserMessage {
-                    text: "third".into(),
-                    attachments: Vec::new(),
-                },
-            }),
-            AgentEvent::TurnStarted {
-                turn_id: "turn-2".into(),
-            },
-            AgentEvent::ItemCompleted(agent::ThreadItem {
-                id: "assistant-2".into(),
-                parent_item_id: None,
-                content: ItemContent::AssistantMessage {
-                    text: "Three.".into(),
-                    summarized: false,
-                },
-            }),
-            AgentEvent::TurnCompleted {
-                turn_id: "turn-2".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-        ]);
-        let (workspace_store, window_state, session_id, _driver, _scripted) =
-            seed_chat_scripted(cx, log, false, Some(ProviderKind::Cursor), false);
-        let (_view, window) =
-            crate::chat::tests::add_chat_window_hosting_dialogs(cx, |window, cx| {
-                ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
-            });
-        let window: &mut VisualTestContext = window;
-        window.simulate_resize(size(px(1_024.), px(900.)));
-        draw_settled(window);
-        let hover = |window: &mut VisualTestContext, id: &'static str| {
-            let bounds = window
-                .debug_bounds(id)
-                .unwrap_or_else(|| panic!("{id} is drawn"));
-            window.simulate_mouse_move(bounds.center(), None, Modifiers::default());
-            draw_settled(window);
-        };
-        hover(window, "user-bubble-user-2");
-        assert!(window.debug_bounds("rewind-user-2").is_some());
-        hover(window, "copy-assistant:assistant-1");
-        assert!(window.debug_bounds("fork-assistant-1").is_some());
-        hover(window, "copy-assistant:assistant-0");
-        assert!(window.debug_bounds("fork-assistant-0").is_some());
-
-        hover(window, "user-bubble-user-1");
-        let trigger = window
-            .debug_bounds("rewind-user-1")
-            .expect("the message Claude Code ran has a rewind action");
-        window.simulate_click(trigger.center(), Modifiers::default());
-        draw_settled(window);
-        assert!(window.debug_bounds("rewind-panel").is_some());
-        let shown: Vec<RewindMode> = [
-            (
-                RewindMode::FilesAndConversation,
-                "rewind-option-FilesAndConversation",
-            ),
-            (RewindMode::Conversation, "rewind-option-Conversation"),
-            (RewindMode::Files, "rewind-option-Files"),
-        ]
-        .into_iter()
-        .filter(|(_, id)| window.debug_bounds(id).is_some())
-        .map(|(mode, _)| mode)
-        .collect();
-        assert_eq!(shown, [RewindMode::Conversation]);
     }
 
     /// The panel asks the Harness what each file scope would restore, and

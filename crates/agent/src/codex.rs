@@ -333,7 +333,7 @@ async fn collect_models(
     windows: &HashMap<String, model_windows::ModelWindows>,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     initialize(stdin, lines).await?;
-    let entries = list_models_raw(stdin, lines, &mut 2, false).await?;
+    let entries = list_models_raw(stdin, lines, &mut 2, false, &mut Vec::new()).await?;
     Ok(entries
         .iter()
         .filter_map(|model| {
@@ -351,6 +351,7 @@ async fn list_models_raw(
     lines: &Receiver<ChildOutput>,
     next_id: &mut i64,
     include_hidden: bool,
+    said: &mut Vec<String>,
 ) -> Result<Vec<Value>, AgentError> {
     let mut entries = Vec::new();
     let mut cursor: Option<String> = None;
@@ -368,7 +369,7 @@ async fn list_models_raw(
             stdin,
             &json!({ "id": id, "method": "model/list", "params": params }),
         )?;
-        let response = wait_for_response(lines, id).await?;
+        let response = wait_for_answer(lines, id, said).await?;
         if let Some(data) = response.get("data").and_then(Value::as_array) {
             entries.extend(data.iter().cloned());
         }
@@ -858,6 +859,9 @@ struct Actor {
     continuing: bool,
     /// Turns that continue a failed one rather than answer a prompt.
     continuations: HashSet<String>,
+    /// The `summary` of each `configWarning`. Codex says each again to the
+    /// thread as a `warning` with the same text (0.169.0), shown once.
+    config_warnings: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -899,6 +903,7 @@ async fn run_actor(
         permission_descriptor,
         effective_permission,
         warnings,
+        said,
     } = match startup {
         Ok(value) => value,
         Err(err) => {
@@ -955,6 +960,7 @@ async fn run_actor(
         instructions: opts.instructions.clone(),
         continuing: false,
         continuations: HashSet::new(),
+        config_warnings: HashSet::new(),
     };
 
     let started = AgentEvent::SessionStarted {
@@ -990,6 +996,9 @@ async fn run_actor(
         .await;
     for message in warnings {
         actor.events.emit(AgentEvent::Warning { message }).await;
+    }
+    for line in said {
+        actor.handle_line(&line).await;
     }
     let thread = json!({ "threadId": actor.thread_id });
     if let Err(err) = actor.request("thread/goal/get", thread, PendingRequest::GoalSnapshot) {
@@ -1573,6 +1582,10 @@ struct OpenedThread {
     permission_descriptor: OptionDescriptor,
     effective_permission: String,
     warnings: Vec<String>,
+    /// What Codex wrote while the thread opened besides the answers awaited:
+    /// the configuration's warnings and deprecations, the thread's own
+    /// notifications. The actor reads them first.
+    said: Vec<String>,
 }
 
 async fn initialize_and_open_thread(
@@ -1615,7 +1628,8 @@ async fn initialize_and_open_thread(
         stdin,
         &json!({ "id": 2, "method": method, "params": params }),
     )?;
-    let result = wait_for_response(lines, 2).await?;
+    let mut said = Vec::new();
+    let result = wait_for_answer(lines, 2, &mut said).await?;
     let thread_id = result
         .pointer("/thread/id")
         .and_then(Value::as_str)
@@ -1647,21 +1661,21 @@ async fn initialize_and_open_thread(
     // files, so those are not offered.
     let mut warnings = Vec::new();
     let mut next_id = 3;
-    let profiles = request_permission_profiles(&opts.cwd, stdin, lines, &mut next_id)
+    let profiles = request_permission_profiles(&opts.cwd, stdin, lines, &mut next_id, &mut said)
         .await
         .unwrap_or_else(|err| {
             warnings.push(format!("Codex permissionProfile/list failed: {err}"));
             Vec::new()
         });
     let permission_descriptor = permission_descriptor(&profiles, &effective_permission, &result);
-    let provider_commands = request_codex_skills(&opts.cwd, stdin, lines, next_id)
+    let provider_commands = request_codex_skills(&opts.cwd, stdin, lines, next_id, &mut said)
         .await
         .unwrap_or_else(|err| {
             warnings.push(format!("Codex skills/list failed: {err}"));
             Vec::new()
         });
     next_id += 1;
-    let model_efforts = list_models_raw(stdin, lines, &mut next_id, true)
+    let model_efforts = list_models_raw(stdin, lines, &mut next_id, true, &mut said)
         .await
         .map(|entries| ModelEfforts::from_list(&entries))
         .unwrap_or_else(|err| {
@@ -1690,6 +1704,7 @@ async fn initialize_and_open_thread(
         permission_descriptor,
         effective_permission,
         warnings,
+        said,
     })
 }
 
@@ -1730,6 +1745,7 @@ async fn request_permission_profiles(
     stdin: &mut BufWriter<ChildStdin>,
     lines: &Receiver<ChildOutput>,
     next_id: &mut i64,
+    said: &mut Vec<String>,
 ) -> Result<Vec<Value>, AgentError> {
     let mut cursor = Value::Null;
     let mut profiles = Vec::new();
@@ -1740,7 +1756,7 @@ async fn request_permission_profiles(
             stdin,
             &json!({"id":id, "method":"permissionProfile/list", "params":{"cwd":cwd.to_string_lossy(), "cursor":cursor}}),
         )?;
-        let result = wait_for_response(lines, id).await?;
+        let result = wait_for_answer(lines, id, said).await?;
         if let Some(entries) = result.get("data").and_then(Value::as_array) {
             profiles.extend(entries.iter().cloned());
         }
@@ -1760,12 +1776,13 @@ async fn request_codex_skills(
     stdin: &mut BufWriter<ChildStdin>,
     lines: &Receiver<ChildOutput>,
     id: i64,
+    said: &mut Vec<String>,
 ) -> Result<Vec<ProviderCommand>, AgentError> {
     send_json(
         stdin,
         &json!({ "id": id, "method": "skills/list", "params": { "cwds": [cwd.to_string_lossy()] } }),
     )?;
-    let result = wait_for_response(lines, id).await?;
+    let result = wait_for_answer(lines, id, said).await?;
     Ok(parse_codex_skills(&result))
 }
 
@@ -1834,6 +1851,16 @@ fn describe_rpc_error(error: &Value) -> String {
 }
 
 async fn wait_for_response(lines: &Receiver<ChildOutput>, id: i64) -> Result<Value, AgentError> {
+    wait_for_answer(lines, id, &mut Vec::new()).await
+}
+
+/// The answer to request `id`. Every other line Codex writes meanwhile goes to
+/// `said`, in order.
+async fn wait_for_answer(
+    lines: &Receiver<ChildOutput>,
+    id: i64,
+    said: &mut Vec<String>,
+) -> Result<Value, AgentError> {
     loop {
         match lines
             .recv()
@@ -1844,7 +1871,10 @@ async fn wait_for_response(lines: &Receiver<ChildOutput>, id: i64) -> Result<Val
                 let value: Value = serde_json::from_str(&line).map_err(|err| {
                     AgentError::Protocol(format!("invalid JSON from codex: {err}: {line}"))
                 })?;
-                if value.get("id").and_then(Value::as_i64) != Some(id) {
+                if value.get("id").and_then(Value::as_i64) != Some(id)
+                    || value.get("method").is_some()
+                {
+                    said.push(line);
                     continue;
                 }
                 if let Some(error) = value.get("error") {
@@ -2942,7 +2972,10 @@ impl Actor {
                             .await;
                     }
                 }
-                let usage = self.usage_by_turn.remove(&id);
+                let mut usage = self.usage_by_turn.remove(&id);
+                if let Some(usage) = usage.as_mut() {
+                    usage.duration_ms = turn.get("durationMs").and_then(Value::as_u64);
+                }
                 let checkpoint =
                     (!id.is_empty() && !self.continuations.remove(&id)).then(|| id.clone());
                 self.events
@@ -3147,11 +3180,37 @@ impl Actor {
                     .unwrap_or(false);
                 self.events.emit(AgentEvent::Error { message, fatal }).await;
             }
-            "warning" | "configWarning" | "deprecationNotice" => {
-                if let Some(message) = params.get("message").and_then(Value::as_str) {
+            "warning" | "guardianWarning" => {
+                if let Some(message) = params.get("message").and_then(Value::as_str)
+                    && !self.config_warnings.contains(message)
+                {
                     self.events
                         .emit(AgentEvent::Warning {
                             message: message.into(),
+                        })
+                        .await;
+                }
+            }
+            "configWarning" | "deprecationNotice" => {
+                if let Some(summary) = params.get("summary").and_then(Value::as_str) {
+                    if method == "configWarning" {
+                        self.config_warnings.insert(summary.to_owned());
+                    }
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: notice_text(summary, params),
+                        })
+                        .await;
+                }
+            }
+            // A server's other states have no place in the canonical stream.
+            "mcpServer/startupStatus/updated" => {
+                if params.get("status").and_then(Value::as_str) == Some("failed")
+                    && let Some(error) = params.get("error").and_then(Value::as_str)
+                {
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: error.into(),
                         })
                         .await;
                 }
@@ -3846,7 +3905,6 @@ fn elicitation_result(
 
     let mut content = serde_json::Map::new();
     let mut unusable = Vec::new();
-    let mut answered = false;
     for field in fields {
         let answer = answers
             .get(&field.key)
@@ -3857,7 +3915,6 @@ fn elicitation_result(
             }
             continue;
         };
-        answered = true;
         let value = match field.kind {
             ElicitFieldKind::Text => non_empty_string(answer).map(Value::String),
             ElicitFieldKind::Enum => {
@@ -3888,7 +3945,9 @@ fn elicitation_result(
         }
     }
 
-    if !answered {
+    // No answers at all is the user dismissing the form; a form whose
+    // optional fields were all left empty is still accepted.
+    if answers.is_empty() {
         Ok(json!({ "action": "decline" }))
     } else if unusable.is_empty() {
         Ok(json!({ "action": "accept", "content": content }))
@@ -4021,6 +4080,7 @@ fn parse_elicitation_form(
             question: question.to_owned(),
             options,
             multi_select: matches!(kind, ElicitFieldKind::MultiEnum),
+            optional: !required.contains(key),
             prefill: None,
         });
         fields.push(ElicitField {
@@ -4056,6 +4116,7 @@ fn parse_elicitation_url(
             elicit_option(ELICITATION_URL_CANCEL_LABEL),
         ],
         multi_select: false,
+        optional: false,
         prefill: None,
     };
     let field = ElicitField {
@@ -4114,6 +4175,7 @@ fn parse_codex_user_input(params: &Value) -> Vec<UserInputQuestion> {
                 question: question.to_owned(),
                 options,
                 multi_select: false,
+                optional: false,
                 prefill: None,
             })
         })
@@ -4162,6 +4224,7 @@ fn parse_codex_async_questions(message_id: &str, item: &Value) -> Vec<UserInputQ
                 question: title.to_owned(),
                 options,
                 multi_select: false,
+                optional: false,
                 prefill: None,
             })
         })
@@ -4268,6 +4331,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             // `FileChangeThreadItem` (v2, 0.167.1) says nothing of the patch's
             // result beyond its status.
             output: None,
+            command: None,
         },
         "mcpToolCall" | "dynamicToolCall" => {
             let result = item
@@ -4839,6 +4903,17 @@ fn normalize_file_change_diff(change: &mut FileChange) {
     change.diff = Some(patch);
 }
 
+/// A `ConfigWarningNotification` or `DeprecationNoticeNotification`
+/// (app-server protocol v2, codex-cli 0.169.0): its summary, then its details
+/// where it has them. A configuration Codex could not read names the file and
+/// place in `details` already; `path` and `range` say them again as data.
+fn notice_text(summary: &str, params: &Value) -> String {
+    match params.get("details").and_then(Value::as_str) {
+        Some(details) => format!("{summary}\n{details}"),
+        None => summary.to_owned(),
+    }
+}
+
 fn map_usage(value: &Value) -> Option<TokenUsage> {
     let last = value.get("last")?;
     // The session-cumulative running total lives in a sibling `total` object.
@@ -5017,10 +5092,15 @@ mod tests {
             ))
             .await
             .unwrap();
-            let profiles =
-                request_permission_profiles(Path::new("/workspace"), &mut actor.stdin, &rx, &mut 3)
-                    .await
-                    .unwrap();
+            let profiles = request_permission_profiles(
+                Path::new("/workspace"),
+                &mut actor.stdin,
+                &rx,
+                &mut 3,
+                &mut Vec::new(),
+            )
+            .await
+            .unwrap();
             let request = sent(&mut actor).await;
             assert_eq!(
                 request,
@@ -5580,6 +5660,7 @@ mod tests {
                 instructions: None,
                 continuing: false,
                 continuations: HashSet::new(),
+                config_warnings: HashSet::new(),
             },
             event_rx,
         )
@@ -7940,6 +8021,63 @@ mod tests {
         });
     }
 
+    /// What Codex says outside a turn's items reaches the user in its own
+    /// words, and a configuration warning Codex repeats to the thread is shown
+    /// once. Shapes are `ConfigWarningNotification`, `WarningNotification`,
+    /// `DeprecationNoticeNotification`, `GuardianWarningNotification` and
+    /// `McpServerStatusUpdatedNotification` of `ServerNotification.json`
+    /// (`codex app-server generate-json-schema --experimental`, codex-cli
+    /// 0.169.0); the content is invented.
+    #[test]
+    fn notices_outside_a_turn_reach_the_user_as_codex_gave_them() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            let ignored = "Codex is ignoring 1 unrecognized configuration setting.\n  \
+                user (/home/user/.codex/config.toml): `quux` is ignored.";
+            for line in [
+                json!({"method": "configWarning", "params": {"summary": ignored, "details": null}}),
+                json!({"method": "warning", "params": {"threadId": "thread-1", "message": ignored}}),
+                json!({"method": "configWarning", "params": {
+                    "summary": "Invalid configuration; using defaults.",
+                    "details": "/home/user/.codex/config.toml:3:7: invalid type: integer `5`, expected a string",
+                    "path": "/home/user/.codex/config.toml",
+                    "range": {"start": {"line": 3, "column": 7}, "end": {"line": 3, "column": 7}}}}),
+                json!({"method": "deprecationNotice", "params": {
+                    "summary": "`[features].frob` is deprecated and ignored.",
+                    "details": "Remove `frob` from [features] in config.toml."}}),
+                json!({"method": "guardianWarning", "params": {
+                    "threadId": "thread-1", "message": "reviewer is behind"}}),
+                json!({"method": "mcpServer/startupStatus/updated", "params": {
+                    "name": "tracker", "status": "failed", "threadId": "thread-1",
+                    "error": "MCP client for `tracker` failed to start: handshake refused",
+                    "failureReason": null}}),
+            ] {
+                actor.handle_line(&line.to_string()).await;
+            }
+            let mut shown = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                let AgentEvent::Warning { message } = event else {
+                    panic!("{event:?} is no warning");
+                };
+                shown.push(message);
+            }
+            assert_eq!(
+                shown,
+                [
+                    ignored,
+                    "Invalid configuration; using defaults.\n\
+                        /home/user/.codex/config.toml:3:7: invalid type: integer `5`, expected a string",
+                    "`[features].frob` is deprecated and ignored.\n\
+                        Remove `frob` from [features] in config.toml.",
+                    "reviewer is behind",
+                    "MCP client for `tracker` failed to start: handshake refused",
+                ]
+            );
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
     #[test]
     fn maps_fixture_envelopes_and_approval_response() {
         smol::block_on(async {
@@ -7999,6 +8137,7 @@ mod tests {
                         used_tokens: Some(12),
                         total_processed_tokens: Some(123),
                         context_window: Some(200000),
+                        duration_ms: Some(1000),
                         ..
                     }),
                     ..

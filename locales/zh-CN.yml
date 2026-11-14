@@ -1296,6 +1296,7 @@ diff:
   modified: "已修改"
   deleted: "已删除"
   renamed: "已重命名"
+  changed: "已更改"
   unmodified_lines: "%{count} 行未修改"
   empty: "此范围内没有文件更改"
   loading: "正在加载 Diff…"
@@ -1325,6 +1326,8 @@ userinput:
   dismiss: "隐藏"
   answer: "回答"
   collapse: "收起"
+  optional: "可选"
+  skip: "跳过"
 terminal:
   title: "终端"
   tabs: "终端标签页"
@@ -3087,6 +3090,10 @@ tools:
       running: "查看中"
       done: "已查看"
       asked: "查看"
+    change:
+      running: "更改中"
+      done: "已更改"
+      asked: "更改"
     edit:
       running: "编辑中"
       done: "已编辑"

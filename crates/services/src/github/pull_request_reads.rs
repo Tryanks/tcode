@@ -1129,6 +1129,8 @@ fn listed_file(row: &Value) -> Option<PullRequestFile> {
         "added" | "copied" => FileChangeKind::Create,
         "removed" => FileChangeKind::Delete,
         "renamed" => FileChangeKind::Rename,
+        // GitHub says the file changed without saying how (a mode change).
+        "changed" => FileChangeKind::Changed,
         _ => FileChangeKind::Modify,
     };
     let additions = row["additions"].as_u64()?;

@@ -1392,6 +1392,7 @@ fn questions(params: &Value) -> Result<Vec<UserInputQuestion>, acp::Error> {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 prefill: None,
+                optional: false,
             })
         })
         .collect())

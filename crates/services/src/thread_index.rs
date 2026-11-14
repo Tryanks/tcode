@@ -1212,6 +1212,7 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
                 changes,
                 status,
                 output,
+                command: _,
             } => (
                 "file_change",
                 changes
@@ -1355,6 +1356,7 @@ fn kind_name(kind: FileChangeKind) -> &'static str {
         FileChangeKind::Modify => "modify",
         FileChangeKind::Delete => "delete",
         FileChangeKind::Rename => "rename",
+        FileChangeKind::Changed => "changed",
     }
 }
 
@@ -1738,6 +1740,7 @@ mod tests {
                 }],
                 status: ItemStatus::Completed,
                 output: None,
+                command: None,
             },
         ))
     }

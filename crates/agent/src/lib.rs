@@ -578,7 +578,12 @@ impl ProviderKind {
                 // (2.2.7); the permission mode is the adapter's own answer to
                 // each `permission.asked`.
                 confirmed_options: OptionIds::Only(&[EFFORT_OPTION_ID, "agent", "permission_mode"]),
-                background: None,
+                // A shell is stopped by `DELETE /api/shell/{id}`, a subagent by
+                // interrupting its session, one at a time (2.3.0).
+                background: Some(BackgroundControl {
+                    stop: BackgroundStop::Each,
+                    move_running: false,
+                }),
                 live_settings: true,
                 mcp_servers: true,
                 native_computer_use: false,
@@ -2117,6 +2122,9 @@ pub struct UserInputQuestion {
     pub multi_select: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill: Option<String>,
+    /// The asker accepts this question left unanswered.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3196,6 +3204,11 @@ pub enum ItemContent {
         /// its tool returned, or why it failed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
+        /// The command item whose run changed these files, when the harness
+        /// saw them change while it ran instead of a tool asking for each
+        /// change (Claude Code's `bashEditDiff`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
     },
     ToolCall {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3393,6 +3406,8 @@ pub enum FileChangeKind {
     Modify,
     Delete,
     Rename,
+    /// The harness reports the file changed and does not say how.
+    Changed,
 }
 
 /// A provider-supplied, multi-file Git-style unified diff, split into the

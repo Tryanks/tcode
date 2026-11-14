@@ -593,6 +593,7 @@ fn question(request_id: &str) -> AgentEvent {
             options: Vec::new(),
             multi_select: false,
             prefill: None,
+            optional: false,
         }],
         delivery: agent::UserInputDelivery::Blocking,
     }

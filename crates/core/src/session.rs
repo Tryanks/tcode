@@ -2354,6 +2354,7 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
                 mut changes,
                 status,
                 output,
+                command,
             }),
         ) => {
             for change in &mut changes {
@@ -2370,6 +2371,7 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
                 changes,
                 status,
                 output,
+                command,
             })
         }
         (
@@ -2848,6 +2850,7 @@ mod tests {
                 options: Vec::new(),
                 multi_select: false,
                 prefill: None,
+                optional: false,
             }],
             delivery: UserInputDelivery::Blocking,
         };
@@ -3144,6 +3147,7 @@ mod tests {
                             }],
                             status,
                             output: None,
+                            command: None,
                         },
                     }),
                 );
@@ -3189,6 +3193,7 @@ mod tests {
                     }],
                     status: ItemStatus::InProgress,
                     output: None,
+                    command: None,
                 },
             }),
             AgentEvent::ItemCompleted(ThreadItem {
@@ -3202,6 +3207,7 @@ mod tests {
                     }],
                     status: ItemStatus::Completed,
                     output: None,
+                    command: None,
                 },
             }),
         ]);
@@ -3233,6 +3239,7 @@ mod tests {
                     }],
                     status: ItemStatus::Completed,
                     output: None,
+                    command: None,
                 },
             }),
         ]);
@@ -3262,6 +3269,7 @@ mod tests {
                     }],
                     status: ItemStatus::Completed,
                     output: None,
+                    command: None,
                 },
             }),
         );

@@ -3671,6 +3671,7 @@ mod replica_tests {
                 options: vec![option("Red"), option("Blue")],
                 multi_select: false,
                 prefill: Some("Red".into()),
+                optional: false,
             }],
             delivery: agent::UserInputDelivery::Blocking,
         });
@@ -3695,6 +3696,57 @@ mod replica_tests {
                 "color".to_owned(),
                 serde_json::json!("Blue")
             )])]
+        );
+    }
+
+    /// A required question is not passed empty; an optional one is, and the
+    /// answers then go with it empty, for the provider to leave out.
+    #[gpui::test]
+    fn an_optional_question_is_submitted_empty(cx: &mut TestAppContext) {
+        let (store, incoming, outgoing, mut status) = attach(cx);
+        let question = |id: &str, optional| UserInputQuestion {
+            id: id.into(),
+            header: id.into(),
+            question: format!("{id}?"),
+            options: Vec::new(),
+            multi_select: false,
+            prefill: None,
+            optional,
+        };
+        status.activity.turn_running = true;
+        status.pending_user_input = Some(tcode_core::session::PendingUserInput {
+            request_id: "ask".into(),
+            questions: vec![question("region", false), question("note", true)],
+            delivery: agent::UserInputDelivery::Blocking,
+        });
+        let (_composer, cx) = composer_on(&store, &incoming, status, cx);
+        while outgoing.try_recv().is_ok() {}
+        let mut answer = |text: &str| {
+            if !text.is_empty() {
+                cx.simulate_input(text);
+            }
+            cx.simulate_keystrokes("enter");
+            cx.executor().advance_clock(Duration::from_millis(200));
+            cx.run_until_parked();
+            std::iter::from_fn(|| outgoing.try_recv().ok())
+                .filter_map(|line| {
+                    match tcode_protocol::decode_client_line(&line).unwrap().payload {
+                        tcode_protocol::ClientPayload::Command(
+                            tcode_protocol::Command::RespondUserInput { answers, .. },
+                        ) => Some(answers),
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<serde_json::Map<String, serde_json::Value>>>()
+        };
+        assert!(answer("").is_empty());
+        assert!(answer("eu-west").is_empty());
+        assert_eq!(
+            answer(""),
+            [serde_json::Map::from_iter([
+                ("region".to_owned(), serde_json::json!("eu-west")),
+                ("note".to_owned(), serde_json::json!("")),
+            ])]
         );
     }
 
