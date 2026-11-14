@@ -374,7 +374,7 @@ async fn run_actor(
         actor.events
             .emit(AgentEvent::Warning {
                 message: format!(
-                    "pi connects only the MCP servers in its own configuration, so Tcode's {} tools are unavailable in this session",
+                    "Tcode does not connect its {} tools to pi, so they are unavailable in this session",
                     unattached.join(", ")
                 ),
             })
@@ -2183,9 +2183,10 @@ fn resume_session(resume: &Option<ResumeCursor>) -> Option<&str> {
 /// The tcode tool families this session does without, named the way the user
 /// knows them from Settings.
 ///
-/// pi takes MCP servers from its own configuration files only (1.5.2's
-/// `docs/mcp.md`): neither its command line nor its RPC protocol registers
-/// one for a session, so explicitly enabled tcode MCP servers stay behind.
+/// pi 1.5.2 connects the MCP servers of its configuration files
+/// (`docs/mcp.md`) and those an extension registers (`pi.registerMcpServer`,
+/// `docs/extensions.md`). Tcode registers none, so explicitly enabled tcode
+/// MCP servers stay behind.
 fn unattached_servers(opts: &SessionOptions) -> Vec<&'static str> {
     [(
         crate::McpRegistration::SERVER_NAME_COMPUTER_USE,
@@ -2797,11 +2798,6 @@ mod tests {
     #[test]
     fn maps_recorded_rpc_fixture() {
         let mut mapper = PiMapper::new();
-        // The `Model` a `get_state` answers with (pi-ai 1.5.2's
-        // `dist/types.d.ts`), as far as the window goes.
-        mapper.context_window = context_window(Some(&json!({
-            "id":"scripted-1","provider":"scripted","contextWindow":200000,"maxTokens":8192
-        })));
         let mut events = Vec::new();
         for message in recorded_rpc_events() {
             events.extend(mapper.on_message(&message));
@@ -2887,8 +2883,7 @@ mod tests {
         // The turn's two assistant messages used 19 and 27 tokens and cost
         // 0.25 and 0.5; each is reported by its `message_end` and again by
         // its `turn_end`. The turn processed and cost what both did; the
-        // context holds what the last one counted, in the window of the
-        // model pi runs.
+        // context holds what the last one counted.
         assert!(matches!(
             events.last(),
             Some(AgentEvent::TurnCompleted {
@@ -2896,7 +2891,6 @@ mod tests {
                 usage: Some(TokenUsage {
                     used_tokens: Some(27),
                     total_processed_tokens: Some(46),
-                    context_window: Some(200_000),
                     cost_usd: Some(cost),
                     ..
                 }),
