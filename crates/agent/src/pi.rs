@@ -227,6 +227,12 @@ fn thinking_level(level: Option<&Value>) -> Option<AgentEvent> {
     })
 }
 
+/// The window of a `Model` (pi-ai 1.5.2 `dist/types.d.ts`). pi itself reads
+/// one that is not positive as no window (`getContextUsage`).
+fn context_window(model: Option<&Value>) -> Option<u64> {
+    crate::json_u64(model?.get("contextWindow")).filter(|window| *window > 0)
+}
+
 fn model_wire_id(model: Option<&Value>) -> Option<String> {
     let model = model?;
     Some(format!(
@@ -368,7 +374,7 @@ async fn run_actor(
         actor.events
             .emit(AgentEvent::Warning {
                 message: format!(
-                    "pi has no MCP client of its own, so Tcode's {} tools are unavailable in this session",
+                    "pi connects only the MCP servers in its own configuration, so Tcode's {} tools are unavailable in this session",
                     unattached.join(", ")
                 ),
             })
@@ -758,6 +764,7 @@ impl PiActor {
             cursor.insert("session_file".into(), Value::String(path.to_owned()));
         }
         let model = model_wire_id(data.get("model"));
+        self.mapper.context_window = context_window(data.get("model"));
         self.session_file = data
             .get("sessionFile")
             .and_then(Value::as_str)
@@ -861,6 +868,7 @@ impl PiActor {
         if let Some(path) = &self.session_file {
             cursor.insert("session_file".into(), Value::String(path.clone()));
         }
+        self.mapper.context_window = context_window(data.get("model"));
         self.events
             .emit(AgentEvent::SessionStarted {
                 provider_session_id: session_id.to_owned(),
@@ -1060,6 +1068,7 @@ impl PiActor {
                 && message.get("command").and_then(Value::as_str) == Some("set_model")
                 && let Some(model) = model_wire_id(message.get("data"))
             {
+                self.mapper.context_window = context_window(message.get("data"));
                 self.events.emit(AgentEvent::SessionModel { model }).await;
             }
             if let Some(event) = message
@@ -1313,6 +1322,9 @@ struct PiMapper {
     current_turn: Option<String>,
     turn_usage: Option<TokenUsage>,
     cumulative_processed: u64,
+    /// The window of the model pi runs, from its last `get_state` or
+    /// `set_model` answer.
+    context_window: Option<u64>,
     interrupt_pending: bool,
     failed: bool,
     tool_items: HashMap<String, PiTool>,
@@ -1342,6 +1354,7 @@ impl PiMapper {
             current_turn: None,
             turn_usage: None,
             cumulative_processed: 0,
+            context_window: None,
             interrupt_pending: false,
             failed: false,
             tool_items: HashMap::new(),
@@ -1610,14 +1623,31 @@ impl PiMapper {
                     self.cumulative_processed = self.cumulative_processed.saturating_add(processed);
                     let usage = TokenUsage {
                         freshness: crate::ContextFreshness::Current,
+                        context_window: self.context_window,
                         total_processed_tokens: Some(self.cumulative_processed),
                         ..usage
                     };
-                    self.turn_usage.get_or_insert_default().merge(usage);
+                    let turn = self.turn_usage.get_or_insert_default();
+                    turn.merge(usage);
+                    // `merge` adds up a turn's traffic. What the context holds
+                    // and the window it is in are the last message's: each
+                    // `totalTokens` already counts everything before it.
+                    turn.used_tokens = usage.used_tokens;
+                    turn.context_window = usage.context_window;
                     events.push(AgentEvent::TokenUsage(usage));
                 }
                 events.extend(failure);
                 events
+            }
+            // A tool that ran a model of its own, or whose nested calls did,
+            // reports that `usage` here; pi counts its cost in the session's
+            // (`getSessionStats`) and none of its tokens in the context.
+            Some("toolResult") => {
+                if let Some(cost) = message_cost(message.get("usage")) {
+                    let turn = self.turn_usage.get_or_insert_default();
+                    turn.cost_usd = Some(turn.cost_usd.unwrap_or(0.0) + cost);
+                }
+                Vec::new()
             }
             _ => Vec::new(),
         }
@@ -2080,8 +2110,16 @@ fn map_usage(usage: Option<&Value>) -> Option<TokenUsage> {
         cached_input_tokens: cache_read,
         output_tokens: output,
         used_tokens: crate::json_u64(usage.get("totalTokens")),
+        cost_usd: message_cost(Some(usage)),
         ..TokenUsage::default()
     })
+}
+
+/// What one message cost, in US dollars: `Usage.cost.total` of pi-ai 1.5.2
+/// (`dist/types.d.ts`), the provider's billed cost where it reports one and
+/// pi's catalog estimate otherwise.
+fn message_cost(usage: Option<&Value>) -> Option<f64> {
+    usage?.pointer("/cost/total")?.as_f64()
 }
 
 fn attach_images(request: &mut Value, attachments: Vec<Attachment>) {
@@ -2145,10 +2183,9 @@ fn resume_session(resume: &Option<ResumeCursor>) -> Option<&str> {
 /// The tcode tool families this session does without, named the way the user
 /// knows them from Settings.
 ///
-/// pi has no MCP client (its README: "No MCP"), and its RPC protocol exposes no
-/// registration hook, so explicitly enabled tcode MCP servers stay behind.
-/// Naming them beats a blanket notice: the person reading it wants to know
-/// which opted-in tools went missing, not that a protocol lacks a feature.
+/// pi takes MCP servers from its own configuration files only (1.5.2's
+/// `docs/mcp.md`): neither its command line nor its RPC protocol registers
+/// one for a session, so explicitly enabled tcode MCP servers stay behind.
 fn unattached_servers(opts: &SessionOptions) -> Vec<&'static str> {
     [(
         crate::McpRegistration::SERVER_NAME_COMPUTER_USE,
@@ -2565,7 +2602,9 @@ mod tests {
 
     /// Replays `pi --mode rpc` output recorded from pi 0.85.1 with a scripted
     /// provider: one prompt, an assistant message that thinks and calls
-    /// `bash`, then a second assistant message that thinks and answers.
+    /// `bash`, then a second assistant message that thinks and answers. The
+    /// two messages' `usage.cost` is invented, in the shape of `Usage` in
+    /// pi-ai 1.5.2's `dist/types.d.ts`.
     fn recorded_rpc_events() -> Vec<Value> {
         include_str!("../tests/fixtures/pi/rpc_events.jsonl")
             .lines()
@@ -2757,6 +2796,11 @@ mod tests {
     #[test]
     fn maps_recorded_rpc_fixture() {
         let mut mapper = PiMapper::new();
+        // The `Model` a `get_state` answers with (pi-ai 1.5.2's
+        // `dist/types.d.ts`), as far as the window goes.
+        mapper.context_window = context_window(Some(&json!({
+            "id":"scripted-1","provider":"scripted","contextWindow":200000,"maxTokens":8192
+        })));
         let mut events = Vec::new();
         for message in recorded_rpc_events() {
             events.extend(mapper.on_message(&message));
@@ -2839,19 +2883,24 @@ mod tests {
                 ..
             })
         )));
-        // The turn's two assistant messages used 19 and 27 tokens; each is
-        // reported by its `message_end` and again by its `turn_end`.
+        // The turn's two assistant messages used 19 and 27 tokens and cost
+        // 0.25 and 0.5; each is reported by its `message_end` and again by
+        // its `turn_end`. The turn processed and cost what both did; the
+        // context holds what the last one counted, in the window of the
+        // model pi runs.
         assert!(matches!(
             events.last(),
             Some(AgentEvent::TurnCompleted {
                 status: TurnStatus::Completed,
                 usage: Some(TokenUsage {
-                    used_tokens: Some(46),
+                    used_tokens: Some(27),
                     total_processed_tokens: Some(46),
+                    context_window: Some(200_000),
+                    cost_usd: Some(cost),
                     ..
                 }),
                 ..
-            })
+            }) if *cost == 0.75
         ));
     }
 }
