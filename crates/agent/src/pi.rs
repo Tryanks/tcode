@@ -1629,8 +1629,10 @@ impl PiMapper {
                     };
                     let turn = self.turn_usage.get_or_insert_default();
                     turn.merge(usage);
-                    // The window is the one the model in use has now, not the
-                    // widest the turn saw.
+                    // `merge` adds up a turn's traffic. What the context holds
+                    // and the window it is in are the last message's: each
+                    // `totalTokens` already counts everything before it.
+                    turn.used_tokens = usage.used_tokens;
                     turn.context_window = usage.context_window;
                     events.push(AgentEvent::TokenUsage(usage));
                 }
@@ -2881,14 +2883,15 @@ mod tests {
         )));
         // The turn's two assistant messages used 19 and 27 tokens and cost
         // 0.25 and 0.5; each is reported by its `message_end` and again by
-        // its `turn_end`. The turn cost what both did, in the window of the
+        // its `turn_end`. The turn processed and cost what both did; the
+        // context holds what the last one counted, in the window of the
         // model pi runs.
         assert!(matches!(
             events.last(),
             Some(AgentEvent::TurnCompleted {
                 status: TurnStatus::Completed,
                 usage: Some(TokenUsage {
-                    used_tokens: Some(46),
+                    used_tokens: Some(27),
                     total_processed_tokens: Some(46),
                     context_window: Some(200_000),
                     cost_usd: Some(cost),
