@@ -500,15 +500,26 @@ fn launch_args(
     .into_iter()
     .map(Into::into)
     .collect();
-    for (flag, value) in [
-        ("--model", &launch.model_id),
-        ("--effort", &launch.effort),
-        ("--settings", &launch.settings_json),
-    ] {
+    for (flag, value) in [("--model", &launch.model_id), ("--effort", &launch.effort)] {
         if let Some(value) = value {
             args.extend([flag.into(), value.into()]);
         }
     }
+    // Claude Code records the files a Bash command changed (`bashEditDiff`)
+    // only in auto and bypass modes unless asked to in every mode.
+    let mut settings = serde_json::Map::new();
+    settings.insert("bashEditDiffEnabled".into(), json!(true));
+    settings.extend(
+        launch
+            .settings_json
+            .as_deref()
+            .and_then(|settings| serde_json::from_str::<serde_json::Map<_, _>>(settings).ok())
+            .unwrap_or_default(),
+    );
+    args.extend([
+        "--settings".into(),
+        Value::Object(settings).to_string().into(),
+    ]);
     args.extend(resume.into_iter().map(Into::into));
     // Tokens ride in Authorization headers inside the merged `--mcp-config` JSON.
     args.extend(mcp_args(mcp_servers).into_iter().map(Into::into));
@@ -6224,7 +6235,7 @@ mod tests {
             "--effort",
             "high",
             "--settings",
-            r#"{"fastMode":true}"#,
+            r#"{"bashEditDiffEnabled":true,"fastMode":true}"#,
             "--resume",
             "native",
             &mcp_config[0],
