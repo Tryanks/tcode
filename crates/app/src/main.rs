@@ -26,6 +26,8 @@ use tcode_ui::widgets::button::{Button, ButtonVariants as _};
 mod editor;
 mod migration;
 
+const APP_ID: &str = "com.tryanks.tcode";
+
 /// macOS vibrancy can be disabled with `TCODE_NO_VIBRANCY=1` as a diagnostic
 /// escape hatch (opaque window + flattened palette).
 fn vibrancy_enabled() -> bool {
@@ -250,6 +252,7 @@ fn window_options(cx: &App, throttle_inactive: bool) -> WindowOptions {
             size(px(tcode_ui::DEFAULT_WINDOW_WIDTH), px(800.)),
             cx,
         )),
+        app_id: Some(APP_ID.to_owned()),
         window_min_size: Some(size(px(360.), px(480.))),
         // macOS: seamless titlebar — transparent, with the traffic lights
         // nudged down to sit vertically centered in the 52px top strip.
