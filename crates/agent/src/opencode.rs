@@ -3674,9 +3674,9 @@ mod tests {
     /// `metadata.status: "running"` and ends with its shell's `shell.exited`,
     /// after the turn that started it (v2.3.0's `shell.ts`, and `shell.exited`
     /// in its `/openapi.json`; content invented). It settles once the poll
-    /// has read what the shell wrote last.
+    /// of its output has ended.
     #[test]
-    fn a_command_in_the_background_ends_with_its_shells_exit_and_all_it_wrote() {
+    fn a_command_in_the_background_ends_with_its_shells_exit_once_its_poll_has_ended() {
         let id = "msg_19c0000a100100000000000a01:call_0000000000000021";
         let running = json!({"type": "item_updated", "id": id, "content": {"kind": "command_execution", "command": "make build", "output": "", "exit_code": null, "status": "in_progress"}});
         let mut mapper = Mapper::new("ses_root".into(), Vec::new(), HashMap::new());
