@@ -2438,32 +2438,38 @@ fn cursor_mcp_call(raw_input: &Value) -> Option<(String, &Value)> {
 }
 
 /// The diffs a call shows, each a path, the text before and after, and where
-/// the texts begin: the agent's own `diff` content, or when it sent none, the
-/// files Tcode wrote for it. An agent that reports its own diff has said what
-/// the write did, so the write is not a second change to the same file.
+/// the texts begin: the agent's own `diff` content, and the files Tcode wrote
+/// for it that no `diff` names. An agent that reports its own diff of a file
+/// has said what the write did, so the write is not a second change to it.
 fn diffs(tool: &ToolState) -> impl Iterator<Item = (String, Option<&str>, &str, (usize, usize))> {
-    let mut own = tool
-        .content
-        .iter()
-        .filter_map(|content| match content {
-            acp::ToolCallContent::Diff(diff) => Some((
+    let own = || {
+        tool.content.iter().filter_map(|content| match content {
+            acp::ToolCallContent::Diff(diff) => Some(diff),
+            _ => None,
+        })
+    };
+    own()
+        .map(|diff| {
+            (
                 diff.path.to_string_lossy().into_owned(),
                 diff.old_text.as_deref(),
                 diff.new_text.as_str(),
                 hunk_start(diff.meta.as_ref()),
-            )),
-            _ => None,
+            )
         })
-        .peekable();
-    let written = own.peek().is_none().then_some(&tool.writes);
-    own.chain(written.into_iter().flatten().map(|write| {
-        (
-            write.path.to_string_lossy().into_owned(),
-            write.old_text.as_deref(),
-            write.new_text.as_str(),
-            (1, 1),
+        .chain(
+            tool.writes
+                .iter()
+                .filter(move |write| !own().any(|diff| diff.path == write.path))
+                .map(|write| {
+                    (
+                        write.path.to_string_lossy().into_owned(),
+                        write.old_text.as_deref(),
+                        write.new_text.as_str(),
+                        (1, 1),
+                    )
+                }),
         )
-    }))
 }
 
 /// A call's [`diffs`] → canonical [`FileChange`]s (with a unified diff, so
@@ -3878,14 +3884,14 @@ mod tests {
             );
             let completed = apply(update(json!({
                 "sessionUpdate":"tool_call_update", "toolCallId":"call-2", "status":"completed",
-                "content":[{"type":"diff","path":"todo.md","oldText":"- buy milk\n","newText":"- buy milk\n- call Ada\n"}]
+                "content":[{"type":"diff","path":path,"oldText":"- buy milk\n","newText":"- buy milk\n- call Ada\n"}]
             })));
             assert_eq!(
                 changes(completed.into_iter().next().unwrap()),
                 [FileChange {
-                    path: "todo.md".into(),
+                    path: shown.clone(),
                     kind: FileChangeKind::Modify,
-                    diff: Some(modified.replace(&shown, "todo.md")),
+                    diff: Some(modified),
                 }],
                 "the agent's own diff is the one account of the file"
             );
