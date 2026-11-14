@@ -1,7 +1,7 @@
 //! The commands of the thread's agent: those running in the background,
 //! whichever turn started them, then those its latest turn ran.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -227,17 +227,23 @@ fn listed(rail: &RailView) -> Rc<[Line]> {
     last.borrow().clone()
 }
 
-fn fitted(rail: &RailView) -> Rc<Cell<Fitted>> {
+fn fitted(rail: &RailView) -> Rc<RefCell<Fitted>> {
     rail.motion.keep("rail-commands-fitted")
 }
 
 /// The card's rows never scroll: in a rail too short for them all it
 /// shows as many as fit and counts the rest.
 pub(super) fn fit(rail: &RailView, cx: &App) -> Fit {
+    let rows: Vec<SharedString> = listed(rail)
+        .iter()
+        .map(|line| SharedString::from(line.key.clone()))
+        .collect();
+    let fitted = fitted(rail);
+    fitted.borrow_mut().rows.retain(|key, _| rows.contains(key));
     Fit {
-        rows: listed(rail).len(),
+        rows,
         edge: f32::from(cx.theme().tokens.spacing.sm),
-        fitted: fitted(rail),
+        fitted,
     }
 }
 
@@ -257,10 +263,12 @@ pub(super) fn body(
         return None;
     }
     let fitted = fitted(rail);
-    let shown = fitted.get().shown.unwrap_or(lines.len()).min(lines.len());
+    let shown = fitted
+        .borrow()
+        .shown
+        .unwrap_or(lines.len())
+        .min(lines.len());
     let more = lines.len() - shown;
-    // The tallest row laid out this frame, noted once they all are.
-    let tallest = Rc::new(Cell::new(0f32));
     let background = rail.background(cx).zip(rail.background_place(cx));
     let highlight = rail.background_highlight.clone();
     let store = rail.workspace_store.clone();
@@ -274,14 +282,17 @@ pub(super) fn body(
         window,
         cx,
         |key, line, window, cx| {
-            let tallest = tallest.clone();
+            let (fitted, noted) = (fitted.clone(), key.clone());
             // Folding, a row is laid out whole and clipped: this is its
             // height at rest.
             div()
                 .w_full()
                 .on_children_prepainted(move |bounds, _, _| {
-                    for row in bounds {
-                        tallest.set(tallest.get().max(f32::from(row.size.height)));
+                    if let Some(row) = bounds.first() {
+                        fitted
+                            .borrow_mut()
+                            .rows
+                            .insert(noted.clone(), f32::from(row.size.height));
                     }
                 })
                 .child(row(
@@ -298,18 +309,7 @@ pub(super) fn body(
                 .into_any_element()
         },
     )
-    .render(v_flex().w_full().min_w_0().on_children_prepainted({
-        let fitted = fitted.clone();
-        move |_, _, _| {
-            let row = tallest.replace(0.);
-            if row > 0. {
-                fitted.set(Fitted {
-                    row: Some(row),
-                    ..fitted.get()
-                });
-            }
-        }
-    }));
+    .render(v_flex().w_full().min_w_0());
     let more = crate::motion::shown(
         "rail-commands-more",
         (more > 0).then_some(more),
@@ -325,10 +325,7 @@ pub(super) fn body(
                 .w_full()
                 .on_children_prepainted(move |bounds, _, _| {
                     if let Some(more) = bounds.first() {
-                        fitted.set(Fitted {
-                            more: Some(f32::from(more.size.height)),
-                            ..fitted.get()
-                        });
+                        fitted.borrow_mut().more = Some(f32::from(more.size.height));
                     }
                 })
                 .child(

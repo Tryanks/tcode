@@ -793,6 +793,17 @@ mod tests {
         tasks: Vec<BackgroundTaskStatus>,
         width: f32,
     ) -> (ScriptedThread, Entity<ChatView>, &mut VisualTestContext) {
+        backgrounded_before(cx, tasks, width, 1)
+    }
+
+    /// [`backgrounded`], the latest turn having run `cargo test` `ran`
+    /// times, as `call_3` and the calls after it.
+    fn backgrounded_before(
+        cx: &mut TestAppContext,
+        tasks: Vec<BackgroundTaskStatus>,
+        width: f32,
+        ran: usize,
+    ) -> (ScriptedThread, Entity<ChatView>, &mut VisualTestContext) {
         let command = |id: &str, command: &str, status| ThreadItem {
             id: id.into(),
             parent_item_id: None,
@@ -809,7 +820,7 @@ mod tests {
             status: agent::TurnStatus::Completed,
             usage: None,
         };
-        let events = vec![
+        let mut events = vec![
             AgentEvent::TurnStarted {
                 turn_id: "t1".into(),
             },
@@ -824,9 +835,15 @@ mod tests {
                 turn_id: "t2".into(),
             },
             user_event("u2", "Run the tests once more."),
-            AgentEvent::ItemCompleted(command("call_3", "cargo test", ItemStatus::Completed)),
-            completed("t2"),
         ];
+        events.extend((0..ran).map(|index| {
+            AgentEvent::ItemCompleted(command(
+                &format!("call_{}", 3 + index),
+                "cargo test",
+                ItemStatus::Completed,
+            ))
+        }));
+        events.push(completed("t2"));
         let mut thread = ScriptedThread::new(cx, events, 0, false);
         thread.status.background_tasks = tasks;
         thread.event(
@@ -852,6 +869,41 @@ mod tests {
         draw_settled(cx);
         while thread.outgoing.try_recv().is_ok() {}
         (thread, chat.expect("the chat is built"), cx)
+    }
+
+    /// A row with a stop stands taller than a row of text, and the Commands
+    /// card fits its rows by the height each has: in a rail too short for
+    /// them all it lists commands down to its count of the rest, which the
+    /// next one would not fit above.
+    #[gpui::test]
+    fn the_commands_card_fills_its_height_under_a_taller_row(cx: &mut TestAppContext) {
+        const RAN: usize = 80;
+        let (_thread, _chat, cx) = backgrounded_before(
+            cx,
+            vec![task("98412", Some("call_1"), "npm run dev")],
+            1_400.,
+            RAN,
+        );
+        let bounds = |cx: &mut VisualTestContext, selector: String| {
+            cx.debug_bounds(selector.clone().leak())
+                .unwrap_or_else(|| panic!("{selector} is drawn"))
+        };
+        let stopped = bounds(cx, "rail-command-call_1".into());
+        let newest = bounds(cx, format!("rail-command-call_{}", 2 + RAN));
+        assert!(
+            stopped.size.height > newest.size.height,
+            "the row with a stop is the taller: {stopped:?} {newest:?}"
+        );
+        let more = bounds(cx, "rail-commands-more".into());
+        let card = bounds(cx, "rail-card-frame-commands".into());
+        let inset = cx.update(|_, cx| cx.theme().tokens.spacing.sm);
+        let left = card.bottom() - inset - more.bottom();
+        assert!(
+            left < newest.size.height,
+            "the card has no room for another command: {left:?} under its count, \
+             a row being {:?}",
+            newest.size.height
+        );
     }
 
     /// A thread's background work stays where the rail lists commands,
