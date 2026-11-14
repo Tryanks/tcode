@@ -349,7 +349,8 @@ pub use wire::{
 //
 // Unreleased: the provider_relay event and timeline entry carry left
 // (LeftSession), the native session the handoff left with the profile and
-// options the thread had there, and ForkStatus carries
+// options the thread had there, the agent event stream gains relay_undone,
+// and ForkStatus carries
 // left_only.
 pub const PROTOCOL_VERSION: u32 = 29;
 

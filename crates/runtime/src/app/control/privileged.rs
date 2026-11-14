@@ -500,6 +500,14 @@ impl AppState {
                     "reason": failure.reason,
                     "detail": failure.detail,
                 }),
+                AgentEvent::RelayUndone { .. } => serde_json::json!({
+                    "thread_id": target,
+                    "turn": turn,
+                    "status": "completed",
+                    "restored": tcode_core::session::RewindReturn::MODE,
+                    "later_history": agent::LaterHistory::Truncated,
+                    "undoable": false,
+                }),
                 other => serde_json::json!({
                     "thread_id": target,
                     "turn": turn,

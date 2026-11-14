@@ -2496,6 +2496,8 @@ pub struct TurnRetry {
 /// starts its harness on it again.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LeftSession {
+    /// Names the handoff in [`AgentEvent::RelayUndone`].
+    pub id: String,
     /// The provider profile whose home holds it; `None` is the built-in one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
@@ -2536,6 +2538,13 @@ pub enum AgentEvent {
         /// was kept.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         left: Option<LeftSession>,
+    },
+    /// The thread went back to the session the [`Self::ProviderRelay`] whose
+    /// `left` is named `relay` had left, as it stood there: the message that
+    /// handoff carried and everything after it leave the conversation. Like
+    /// the handoff this is the runtime's record; no harness is asked for it.
+    RelayUndone {
+        relay: String,
     },
     /// The agent's self-described options (ACP `modes` / `models` /
     /// `configOptions`), pushed at session start and on every change. Reuses
@@ -2655,10 +2664,8 @@ pub enum AgentEvent {
         mode: RewindMode,
         result: RewindPreviewResult,
     },
-    /// The provider applied a native restore operation; or, with nothing for
-    /// a harness to do, the runtime returned the thread to the session a
-    /// [`Self::ProviderRelay`] left, from the message that handoff carried.
-    /// `mode` is what was restored; when that is less than was asked, `incomplete` says what
+    /// The provider applied a native restore operation. `mode` is what it
+    /// restored; when that is less than was asked, `incomplete` says what
     /// failed. A conversation restore also returns the selected prompt for
     /// composer prefill, matching the provider's own edit-after-rewind
     /// behavior.

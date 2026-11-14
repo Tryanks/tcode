@@ -4205,19 +4205,25 @@ impl WorkspaceStore {
                 }
                 .map(|returns| {
                     returns.map(|to| {
-                        self.harness_name(
+                        let harness = self.harness_name(
                             to.session.acp_agent.as_deref(),
                             to.session.profile.as_deref(),
                             to.provider,
-                        )
+                        );
+                        // The message a handoff carried has the session it
+                        // left for a restore point.
+                        let left = (!to.harness_rewinds).then(|| to.session.id.clone());
+                        (harness, left)
                     })
                 });
                 if returns == Some(None) {
                     return None;
                 }
                 let meta = timeline.turns.get(turn)?;
+                let returns = returns.flatten();
+                let left = returns.as_ref().and_then(|(_, left)| left.clone());
                 let checkpoint = match steer {
-                    None => meta.provider_checkpoint_id.clone(),
+                    None => left.or_else(|| meta.provider_checkpoint_id.clone()),
                     Some(steer) => meta
                         .steer_checkpoints
                         .iter()
@@ -4239,7 +4245,12 @@ impl WorkspaceStore {
                     .map(|entry| entry.turn)
                     .collect();
                 let later = opened.len() - usize::from(steer.is_some() && opened.contains(&turn));
-                Some((checkpoint, later, meta.start_ts, returns.flatten()))
+                Some((
+                    checkpoint,
+                    later,
+                    meta.start_ts,
+                    returns.map(|(harness, _)| harness),
+                ))
             },
             cx,
         )??;

@@ -450,6 +450,7 @@ impl AppState {
             .take()
             .filter(|_| active.meta.pending_fork.is_none())
             .map(|resume| agent::LeftSession {
+                id: uuid::Uuid::new_v4().to_string(),
                 profile: home,
                 acp_agent: pending.from_acp_agent.clone(),
                 options: pending.from_options.clone(),

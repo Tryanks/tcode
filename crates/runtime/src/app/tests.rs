@@ -5665,6 +5665,18 @@ fn a_rewind_to_the_message_a_handoff_carried_returns_to_the_session_it_left() {
     assert!(!has_relay(cx));
     cx.run_until_seen(|view| view.status(HANDED).provider == ProviderKind::Codex);
     assert_eq!(backend(cx), (ProviderKind::Codex, Some("gpt-5".into())));
+    // The log says the handoff was undone, not that a harness rewound.
+    let records = cx.seen().records(HANDED);
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record.event, AgentEvent::RelayUndone { .. }))
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|record| matches!(record.event, AgentEvent::RewindCompleted { .. }))
+    );
 
     // The first provider started since is the one the message goes to: none
     // was started to rewind.

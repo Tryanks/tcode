@@ -195,8 +195,12 @@ impl AppState {
             return None;
         }
         let turn = active.timeline.turns.get(at.turn)?;
+        let left = elsewhere
+            .flatten()
+            .filter(|returns| !returns.harness_rewinds)
+            .map(|returns| returns.session.id.clone());
         match at.steer {
-            None => turn.provider_checkpoint_id.clone(),
+            None => left.or_else(|| turn.provider_checkpoint_id.clone()),
             Some(steer) => turn
                 .steer_checkpoints
                 .iter()
@@ -302,18 +306,13 @@ impl AppState {
         if !active.queue.is_empty() {
             active.queue_held = true;
         }
-        request.came_from = Some(Box::new(backend.replace(active)));
+        let came_from = backend.replace(active);
+        // Only a harness can refuse, and send the thread back.
+        request.came_from = to.harness_rewinds.then(|| Box::new(came_from));
         let (waiter, answer) = smol::channel::bounded(1);
         request.waiters.push(waiter);
-        let completed = AgentEvent::RewindCompleted {
-            checkpoint_id: request.checkpoint_id.clone(),
-            mode: request.mode,
-            prefill: None,
-            prefill_attachments: Vec::new(),
-            later_history: agent::LaterHistory::Truncated,
-            files: None,
-            incomplete: None,
-            undo_token: None,
+        let undone = AgentEvent::RelayUndone {
+            relay: request.checkpoint_id.clone(),
         };
         self.rewind_requests.insert(session_id.clone(), request);
         // The provider that ran it is gone; the request above keeps the queue
@@ -322,7 +321,7 @@ impl AppState {
         if to.harness_rewinds {
             self.ensure_started(target_id, cx);
         } else {
-            self.on_rewind_outcome(&session_id, completed, cx);
+            self.on_rewind_outcome(&session_id, undone, cx);
         }
         Some(answer)
     }
@@ -526,7 +525,8 @@ impl AppState {
         self.settle_previews(session_id, RewindFailureReason::ProcessGone);
     }
 
-    /// The harness answered a preview, a rewind or an undo.
+    /// The harness answered a preview, a rewind or an undo; or the thread
+    /// went back to the session a handoff left, with no harness to answer.
     pub(super) fn on_rewind_outcome(
         &mut self,
         session_id: &str,
@@ -557,6 +557,12 @@ impl AppState {
         }
         let mut request = self.rewind_requests.remove(session_id);
         let mut event = event;
+        let handoff_prompt = match &event {
+            AgentEvent::RelayUndone { relay } => self
+                .resident(session_id)
+                .and_then(|active| handoff_prompt(&active.timeline, relay)),
+            _ => None,
+        };
         if let Some(came_from) = request
             .as_mut()
             .and_then(|request| request.came_from.take())
@@ -628,6 +634,24 @@ impl AppState {
                 cx,
             );
         }
+        if let Some((text, attachments)) = handoff_prompt
+            && let Some(client_id) = request
+                .as_ref()
+                .and_then(|request| request.client_id.clone())
+        {
+            self.emit_domain(
+                Topic::SessionStatus {
+                    session_id: session_id.to_owned(),
+                },
+                ServerEvent::RewindPrefill {
+                    session_id: session_id.to_owned(),
+                    client_id,
+                    text,
+                    attachments,
+                },
+                cx,
+            );
+        }
         if let Some(meta) = self.meta_mut(session_id) {
             meta.updated_at = cx.clock().unix_secs();
             let meta = meta.clone();
@@ -674,6 +698,33 @@ fn stored_prompt(
                 .find(|(_, checkpoint)| checkpoint == checkpoint_id)
                 .map(|(steer, _)| (index, Some(steer.as_str())))
         })?;
+    message_in(timeline, turn, steer)
+}
+
+/// The words and images of the message a handoff carried, by the name of the
+/// session it left.
+fn handoff_prompt(
+    timeline: &tcode_core::session::Timeline,
+    relay: &str,
+) -> Option<(String, Vec<String>)> {
+    let turn = timeline
+        .entries
+        .iter()
+        .find_map(|entry| match &entry.content {
+            EntryContent::ProviderRelay {
+                left: Some(left), ..
+            } if left.id == relay => Some(entry.turn),
+            _ => None,
+        })?;
+    message_in(timeline, turn, None)
+}
+
+/// The prompt that opened `turn`, or the steer `steer` in it.
+fn message_in(
+    timeline: &tcode_core::session::Timeline,
+    turn: usize,
+    steer: Option<&str>,
+) -> Option<(String, Vec<String>)> {
     timeline.entries.iter().find_map(|entry| {
         if entry.turn != turn || steer.is_some_and(|steer| entry.id != steer) {
             return None;

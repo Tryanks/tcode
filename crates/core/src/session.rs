@@ -675,7 +675,9 @@ pub struct RewindReturn<'a> {
     pub session: &'a agent::LeftSession,
     /// The session's harness rewinds it to the message. `false` for the
     /// message a handoff carried: the session it left is returned to as it
-    /// stands, and no harness is asked for anything.
+    /// stands, no harness is asked for anything
+    /// ([`AgentEvent::RelayUndone`]), and the session's name stands for the
+    /// message's restore point.
     pub harness_rewinds: bool,
 }
 
@@ -1452,20 +1454,28 @@ impl Timeline {
                         "provider rewind target is absent from the local timeline: {checkpoint_id}"
                     );
                 }
-                // A window of the log may begin after every turn the rewind
-                // touched.
-                let Some(turn) = self.boundaries.current() else {
-                    return;
+                self.push_rewound(ts, rewound);
+            }
+            AgentEvent::RelayUndone { relay } => {
+                let mut rewound = Rewound {
+                    checkpoint_id: relay.clone(),
+                    mode: RewindReturn::MODE,
+                    later_history: agent::LaterHistory::Truncated,
+                    removed: Vec::new(),
+                    removed_turns: 0,
+                    files: None,
+                    incomplete: None,
+                    undo_token: None,
+                    branch: None,
+                    removed_meta: Vec::new(),
+                    cut_steers: None,
                 };
-                let id = self.synthetic_id("rewound", ts);
-                self.entries.push(Arc::new(TimelineEntry {
-                    id,
-                    content: EntryContent::Rewound(Box::new(rewound)),
-                    ts,
-                    finished_ts: None,
-                    background: false,
-                    turn,
-                }));
+                if let Some(cut) = &boundary.rewind {
+                    self.close_undo();
+                    self.rewind_conversation(cut, &mut rewound);
+                    self.push_turn(ts);
+                }
+                self.push_rewound(ts, rewound);
             }
             AgentEvent::RewindUndone { checkpoint_id } => {
                 if boundary.undone {
@@ -1912,6 +1922,23 @@ impl Timeline {
             cost_usd: None,
             provider_duration_ms: None,
         });
+    }
+
+    /// The divider of a cut, in the turn it opened.
+    fn push_rewound(&mut self, ts: Option<u64>, rewound: Rewound) {
+        // A window of the log may begin after every turn the cut touched.
+        let Some(turn) = self.boundaries.current() else {
+            return;
+        };
+        let id = self.synthetic_id("rewound", ts);
+        self.entries.push(Arc::new(TimelineEntry {
+            id,
+            content: EntryContent::Rewound(Box::new(rewound)),
+            ts,
+            finished_ts: None,
+            background: false,
+            turn,
+        }));
     }
 
     /// Apply a provider-confirmed conversation rewind. The event log remains
