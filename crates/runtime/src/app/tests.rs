@@ -5415,6 +5415,280 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
     assert_eq!(claude.next_turn(cx).1, "check the logs");
 }
 
+const HANDED: &str = "handed-over";
+
+fn native(session: &str) -> agent::ResumeCursor {
+    agent::ResumeCursor(serde_json::json!({ "session_id": session }))
+}
+
+/// The option the thread had chosen while it ran in Codex.
+fn codex_effort() -> agent::OptionSelection {
+    agent::OptionSelection {
+        id: "effort".into(),
+        value: "high".into(),
+    }
+}
+
+/// A thread that ran two turns in Codex with that option and was handed to Claude Code, which
+/// ran a third: each harness reported its session and a restore point per
+/// prompt, as it does.
+fn handed_over(cx: &mut TestAppContext, test_store: &TestStore) -> (TestEntity, Providers) {
+    stored_thread(
+        test_store,
+        HANDED,
+        ProviderKind::Codex,
+        &test_store.root().join("thread"),
+        |meta| {
+            meta.model = Some("gpt-5".into());
+            meta.option_selections = vec![codex_effort()];
+        },
+    );
+    let (state, providers) = played_host(cx, test_store);
+    state.open(cx, HANDED);
+    let turn = |cx: &mut TestAppContext, played: &Played, name: &str| {
+        played.start_turn(cx, &format!("{name}-turn"));
+        played.play([
+            AgentEvent::TurnCheckpoint {
+                turn_id: format!("{name}-turn"),
+                checkpoint_id: name.into(),
+            },
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: format!("{name}-answer"),
+                parent_item_id: None,
+                content: ItemContent::AssistantMessage {
+                    text: format!("answer in {name}"),
+                    summarized: false,
+                },
+            }),
+            completed_turn(&format!("{name}-turn")),
+        ]);
+        played.fence(cx, HANDED);
+    };
+    let started = |played: &Played, session: &str| {
+        played.play([AgentEvent::SessionStarted {
+            provider_session_id: session.into(),
+            resume: native(session),
+            model: None,
+        }]);
+    };
+    state.send(cx, HANDED, "first");
+    let codex = providers.started(cx, 0);
+    started(&codex, "codex-native");
+    turn(cx, &codex, "codex-1");
+    state.send(cx, HANDED, "second");
+    turn(cx, &codex, "codex-2");
+    state
+        .command(
+            cx,
+            Command::SetActiveModel {
+                session_id: HANDED.into(),
+                provider: ProviderKind::ClaudeCode,
+                model: Some("claude-opus-5-5".into()),
+                profile_id: None,
+            },
+        )
+        .unwrap();
+    state
+        .command(
+            cx,
+            Command::ConfirmRelayAndSend {
+                session_id: HANDED.into(),
+                text: "third".into(),
+                attachment_paths: Vec::new(),
+            },
+        )
+        .unwrap();
+    let claude = providers.started(cx, 1);
+    assert_eq!(claude.provider, ProviderKind::ClaudeCode);
+    started(&claude, "claude-native");
+    turn(cx, &claude, "claude-1");
+    (state, providers)
+}
+
+fn rewind_handed(state: &TestEntity, cx: &mut TestAppContext, turn: usize) {
+    let command = serde_json::from_value(serde_json::json!({
+        "type": "rewind_turn",
+        "content": {
+            "session_id": HANDED, "turn": turn, "mode": "conversation", "client_id": "desk",
+        }
+    }))
+    .unwrap();
+    state.command(cx, command).unwrap();
+}
+
+/// The harness and model the thread is on, as its status says.
+fn backend(cx: &TestAppContext) -> (ProviderKind, Option<String>) {
+    let status = cx.seen().status(HANDED);
+    (status.provider, status.requested_model.clone())
+}
+
+fn has_relay(cx: &TestAppContext) -> bool {
+    cx.seen()
+        .timeline(HANDED)
+        .entries
+        .iter()
+        .any(|entry| matches!(entry.content, EntryContent::ProviderRelay { .. }))
+}
+
+/// A fork through a turn that ran before a handoff is a fork of the session
+/// that ran it, on the backend that holds it: Codex forks its own session at
+/// the restore point of the prompt that followed, or all of it through its
+/// last turn, and no handoff is made.
+#[test]
+fn a_fork_through_a_turn_before_a_handoff_is_of_the_session_that_ran_it() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-fork-before-handoff");
+    let (state, providers) = handed_over(cx, &test_store);
+    for (n, (turn, checkpoint, point)) in [
+        (
+            0,
+            "codex-1",
+            agent::ForkPoint::Before {
+                checkpoint_id: "codex-2".into(),
+            },
+        ),
+        (1, "codex-2", agent::ForkPoint::Tail),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let command = serde_json::from_value(serde_json::json!({
+            "type": "fork_thread",
+            "content": { "id": HANDED, "at": { "turn": turn, "checkpoint_id": checkpoint } },
+        }))
+        .unwrap();
+        let Ok(CommandResponse::SessionId(Some(fork))) = state.command(cx, command) else {
+            panic!("turn {turn} forks");
+        };
+        state.open(cx, &fork);
+        cx.run_until_seen(|view| view.timeline(&fork).turns.len() == turn + 1);
+        assert!(cx.seen().status(&fork).relay_confirmation.is_none());
+        state.send(cx, &fork, "go on");
+        let codex = providers.started(cx, 2 + n);
+        assert_eq!(codex.provider, ProviderKind::Codex);
+        assert_eq!(codex.options.model.as_deref(), Some("gpt-5"));
+        assert_eq!(codex.options.resume, Some(native("codex-native")));
+        assert_eq!(codex.options.fork, Some(point));
+        assert!(codex.options.option_selections.contains(&codex_effort()));
+        assert_eq!(codex.next_turn(cx).1, "go on");
+    }
+}
+
+/// A rewind to a message that ran before a handoff takes the thread back to
+/// the backend that ran it, where its harness makes the rewind in its own
+/// session. A rewind that harness refuses leaves the thread where it was.
+#[test]
+fn a_rewind_to_a_message_before_a_handoff_is_made_by_the_harness_that_ran_it() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-rewind-before-handoff");
+    let (state, providers) = handed_over(cx, &test_store);
+
+    rewind_handed(&state, cx, 1);
+    let codex = providers.started(cx, 2);
+    assert_eq!(codex.provider, ProviderKind::Codex);
+    assert_eq!(codex.options.resume, Some(native("codex-native")));
+    assert_eq!(codex.options.fork, None);
+    assert!(matches!(
+        codex.next_command(cx),
+        SessionCommand::Rewind { checkpoint_id, mode: RewindMode::Conversation }
+            if checkpoint_id == "codex-2"
+    ));
+    codex.play([AgentEvent::RewindFailed {
+        checkpoint_id: "codex-2".into(),
+        mode: RewindMode::Conversation,
+        failure: agent::RewindFailure::new(agent::RewindFailureReason::TargetNotFound, None),
+    }]);
+    cx.run_until_seen(|view| {
+        view.timeline(HANDED)
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.content, EntryContent::RewindFailed { .. }))
+    });
+    assert!(has_relay(cx));
+    cx.run_until_seen(|view| view.status(HANDED).provider == ProviderKind::ClaudeCode);
+    assert_eq!(
+        backend(cx),
+        (ProviderKind::ClaudeCode, Some("claude-opus-5-5".into()))
+    );
+    // The thread goes on in the session Claude Code holds.
+    state.send(cx, HANDED, "fourth");
+    let claude = providers.started(cx, 3);
+    assert_eq!(claude.provider, ProviderKind::ClaudeCode);
+    assert_eq!(claude.options.resume, Some(native("claude-native")));
+    claude.start_turn(cx, "claude-2-turn");
+    claude.play([completed_turn("claude-2-turn")]);
+    claude.fence(cx, HANDED);
+
+    rewind_handed(&state, cx, 1);
+    let codex = providers.started(cx, 4);
+    assert_eq!(codex.options.resume, Some(native("codex-native")));
+    assert!(codex.options.option_selections.contains(&codex_effort()));
+    codex.next_command(cx);
+    codex.play([AgentEvent::RewindCompleted {
+        checkpoint_id: "codex-2".into(),
+        mode: RewindMode::Conversation,
+        prefill: Some("second".into()),
+        prefill_attachments: Vec::new(),
+        later_history: agent::LaterHistory::Truncated,
+        files: None,
+        incomplete: None,
+        undo_token: None,
+    }]);
+    cx.run_until_seen(|view| {
+        view.timeline(HANDED)
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.content, EntryContent::Rewound(_)))
+    });
+    assert!(!has_relay(cx));
+    cx.run_until_seen(|view| view.status(HANDED).provider == ProviderKind::Codex);
+    assert_eq!(backend(cx), (ProviderKind::Codex, Some("gpt-5".into())));
+    assert!(cx.seen().status(HANDED).relay_confirmation.is_none());
+}
+
+/// A rewind to the message a handoff carried undoes the handoff: the thread
+/// goes on in the session it left, as it stands, with no harness asked to
+/// rewind anything, and the next message is that session's, not a handoff.
+#[test]
+fn a_rewind_to_the_message_a_handoff_carried_returns_to_the_session_it_left() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-rewind-handoff");
+    let (state, providers) = handed_over(cx, &test_store);
+
+    rewind_handed(&state, cx, 2);
+    cx.run_until_seen(|view| {
+        view.timeline(HANDED)
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.content, EntryContent::Rewound(_)))
+    });
+    assert!(!has_relay(cx));
+    cx.run_until_seen(|view| view.status(HANDED).provider == ProviderKind::Codex);
+    assert_eq!(backend(cx), (ProviderKind::Codex, Some("gpt-5".into())));
+    // The log says the handoff was undone, not that a harness rewound.
+    let records = cx.seen().records(HANDED);
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record.event, AgentEvent::RelayUndone { .. }))
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|record| matches!(record.event, AgentEvent::RewindCompleted { .. }))
+    );
+
+    // The first provider started since is the one the message goes to: none
+    // was started to rewind.
+    state.send(cx, HANDED, "third again");
+    let codex = providers.started(cx, 2);
+    assert_eq!(codex.provider, ProviderKind::Codex);
+    assert_eq!(codex.options.resume, Some(native("codex-native")));
+    assert_eq!(codex.options.fork, None);
+    assert!(codex.options.option_selections.contains(&codex_effort()));
+    assert_eq!(codex.next_turn(cx).1, "third again");
+}
+
 /// One provider process a test launched: the options it started with, and its command and
 /// event channels.
 type Launch = (

@@ -14,22 +14,31 @@ pub(super) struct ForkPlan {
     /// The branch the new thread takes up, which is the session the restore
     /// points in its log came from. A fork is a new session.
     branch: Option<String>,
+    /// The session a handoff left, when the fork is of that one and not of
+    /// the session the source is in.
+    left: Option<LeftBackend>,
+}
+
+struct LeftBackend {
+    provider: ProviderKind,
+    model: Option<String>,
+    session: agent::LeftSession,
 }
 
 impl AppState {
     /// Whether this thread can fork through a turn and whether one can start
     /// now.
     pub(super) fn fork_status(&self, active: &ActiveSession) -> Option<ForkStatus> {
-        active.meta.provider.caps().fork_at.then_some(())?;
-        // A branch not started yet holds the source's cursor, not its session's.
-        if Self::conversation_read_only(&active.meta)
-            || active.meta.resume_cursor.is_none()
-            || matches!(active.meta.pending_fork, Some(ForkPoint::Branch { .. }))
-        {
+        if Self::conversation_read_only(&active.meta) {
             return None;
         }
-        Some(ForkStatus {
+        // A branch not started yet holds the source's cursor, not its session's.
+        let own = active.meta.provider.caps().fork_at
+            && active.meta.resume_cursor.is_some()
+            && !matches!(active.meta.pending_fork, Some(ForkPoint::Branch { .. }));
+        (own || active.timeline.has_relays()).then(|| ForkStatus {
             blocked: self.rewind_requests.contains_key(&active.meta.id),
+            left_only: !own,
         })
     }
 
@@ -37,11 +46,24 @@ impl AppState {
     /// the next prompt's restore point, or as all of the session when no
     /// prompt follows and none is on its way.
     pub(super) fn fork_plan(&self, active: &ActiveSession, at: &ForkAt) -> Option<ForkPlan> {
-        if self.fork_status(active)?.blocked {
+        let status = self.fork_status(active)?;
+        if status.blocked {
             return None;
         }
         let timeline = &active.timeline;
         if timeline.turns.get(at.turn)?.provider_checkpoint_id != at.checkpoint_id {
+            return None;
+        }
+        // `fork_edge` answers for a session a handoff left only where it can
+        // be gone on in.
+        let left = timeline.left_session(at.turn).and_then(|left| {
+            Some(LeftBackend {
+                provider: left.provider,
+                model: left.model.map(str::to_owned),
+                session: left.session?.clone(),
+            })
+        });
+        if left.is_none() && status.left_only {
             return None;
         }
         let (point, bound) = match timeline.fork_edge(at.turn)? {
@@ -61,6 +83,7 @@ impl AppState {
                 };
                 (ForkPoint::Before { checkpoint_id }, Some(bound))
             }
+            ForkEdge::LeftEnd { turn } => (ForkPoint::Tail, Some(CloneBound::BeforeTurn(turn))),
             ForkEdge::End if active.turn_in_flight => return None,
             // A fork not started yet still names the point it was made from.
             ForkEdge::End => (
@@ -72,6 +95,7 @@ impl AppState {
             point,
             bound,
             branch: None,
+            left,
         })
     }
 
@@ -97,6 +121,7 @@ impl AppState {
                 point,
                 bound: None,
                 branch: None,
+                left: None,
             },
             cx,
         ))
@@ -170,6 +195,7 @@ impl AppState {
                 },
                 bound: Some(CloneBound::BeforeTurn(turn)),
                 branch: Some(token),
+                left: None,
             },
             cx,
         ))
@@ -217,6 +243,17 @@ impl AppState {
         fork.profile_id = source.profile_id.clone();
         fork.resume_cursor = source.resume_cursor.clone();
         fork.session_transfer_from = source.session_transfer_from.clone();
+        if let Some(left) = plan.left {
+            // The fork is of the session that ran the turn, on the backend
+            // that holds it and with the options the thread had there.
+            fork.provider = left.provider;
+            fork.model = left.model;
+            fork.option_selections = left.session.options;
+            fork.acp_agent_id = left.session.acp_agent;
+            fork.profile_id = left.session.profile;
+            fork.resume_cursor = Some(left.session.resume);
+            fork.session_transfer_from = None;
+        }
         // The fork carries the source's context, so it may read what the source could.
         fork.references = source.references.clone();
         fork.pending_fork = Some(plan.point);

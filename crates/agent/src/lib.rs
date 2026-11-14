@@ -2492,6 +2492,23 @@ pub struct TurnRetry {
     pub retry_at: Option<u64>,
 }
 
+/// The native session a [`AgentEvent::ProviderRelay`] left behind, with what
+/// starts its harness on it again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LeftSession {
+    /// Names the handoff in [`AgentEvent::RelayUndone`].
+    pub id: String,
+    /// The provider profile whose home holds it; `None` is the built-in one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_agent: Option<String>,
+    /// The option values the thread had chosen there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<OptionSelection>,
+    pub resume: ResumeCursor,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -2514,6 +2531,20 @@ pub enum AgentEvent {
         /// directory the native session it replaces belonged to.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         moved_from: Option<PathBuf>,
+        /// The native session `from_provider` held, where the thread can go
+        /// on in it again: a fork through a turn it ran, or a rewind to one,
+        /// returns to it. Absent where it cannot (the thread moved, the
+        /// session was never the thread's own) and in records from before it
+        /// was kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        left: Option<LeftSession>,
+    },
+    /// The thread went back to the session the [`Self::ProviderRelay`] whose
+    /// `left` is named `relay` had left, as it stood there: the message that
+    /// handoff carried and everything after it leave the conversation. Like
+    /// the handoff this is the runtime's record; no harness is asked for it.
+    RelayUndone {
+        relay: String,
     },
     /// The agent's self-described options (ACP `modes` / `models` /
     /// `configOptions`), pushed at session start and on every change. Reuses

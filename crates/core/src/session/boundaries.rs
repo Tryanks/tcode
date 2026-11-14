@@ -32,6 +32,9 @@ struct Boundary {
     checkpoint: Option<String>,
     closed: bool,
     running: bool,
+    /// The handoff that opened the turn, by the name of the session it left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    relay: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +120,7 @@ impl TurnBoundaries {
                 | AgentEvent::TurnChangesUpdated { .. }
                 | AgentEvent::TurnCheckpoint { .. }
                 | AgentEvent::RewindCompleted { .. }
+                | AgentEvent::RelayUndone { .. }
                 | AgentEvent::RewindUndone { .. }
                 | AgentEvent::SteerCheckpoint { .. }
                 | AgentEvent::CheckpointsCleared
@@ -191,33 +195,25 @@ impl TurnBoundaries {
                         users: self.users.clone(),
                         steer_checkpoints: self.steer_checkpoints.clone(),
                     };
-                    let kept = match &cut.steer {
-                        Some(steer) => {
-                            if let Some(cut_seq) = self.users.get(steer).map(|user| user.seq) {
-                                self.users
-                                    .retain(|_, user| user.turn != cut.turn || user.seq < cut_seq);
-                            }
-                            if let Some(turn) = self.turns.get_mut(cut.turn) {
-                                turn.closed = true;
-                                turn.running = false;
-                            }
-                            cut.turn + 1
-                        }
-                        None => cut.turn,
-                    };
-                    self.turns.truncate(kept);
-                    self.users.retain(|_, user| user.turn < kept);
-                    let users = &self.users;
-                    self.steer_checkpoints
-                        .retain(|_, steer| users.contains_key(steer));
-                    self.compacting = false;
+                    self.cut_at(cut, &mut change);
                     self.undo = undo_token.is_some().then(|| Box::new(before));
-                    // What follows the cut joins a turn of its own, which the
-                    // rewind's divider opens.
-                    self.turns.push(Boundary::default());
-                    change.opened = true;
-                    change.rewind = Some(cut);
-                    change.target = self.current();
+                }
+            }
+            AgentEvent::ProviderRelay {
+                left: Some(left), ..
+            } if opened => {
+                if let Some(turn) = self.turns.last_mut() {
+                    turn.relay = Some(left.id.clone());
+                }
+            }
+            AgentEvent::RelayUndone { relay } => {
+                if let Some(turn) = self
+                    .turns
+                    .iter()
+                    .position(|turn| turn.relay.as_ref() == Some(relay))
+                {
+                    self.cut_at(RewindCut { turn, steer: None }, &mut change);
+                    self.undo = None;
                 }
             }
             AgentEvent::RewindUndone { checkpoint_id } => {
@@ -294,6 +290,35 @@ impl TurnBoundaries {
         change
     }
 
+    /// Take the conversation from `cut` on out of the turns, and open the
+    /// turn of what comes next, which the cut's divider opens.
+    fn cut_at(&mut self, cut: RewindCut, change: &mut TurnBoundaryChange) {
+        let kept = match &cut.steer {
+            Some(steer) => {
+                if let Some(cut_seq) = self.users.get(steer).map(|user| user.seq) {
+                    self.users
+                        .retain(|_, user| user.turn != cut.turn || user.seq < cut_seq);
+                }
+                if let Some(turn) = self.turns.get_mut(cut.turn) {
+                    turn.closed = true;
+                    turn.running = false;
+                }
+                cut.turn + 1
+            }
+            None => cut.turn,
+        };
+        self.turns.truncate(kept);
+        self.users.retain(|_, user| user.turn < kept);
+        let users = &self.users;
+        self.steer_checkpoints
+            .retain(|_, steer| users.contains_key(steer));
+        self.compacting = false;
+        self.turns.push(Boundary::default());
+        change.opened = true;
+        change.rewind = Some(cut);
+        change.target = self.current();
+    }
+
     /// Where the restore point `checkpoint` cuts the conversation.
     fn cut(&self, checkpoint: &str) -> Option<RewindCut> {
         if let Some(turn) = self
@@ -356,6 +381,7 @@ impl TurnBoundaries {
             | AgentEvent::BackgroundTaskList { .. }
             | AgentEvent::ItemBackgrounded { .. }
             | AgentEvent::RewindCompleted { .. }
+            | AgentEvent::RelayUndone { .. }
             | AgentEvent::RewindFailed { .. }
             | AgentEvent::RewindUndone { .. }
             | AgentEvent::RewindUndoFailed { .. }

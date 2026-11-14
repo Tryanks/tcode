@@ -495,6 +495,7 @@ impl AppState {
                 );
             }
             AgentEvent::ProviderRelay { .. }
+            | AgentEvent::RelayUndone { .. }
             | AgentEvent::ServedModel { .. }
             | AgentEvent::TurnChangesUpdated { .. }
             | AgentEvent::TurnCheckpoint { .. }

@@ -105,6 +105,8 @@ impl AppState {
                 from_provider: active.meta.provider,
                 from_model: active.meta.model.clone(),
                 from_profile: active.meta.profile_id.clone(),
+                from_acp_agent: active.meta.acp_agent_id.clone(),
+                from_options: active.meta.option_selections.clone(),
             });
             let session_home = (source.from_provider == provider
                 && active.meta.resume_cursor.is_some()

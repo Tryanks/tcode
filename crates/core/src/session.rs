@@ -563,6 +563,9 @@ pub enum EntryContent {
         prompt: Option<String>,
         /// The directory the thread moved from, when the handoff follows a move.
         moved_from: Option<std::path::PathBuf>,
+        /// The native session the handoff left, where the thread can go on
+        /// in it again ([`Timeline::left_session`]).
+        left: Option<agent::LeftSession>,
     },
     /// The provider changed the model actually serving this session.
     ModelChanged {
@@ -647,6 +650,42 @@ pub enum ForkEdge {
     BeforePrompt { turn: usize, checkpoint_id: String },
     /// Nothing comes after it: all of the session.
     End,
+    /// All of a session a handoff left, which `turn` opened
+    /// ([`Timeline::left_session`]).
+    LeftEnd { turn: usize },
+}
+
+/// The native session a turn ran in, once a handoff has left it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LeftTurn<'a> {
+    /// The turn the handoff opened: the first one not in that session.
+    pub relay_turn: usize,
+    pub provider: agent::ProviderKind,
+    pub model: Option<&'a str>,
+    /// `None` where the session cannot be gone on in.
+    pub session: Option<&'a agent::LeftSession>,
+}
+
+/// The session a rewind returns the thread to, when it is not the one the
+/// thread is in ([`Timeline::rewind_return`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RewindReturn<'a> {
+    pub provider: agent::ProviderKind,
+    pub model: Option<&'a str>,
+    pub session: &'a agent::LeftSession,
+    /// The session's harness rewinds it to the message. `false` for the
+    /// message a handoff carried: the session it left is returned to as it
+    /// stands, no harness is asked for anything
+    /// ([`AgentEvent::RelayUndone`]), and the session's name stands for the
+    /// message's restore point.
+    pub harness_rewinds: bool,
+}
+
+impl RewindReturn<'_> {
+    /// What such a rewind restores: the conversation alone. The turns after
+    /// the message ran in other sessions, whose files this one's harness
+    /// never tracked.
+    pub const MODE: agent::RewindMode = agent::RewindMode::Conversation;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -837,6 +876,8 @@ pub struct Timeline {
     pub rewind_unavailable: Option<agent::RewindFailureReason>,
     /// A divider in `entries` still carries an undo token.
     undo_open: bool,
+    /// How many handoffs `entries` holds.
+    relays: usize,
     boundaries: TurnBoundaries,
     /// Monotonic counter for synthetic entry ids.
     next_synthetic_id: u64,
@@ -922,6 +963,11 @@ impl Timeline {
     /// holds.
     fn reindex_entries(&mut self) {
         self.entry_index = EntryIndex::default();
+        self.relays = self
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.content, EntryContent::ProviderRelay { .. }))
+            .count();
     }
 
     /// Fold a whole event sequence (replay path). Accepts either bare
@@ -1048,6 +1094,64 @@ impl Timeline {
             .collect()
     }
 
+    /// Whether a handoff has left a native session behind in this fold.
+    pub fn has_relays(&self) -> bool {
+        self.relays > 0
+    }
+
+    fn relay(&self, found: impl Fn(usize) -> bool) -> Option<LeftTurn<'_>> {
+        if self.relays == 0 {
+            return None;
+        }
+        self.entries.iter().find_map(|entry| match &entry.content {
+            EntryContent::ProviderRelay {
+                from_provider,
+                from_model,
+                left,
+                ..
+            } if found(entry.turn) => Some(LeftTurn {
+                relay_turn: entry.turn,
+                provider: *from_provider,
+                model: from_model.as_deref(),
+                session: left.as_ref(),
+            }),
+            _ => None,
+        })
+    }
+
+    /// The native session `turn` ran in, when a handoff has since left it:
+    /// the one the first handoff after the turn names. The turns of the
+    /// session the thread is in now answer `None`.
+    pub fn left_session(&self, turn: usize) -> Option<LeftTurn<'_>> {
+        self.relay(|relay_turn| relay_turn > turn)
+    }
+
+    /// Where a conversation rewind to the prompt that opened `turn` (absolute
+    /// turn `absolute`) takes the thread, when that is out of the session it
+    /// is in: `Some(None)` when that session cannot be gone on in. A rewind
+    /// to the message a handoff carried returns to the session it left; one
+    /// to an earlier message is that session's harness's to make.
+    pub fn rewind_return(&self, turn: usize, absolute: usize) -> Option<Option<RewindReturn<'_>>> {
+        let (left, harness_rewinds) = match self.relay(|relay_turn| relay_turn == turn) {
+            Some(left) => (left, false),
+            None => (self.left_session(turn)?, true),
+        };
+        Some(left.session.and_then(|session| {
+            let offered = !harness_rewinds
+                || left
+                    .provider
+                    .caps()
+                    .rewind
+                    .is_some_and(|control| control.offers(RewindReturn::MODE, absolute, false));
+            offered.then_some(RewindReturn {
+                provider: left.provider,
+                model: left.model,
+                session,
+                harness_rewinds,
+            })
+        }))
+    }
+
     /// Where a fork through finished turn `turn` ends in the harness's
     /// session, if it can be named now: a later prompt not yet taken up or
     /// held by a rewind leaves that turn with nothing to anchor on.
@@ -1056,6 +1160,17 @@ impl Timeline {
             .get(turn)
             .filter(|meta| !meta.running && meta.status.is_some())?;
         let next = turn + 1;
+        if let Some(left) = self.left_session(turn) {
+            left.session?;
+            left.provider.caps().fork_at.then_some(())?;
+            if left.relay_turn == next {
+                return Some(ForkEdge::LeftEnd { turn: next });
+            }
+            return Some(ForkEdge::BeforePrompt {
+                turn: next,
+                checkpoint_id: self.turns.get(next)?.provider_checkpoint_id.clone()?,
+            });
+        }
         let Some(meta) = self.turns.get(next) else {
             return Some(ForkEdge::End);
         };
@@ -1157,9 +1272,11 @@ impl Timeline {
                 to_model,
                 prompt,
                 moved_from,
+                left,
             } => {
                 let turn = self.begin_user_turn();
                 let id = self.synthetic_id("relay", ts);
+                self.relays += 1;
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
                     content: EntryContent::ProviderRelay {
@@ -1169,6 +1286,7 @@ impl Timeline {
                         to_model: to_model.clone(),
                         prompt: prompt.clone(),
                         moved_from: moved_from.clone(),
+                        left: left.clone(),
                     },
                     ts,
                     finished_ts: None,
@@ -1336,20 +1454,28 @@ impl Timeline {
                         "provider rewind target is absent from the local timeline: {checkpoint_id}"
                     );
                 }
-                // A window of the log may begin after every turn the rewind
-                // touched.
-                let Some(turn) = self.boundaries.current() else {
-                    return;
+                self.push_rewound(ts, rewound);
+            }
+            AgentEvent::RelayUndone { relay } => {
+                let mut rewound = Rewound {
+                    checkpoint_id: relay.clone(),
+                    mode: RewindReturn::MODE,
+                    later_history: agent::LaterHistory::Truncated,
+                    removed: Vec::new(),
+                    removed_turns: 0,
+                    files: None,
+                    incomplete: None,
+                    undo_token: None,
+                    branch: None,
+                    removed_meta: Vec::new(),
+                    cut_steers: None,
                 };
-                let id = self.synthetic_id("rewound", ts);
-                self.entries.push(Arc::new(TimelineEntry {
-                    id,
-                    content: EntryContent::Rewound(Box::new(rewound)),
-                    ts,
-                    finished_ts: None,
-                    background: false,
-                    turn,
-                }));
+                if let Some(cut) = &boundary.rewind {
+                    self.close_undo();
+                    self.rewind_conversation(cut, &mut rewound);
+                    self.push_turn(ts);
+                }
+                self.push_rewound(ts, rewound);
             }
             AgentEvent::RewindUndone { checkpoint_id } => {
                 if boundary.undone {
@@ -1796,6 +1922,23 @@ impl Timeline {
             cost_usd: None,
             provider_duration_ms: None,
         });
+    }
+
+    /// The divider of a cut, in the turn it opened.
+    fn push_rewound(&mut self, ts: Option<u64>, rewound: Rewound) {
+        // A window of the log may begin after every turn the cut touched.
+        let Some(turn) = self.boundaries.current() else {
+            return;
+        };
+        let id = self.synthetic_id("rewound", ts);
+        self.entries.push(Arc::new(TimelineEntry {
+            id,
+            content: EntryContent::Rewound(Box::new(rewound)),
+            ts,
+            finished_ts: None,
+            background: false,
+            turn,
+        }));
     }
 
     /// Apply a provider-confirmed conversation rewind. The event log remains
@@ -2635,6 +2778,7 @@ mod tests {
                 to_model: Some("gpt-5".into()),
                 prompt: None,
                 moved_from: None,
+                left: None,
             },
             user_msg("u2", "after"),
         ]);

@@ -16,6 +16,64 @@ pub(super) struct RewindRequest {
     pub(super) client_id: Option<String>,
     /// Told the harness's answer (a `tcode_control` call waiting on it).
     pub(super) waiters: Vec<smol::channel::Sender<AgentEvent>>,
+    /// The backend the thread left to make this rewind in a session a
+    /// handoff had left, which it goes back to unless the rewind is made.
+    pub(super) came_from: Option<Box<Backend>>,
+}
+
+/// The backend a thread runs against and the native session it holds there.
+pub(super) struct Backend {
+    provider: ProviderKind,
+    acp_agent_id: Option<String>,
+    profile_id: Option<String>,
+    model: Option<String>,
+    option_selections: Vec<OptionSelection>,
+    resume_cursor: Option<agent::ResumeCursor>,
+    pending_fork: Option<agent::ForkPoint>,
+    session_transfer_from: Option<String>,
+    pending_relay: Option<PendingRelay>,
+    provider_commands: Vec<ProviderCommand>,
+}
+
+impl Backend {
+    /// Stop the thread's provider and point the thread at this backend,
+    /// answering the one it was on.
+    fn replace(self, active: &mut ActiveSession) -> Self {
+        active.shutdown_to_idle();
+        active.provider_options.clear();
+        active.confirmed_option_selections.clear();
+        let meta = &mut active.meta;
+        Self {
+            provider: std::mem::replace(&mut meta.provider, self.provider),
+            acp_agent_id: std::mem::replace(&mut meta.acp_agent_id, self.acp_agent_id),
+            profile_id: std::mem::replace(&mut meta.profile_id, self.profile_id),
+            model: std::mem::replace(&mut meta.model, self.model),
+            option_selections: std::mem::replace(
+                &mut meta.option_selections,
+                self.option_selections,
+            ),
+            resume_cursor: std::mem::replace(&mut meta.resume_cursor, self.resume_cursor),
+            pending_fork: std::mem::replace(&mut meta.pending_fork, self.pending_fork),
+            session_transfer_from: std::mem::replace(
+                &mut meta.session_transfer_from,
+                self.session_transfer_from,
+            ),
+            pending_relay: std::mem::replace(&mut active.pending_relay, self.pending_relay),
+            provider_commands: std::mem::replace(
+                &mut active.provider_commands,
+                self.provider_commands,
+            ),
+        }
+    }
+}
+
+/// The session a rewind returns the thread to
+/// ([`tcode_core::session::RewindReturn`]).
+struct ReturnTo {
+    provider: ProviderKind,
+    model: Option<String>,
+    session: agent::LeftSession,
+    harness_rewinds: bool,
 }
 
 impl RewindRequest {
@@ -67,12 +125,30 @@ pub(super) struct PreviewRequest {
 impl AppState {
     /// What a rewind does in this thread and whether one can start now.
     pub(super) fn rewind_status(&self, active: &ActiveSession) -> Option<RewindStatus> {
-        let control = active.meta.provider.caps().rewind?;
-        if Self::conversation_read_only(&active.meta)
-            || active.timeline.rewind_unavailable.is_some()
-        {
+        if Self::conversation_read_only(&active.meta) {
             return None;
         }
+        // A thread whose own session has no rewind still has those of the
+        // sessions its handoffs left ([`Timeline::rewind_return`]).
+        let control = active
+            .meta
+            .provider
+            .caps()
+            .rewind
+            .filter(|_| active.timeline.rewind_unavailable.is_none())
+            .or_else(|| {
+                active
+                    .timeline
+                    .has_relays()
+                    .then_some(agent::RewindControl {
+                        modes: &[],
+                        first_turn_conversation: false,
+                        steer_targets: false,
+                        later_history: agent::LaterHistory::Truncated,
+                        preview: agent::RewindPreviewKind::None,
+                        restores_command_edits: false,
+                    })
+            })?;
         let pending = self.rewind_requests.get(&active.meta.id);
         let blocked = if pending.is_some() {
             Some(RewindBlocked::InProgress)
@@ -106,12 +182,25 @@ impl AppState {
         mode: RewindMode,
     ) -> Option<String> {
         let status = self.rewind_status(active)?;
-        if status.blocked.is_some() || !status.offers(mode, at.turn, at.steer.is_some()) {
+        let elsewhere = match at.steer {
+            None => active.timeline.rewind_return(at.turn, at.turn),
+            // A steer in a session a handoff left is no target.
+            Some(_) => active.timeline.left_session(at.turn).map(|_| None),
+        };
+        let offered = match elsewhere {
+            Some(returns) => returns.is_some() && mode == tcode_core::session::RewindReturn::MODE,
+            None => status.offers(mode, at.turn, at.steer.is_some()),
+        };
+        if status.blocked.is_some() || !offered {
             return None;
         }
         let turn = active.timeline.turns.get(at.turn)?;
+        let left = elsewhere
+            .flatten()
+            .filter(|returns| !returns.harness_rewinds)
+            .map(|returns| returns.session.id.clone());
         match at.steer {
-            None => turn.provider_checkpoint_id.clone(),
+            None => left.or_else(|| turn.provider_checkpoint_id.clone()),
             Some(steer) => turn
                 .steer_checkpoints
                 .iter()
@@ -157,17 +246,84 @@ impl AppState {
     ) -> Option<smol::channel::Receiver<AgentEvent>> {
         let active = self.resident(target_id)?;
         let checkpoint_id = self.rewind_checkpoint(active, &at, mode)?;
-        self.begin_rewind_request(
-            target_id,
-            RewindRequest {
-                checkpoint_id,
-                mode,
-                undo_token: None,
-                client_id,
-                waiters: Vec::new(),
-            },
-            cx,
-        )
+        let returns = at
+            .steer
+            .is_none()
+            .then(|| active.timeline.rewind_return(at.turn, at.turn))
+            .flatten()
+            .flatten()
+            .map(|to| ReturnTo {
+                provider: to.provider,
+                model: to.model.map(str::to_owned),
+                session: to.session.clone(),
+                harness_rewinds: to.harness_rewinds,
+            });
+        let request = RewindRequest {
+            checkpoint_id,
+            mode,
+            undo_token: None,
+            client_id,
+            waiters: Vec::new(),
+            came_from: None,
+        };
+        match returns {
+            Some(to) => self.begin_return(target_id, request, to, cx),
+            None => self.begin_rewind_request(target_id, request, cx),
+        }
+    }
+
+    /// Rewind to a message of a session a handoff left: the thread goes back
+    /// to that session's backend, whose harness then makes the rewind; or,
+    /// for the message the handoff carried, goes on in the session as it was
+    /// left, with nothing for a harness to do. The thread stays on the
+    /// backend only if the rewind is made.
+    fn begin_return(
+        &mut self,
+        target_id: &str,
+        mut request: RewindRequest,
+        to: ReturnTo,
+        cx: &mut HostCx,
+    ) -> Option<smol::channel::Receiver<AgentEvent>> {
+        let profile_id = to.session.profile.clone();
+        let backend = Backend {
+            provider: to.provider,
+            provider_commands: self.cached_provider_commands(
+                to.provider,
+                profile_id.as_deref(),
+                to.session.acp_agent.as_deref(),
+            ),
+            acp_agent_id: to.session.acp_agent,
+            profile_id,
+            model: to.model,
+            option_selections: to.session.options,
+            resume_cursor: Some(to.session.resume),
+            pending_fork: None,
+            session_transfer_from: None,
+            pending_relay: None,
+        };
+        let active = self.resident_mut(target_id)?;
+        let session_id = active.meta.id.clone();
+        if !active.queue.is_empty() {
+            active.queue_held = true;
+        }
+        let came_from = backend.replace(active);
+        // Only a harness can refuse, and send the thread back.
+        request.came_from = to.harness_rewinds.then(|| Box::new(came_from));
+        let (waiter, answer) = smol::channel::bounded(1);
+        request.waiters.push(waiter);
+        let undone = AgentEvent::RelayUndone {
+            relay: request.checkpoint_id.clone(),
+        };
+        self.rewind_requests.insert(session_id.clone(), request);
+        // The provider that ran it is gone; the request above keeps the queue
+        // from going out as the turn closes.
+        self.close_abandoned_turn(&session_id, cx);
+        if to.harness_rewinds {
+            self.ensure_started(target_id, cx);
+        } else {
+            self.on_rewind_outcome(&session_id, undone, cx);
+        }
+        Some(answer)
     }
 
     /// Ask the harness to undo the thread's latest rewind.
@@ -196,6 +352,7 @@ impl AppState {
                 undo_token: Some(undo_token),
                 client_id: None,
                 waiters: Vec::new(),
+                came_from: None,
             },
             cx,
         )
@@ -260,9 +417,12 @@ impl AppState {
             .caps()
             .rewind
             .is_some_and(|control| control.preview != agent::RewindPreviewKind::None);
+        // A session a handoff left has no provider running to ask.
+        let elsewhere =
+            at.steer.is_none() && active.timeline.rewind_return(at.turn, at.turn).is_some();
         let Some(checkpoint_id) = self
             .rewind_checkpoint(active, &at, mode)
-            .filter(|_| previews)
+            .filter(|_| previews && !elsewhere)
         else {
             let _ = reply.try_send(refused(RewindFailureReason::Unsupported));
             return answer;
@@ -354,11 +514,19 @@ impl AppState {
 
     /// Forget what waits on a provider shut down on purpose.
     pub(super) fn drop_rewind_requests(&mut self, session_id: &str) {
-        self.rewind_requests.remove(session_id);
+        if let Some(came_from) = self
+            .rewind_requests
+            .remove(session_id)
+            .and_then(|request| request.came_from)
+            && let Some(active) = self.resident_mut(session_id)
+        {
+            came_from.replace(active);
+        }
         self.settle_previews(session_id, RewindFailureReason::ProcessGone);
     }
 
-    /// The harness answered a preview, a rewind or an undo.
+    /// The harness answered a preview, a rewind or an undo; or the thread
+    /// went back to the session a handoff left, with no harness to answer.
     pub(super) fn on_rewind_outcome(
         &mut self,
         session_id: &str,
@@ -387,8 +555,29 @@ impl AppState {
             }
             return;
         }
-        let request = self.rewind_requests.remove(session_id);
+        let mut request = self.rewind_requests.remove(session_id);
         let mut event = event;
+        let handoff_prompt = match &event {
+            AgentEvent::RelayUndone { relay } => self
+                .resident(session_id)
+                .and_then(|active| handoff_prompt(&active.timeline, relay)),
+            _ => None,
+        };
+        if let Some(came_from) = request
+            .as_mut()
+            .and_then(|request| request.came_from.take())
+        {
+            match &mut event {
+                // The turns it took out ran in another session, which neither
+                // an undo nor a branch of this one brings back.
+                AgentEvent::RewindCompleted { undo_token, .. } => *undo_token = None,
+                _ => {
+                    if let Some(active) = self.resident_mut(session_id) {
+                        came_from.replace(active);
+                    }
+                }
+            }
+        }
         if let AgentEvent::RewindCompleted {
             checkpoint_id,
             mode,
@@ -445,6 +634,24 @@ impl AppState {
                 cx,
             );
         }
+        if let Some((text, attachments)) = handoff_prompt
+            && let Some(client_id) = request
+                .as_ref()
+                .and_then(|request| request.client_id.clone())
+        {
+            self.emit_domain(
+                Topic::SessionStatus {
+                    session_id: session_id.to_owned(),
+                },
+                ServerEvent::RewindPrefill {
+                    session_id: session_id.to_owned(),
+                    client_id,
+                    text,
+                    attachments,
+                },
+                cx,
+            );
+        }
         if let Some(meta) = self.meta_mut(session_id) {
             meta.updated_at = cx.clock().unix_secs();
             let meta = meta.clone();
@@ -491,6 +698,33 @@ fn stored_prompt(
                 .find(|(_, checkpoint)| checkpoint == checkpoint_id)
                 .map(|(steer, _)| (index, Some(steer.as_str())))
         })?;
+    message_in(timeline, turn, steer)
+}
+
+/// The words and images of the message a handoff carried, by the name of the
+/// session it left.
+fn handoff_prompt(
+    timeline: &tcode_core::session::Timeline,
+    relay: &str,
+) -> Option<(String, Vec<String>)> {
+    let turn = timeline
+        .entries
+        .iter()
+        .find_map(|entry| match &entry.content {
+            EntryContent::ProviderRelay {
+                left: Some(left), ..
+            } if left.id == relay => Some(entry.turn),
+            _ => None,
+        })?;
+    message_in(timeline, turn, None)
+}
+
+/// The prompt that opened `turn`, or the steer `steer` in it.
+fn message_in(
+    timeline: &tcode_core::session::Timeline,
+    turn: usize,
+    steer: Option<&str>,
+) -> Option<(String, Vec<String>)> {
     timeline.entries.iter().find_map(|entry| {
         if entry.turn != turn || steer.is_some_and(|steer| entry.id != steer) {
             return None;

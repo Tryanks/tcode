@@ -437,9 +437,27 @@ impl AppState {
             return;
         };
         active.shutdown_to_idle();
-        active.meta.resume_cursor = None;
+        // The session stays where its harness keeps it, and the handoff names it: in the
+        // home of the account it was still to be carried from, when the thread had
+        // switched accounts. A fork not started yet holds its source's session.
+        let home = match &active.meta.session_transfer_from {
+            Some(home) => (!Settings::is_builtin_profile_id(home)).then(|| home.clone()),
+            None => pending.from_profile.clone(),
+        };
+        let left = active
+            .meta
+            .resume_cursor
+            .take()
+            .filter(|_| active.meta.pending_fork.is_none())
+            .map(|resume| agent::LeftSession {
+                id: uuid::Uuid::new_v4().to_string(),
+                profile: home,
+                acp_agent: pending.from_acp_agent.clone(),
+                options: pending.from_options.clone(),
+                resume,
+            });
         active.meta.pending_fork = None;
-        let Some(transcript) = self.record_relay(target_id, pending, &text, cx) else {
+        let Some(transcript) = self.record_relay(target_id, pending, left, &text, cx) else {
             return;
         };
 
@@ -477,6 +495,7 @@ impl AppState {
         &mut self,
         target_id: &str,
         from: PendingRelay,
+        left: Option<agent::LeftSession>,
         text: &str,
         cx: &mut HostCx,
     ) -> Option<String> {
@@ -509,6 +528,7 @@ impl AppState {
             to_model: active.meta.model.clone(),
             prompt: Some(assemble_relay_prompt(&transcript, text)),
             moved_from,
+            left,
         };
         active.meta.updated_at = cx.clock().unix_secs();
         let meta = active.meta.clone();
@@ -574,8 +594,10 @@ impl AppState {
             from_provider: active.meta.provider,
             from_model: active.meta.model.clone(),
             from_profile,
+            from_acp_agent: active.meta.acp_agent_id.clone(),
+            from_options: active.meta.option_selections.clone(),
         };
-        let transcript = self.record_relay(target_id, from, &text, cx);
+        let transcript = self.record_relay(target_id, from, None, &text, cx);
         if let Some(message) = self
             .resident_mut(target_id)
             .and_then(|active| active.queue.iter_mut().find(|m| m.id == message_id))

@@ -369,6 +369,9 @@ pub struct RewindTarget {
     /// The scopes the Harness restores this message in, in its order.
     pub modes: Vec<agent::RewindMode>,
     pub rewind: tcode_protocol::RewindStatus,
+    /// The message ran in a session a handoff left: the rewind takes the
+    /// thread back to `harness`, in that session.
+    pub returns: bool,
     /// This rewind is being made now.
     pub in_progress: bool,
     /// Turns the cut takes out of the conversation, this one included; for a
@@ -4189,14 +4192,38 @@ impl WorkspaceStore {
         cx: &App,
     ) -> Option<RewindTarget> {
         let status = self.thread_status(session_id, cx)?;
-        let rewind = status.rewind.clone()?;
+        let mut rewind = status.rewind.clone()?;
         let absolute = self.absolute_turn_for(session_id, turn);
-        let (checkpoint_id, later_turns, started) = self.with_timeline_for(
+        let (checkpoint_id, later_turns, started, returns) = self.with_timeline_for(
             session_id,
             |timeline| {
+                // A message of a session a handoff left is rewound to in that
+                // session, by its Harness.
+                let returns = match steer {
+                    None => timeline.rewind_return(turn, absolute),
+                    Some(_) => timeline.left_session(turn).map(|_| None),
+                }
+                .map(|returns| {
+                    returns.map(|to| {
+                        let harness = self.harness_name(
+                            to.session.acp_agent.as_deref(),
+                            to.session.profile.as_deref(),
+                            to.provider,
+                        );
+                        // The message a handoff carried has the session it
+                        // left for a restore point.
+                        let left = (!to.harness_rewinds).then(|| to.session.id.clone());
+                        (harness, left)
+                    })
+                });
+                if returns == Some(None) {
+                    return None;
+                }
                 let meta = timeline.turns.get(turn)?;
+                let returns = returns.flatten();
+                let left = returns.as_ref().and_then(|(_, left)| left.clone());
                 let checkpoint = match steer {
-                    None => meta.provider_checkpoint_id.clone(),
+                    None => left.or_else(|| meta.provider_checkpoint_id.clone()),
                     Some(steer) => meta
                         .steer_checkpoints
                         .iter()
@@ -4218,10 +4245,26 @@ impl WorkspaceStore {
                     .map(|entry| entry.turn)
                     .collect();
                 let later = opened.len() - usize::from(steer.is_some() && opened.contains(&turn));
-                Some((checkpoint, later, meta.start_ts))
+                Some((
+                    checkpoint,
+                    later,
+                    meta.start_ts,
+                    returns.map(|(harness, _)| harness),
+                ))
             },
             cx,
         )??;
+        if returns.is_some() {
+            rewind = tcode_protocol::RewindStatus {
+                modes: vec![tcode_core::session::RewindReturn::MODE],
+                first_turn_conversation: true,
+                steer_targets: false,
+                later_history: agent::LaterHistory::Truncated,
+                preview: agent::RewindPreviewKind::None,
+                restores_command_edits: false,
+                ..rewind
+            };
+        }
         let modes: Vec<agent::RewindMode> = rewind
             .modes
             .iter()
@@ -4241,8 +4284,10 @@ impl WorkspaceStore {
                     && since.is_some_and(|since| meta.created_at >= since)
             })
             .count();
-        let harness = self.harness_name_for(session_id, cx);
+        let returning = returns.is_some();
+        let harness = returns.unwrap_or_else(|| self.harness_name_for(session_id, cx));
         Some(RewindTarget {
+            returns: returning,
             in_progress: rewind
                 .pending
                 .as_ref()
@@ -4271,6 +4316,9 @@ impl WorkspaceStore {
         let checkpoint_id = self.with_timeline_for(
             session_id,
             |timeline| {
+                if fork.left_only && timeline.left_session(turn).is_none() {
+                    return None;
+                }
                 timeline.fork_edge(turn)?;
                 Some(timeline.turns[turn].provider_checkpoint_id.clone())
             },

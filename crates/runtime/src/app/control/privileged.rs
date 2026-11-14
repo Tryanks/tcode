@@ -422,6 +422,9 @@ impl AppState {
         if self
             .find_meta(&target)
             .is_some_and(|meta| meta.provider.caps().rewind.is_none())
+            && !self
+                .resident(&target)
+                .is_some_and(|active| active.timeline.has_relays())
         {
             return Answer::Now(Err(format!(
                 "refused: thread {target}'s provider has no native rewind"
@@ -496,6 +499,14 @@ impl AppState {
                     "status": "failed",
                     "reason": failure.reason,
                     "detail": failure.detail,
+                }),
+                AgentEvent::RelayUndone { .. } => serde_json::json!({
+                    "thread_id": target,
+                    "turn": turn,
+                    "status": "completed",
+                    "restored": tcode_core::session::RewindReturn::MODE,
+                    "later_history": agent::LaterHistory::Truncated,
+                    "undoable": false,
                 }),
                 other => serde_json::json!({
                     "thread_id": target,
