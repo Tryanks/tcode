@@ -1822,6 +1822,9 @@ struct ToolState {
     raw_input: Option<Value>,
     raw_output: Option<Value>,
     announced: bool,
+    /// The turn the agent last spoke of this call in. A call a turn left
+    /// unfinished (an interrupt, a rejected permission) keeps its status.
+    turn: Option<String>,
     /// The files Tcode wrote for this call through `fs/write_text_file`.
     writes: Vec<FileWrite>,
 }
@@ -2070,6 +2073,7 @@ impl State {
                     raw_input: call.raw_input,
                     raw_output: call.raw_output,
                     announced: true,
+                    turn: self.turn.clone(),
                     writes: match self.tools.get_mut(&id) {
                         Some(previous) => std::mem::take(&mut previous.writes),
                         None => Vec::new(),
@@ -2091,6 +2095,7 @@ impl State {
                 let mut events = self.flush_text();
                 let id = update.tool_call_id.0.to_string();
                 let entry = self.tools.entry(id.clone()).or_default();
+                entry.turn = self.turn.clone();
                 let fields = update.fields;
                 if let Some(title) = fields.title {
                     entry.title = title;
@@ -2179,18 +2184,21 @@ impl State {
 
     /// Records a file Tcode wrote for the agent on the call that asked for
     /// it, and returns that call's item as it now stands. `fs/write_text_file`
-    /// names no call: the one in flight that locates the file is it, and a
-    /// write no single call locates is recorded on none.
+    /// names no call: the one of this turn in flight that locates the file is
+    /// it, and a write no single call locates is recorded on none.
     fn record_write(&mut self, write: FileWrite) -> Option<AgentEvent> {
         let cwd = &self.cwd;
+        let turn = &self.turn;
         let mut asking = self.tools.iter_mut().filter(|(_, tool)| {
-            matches!(
-                tool.status,
-                acp::ToolCallStatus::Pending | acp::ToolCallStatus::InProgress
-            ) && tool
-                .locations
-                .iter()
-                .any(|location| cwd.join(&location.path) == write.path)
+            tool.turn == *turn
+                && matches!(
+                    tool.status,
+                    acp::ToolCallStatus::Pending | acp::ToolCallStatus::InProgress
+                )
+                && tool
+                    .locations
+                    .iter()
+                    .any(|location| cwd.join(&location.path) == write.path)
         });
         let (id, tool) = asking.next()?;
         if asking.next().is_some() {
