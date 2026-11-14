@@ -33,11 +33,11 @@ fn vibrancy_enabled() -> bool {
 }
 
 fn translucent_canvas_enabled() -> bool {
-    cfg!(target_os = "windows") || vibrancy_enabled()
+    cfg!(any(target_os = "windows", target_os = "linux")) || vibrancy_enabled()
 }
 
 fn main_window_background() -> WindowBackgroundAppearance {
-    if cfg!(target_os = "windows") {
+    if cfg!(any(target_os = "windows", target_os = "linux")) {
         WindowBackgroundAppearance::Blurred
     } else if vibrancy_enabled() {
         // `run_shell` slides Liquid Glass under a transparent window; GPUI's
@@ -280,7 +280,8 @@ fn window_options(cx: &App, throttle_inactive: bool) -> WindowOptions {
         // on whatever its compositor/backend already chose.)
         window_decorations: cfg!(target_os = "windows").then_some(WindowDecorations::Client),
         // Persistent windows use the platform's system material:
-        // macOS sidebar vibrancy, Windows Acrylic, or an opaque fallback.
+        // macOS sidebar vibrancy, Windows Acrylic, Linux compositor blur,
+        // or an opaque fallback.
         window_background: main_window_background(),
         ..Default::default()
     };
@@ -733,9 +734,10 @@ fn main() {
         ];
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let application_fonts: Vec<Cow<'static, [u8]>> = vec![Cow::Borrowed(assets::DM_SANS)];
-        // Translucent canvas colors composite over macOS vibrancy and Windows
-        // Acrylic. Opaque windows flatten them to the solid base; macOS
-        // fullscreen applies the same fallback in material::opaque_canvas.
+        // Translucent canvas colors composite over macOS vibrancy, Windows
+        // Acrylic and a Linux compositor blur. Opaque windows flatten them to
+        // the solid base; macOS fullscreen applies the same fallback in
+        // material::opaque_canvas.
         let theme_json: Cow<'static, str> = if translucent_canvas_enabled() {
             Cow::Borrowed(tcode_ui::THEME_JSON)
         } else {
