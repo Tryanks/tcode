@@ -1592,6 +1592,13 @@ fn control_response(request_id: &str, body: Value) -> Value {
     })
 }
 
+fn control_error(request_id: &str, error: &str) -> Value {
+    json!({
+        "type": "control_response",
+        "response": { "subtype": "error", "request_id": request_id, "error": error },
+    })
+}
+
 async fn write_turn_message<W: AsyncWrite + Unpin>(
     stdin: &mut W,
     message: &Value,
@@ -2057,9 +2064,8 @@ pub(crate) struct Mapper {
     /// reopen a completed item.
     child_items: HashMap<String, ChildItemStage>,
     pending_approvals: HashMap<String, PendingApproval>,
-    /// Pending `AskUserQuestion` prompts: control request_id → the original
-    /// `questions` array, echoed back verbatim in the allow response.
-    pending_user_input: HashMap<String, Value>,
+    /// The questions the user has open, by control request_id.
+    pending_user_input: HashMap<String, PendingUserInput>,
     /// Set when we send an `interrupt` control_request; the next non-success
     /// `result` is then attributed to the interrupt rather than a failure
     /// (the CLI's result carries no reliable interrupt marker).
@@ -2597,22 +2603,58 @@ impl Mapper {
         Some(control_response(request_id, response))
     }
 
-    /// Build the `control_response` allowing a pending `AskUserQuestion` prompt,
-    /// echoing the original `questions` alongside the collected `answers`.
-    /// Returns `None` for an unknown request id.
+    /// The `control_response` giving pending questions the user's `answers`;
+    /// `None` for an unknown request id. No answers at all is the user
+    /// dismissing an elicitation, which MCP calls `cancel`.
     fn build_user_input_response(
         &mut self,
         request_id: &str,
         answers: &serde_json::Map<String, Value>,
     ) -> Option<Value> {
-        let questions = self.pending_user_input.remove(request_id)?;
-        Some(control_response(
-            request_id,
-            json!({
+        let response = match self.pending_user_input.remove(request_id)? {
+            PendingUserInput::AskUserQuestion { questions } => json!({
                 "behavior": "allow",
                 "updatedInput": { "questions": questions, "answers": answers }
             }),
-        ))
+            PendingUserInput::Elicitation { .. } if answers.is_empty() => {
+                json!({ "action": "cancel" })
+            }
+            PendingUserInput::Elicitation { fields } => json!({
+                "action": "accept",
+                "content": elicitation_content(&fields, answers),
+            }),
+        };
+        Some(control_response(request_id, response))
+    }
+
+    /// An `elicitation` control request: an MCP server asking the user for
+    /// input. A form is asked as questions. What questions cannot ask (a URL
+    /// to visit, a field of another shape) is declined, as the Agent SDK
+    /// answers for a host with no elicitation handler, and the user is told.
+    fn on_elicitation(&mut self, request_id: String, request: &Value) -> Vec<AgentEvent> {
+        let Some((questions, fields)) = elicitation_questions(request) else {
+            self.outgoing.push(control_response(
+                &request_id,
+                json!({ "action": "decline" }),
+            ));
+            let text = |key: &str| request.get(key).and_then(Value::as_str).unwrap_or_default();
+            let mut message = format!(
+                "The MCP server {} asked for input Tcode cannot show, and was declined: {}",
+                text("mcp_server_name"),
+                text("message")
+            );
+            if let Some(url) = request.get("url").and_then(Value::as_str) {
+                message.push_str(&format!(" ({url})"));
+            }
+            return vec![AgentEvent::Warning { message }];
+        };
+        self.pending_user_input
+            .insert(request_id.clone(), PendingUserInput::Elicitation { fields });
+        vec![AgentEvent::UserInputRequested {
+            request_id,
+            questions,
+            delivery: UserInputDelivery::Blocking,
+        }]
     }
 
     /// The `initialize` control request registering the worktree hooks.
@@ -2672,12 +2714,7 @@ impl Mapper {
         answer: &WorktreeAnswer,
     ) -> Option<(Value, WorktreeRequest)> {
         let request = self.pending_worktrees.remove(request_id)?;
-        let refusal = |error: &str| {
-            json!({
-                "type": "control_response",
-                "response": { "subtype": "error", "request_id": request_id, "error": error },
-            })
-        };
+        let refusal = |error: &str| control_error(request_id, error);
         let response = match (&request, answer) {
             (WorktreeRequest::Create { cwd, name }, WorktreeAnswer::Ready { path, .. }) => {
                 self.worktrees.push(path.clone());
@@ -4240,22 +4277,30 @@ impl Mapper {
             Some(r) => r,
             None => return Vec::new(),
         };
-        if request.get("subtype").and_then(Value::as_str) == Some("hook_callback")
-            && let Some(request_id) = msg.get("request_id").and_then(Value::as_str)
-        {
-            return self.on_hook_callback(request_id.to_owned(), request);
-        }
-        if request.get("subtype").and_then(Value::as_str) != Some("can_use_tool") {
-            log::debug!(
-                "claude: ignoring control_request/{:?}",
-                request.get("subtype").and_then(Value::as_str)
-            );
-            return Vec::new();
-        }
         let request_id = match msg.get("request_id").and_then(Value::as_str) {
             Some(id) => id.to_string(),
             None => return Vec::new(),
         };
+        match request.get("subtype").and_then(Value::as_str) {
+            Some("can_use_tool") => {}
+            Some("hook_callback") => return self.on_hook_callback(request_id, request),
+            Some("elicitation") => return self.on_elicitation(request_id, request),
+            // A dialog kind the host never declared is left unanswered: the
+            // control schema has Claude Code discard an error and take any
+            // other answer for the user's (2.1.323, `request_user_dialog`).
+            Some("request_user_dialog") => return Vec::new(),
+            // The Agent SDK's answer to a request it has no handler for.
+            subtype => {
+                self.outgoing.push(control_error(
+                    &request_id,
+                    &format!(
+                        "Unsupported control request subtype: {}",
+                        subtype.unwrap_or_default()
+                    ),
+                ));
+                return Vec::new();
+            }
+        }
         let tool_name = request
             .get("tool_name")
             .and_then(Value::as_str)
@@ -4276,8 +4321,12 @@ impl Mapper {
         if tool_name == "AskUserQuestion" {
             let questions_raw = input.get("questions").cloned().unwrap_or_else(|| json!([]));
             let questions = parse_ask_user_questions(&input);
-            self.pending_user_input
-                .insert(request_id.clone(), questions_raw);
+            self.pending_user_input.insert(
+                request_id.clone(),
+                PendingUserInput::AskUserQuestion {
+                    questions: questions_raw,
+                },
+            );
             return vec![AgentEvent::UserInputRequested {
                 request_id,
                 questions,
@@ -5143,6 +5192,185 @@ fn parse_ask_user_questions(input: &Value) -> Vec<UserInputQuestion> {
                 multi_select,
                 prefill: None,
             }
+        })
+        .collect()
+}
+
+/// Questions the user has open, and what their answer has to carry back.
+enum PendingUserInput {
+    /// `AskUserQuestion`: its `questions` input, echoed with the answers.
+    AskUserQuestion { questions: Value },
+    /// A form-mode MCP elicitation: its fields, in the order asked.
+    Elicitation { fields: Vec<ElicitationField> },
+}
+
+/// One field of an MCP elicitation form: its property name and how the answer
+/// to its question becomes the property's value.
+struct ElicitationField {
+    key: String,
+    kind: ElicitationKind,
+}
+
+enum ElicitationKind {
+    Text,
+    Number,
+    Boolean,
+    /// Each option's label and the value it stands for.
+    Choice(Vec<(String, String)>),
+    Choices(Vec<(String, String)>),
+}
+
+/// The questions asking a form-mode `elicitation` control request's fields
+/// (Claude Code 2.1.323 control schema; the field shapes are MCP 2025-11-25's
+/// `PrimitiveSchemaDefinition`), each naming the server and its message.
+/// `None` when the request is not a form or a field is of a shape a question
+/// cannot ask.
+fn elicitation_questions(
+    request: &Value,
+) -> Option<(Vec<UserInputQuestion>, Vec<ElicitationField>)> {
+    if !matches!(
+        request.get("mode").and_then(Value::as_str),
+        None | Some("form")
+    ) {
+        return None;
+    }
+    let properties = request
+        .pointer("/requested_schema/properties")
+        .and_then(Value::as_object)
+        .filter(|properties| !properties.is_empty())?;
+    // `property_order` is the order the server listed them in, which the
+    // parsed object no longer has.
+    let keys: Vec<&str> = match request.get("property_order").and_then(Value::as_array) {
+        Some(order) => order.iter().filter_map(Value::as_str).collect(),
+        None => properties.keys().map(String::as_str).collect(),
+    };
+    let text = |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
+    let asked_by = format!(
+        "{}: {}",
+        text(request, "mcp_server_name").unwrap_or_default(),
+        text(request, "message").unwrap_or_default()
+    );
+    let titled = |choices: &Value| -> Option<Vec<(String, String)>> {
+        choices
+            .as_array()?
+            .iter()
+            .map(|choice| Some((text(choice, "title")?, text(choice, "const")?)))
+            .collect()
+    };
+    let named = |values: &Value, names: &Value| -> Option<Vec<(String, String)>> {
+        values
+            .as_array()?
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let value = value.as_str()?;
+                let name = names.get(index).and_then(Value::as_str).unwrap_or(value);
+                Some((name.to_owned(), value.to_owned()))
+            })
+            .collect()
+    };
+    let mut questions = Vec::new();
+    let mut fields = Vec::new();
+    for key in keys {
+        let schema = properties.get(key)?;
+        let mut prefill = None;
+        let kind = match schema.get("type").and_then(Value::as_str)? {
+            "string" if schema.get("enum").is_some() => {
+                ElicitationKind::Choice(named(&schema["enum"], &schema["enumNames"])?)
+            }
+            "string" if schema.get("oneOf").is_some() => {
+                ElicitationKind::Choice(titled(&schema["oneOf"])?)
+            }
+            "string" => {
+                prefill = text(schema, "default");
+                ElicitationKind::Text
+            }
+            "number" | "integer" => {
+                prefill = schema
+                    .get("default")
+                    .and_then(Value::as_number)
+                    .map(ToString::to_string);
+                ElicitationKind::Number
+            }
+            "boolean" => ElicitationKind::Boolean,
+            "array" => {
+                let items = schema.get("items")?;
+                ElicitationKind::Choices(match items.get("anyOf").or_else(|| items.get("oneOf")) {
+                    Some(choices) => titled(choices)?,
+                    None => named(items.get("enum")?, &Value::Null)?,
+                })
+            }
+            _ => return None,
+        };
+        let labels: Vec<&str> = match &kind {
+            ElicitationKind::Text | ElicitationKind::Number => Vec::new(),
+            ElicitationKind::Boolean => vec!["true", "false"],
+            ElicitationKind::Choice(choices) | ElicitationKind::Choices(choices) => {
+                choices.iter().map(|(label, _)| label.as_str()).collect()
+            }
+        };
+        questions.push(UserInputQuestion {
+            id: key.to_owned(),
+            header: text(schema, "title").unwrap_or_else(|| key.to_owned()),
+            question: match text(schema, "description") {
+                Some(description) => format!("{asked_by}\n\n{description}"),
+                None => asked_by.clone(),
+            },
+            options: labels
+                .into_iter()
+                .map(|label| UserInputOption {
+                    label: label.to_owned(),
+                    description: String::new(),
+                })
+                .collect(),
+            multi_select: matches!(kind, ElicitationKind::Choices(_)),
+            prefill,
+        });
+        fields.push(ElicitationField {
+            key: key.to_owned(),
+            kind,
+        });
+    }
+    Some((questions, fields))
+}
+
+/// The `content` of an accepted elicitation: each answered field's value in
+/// the type its schema asks for. A field left empty is left out, and an answer
+/// that is none of a field's options or not of its type goes as the user gave
+/// it, for the server to judge.
+fn elicitation_content(
+    fields: &[ElicitationField],
+    answers: &serde_json::Map<String, Value>,
+) -> serde_json::Map<String, Value> {
+    let value_of = |choices: &[(String, String)], answer: &str| {
+        let value = choices.iter().find(|(label, _)| label == answer);
+        json!(value.map_or(answer, |(_, value)| value))
+    };
+    fields
+        .iter()
+        .filter_map(|field| {
+            let answer: Vec<&str> = match answers.get(&field.key)? {
+                Value::String(text) => vec![text.as_str()],
+                Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+                _ => Vec::new(),
+            };
+            let first = *answer.first().filter(|text| !text.is_empty())?;
+            let value = match &field.kind {
+                ElicitationKind::Text => json!(first),
+                ElicitationKind::Number => serde_json::from_str::<serde_json::Number>(first.trim())
+                    .map_or_else(|_| json!(first), Value::Number),
+                ElicitationKind::Boolean => match first {
+                    "true" => json!(true),
+                    "false" => json!(false),
+                    other => json!(other),
+                },
+                ElicitationKind::Choice(choices) => value_of(choices, first),
+                ElicitationKind::Choices(choices) => answer
+                    .iter()
+                    .map(|answer| value_of(choices, answer))
+                    .collect(),
+            };
+            Some((field.key.clone(), value))
         })
         .collect()
 }
@@ -8125,6 +8353,124 @@ mod tests {
         );
         // Consumed once.
         assert!(m.build_user_input_response("ctrl-9", &answers).is_none());
+    }
+
+    /// The `elicitation` control request and its `{action, content}` answer
+    /// are Claude Code 2.1.323's SDK control schema; the fields are MCP
+    /// 2025-11-25 `PrimitiveSchemaDefinition`s (schema.ts).
+    #[test]
+    fn an_mcp_form_is_asked_as_questions_and_answered_in_its_schemas_types() {
+        let form = r#"{"type":"control_request","request_id":"REQUEST","request":{"subtype":"elicitation","mcp_server_name":"deployer","message":"Where should this go?","mode":"form","requested_schema":{"type":"object","properties":{"public":{"type":"boolean","title":"Public"},"region":{"type":"string","title":"Region","description":"A region code","default":"eu-west"},"replicas":{"type":"integer","minimum":1},"tier":{"type":"string","title":"Tier","oneOf":[{"const":"std","title":"Standard"},{"const":"pro","title":"Professional"}]},"zones":{"type":"array","title":"Zones","items":{"type":"string","enum":["a","b","c"]}}},"required":["region"]},"property_order":["region","replicas","public","tier","zones"]}}"#;
+        let mut m = Mapper::new();
+        m.start_turn();
+        let events = feed(&mut m, &form.replace("REQUEST", "elicit-1"));
+        let question =
+            |id: &str, header: &str, question: &str, options: &[&str]| UserInputQuestion {
+                id: id.into(),
+                header: header.into(),
+                question: question.into(),
+                options: options
+                    .iter()
+                    .map(|label| UserInputOption {
+                        label: (*label).into(),
+                        description: String::new(),
+                    })
+                    .collect(),
+                multi_select: id == "zones",
+                prefill: (id == "region").then(|| "eu-west".into()),
+            };
+        let asked_by = "deployer: Where should this go?";
+        let [
+            AgentEvent::UserInputRequested {
+                request_id,
+                questions,
+                delivery: UserInputDelivery::Blocking,
+            },
+        ] = events.as_slice()
+        else {
+            panic!("{events:?}");
+        };
+        assert_eq!(request_id, "elicit-1");
+        assert_eq!(
+            questions,
+            &[
+                question(
+                    "region",
+                    "Region",
+                    &format!("{asked_by}\n\nA region code"),
+                    &[]
+                ),
+                question("replicas", "replicas", asked_by, &[]),
+                question("public", "Public", asked_by, &["true", "false"]),
+                question("tier", "Tier", asked_by, &["Standard", "Professional"]),
+                question("zones", "Zones", asked_by, &["a", "b", "c"]),
+            ]
+        );
+        assert!(m.take_outgoing().is_empty());
+
+        let answers = json!({
+            "region": "us-east", "replicas": "3", "public": "true",
+            "tier": "Professional", "zones": ["a", "c"],
+        });
+        assert_eq!(
+            m.build_user_input_response("elicit-1", answers.as_object().unwrap()),
+            Some(
+                json!({"type":"control_response","response":{"subtype":"success","request_id":"elicit-1","response":{
+                    "action":"accept",
+                    "content":{"region":"us-east","replicas":3,"public":true,"tier":"pro","zones":["a","c"]},
+                }}})
+            )
+        );
+
+        feed(&mut m, &form.replace("REQUEST", "elicit-2"));
+        assert_eq!(
+            m.build_user_input_response("elicit-2", &serde_json::Map::new()),
+            Some(
+                json!({"type":"control_response","response":{"subtype":"success","request_id":"elicit-2","response":{"action":"cancel"}}})
+            ),
+            "dismissed without an answer"
+        );
+    }
+
+    /// A URL-mode `elicitation` and `mcp_message` are requests of Claude Code
+    /// 2.1.323's SDK control schema that Tcode has no way to serve. The Agent
+    /// SDK of that version declines an elicitation it has no handler for and
+    /// answers the error "Unsupported control request subtype: …" to a
+    /// request it does not know; a request with no answer holds its tool call
+    /// open for good.
+    #[test]
+    fn a_control_request_tcode_cannot_serve_is_answered() {
+        let mut m = Mapper::new();
+        m.start_turn();
+        let events = feed(
+            &mut m,
+            r#"{"type":"control_request","request_id":"elicit-url","request":{"subtype":"elicitation","mcp_server_name":"tracker","message":"Sign in to continue","mode":"url","url":"https://tracker.example/authorize","elicitation_id":"el-7"}}"#,
+        );
+        assert_eq!(
+            m.take_outgoing(),
+            [
+                json!({"type":"control_response","response":{"subtype":"success","request_id":"elicit-url","response":{"action":"decline"}}})
+            ]
+        );
+        assert!(
+            matches!(events.as_slice(), [AgentEvent::Warning { message }]
+                if ["tracker", "Sign in to continue", "https://tracker.example/authorize"]
+                    .iter()
+                    .all(|said| message.contains(said))),
+            "the user is told who asked and what: {events:?}"
+        );
+
+        let events = feed(
+            &mut m,
+            r#"{"type":"control_request","request_id":"mcp-1","request":{"subtype":"mcp_message","server_name":"tracker","message":{"jsonrpc":"2.0","id":1,"method":"ping"}}}"#,
+        );
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(
+            m.take_outgoing(),
+            [
+                json!({"type":"control_response","response":{"subtype":"error","request_id":"mcp-1","error":"Unsupported control request subtype: mcp_message"}})
+            ]
+        );
     }
 
     #[test]
