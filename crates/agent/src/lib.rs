@@ -578,7 +578,12 @@ impl ProviderKind {
                 // (2.2.7); the permission mode is the adapter's own answer to
                 // each `permission.asked`.
                 confirmed_options: OptionIds::Only(&[EFFORT_OPTION_ID, "agent", "permission_mode"]),
-                background: None,
+                // A shell is stopped by `DELETE /api/shell/{id}`, a subagent by
+                // interrupting its session, one at a time (2.3.0).
+                background: Some(BackgroundControl {
+                    stop: BackgroundStop::Each,
+                    move_running: false,
+                }),
                 live_settings: true,
                 mcp_servers: true,
                 native_computer_use: false,
