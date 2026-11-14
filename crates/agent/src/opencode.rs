@@ -592,7 +592,16 @@ struct OpenCodeActor {
     steers: HashMap<String, String>,
     /// Inbox ids of the turns Tcode sent; each is a revert boundary.
     prompts: HashSet<String>,
-    shell_polls: HashMap<String, Arc<AtomicBool>>,
+    shell_polls: HashMap<String, Arc<ShellPoll>>,
+}
+
+/// What the actor tells the thread polling a shell's output.
+#[derive(Default)]
+struct ShellPoll {
+    /// The call ended with its output: nothing more is read.
+    stop: AtomicBool,
+    /// The shell exited: what it wrote last is one more read away.
+    exited: AtomicBool,
 }
 
 struct PendingForm {
@@ -746,6 +755,14 @@ impl SessionActor for OpenCodeActor {
             },
             Ok(Transport::ShellOutput { item_id, text }) => {
                 let events = self.mapper.shell_output(&item_id, text);
+                for event in events {
+                    self.events.emit(event).await;
+                }
+                TransportOutcome::Continue
+            }
+            Ok(Transport::ShellPollEnded { item_id }) => {
+                self.shell_polls.remove(&item_id);
+                let events = self.mapper.shell_poll_ended(&item_id);
                 for event in events {
                     self.events.emit(event).await;
                 }
@@ -1298,8 +1315,8 @@ impl OpenCodeActor {
                 shell_id,
                 directory,
             } => {
-                let stop = Arc::new(AtomicBool::new(false));
-                self.shell_polls.insert(item_id.clone(), stop.clone());
+                let poll = Arc::new(ShellPoll::default());
+                self.shell_polls.insert(item_id.clone(), poll.clone());
                 let http = match directory {
                     Some(directory) => self.http.at(Path::new(&directory)),
                     None => self.http.clone(),
@@ -1307,11 +1324,16 @@ impl OpenCodeActor {
                 let sender = self.transport_tx.clone();
                 let _ = std::thread::Builder::new()
                     .name("opencode-shell-output".into())
-                    .spawn(move || poll_shell_output(&http, &shell_id, &item_id, &stop, &sender));
+                    .spawn(move || poll_shell_output(&http, &shell_id, &item_id, &poll, &sender));
             }
             Action::StopShell { item_id } => {
-                if let Some(stop) = self.shell_polls.remove(&item_id) {
-                    stop.store(true, Ordering::Relaxed);
+                if let Some(poll) = self.shell_polls.get(&item_id) {
+                    poll.stop.store(true, Ordering::Relaxed);
+                }
+            }
+            Action::DrainShell { item_id } => {
+                if let Some(poll) = self.shell_polls.get(&item_id) {
+                    poll.exited.store(true, Ordering::Relaxed);
                 }
             }
             Action::FetchDiff => {
@@ -1475,8 +1497,8 @@ impl OpenCodeActor {
     }
 
     fn shutdown(&mut self) {
-        for stop in self.shell_polls.values() {
-            stop.store(true, Ordering::Relaxed);
+        for poll in self.shell_polls.values() {
+            poll.stop.store(true, Ordering::Relaxed);
         }
         self.server.stop();
     }
@@ -1673,18 +1695,23 @@ fn form_answer(fields: &[(String, String)], answers: &Map<String, Value>) -> Map
         .collect()
 }
 
+/// Reads a shell's output as it grows, and says when it has stopped reading:
+/// a command in the background settles only after what it wrote last.
 fn poll_shell_output(
     http: &Http,
     shell_id: &str,
     item_id: &str,
-    stop: &AtomicBool,
+    poll: &ShellPoll,
     sender: &Sender<Transport>,
 ) {
     let mut cursor = 0;
-    while !stop.load(Ordering::Relaxed) {
+    while !poll.stop.load(Ordering::Relaxed) {
+        // Read before asking: a page asked for after the exit holds all the
+        // shell wrote.
+        let exited = poll.exited.load(Ordering::Relaxed);
         let Ok(page) = http.get(&format!("/api/shell/{shell_id}/output?cursor={cursor}")) else {
             // The server drops a shell once its command is settled.
-            return;
+            break;
         };
         let page = &page["data"];
         if let Some(text) = page["output"].as_str().filter(|text| !text.is_empty())
@@ -1698,8 +1725,14 @@ fn poll_shell_output(
             return;
         }
         cursor = page["cursor"].as_u64().unwrap_or(cursor);
+        if exited {
+            break;
+        }
         std::thread::sleep(SHELL_POLL_INTERVAL);
     }
+    let _ = sender.send_blocking(Transport::ShellPollEnded {
+        item_id: item_id.to_owned(),
+    });
 }
 
 /// Side effects the actor performs for the mapper.
@@ -1711,6 +1744,10 @@ enum Action {
         directory: Option<String>,
     },
     StopShell {
+        item_id: String,
+    },
+    /// The shell exited: its poll reads once more and ends.
+    DrainShell {
         item_id: String,
     },
     FetchDiff,
@@ -1731,8 +1768,21 @@ struct ToolCall {
     /// The child session a `subagent` call runs, once it reports one.
     child_session: Option<String>,
     child_model: Option<String>,
-    /// The subagent moved to the background; it settles with its session.
+    /// The call returned while its work goes on: a subagent settles with its
+    /// report, a command with its shell's exit.
     background: bool,
+    /// The shell a `shell` call runs, once it reports one.
+    shell_id: Option<String>,
+    /// The shell's output is being polled.
+    polling: bool,
+    /// How the shell ended, once OpenCode says it exited.
+    shell_end: Option<ShellEnd>,
+}
+
+#[derive(Clone, Copy)]
+struct ShellEnd {
+    status: ItemStatus,
+    exit: Option<i32>,
 }
 
 struct Mapper {
@@ -1748,6 +1798,9 @@ struct Mapper {
     active_turn: Option<String>,
     /// The root's inbox items not yet delivered → whether the item is a move.
     undelivered: HashMap<String, bool>,
+    /// Inbox id → a message OpenCode wrote for the model itself, shown once
+    /// it is delivered.
+    synthetic: HashMap<String, ThreadItem>,
     /// An execution started for moves alone, which is no turn: its turn id,
     /// for the turn it starts if it delivers anything else.
     held_turn: Option<String>,
@@ -1772,6 +1825,7 @@ impl Mapper {
             context_window: None,
             active_turn: None,
             undelivered: HashMap::new(),
+            synthetic: HashMap::new(),
             held_turn: None,
             last_turn: None,
             turn_usage: None,
@@ -1821,6 +1875,29 @@ impl Mapper {
             }
             return Ok(mapped);
         }
+        // A shell's events name the shell, not its session.
+        if kind == "shell.exited" {
+            if let Some(item_id) = data["id"].as_str().and_then(|shell_id| {
+                self.tools
+                    .iter()
+                    .find(|(_, tool)| tool.shell_id.as_deref() == Some(shell_id))
+                    .map(|(item_id, _)| item_id.clone())
+            }) && let Some(tool) = self.tools.get_mut(&item_id)
+            {
+                tool.shell_end = Some(ShellEnd {
+                    status: if data["status"] == "killed" {
+                        ItemStatus::Interrupted
+                    } else {
+                        ItemStatus::Completed
+                    },
+                    exit: data["exit"]
+                        .as_i64()
+                        .and_then(|exit| i32::try_from(exit).ok()),
+                });
+                self.settle_background_shell(&item_id, &mut mapped);
+            }
+            return Ok(mapped);
+        }
         let Some(session_id) = data["sessionID"].as_str() else {
             return Ok(mapped);
         };
@@ -1830,18 +1907,47 @@ impl Mapper {
         let root = session_id == self.root;
         let message_id = data["assistantMessageID"].as_str().unwrap_or_default();
         match kind {
-            "session.inbox.enqueued" if root => {
-                if let Some(inbox_id) = data["inboxID"].as_str() {
-                    self.undelivered.insert(
+            "session.inbox.enqueued" => {
+                let Some(inbox_id) = data["inboxID"].as_str() else {
+                    return Ok(mapped);
+                };
+                let item = &data["item"];
+                if root {
+                    self.undelivered
+                        .insert(inbox_id.to_owned(), item["type"] == "move");
+                }
+                if item["type"] == "synthetic" {
+                    let payload = &item["payload"];
+                    self.synthetic.insert(
                         inbox_id.to_owned(),
-                        data.pointer("/item/type") == Some(&json!("move")),
+                        synthetic_item(inbox_id, payload, parent_item_id),
                     );
+                    mapped.events.extend(self.subagent_reported(payload));
                 }
             }
-            "session.inbox.cancelled" if root => {
+            "session.inbox.delivered" => {
+                let delivered = data["inboxID"]
+                    .as_str()
+                    .and_then(|inbox_id| self.synthetic.remove(inbox_id));
+                mapped
+                    .events
+                    .extend(delivered.map(AgentEvent::ItemCompleted));
+            }
+            "session.inbox.cancelled" => {
                 if let Some(inbox_id) = data["inboxID"].as_str() {
                     self.undelivered.remove(inbox_id);
+                    self.synthetic.remove(inbox_id);
                 }
+            }
+            "session.synthetic" => {
+                let Some(id) = event["id"].as_str() else {
+                    return Err("OpenCode wrote the model a message without an event id".into());
+                };
+                mapped.events.push(AgentEvent::ItemCompleted(synthetic_item(
+                    id,
+                    data,
+                    parent_item_id,
+                )));
             }
             "session.execution.started" if root => {
                 self.turn_processed = 0;
@@ -1868,45 +1974,36 @@ impl Mapper {
             }
             "session.execution.succeeded"
             | "session.execution.failed"
-            | "session.execution.interrupted" => {
-                let status = match kind {
-                    "session.execution.succeeded" => ItemStatus::Completed,
-                    "session.execution.failed" => ItemStatus::Failed,
-                    _ => ItemStatus::Interrupted,
-                };
-                if root {
-                    self.held_turn = None;
-                    if status == ItemStatus::Failed {
-                        self.turn_failed = true;
-                        let message = error_message(&data["error"]);
-                        if self.last_error.as_deref() != Some(message.as_str()) {
-                            mapped.events.push(AgentEvent::Error {
-                                message,
-                                fatal: false,
-                            });
-                        }
-                    } else if status == ItemStatus::Interrupted {
-                        self.interrupted = true;
+            | "session.execution.interrupted"
+                if root =>
+            {
+                self.held_turn = None;
+                if kind == "session.execution.failed" {
+                    self.turn_failed = true;
+                    let message = error_message(&data["error"]);
+                    if self.last_error.as_deref() != Some(message.as_str()) {
+                        mapped.events.push(AgentEvent::Error {
+                            message,
+                            fatal: false,
+                        });
                     }
-                    if let Some(turn_id) = &self.active_turn {
-                        self.last_turn = Some(turn_id.clone());
-                    }
-                    let usage = self.turn_usage.map(|usage| TokenUsage {
-                        turn_processed_tokens: Some(self.turn_processed),
-                        cost_usd: self.turn_cost,
-                        ..usage
-                    });
-                    mapped.events.extend(crate::complete_mapped_turn(
-                        &mut self.active_turn,
-                        &mut self.interrupted,
-                        self.turn_failed,
-                        usage,
-                    ));
-                } else {
-                    mapped
-                        .events
-                        .extend(self.settle_background_subagent(session_id, status));
+                } else if kind == "session.execution.interrupted" {
+                    self.interrupted = true;
                 }
+                if let Some(turn_id) = &self.active_turn {
+                    self.last_turn = Some(turn_id.clone());
+                }
+                let usage = self.turn_usage.map(|usage| TokenUsage {
+                    turn_processed_tokens: Some(self.turn_processed),
+                    cost_usd: self.turn_cost,
+                    ..usage
+                });
+                mapped.events.extend(crate::complete_mapped_turn(
+                    &mut self.active_turn,
+                    &mut self.interrupted,
+                    self.turn_failed,
+                    usage,
+                ));
             }
             "session.step.started" => {
                 let model = ModelRef::from_wire(&data["model"]).map(|model| model.id());
@@ -2018,6 +2115,9 @@ impl Mapper {
                         child_session: None,
                         child_model: None,
                         background: false,
+                        shell_id: None,
+                        polling: false,
+                        shell_end: None,
                     },
                 );
                 let item = self.tool_item(&item_id, ItemStatus::InProgress, None, None);
@@ -2037,6 +2137,9 @@ impl Mapper {
                         child_session: None,
                         child_model: None,
                         background: false,
+                        shell_id: None,
+                        polling: false,
+                        shell_end: None,
                     });
                 tool.input = data["input"].clone();
                 let item = self.tool_item(&item_id, ItemStatus::InProgress, None, None);
@@ -2055,6 +2158,8 @@ impl Mapper {
                 if tool.name == "shell"
                     && let Some(shell_id) = metadata["shellID"].as_str()
                 {
+                    tool.shell_id = Some(shell_id.to_owned());
+                    tool.polling = true;
                     mapped.actions.push(Action::PollShell {
                         item_id: item_id.clone(),
                         shell_id: shell_id.to_owned(),
@@ -2073,19 +2178,18 @@ impl Mapper {
             }
             "session.tool.success" | "session.tool.failed" => {
                 let item_id = tool_item_id(message_id, data);
-                mapped.actions.push(Action::StopShell {
-                    item_id: item_id.clone(),
-                });
                 let Some(tool) = self.tools.get_mut(&item_id) else {
                     return Ok(mapped);
                 };
                 let success = kind == "session.tool.success";
+                // The call returned and its work goes on: a subagent (every
+                // one, from 2.3.0) or a command moved to the background.
                 if success
-                    && tool.name == "subagent"
+                    && matches!(tool.name.as_str(), "subagent" | "shell")
                     && data.pointer("/metadata/status") == Some(&json!("running"))
                 {
                     tool.background = true;
-                    let item = self.tool_item(&item_id, ItemStatus::InProgress, Some(data), None);
+                    let item = self.tool_item(&item_id, ItemStatus::InProgress, None, None);
                     if let Some(item) = item {
                         let backgrounded = AgentEvent::ItemBackgrounded {
                             item_id: item.id.clone(),
@@ -2094,8 +2198,12 @@ impl Mapper {
                         mapped.events.push(AgentEvent::ItemUpdated(item));
                         mapped.events.push(backgrounded);
                     }
+                    self.settle_background_shell(&item_id, &mut mapped);
                     return Ok(mapped);
                 }
+                mapped.actions.push(Action::StopShell {
+                    item_id: item_id.clone(),
+                });
                 if tool.name == "todowrite" {
                     let todos = data
                         .pointer("/metadata/todos")
@@ -2160,16 +2268,62 @@ impl Mapper {
         }]
     }
 
-    fn settle_background_subagent(&mut self, child: &str, status: ItemStatus) -> Vec<AgentEvent> {
-        let Some(item_id) = self.children.get(child).cloned().flatten() else {
+    /// The shell's output poll stopped reading.
+    fn shell_poll_ended(&mut self, item_id: &str) -> Vec<AgentEvent> {
+        let Some(tool) = self.tools.get_mut(item_id) else {
             return Vec::new();
         };
-        if !self.tools.get(&item_id).is_some_and(|tool| tool.background) {
-            return Vec::new();
+        tool.polling = false;
+        let mut mapped = Mapped::default();
+        self.settle_background_shell(item_id, &mut mapped);
+        mapped.events
+    }
+
+    /// A command in the background ends when its shell has exited, whichever
+    /// of that and the call's return OpenCode reports first, and its output
+    /// has been read to the end.
+    fn settle_background_shell(&mut self, item_id: &str, mapped: &mut Mapped) {
+        let Some(tool) = self.tools.get(item_id) else {
+            return;
+        };
+        let (true, Some(end)) = (tool.background, tool.shell_end) else {
+            return;
+        };
+        if tool.polling {
+            mapped.actions.push(Action::DrainShell {
+                item_id: item_id.to_owned(),
+            });
+            return;
         }
-        let item = self.tool_item(&item_id, status, None, None);
+        let item = self.tool_item(item_id, end.status, None, None);
+        self.tools.remove(item_id);
+        mapped.events.extend(item.map(AgentEvent::ItemCompleted));
+    }
+
+    /// A subagent in the background ends with the report OpenCode writes its
+    /// parent, a synthetic message whose metadata names the child session and
+    /// how its job ended (`subagent-completion.ts`).
+    fn subagent_reported(&mut self, payload: &Value) -> Option<AgentEvent> {
+        let metadata = &payload["metadata"];
+        if metadata["source"] != "subagent" {
+            return None;
+        }
+        let status = match metadata["state"].as_str()? {
+            "completed" => ItemStatus::Completed,
+            "error" => ItemStatus::Failed,
+            "cancelled" => ItemStatus::Interrupted,
+            _ => return None,
+        };
+        let item_id = self.children.get(metadata["childID"].as_str()?)?.clone()?;
+        if !self.tools.get(&item_id)?.background {
+            return None;
+        }
+        let mut item = self.tool_item(&item_id, status, None, None)?;
         self.tools.remove(&item_id);
-        item.map(AgentEvent::ItemCompleted).into_iter().collect()
+        if let ItemContent::Subagent { summary, .. } = &mut item.content {
+            *summary = payload["text"].as_str().map(subagent_output);
+        }
+        Some(AgentEvent::ItemCompleted(item))
     }
 
     /// The canonical item for a tool call. `result` is the terminal
@@ -2202,7 +2356,9 @@ impl Mapper {
                     .unwrap_or_default(),
                 exit_code: metadata
                     .and_then(|metadata| metadata["exit"].as_i64())
-                    .and_then(|exit| i32::try_from(exit).ok()),
+                    .and_then(|exit| i32::try_from(exit).ok())
+                    // A command in the background has no result but its exit.
+                    .or_else(|| tool.shell_end.and_then(|end| end.exit)),
                 status,
                 changes: Vec::new(),
             },
@@ -2376,6 +2532,21 @@ fn text_item(
 /// A tool call id is unique only within its assistant message.
 fn tool_item_id(message_id: &str, data: &Value) -> String {
     format!("{message_id}:{}", data["id"].as_str().unwrap_or_default())
+}
+
+/// A message OpenCode wrote for the model itself (a subagent's report, how a
+/// background command ended, a continuation it asks for), as it wrote it:
+/// the `payload` of a `synthetic` inbox item, or a `session.synthetic` event's
+/// data.
+fn synthetic_item(id: &str, payload: &Value, parent_item_id: Option<String>) -> ThreadItem {
+    ThreadItem {
+        id: id.to_owned(),
+        parent_item_id,
+        content: ItemContent::Other {
+            provider_kind: "synthetic".into(),
+            summary: payload["text"].as_str().unwrap_or_default().to_owned(),
+        },
+    }
 }
 
 /// The subagent's reply inside the `<subagent …>` envelope OpenCode hands the
@@ -3125,6 +3296,7 @@ fn http_error(error: ureq::Error) -> AgentError {
 enum Transport {
     Event(Value),
     ShellOutput { item_id: String, text: String },
+    ShellPollEnded { item_id: String },
     Eof,
     Error(String),
 }
@@ -3168,7 +3340,11 @@ async fn wait_for_server_connected(events: &Receiver<Transport>) -> Result<(), A
             Ok(Transport::Event(event)) if event["type"] == "server.connected" => {
                 return Ok(());
             }
-            Ok(Transport::Event(_) | Transport::ShellOutput { .. }) => {}
+            Ok(
+                Transport::Event(_)
+                | Transport::ShellOutput { .. }
+                | Transport::ShellPollEnded { .. },
+            ) => {}
             Ok(Transport::Error(error)) => return Err(AgentError::Protocol(error)),
             Ok(Transport::Eof) | Err(_) => {
                 return Err(AgentError::Protocol(
@@ -3209,28 +3385,37 @@ mod tests {
                 .collect(),
             HashMap::new(),
         );
-        let mut out = Vec::new();
-        for frame in frames(name) {
-            let mapped = mapper.on_event(&frame).unwrap();
-            out.extend(
-                mapped
-                    .events
-                    .iter()
-                    .map(|event| serde_json::to_value(event).unwrap()),
-            );
-            out.extend(mapped.actions.into_iter().map(|action| match action {
-                Action::PollShell {
-                    item_id,
-                    shell_id,
-                    directory,
-                } => json!({"action": "poll_shell", "item_id": item_id, "shell_id": shell_id, "directory": directory}),
-                Action::StopShell { item_id } => {
-                    json!({"action": "stop_shell", "item_id": item_id})
-                }
-                Action::FetchDiff => json!({"action": "fetch_diff"}),
-            }));
-        }
+        frames(name)
+            .iter()
+            .flat_map(|frame| feed(&mut mapper, frame))
+            .collect()
+    }
+
+    fn feed(mapper: &mut Mapper, frame: &Value) -> Vec<Value> {
+        let mapped = mapper.on_event(frame).unwrap();
+        let mut out = wire(&mapped.events);
+        out.extend(mapped.actions.into_iter().map(|action| match action {
+            Action::PollShell {
+                item_id,
+                shell_id,
+                directory,
+            } => json!({"action": "poll_shell", "item_id": item_id, "shell_id": shell_id, "directory": directory}),
+            Action::StopShell { item_id } => {
+                json!({"action": "stop_shell", "item_id": item_id})
+            }
+            Action::DrainShell { item_id } => {
+                json!({"action": "drain_shell", "item_id": item_id})
+            }
+            Action::FetchDiff => json!({"action": "fetch_diff"}),
+        }));
         out
+    }
+
+    fn wire(events: &[AgentEvent]) -> Vec<Value> {
+        events
+            .iter()
+            .map(|event| serde_json::to_value(event).unwrap())
+            .collect()
     }
 
     /// The events a turn's bookkeeping adds around its items, and the
@@ -3469,6 +3654,42 @@ mod tests {
         );
     }
 
+    /// A command run in the background returns at once with
+    /// `metadata.status: "running"` and ends with its shell's `shell.exited`,
+    /// after the turn that started it (v2.3.0's `shell.ts`, and `shell.exited`
+    /// in its `/openapi.json`; content invented). It settles once the poll
+    /// has read what the shell wrote last.
+    #[test]
+    fn a_command_in_the_background_ends_with_its_shells_exit_and_all_it_wrote() {
+        let id = "msg_19c0000a100100000000000a01:call_0000000000000021";
+        let running = json!({"type": "item_updated", "id": id, "content": {"kind": "command_execution", "command": "make build", "output": "", "exit_code": null, "status": "in_progress"}});
+        let mut mapper = Mapper::new("ses_root".into(), Vec::new(), HashMap::new());
+        let out: Vec<Value> = frames("background_shell_turn.jsonl")
+            .iter()
+            .flat_map(|frame| feed(&mut mapper, frame))
+            .collect();
+        assert_eq!(
+            out[2..],
+            [
+                running.clone(),
+                json!({"action": "poll_shell", "item_id": id, "shell_id": "sh_19c0000b100100000000000b01", "directory": "/work/project"}),
+                running,
+                json!({"type": "item_backgrounded", "item_id": id}),
+                json!({"type": "turn_completed", "turn_id": "evt_19c000000200100000000000002", "status": "completed", "usage": null}),
+                json!({"action": "drain_shell", "item_id": id}),
+            ]
+        );
+        let mut settled = wire(&mapper.shell_output(id, "built\n".into()));
+        settled.extend(wire(&mapper.shell_poll_ended(id)));
+        assert_eq!(
+            settled,
+            [
+                json!({"type": "delta", "item_id": id, "kind": "command_output", "text": "built\n"}),
+                json!({"type": "item_completed", "id": id, "content": {"kind": "command_execution", "command": "make build", "output": "built\n", "exit_code": 2, "status": "completed"}}),
+            ]
+        );
+    }
+
     /// Each file tool carries its own diff, the todo list is the plan, and
     /// every step that changed files has the turn's diff read again.
     #[test]
@@ -3532,6 +3753,35 @@ mod tests {
                 json!({"type": "item_completed", "id": spawn, "content": {"kind": "subagent", "agent_type": "general", "description": "Reply with KIWI", "status": "completed", "summary": "KIWI", "model": "opencode/deepseek-v4.1-flash-free"}}),
                 json!({"type": "item_started", "id": reply, "content": {"kind": "assistant_message", "text": ""}}),
                 json!({"type": "delta", "item_id": reply, "kind": "assistant_text", "text": "The subagent said: KIWI"}),
+            ]
+        );
+    }
+
+    /// From 2.3.0 every subagent runs in the background: its call returns
+    /// `metadata.status: "running"`, and what the child replied reaches the
+    /// parent as a `synthetic` inbox item naming the child (v2.3.0's
+    /// `subagent.ts` and `subagent-completion.ts`, and
+    /// `Session.Inbox.SyntheticPayload` in its `/openapi.json`; content
+    /// invented). The call ends with that report, and the message is shown as
+    /// OpenCode wrote it where the model receives it.
+    #[test]
+    fn a_subagent_ends_with_its_report_and_the_model_is_shown_what_opencode_wrote_it() {
+        let spawn = "msg_19c0000c100100000000000c01:call_0000000000000022";
+        let child = "msg_19c0000d100100000000000d01:text:0";
+        let running = json!({"type": "item_updated", "id": spawn, "content": {"kind": "subagent", "agent_type": "general", "description": "Name a fruit", "status": "in_progress", "summary": null}});
+        assert_eq!(
+            replay("subagent_report_turn.jsonl", &[])[2..],
+            [
+                running.clone(),
+                running,
+                json!({"type": "item_backgrounded", "item_id": spawn}),
+                json!({"type": "turn_completed", "turn_id": "evt_19c000000200100000000000002", "status": "completed", "usage": null}),
+                json!({"type": "item_started", "id": child, "parent_item_id": spawn, "content": {"kind": "assistant_message", "text": ""}}),
+                json!({"type": "item_completed", "id": child, "parent_item_id": spawn, "content": {"kind": "assistant_message", "text": "KIWI"}}),
+                json!({"type": "item_completed", "id": spawn, "content": {"kind": "subagent", "agent_type": "general", "description": "Name a fruit", "status": "completed", "summary": "KIWI"}}),
+                json!({"type": "turn_started", "turn_id": "evt_19c000001700100000000000017"}),
+                json!({"type": "item_completed", "id": "msg_19c0000e100100000000000e01", "content": {"kind": "other", "provider_kind": "synthetic", "summary": "<subagent sessionID=\"ses_child\" state=\"completed\" description=\"Name a fruit\">\nKIWI\n</subagent>"}}),
+                json!({"type": "turn_completed", "turn_id": "evt_19c000001700100000000000017", "status": "completed", "usage": null}),
             ]
         );
     }
