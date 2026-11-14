@@ -6879,6 +6879,24 @@ pub(crate) mod tests {
         Rc<ReturningClient>,
         &'a mut VisualTestContext,
     ) {
+        mount_restored_with_outbox(cx, history, machine_exists, width, panel, None)
+    }
+
+    /// [`mount_restored_at_width`] on a device whose outbox for the host
+    /// holds what `outbox` saved.
+    fn mount_restored_with_outbox<'a>(
+        cx: &'a mut TestAppContext,
+        history: &[&str],
+        machine_exists: bool,
+        width: f32,
+        panel: &str,
+        outbox: Option<std::sync::Arc<dyn tcode_client::outbox::Storage>>,
+    ) -> (
+        Entity<AppShell>,
+        MountedShell,
+        Rc<ReturningClient>,
+        &'a mut VisualTestContext,
+    ) {
         cx.update(crate::test_client::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
@@ -6919,7 +6937,7 @@ pub(crate) mod tests {
                 ..Default::default()
             }),
             machine_exists,
-            outbox: None,
+            outbox,
         });
         let setup_client = client.clone();
         cx.update(|cx| {
@@ -9326,6 +9344,58 @@ pub(crate) mod tests {
                 Some("thread-a")
             );
         });
+    }
+
+    /// A phone suspended before the host acknowledged a read receipt keeps
+    /// it in its outbox. The next launch returns to the threads the phone
+    /// was left on: only a message on its way opens its thread.
+    #[gpui::test]
+    fn a_saved_read_receipt_does_not_open_its_thread_at_launch(cx: &mut TestAppContext) {
+        struct SavedReadReceipt;
+        impl tcode_client::outbox::Storage for SavedReadReceipt {
+            fn load(
+                &self,
+            ) -> Result<Vec<tcode_client::outbox::Entry>, tcode_protocol::ProtocolError>
+            {
+                Ok(vec![tcode_client::outbox::Entry {
+                    key: "read-receipt".into(),
+                    command: Command::MarkSessionRead {
+                        session_id: "thread-b".into(),
+                        through: 1,
+                    },
+                }])
+            }
+            fn save(
+                &self,
+                _: &[tcode_client::outbox::Entry],
+            ) -> Result<(), tcode_protocol::ProtocolError> {
+                Ok(())
+            }
+        }
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(crate::window_seam::force_mobile_layout);
+        let (shell, _, _, cx) = mount_restored_with_outbox(
+            cx,
+            &["threads"],
+            true,
+            393.,
+            "plan",
+            Some(std::sync::Arc::new(SavedReadReceipt)),
+        );
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.window_state.read(cx).history(),
+                [Destination::Threads]
+            );
+            assert_ne!(
+                shell
+                    .page_thread(cx)
+                    .map(|thread| thread.session_id)
+                    .as_deref(),
+                Some("thread-b")
+            );
+        });
+        assert!(cx.debug_bounds("pending-thread-row").is_none());
     }
 
     #[gpui::test]

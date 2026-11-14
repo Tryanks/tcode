@@ -985,21 +985,29 @@ impl WorkspaceStore {
         self.connection_state = state;
     }
 
-    /// Outbox-derived navigation only; no host metadata is invented or cached.
+    /// The threads a message is still on its way to, with its text: what
+    /// the window opens and lists while the host does not have it. Other
+    /// writes naming a thread, such as the read receipt a phone leaves
+    /// behind when it is suspended, are not messages and lead nowhere.
     pub(crate) fn pending_sessions(&self) -> Vec<(String, String)> {
         let mut sessions = Vec::new();
         for (_, command) in self.host.pending_commands() {
-            let Some(id) = command.session_id().map(str::to_owned) else {
-                continue;
+            let (id, preview) = match command {
+                Command::SendTurn {
+                    session_id, text, ..
+                }
+                | Command::ScheduleTurn {
+                    session_id, text, ..
+                }
+                | Command::Steer {
+                    session_id, text, ..
+                }
+                | Command::ConfirmRelayAndSend {
+                    session_id, text, ..
+                } => (session_id, text),
+                _ => continue,
             };
-            let preview = match command {
-                Command::SendTurn { text, .. }
-                | Command::ScheduleTurn { text, .. }
-                | Command::Steer { text, .. }
-                | Command::ConfirmRelayAndSend { text, .. } => text,
-                _ => String::new(),
-            };
-            if !sessions.iter().any(|(existing, _)| existing == &id) {
+            if !sessions.iter().any(|(existing, _)| *existing == id) {
                 sessions.push((id, preview));
             }
         }
