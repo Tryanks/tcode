@@ -460,6 +460,8 @@ impl AppState {
         let Some(transcript) = self.record_relay(target_id, pending, left, &text, cx) else {
             return;
         };
+        self.reactivate_session(target_id, cx);
+        self.resume_pull_request_watches(target_id, cx);
 
         let default_window = self.default_context_window(target_id);
         let Some(active) = self.resident_mut(target_id) else {
