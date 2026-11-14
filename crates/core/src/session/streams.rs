@@ -271,6 +271,7 @@ mod tests {
             output: output.into(),
             exit_code: (status == ItemStatus::Completed).then_some(0),
             status,
+            changes: Vec::new(),
         }
     }
 

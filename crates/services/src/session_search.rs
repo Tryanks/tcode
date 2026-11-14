@@ -563,6 +563,7 @@ mod tests {
                     output: "DO_NOT_INDEX output".into(),
                     exit_code: Some(0),
                     status: ItemStatus::Completed,
+                    changes: Vec::new(),
                 },
             )
             .event,
@@ -782,6 +783,7 @@ mod tests {
                     output: "auth.rs:1".into(),
                     exit_code: Some(0),
                     status: ItemStatus::Completed,
+                    changes: Vec::new(),
                 },
             )
             .event,

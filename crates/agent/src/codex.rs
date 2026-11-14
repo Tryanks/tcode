@@ -4257,6 +4257,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
                 .and_then(Value::as_i64)
                 .and_then(|n| i32::try_from(n).ok()),
             status: map_status(item.get("status").and_then(Value::as_str)),
+            changes: Vec::new(),
         },
         "fileChange" => ItemContent::FileChange {
             changes: item
@@ -4549,6 +4550,7 @@ pub fn rollout_command(item: &Value) -> ItemContent {
             .and_then(Value::as_i64)
             .and_then(|code| i32::try_from(code).ok()),
         status: map_status(item.get("status").and_then(Value::as_str)),
+        changes: Vec::new(),
     }
 }
 

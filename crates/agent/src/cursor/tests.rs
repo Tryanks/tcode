@@ -168,6 +168,7 @@ fn tool_results_are_judged_by_their_raw_output_and_cursors_failure_text_fails_th
             output,
             exit_code,
             status,
+            changes: _,
         } => {
             assert_eq!(command, "cargo build");
             assert_eq!(output, "error[E0425]: cannot find value `x`");

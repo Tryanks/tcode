@@ -459,7 +459,9 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             output,
             exit_code,
             status,
+            changes,
         }) => {
+            changes.len().hash(hash);
             command.len().hash(hash);
             input.len().hash(hash);
             output.len().hash(hash);

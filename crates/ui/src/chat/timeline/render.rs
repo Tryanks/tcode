@@ -2394,6 +2394,7 @@ mod tests {
                     output: String::new(),
                     exit_code: None,
                     status: ItemStatus::InProgress,
+                    changes: Vec::new(),
                 },
             }),
         ] {

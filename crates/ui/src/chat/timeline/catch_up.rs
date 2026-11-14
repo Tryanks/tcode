@@ -45,6 +45,7 @@ fn long_run(turn: usize, count: usize) -> Vec<agent::AgentEvent> {
                 output: format!("{index} checked\n").repeat(350),
                 exit_code: Some(0),
                 status: agent::ItemStatus::Completed,
+                changes: Vec::new(),
             },
         }));
     }

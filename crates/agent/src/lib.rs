@@ -3188,6 +3188,10 @@ pub enum ItemContent {
         output: String,
         exit_code: Option<i32>,
         status: ItemStatus,
+        /// The files the harness reports the command changed, when it
+        /// reports them (Claude Code's `bashEditDiff`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changes: Vec<FileChange>,
     },
     FileChange {
         changes: Vec<FileChange>,
