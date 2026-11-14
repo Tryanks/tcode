@@ -14,6 +14,7 @@ use gpui::{
     AnyWindowHandle, App, AppContext as _, Entity, Render, SharedString, Window, WindowOptions,
 };
 use tcode_client::host::ClientHost;
+use tcode_core::settings::ThemeMode;
 
 use crate::remote::{AttachmentTarget, ClientAttachment};
 use crate::shell::{AppShell, ShellSetup, TogglePalette};
@@ -171,6 +172,15 @@ pub fn open_client_window<V: Render>(
         .open_window(options, move |window, cx| {
             window.set_window_title(&title);
             theme::sync_system_appearance(Some(window), cx);
+            // The system's appearance changes while the window is open; a
+            // device on System follows it, one that chose Light or Dark does not.
+            window
+                .observe_window_appearance(|window, cx| {
+                    if crate::device::DevicePreferences::theme(cx) == ThemeMode::System {
+                        crate::settings_page::apply_theme(ThemeMode::System, window, cx);
+                    }
+                })
+                .detach();
             let view = build(window, cx);
             cx.new(|cx| gpui_base::Root::new(view, window, cx))
         })
