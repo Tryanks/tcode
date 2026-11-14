@@ -333,7 +333,7 @@ async fn collect_models(
     windows: &HashMap<String, model_windows::ModelWindows>,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     initialize(stdin, lines).await?;
-    let entries = list_models_raw(stdin, lines, &mut 2, false).await?;
+    let entries = list_models_raw(stdin, lines, &mut 2, false, &mut Vec::new()).await?;
     Ok(entries
         .iter()
         .filter_map(|model| {
@@ -351,6 +351,7 @@ async fn list_models_raw(
     lines: &Receiver<ChildOutput>,
     next_id: &mut i64,
     include_hidden: bool,
+    said: &mut Vec<String>,
 ) -> Result<Vec<Value>, AgentError> {
     let mut entries = Vec::new();
     let mut cursor: Option<String> = None;
@@ -368,7 +369,7 @@ async fn list_models_raw(
             stdin,
             &json!({ "id": id, "method": "model/list", "params": params }),
         )?;
-        let response = wait_for_response(lines, id).await?;
+        let response = wait_for_answer(lines, id, said).await?;
         if let Some(data) = response.get("data").and_then(Value::as_array) {
             entries.extend(data.iter().cloned());
         }
@@ -899,6 +900,7 @@ async fn run_actor(
         permission_descriptor,
         effective_permission,
         warnings,
+        said,
     } = match startup {
         Ok(value) => value,
         Err(err) => {
@@ -990,6 +992,9 @@ async fn run_actor(
         .await;
     for message in warnings {
         actor.events.emit(AgentEvent::Warning { message }).await;
+    }
+    for line in said {
+        actor.handle_line(&line).await;
     }
     let thread = json!({ "threadId": actor.thread_id });
     if let Err(err) = actor.request("thread/goal/get", thread, PendingRequest::GoalSnapshot) {
@@ -1573,6 +1578,10 @@ struct OpenedThread {
     permission_descriptor: OptionDescriptor,
     effective_permission: String,
     warnings: Vec<String>,
+    /// What Codex wrote while the thread opened besides the answers awaited:
+    /// the configuration's warnings and deprecations, the thread's own
+    /// notifications. The actor reads them first.
+    said: Vec<String>,
 }
 
 async fn initialize_and_open_thread(
@@ -1615,7 +1624,8 @@ async fn initialize_and_open_thread(
         stdin,
         &json!({ "id": 2, "method": method, "params": params }),
     )?;
-    let result = wait_for_response(lines, 2).await?;
+    let mut said = Vec::new();
+    let result = wait_for_answer(lines, 2, &mut said).await?;
     let thread_id = result
         .pointer("/thread/id")
         .and_then(Value::as_str)
@@ -1647,21 +1657,21 @@ async fn initialize_and_open_thread(
     // files, so those are not offered.
     let mut warnings = Vec::new();
     let mut next_id = 3;
-    let profiles = request_permission_profiles(&opts.cwd, stdin, lines, &mut next_id)
+    let profiles = request_permission_profiles(&opts.cwd, stdin, lines, &mut next_id, &mut said)
         .await
         .unwrap_or_else(|err| {
             warnings.push(format!("Codex permissionProfile/list failed: {err}"));
             Vec::new()
         });
     let permission_descriptor = permission_descriptor(&profiles, &effective_permission, &result);
-    let provider_commands = request_codex_skills(&opts.cwd, stdin, lines, next_id)
+    let provider_commands = request_codex_skills(&opts.cwd, stdin, lines, next_id, &mut said)
         .await
         .unwrap_or_else(|err| {
             warnings.push(format!("Codex skills/list failed: {err}"));
             Vec::new()
         });
     next_id += 1;
-    let model_efforts = list_models_raw(stdin, lines, &mut next_id, true)
+    let model_efforts = list_models_raw(stdin, lines, &mut next_id, true, &mut said)
         .await
         .map(|entries| ModelEfforts::from_list(&entries))
         .unwrap_or_else(|err| {
@@ -1690,6 +1700,7 @@ async fn initialize_and_open_thread(
         permission_descriptor,
         effective_permission,
         warnings,
+        said,
     })
 }
 
@@ -1730,6 +1741,7 @@ async fn request_permission_profiles(
     stdin: &mut BufWriter<ChildStdin>,
     lines: &Receiver<ChildOutput>,
     next_id: &mut i64,
+    said: &mut Vec<String>,
 ) -> Result<Vec<Value>, AgentError> {
     let mut cursor = Value::Null;
     let mut profiles = Vec::new();
@@ -1740,7 +1752,7 @@ async fn request_permission_profiles(
             stdin,
             &json!({"id":id, "method":"permissionProfile/list", "params":{"cwd":cwd.to_string_lossy(), "cursor":cursor}}),
         )?;
-        let result = wait_for_response(lines, id).await?;
+        let result = wait_for_answer(lines, id, said).await?;
         if let Some(entries) = result.get("data").and_then(Value::as_array) {
             profiles.extend(entries.iter().cloned());
         }
@@ -1760,12 +1772,13 @@ async fn request_codex_skills(
     stdin: &mut BufWriter<ChildStdin>,
     lines: &Receiver<ChildOutput>,
     id: i64,
+    said: &mut Vec<String>,
 ) -> Result<Vec<ProviderCommand>, AgentError> {
     send_json(
         stdin,
         &json!({ "id": id, "method": "skills/list", "params": { "cwds": [cwd.to_string_lossy()] } }),
     )?;
-    let result = wait_for_response(lines, id).await?;
+    let result = wait_for_answer(lines, id, said).await?;
     Ok(parse_codex_skills(&result))
 }
 
@@ -1834,6 +1847,16 @@ fn describe_rpc_error(error: &Value) -> String {
 }
 
 async fn wait_for_response(lines: &Receiver<ChildOutput>, id: i64) -> Result<Value, AgentError> {
+    wait_for_answer(lines, id, &mut Vec::new()).await
+}
+
+/// The answer to request `id`. Every other line Codex writes meanwhile goes to
+/// `said`, in order.
+async fn wait_for_answer(
+    lines: &Receiver<ChildOutput>,
+    id: i64,
+    said: &mut Vec<String>,
+) -> Result<Value, AgentError> {
     loop {
         match lines
             .recv()
@@ -1844,7 +1867,10 @@ async fn wait_for_response(lines: &Receiver<ChildOutput>, id: i64) -> Result<Val
                 let value: Value = serde_json::from_str(&line).map_err(|err| {
                     AgentError::Protocol(format!("invalid JSON from codex: {err}: {line}"))
                 })?;
-                if value.get("id").and_then(Value::as_i64) != Some(id) {
+                if value.get("id").and_then(Value::as_i64) != Some(id)
+                    || value.get("method").is_some()
+                {
+                    said.push(line);
                     continue;
                 }
                 if let Some(error) = value.get("error") {
@@ -5062,10 +5088,15 @@ mod tests {
             ))
             .await
             .unwrap();
-            let profiles =
-                request_permission_profiles(Path::new("/workspace"), &mut actor.stdin, &rx, &mut 3)
-                    .await
-                    .unwrap();
+            let profiles = request_permission_profiles(
+                Path::new("/workspace"),
+                &mut actor.stdin,
+                &rx,
+                &mut 3,
+                &mut Vec::new(),
+            )
+            .await
+            .unwrap();
             let request = sent(&mut actor).await;
             assert_eq!(
                 request,
