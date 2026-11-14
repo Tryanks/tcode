@@ -353,7 +353,8 @@ pub use wire::{
 // and ForkStatus carries
 // left_only. A file_change item carries command, the command item whose
 // run the harness saw change its files. A file change's kind gains changed,
-// a file the harness reports changed without saying how.
+// a file the harness reports changed without saying how. A user-input
+// question carries optional, set when the asker accepts it left unanswered.
 pub const PROTOCOL_VERSION: u32 = 29;
 
 #[cfg(test)]

@@ -1333,6 +1333,8 @@ userinput:
   dismiss: "Hide"
   answer: "Answer"
   collapse: "Collapse"
+  optional: "Optional"
+  skip: "Skip"
 terminal:
   title: "Terminal"
   tabs: "Terminal tabs"

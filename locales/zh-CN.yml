@@ -1326,6 +1326,8 @@ userinput:
   dismiss: "隐藏"
   answer: "回答"
   collapse: "收起"
+  optional: "可选"
+  skip: "跳过"
 terminal:
   title: "终端"
   tabs: "终端标签页"

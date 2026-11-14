@@ -1661,6 +1661,7 @@ fn form_question(field: &Value) -> Option<UserInputQuestion> {
         question,
         options,
         multi_select: field["type"] == "multiselect",
+        optional: false,
         prefill: match &field["default"] {
             Value::String(text) => Some(text.clone()),
             Value::Number(number) => Some(number.to_string()),

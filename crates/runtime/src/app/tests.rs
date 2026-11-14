@@ -4382,6 +4382,7 @@ fn child_questions_reach_the_lead_and_respond_input_answers_them() {
             }],
             multi_select: false,
             prefill: None,
+            optional: false,
         },
         agent::UserInputQuestion {
             id: "targets".into(),
@@ -4399,6 +4400,7 @@ fn child_questions_reach_the_lead_and_respond_input_answers_them() {
             ],
             multi_select: true,
             prefill: None,
+            optional: false,
         },
     ];
     for (n, mode, delivery) in [

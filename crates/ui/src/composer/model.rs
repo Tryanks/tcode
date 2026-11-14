@@ -429,14 +429,15 @@ pub(super) fn traits_chip_label(spec: &ModelSpec, states: &OptionStates) -> Opti
 }
 
 /// A question counts as answered once it carries at least one selection (or a
-/// recorded custom-text answer, which is stored the same way).
+/// recorded custom-text answer, which is stored the same way). An optional
+/// one counts once the user has passed it, even left empty.
 pub(super) fn user_input_answered(
     question: &UserInputQuestion,
     selections: &std::collections::HashMap<String, Vec<String>>,
 ) -> bool {
     selections
         .get(&question.id)
-        .is_some_and(|selected| !selected.is_empty())
+        .is_some_and(|selected| question.optional || !selected.is_empty())
 }
 
 pub(super) fn user_input_all_answered(
@@ -630,6 +631,7 @@ mod tests {
                 ],
                 multi_select: false,
                 prefill: None,
+                optional: false,
             },
             UserInputQuestion {
                 id: "q2".into(),
@@ -647,6 +649,7 @@ mod tests {
                 ],
                 multi_select: true,
                 prefill: None,
+                optional: false,
             },
         ];
         let mut selections = std::collections::HashMap::new();

@@ -1333,6 +1333,8 @@ userinput:
   dismiss: "非表示"
   answer: "回答"
   collapse: "折りたたむ"
+  optional: "任意"
+  skip: "スキップ"
 terminal:
   title: "ターミナル"
   tabs: "ターミナルのタブ"

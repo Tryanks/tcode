@@ -2035,6 +2035,7 @@ fn extension_dialog_question(message: &Value) -> Option<(String, UserInputQuesti
             options,
             multi_select: false,
             prefill,
+            optional: false,
         },
     ))
 }
