@@ -4244,10 +4244,8 @@ impl WorkspaceStore {
             cx,
         )??;
         if returns.is_some() {
-            // The conversation alone: the turns after it ran in other
-            // sessions, whose files that Harness never tracked.
             rewind = tcode_protocol::RewindStatus {
-                modes: vec![agent::RewindMode::Conversation],
+                modes: vec![tcode_core::session::RewindReturn::MODE],
                 first_turn_conversation: true,
                 steer_targets: false,
                 later_history: agent::LaterHistory::Truncated,

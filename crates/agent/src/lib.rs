@@ -2655,8 +2655,10 @@ pub enum AgentEvent {
         mode: RewindMode,
         result: RewindPreviewResult,
     },
-    /// The provider applied a native restore operation. `mode` is what it
-    /// restored; when that is less than was asked, `incomplete` says what
+    /// The provider applied a native restore operation; or, with nothing for
+    /// a harness to do, the runtime returned the thread to the session a
+    /// [`Self::ProviderRelay`] left, from the message that handoff carried.
+    /// `mode` is what was restored; when that is less than was asked, `incomplete` says what
     /// failed. A conversation restore also returns the selected prompt for
     /// composer prefill, matching the provider's own edit-after-rewind
     /// behavior.

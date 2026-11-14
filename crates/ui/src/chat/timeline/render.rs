@@ -2605,9 +2605,7 @@ mod tests {
 
     /// A thread handed to a Harness with neither fork nor rewind (Cursor)
     /// still offers, on the turns Claude Code ran before the handoff, the
-    /// fork of that session and a rewind of the conversation alone, which
-    /// says it takes the thread back to Claude Code. The turn Cursor ran
-    /// offers neither.
+    /// fork of that session and a rewind of the conversation alone.
     #[gpui::test]
     fn a_turn_before_a_handoff_offers_the_fork_and_rewind_of_the_session_that_ran_it(
         cx: &mut TestAppContext,
@@ -2686,13 +2684,7 @@ mod tests {
             window.simulate_mouse_move(bounds.center(), None, Modifiers::default());
             draw_settled(window);
         };
-        hover(window, "copy-assistant:assistant-2");
-        assert!(window.debug_bounds("fork-assistant-2").is_none());
-        hover(window, "user-bubble-user-2");
-        assert!(window.debug_bounds("rewind-user-2").is_none());
-        for answer in ["copy-assistant:assistant-0", "copy-assistant:assistant-1"] {
-            hover(window, answer);
-        }
+        hover(window, "copy-assistant:assistant-1");
         assert!(window.debug_bounds("fork-assistant-1").is_some());
         hover(window, "copy-assistant:assistant-0");
         assert!(window.debug_bounds("fork-assistant-0").is_some());

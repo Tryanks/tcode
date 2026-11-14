@@ -679,6 +679,13 @@ pub struct RewindReturn<'a> {
     pub harness_rewinds: bool,
 }
 
+impl RewindReturn<'_> {
+    /// What such a rewind restores: the conversation alone. The turns after
+    /// the message ran in other sessions, whose files this one's harness
+    /// never tracked.
+    pub const MODE: agent::RewindMode = agent::RewindMode::Conversation;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SteeringStatus {
     Pending,
@@ -1098,15 +1105,13 @@ impl Timeline {
             EntryContent::ProviderRelay {
                 from_provider,
                 from_model,
-                moved_from,
                 left,
                 ..
             } if found(entry.turn) => Some(LeftTurn {
                 relay_turn: entry.turn,
                 provider: *from_provider,
                 model: from_model.as_deref(),
-                // A session a move left belongs to the directory it ran in.
-                session: left.as_ref().filter(|_| moved_from.is_none()),
+                session: left.as_ref(),
             }),
             _ => None,
         })
@@ -1131,9 +1136,11 @@ impl Timeline {
         };
         Some(left.session.and_then(|session| {
             let offered = !harness_rewinds
-                || left.provider.caps().rewind.is_some_and(|control| {
-                    control.offers(agent::RewindMode::Conversation, absolute, false)
-                });
+                || left
+                    .provider
+                    .caps()
+                    .rewind
+                    .is_some_and(|control| control.offers(RewindReturn::MODE, absolute, false));
             offered.then_some(RewindReturn {
                 provider: left.provider,
                 model: left.model,

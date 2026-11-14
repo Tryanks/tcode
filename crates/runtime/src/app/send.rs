@@ -437,18 +437,20 @@ impl AppState {
             return;
         };
         active.shutdown_to_idle();
-        // The session stays where its harness keeps it, and the handoff names it. A fork
-        // not started yet holds its source's session, and one still to be carried to this
-        // account lies in another home.
+        // The session stays where its harness keeps it, and the handoff names it: in the
+        // home of the account it was still to be carried from, when the thread had
+        // switched accounts. A fork not started yet holds its source's session.
+        let home = match &active.meta.session_transfer_from {
+            Some(home) => (!Settings::is_builtin_profile_id(home)).then(|| home.clone()),
+            None => pending.from_profile.clone(),
+        };
         let left = active
             .meta
             .resume_cursor
             .take()
-            .filter(|_| {
-                active.meta.pending_fork.is_none() && active.meta.session_transfer_from.is_none()
-            })
+            .filter(|_| active.meta.pending_fork.is_none())
             .map(|resume| agent::LeftSession {
-                profile: pending.from_profile.clone(),
+                profile: home,
                 acp_agent: pending.from_acp_agent.clone(),
                 options: pending.from_options.clone(),
                 resume,

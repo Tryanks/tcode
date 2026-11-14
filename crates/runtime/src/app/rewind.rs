@@ -188,7 +188,7 @@ impl AppState {
             Some(_) => active.timeline.left_session(at.turn).map(|_| None),
         };
         let offered = match elsewhere {
-            Some(returns) => returns.is_some() && mode == RewindMode::Conversation,
+            Some(returns) => returns.is_some() && mode == tcode_core::session::RewindReturn::MODE,
             None => status.offers(mode, at.turn, at.steer.is_some()),
         };
         if status.blocked.is_some() || !offered {
