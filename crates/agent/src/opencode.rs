@@ -600,7 +600,7 @@ struct OpenCodeActor {
 struct ShellPoll {
     /// The call ended with its output: nothing more is read.
     stop: AtomicBool,
-    /// The shell exited: what it wrote last is one more read away.
+    /// The shell exited: what is left of its output is read, then nothing.
     exited: AtomicBool,
 }
 
@@ -1696,7 +1696,7 @@ fn form_answer(fields: &[(String, String)], answers: &Map<String, Value>) -> Map
 }
 
 /// Reads a shell's output as it grows, and says when it has stopped reading:
-/// a command in the background settles only after what it wrote last.
+/// a command in the background settles only after all it wrote.
 fn poll_shell_output(
     http: &Http,
     shell_id: &str,
@@ -1706,8 +1706,7 @@ fn poll_shell_output(
 ) {
     let mut cursor = 0;
     while !poll.stop.load(Ordering::Relaxed) {
-        // Read before asking: a page asked for after the exit holds all the
-        // shell wrote.
+        // Read before asking: once the shell has exited, its output is whole.
         let exited = poll.exited.load(Ordering::Relaxed);
         let Ok(page) = http.get(&format!("/api/shell/{shell_id}/output?cursor={cursor}")) else {
             // The server drops a shell once its command is settled.
@@ -1726,7 +1725,11 @@ fn poll_shell_output(
         }
         cursor = page["cursor"].as_u64().unwrap_or(cursor);
         if exited {
-            break;
+            // A page holds at most 64 KiB; `size` is all there is to read.
+            if page["size"].as_u64().is_none_or(|size| cursor >= size) {
+                break;
+            }
+            continue;
         }
         std::thread::sleep(SHELL_POLL_INTERVAL);
     }
@@ -1746,7 +1749,7 @@ enum Action {
     StopShell {
         item_id: String,
     },
-    /// The shell exited: its poll reads once more and ends.
+    /// The shell exited: its poll reads the rest and ends.
     DrainShell {
         item_id: String,
     },
@@ -2302,28 +2305,41 @@ impl Mapper {
 
     /// A subagent in the background ends with the report OpenCode writes its
     /// parent, a synthetic message whose metadata names the child session and
-    /// how its job ended (`subagent-completion.ts`).
-    fn subagent_reported(&mut self, payload: &Value) -> Option<AgentEvent> {
+    /// how its job ended (`subagent-completion.ts`). A call naming a child
+    /// that is still running joins that run (`subagent.ts`), so the report
+    /// ends every call waiting on the child.
+    fn subagent_reported(&mut self, payload: &Value) -> Vec<AgentEvent> {
         let metadata = &payload["metadata"];
         if metadata["source"] != "subagent" {
-            return None;
+            return Vec::new();
         }
-        let status = match metadata["state"].as_str()? {
-            "completed" => ItemStatus::Completed,
-            "error" => ItemStatus::Failed,
-            "cancelled" => ItemStatus::Interrupted,
-            _ => return None,
+        let status = match metadata["state"].as_str() {
+            Some("completed") => ItemStatus::Completed,
+            Some("error") => ItemStatus::Failed,
+            Some("cancelled") => ItemStatus::Interrupted,
+            _ => return Vec::new(),
         };
-        let item_id = self.children.get(metadata["childID"].as_str()?)?.clone()?;
-        if !self.tools.get(&item_id)?.background {
-            return None;
-        }
-        let mut item = self.tool_item(&item_id, status, None, None)?;
-        self.tools.remove(&item_id);
-        if let ItemContent::Subagent { summary, .. } = &mut item.content {
-            *summary = payload["text"].as_str().map(subagent_output);
-        }
-        Some(AgentEvent::ItemCompleted(item))
+        let Some(child) = metadata["childID"].as_str() else {
+            return Vec::new();
+        };
+        let mut calls: Vec<String> = self
+            .tools
+            .iter()
+            .filter(|(_, tool)| tool.background && tool.child_session.as_deref() == Some(child))
+            .map(|(item_id, _)| item_id.clone())
+            .collect();
+        calls.sort();
+        calls
+            .into_iter()
+            .filter_map(|item_id| {
+                let mut item = self.tool_item(&item_id, status, None, None)?;
+                self.tools.remove(&item_id);
+                if let ItemContent::Subagent { summary, .. } = &mut item.content {
+                    *summary = payload["text"].as_str().map(subagent_output);
+                }
+                Some(AgentEvent::ItemCompleted(item))
+            })
+            .collect()
     }
 
     /// The canonical item for a tool call. `result` is the terminal
@@ -3658,9 +3674,9 @@ mod tests {
     /// `metadata.status: "running"` and ends with its shell's `shell.exited`,
     /// after the turn that started it (v2.3.0's `shell.ts`, and `shell.exited`
     /// in its `/openapi.json`; content invented). It settles once the poll
-    /// has read what the shell wrote last.
+    /// of its output has ended.
     #[test]
-    fn a_command_in_the_background_ends_with_its_shells_exit_and_all_it_wrote() {
+    fn a_command_in_the_background_ends_with_its_shells_exit_once_its_poll_has_ended() {
         let id = "msg_19c0000a100100000000000a01:call_0000000000000021";
         let running = json!({"type": "item_updated", "id": id, "content": {"kind": "command_execution", "command": "make build", "output": "", "exit_code": null, "status": "in_progress"}});
         let mut mapper = Mapper::new("ses_root".into(), Vec::new(), HashMap::new());
