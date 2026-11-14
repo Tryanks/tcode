@@ -500,26 +500,15 @@ fn launch_args(
     .into_iter()
     .map(Into::into)
     .collect();
-    for (flag, value) in [("--model", &launch.model_id), ("--effort", &launch.effort)] {
+    for (flag, value) in [
+        ("--model", &launch.model_id),
+        ("--effort", &launch.effort),
+        ("--settings", &launch.settings_json),
+    ] {
         if let Some(value) = value {
             args.extend([flag.into(), value.into()]);
         }
     }
-    // Claude Code records the files a Bash command changed (`bashEditDiff`)
-    // only in auto and bypass modes unless asked to in every mode.
-    let mut settings = serde_json::Map::new();
-    settings.insert("bashEditDiffEnabled".into(), json!(true));
-    settings.extend(
-        launch
-            .settings_json
-            .as_deref()
-            .and_then(|settings| serde_json::from_str::<serde_json::Map<_, _>>(settings).ok())
-            .unwrap_or_default(),
-    );
-    args.extend([
-        "--settings".into(),
-        Value::Object(settings).to_string().into(),
-    ]);
     args.extend(resume.into_iter().map(Into::into));
     // Tokens ride in Authorization headers inside the merged `--mcp-config` JSON.
     args.extend(mcp_args(mcp_servers).into_iter().map(Into::into));
@@ -2149,6 +2138,9 @@ pub(crate) struct Mapper {
     limit_resets_at: Option<u64>,
     /// Warning-bearing stop reason already emitted for this occurrence.
     warned_stop_reason: Option<String>,
+    /// The `apply_flag_settings` turning on `bashEditDiffEnabled`, awaiting
+    /// its answer.
+    pending_edit_diff: Option<String>,
 }
 
 impl Mapper {
@@ -2209,6 +2201,7 @@ impl Mapper {
             last_served_model: None,
             limit_resets_at: None,
             warned_stop_reason: None,
+            pending_edit_diff: None,
         }
     }
 
@@ -2488,6 +2481,22 @@ impl Mapper {
                 value: effort,
             }],
         });
+        // Claude Code records the files a Bash command changed (`bashEditDiff`)
+        // in default modes only when asked. Asked in the flag layer, which
+        // outranks the user's own settings, so only where none of theirs
+        // decides it.
+        if response
+            .pointer("/response/effective")
+            .and_then(Value::as_object)
+            .is_some_and(|effective| !effective.contains_key("bashEditDiffEnabled"))
+        {
+            let message = self.control_request(json!({
+                "subtype": "apply_flag_settings",
+                "settings": { "bashEditDiffEnabled": true },
+            }));
+            self.pending_edit_diff = message["request_id"].as_str().map(str::to_owned);
+            self.outgoing.push(message);
+        }
         events
     }
 
@@ -4059,6 +4068,21 @@ impl Mapper {
             self.pending_settings_read = None;
             return self.on_settings_read(response);
         }
+        if self.pending_edit_diff.as_deref() == Some(request_id) {
+            self.pending_edit_diff = None;
+            if response.get("subtype").and_then(Value::as_str) == Some("success") {
+                return Vec::new();
+            }
+            let error = response
+                .get("error")
+                .and_then(Value::as_str)
+                .map_or_else(|| response.to_string(), str::to_owned);
+            return vec![AgentEvent::Warning {
+                message: format!(
+                    "claude: could not turn on bashEditDiffEnabled, so the files a command changes are not shown: {error}"
+                ),
+            }];
+        }
         if self.pending_background_moves.remove(request_id) {
             let moved = response.get("subtype").and_then(Value::as_str) == Some("success")
                 && response
@@ -4299,15 +4323,19 @@ impl Mapper {
             // control schema has Claude Code discard an error and take any
             // other answer for the user's (2.1.323, `request_user_dialog`).
             Some("request_user_dialog") => return Vec::new(),
-            // The Agent SDK's answer to a request it has no handler for.
+            // The Agent SDK's answer to a request it has no handler for
+            // (0.3.323, `sdk.mjs`), which the control schema names a designed
+            // refusal by its `error_code`.
             subtype => {
-                self.outgoing.push(control_error(
+                let mut refusal = control_error(
                     &request_id,
                     &format!(
                         "Unsupported control request subtype: {}",
                         subtype.unwrap_or_default()
                     ),
-                ));
+                );
+                refusal["response"]["error_code"] = json!("unsupported_request");
+                self.outgoing.push(refusal);
                 return Vec::new();
             }
         }
@@ -5302,16 +5330,32 @@ fn elicitation_questions(
                     .map(ToString::to_string);
                 ElicitationKind::Number
             }
-            "boolean" => ElicitationKind::Boolean,
+            "boolean" => {
+                prefill = schema
+                    .get("default")
+                    .and_then(Value::as_bool)
+                    .map(|default| default.to_string());
+                ElicitationKind::Boolean
+            }
             "array" => {
                 let items = schema.get("items")?;
-                ElicitationKind::Choices(match items.get("anyOf").or_else(|| items.get("oneOf")) {
+                ElicitationKind::Choices(match items.get("anyOf") {
                     Some(choices) => titled(choices)?,
                     None => named(items.get("enum")?, &Value::Null)?,
                 })
             }
             _ => return None,
         };
+        // A choice's default is offered as its option's label, which the
+        // answer maps back to the value.
+        if let ElicitationKind::Choice(choices) = &kind
+            && let Some(default) = text(schema, "default")
+        {
+            prefill = choices
+                .iter()
+                .find(|(_, value)| *value == default)
+                .map(|(label, _)| label.clone());
+        }
         let labels: Vec<&str> = match &kind {
             ElicitationKind::Text | ElicitationKind::Number => Vec::new(),
             ElicitationKind::Boolean => vec!["true", "false"],
@@ -5443,7 +5487,6 @@ fn file_changes(name: &str, input: &Value) -> Vec<FileChange> {
     }
 }
 
-/// Render Claude's structured edit hunks as a unified diff body.
 /// The file change that follows a command whose Bash result carries
 /// `bashEditDiff`: the files Claude Code saw change while it ran. Those it
 /// gives a diff for come first (`files`), then the rest of `changedFiles`,
@@ -5494,6 +5537,7 @@ pub fn command_changes(command_id: &str, tool_use_result: Option<&Value>) -> Opt
     })
 }
 
+/// Render Claude's structured edit hunks as a unified diff body.
 fn render_structured_patch(value: &Value) -> Option<String> {
     let hunks = value.as_array()?;
     let mut rendered = Vec::new();
@@ -5754,6 +5798,39 @@ mod tests {
             json!("xhigh")
         );
         assert_eq!(effort(&answer("low", json!({"effort":null}))), Value::Null);
+    }
+
+    /// `get_settings`' `effective` (the merged settings) and the
+    /// `apply_flag_settings` request are Claude Code 2.1.323's control schema;
+    /// the values are made up.
+    #[test]
+    fn bash_edit_diff_is_turned_on_unless_the_users_settings_decide_it() {
+        let read_with = |effective: Value| {
+            let mut mapper = Mapper::new();
+            let read = mapper.settings_read_request();
+            mapper.on_message(json!({"type":"control_response", "response": {
+                "subtype":"success", "request_id":read["request_id"],
+                "response":{"effective":effective, "sources":[], "applied":{"model":"claude-haiku-4-5","effort":null}}
+            }}));
+            mapper
+        };
+        let mut mapper = read_with(json!({"model":"haiku"}));
+        let [apply] = mapper.take_outgoing().try_into().expect("one request");
+        assert_eq!(
+            apply["request"],
+            json!({"subtype":"apply_flag_settings", "settings":{"bashEditDiffEnabled":true}})
+        );
+        let events = mapper.on_message(json!({"type":"control_response", "response": {
+            "subtype":"error", "request_id":apply["request_id"], "error":"flag settings are read-only here"
+        }}));
+        assert!(
+            matches!(events.as_slice(), [AgentEvent::Warning { message }]
+                if message.contains("flag settings are read-only here")),
+            "{events:?}"
+        );
+
+        let mut mapper = read_with(json!({"bashEditDiffEnabled":false}));
+        assert!(mapper.take_outgoing().is_empty());
     }
 
     #[test]
@@ -6245,7 +6322,7 @@ mod tests {
             "--effort",
             "high",
             "--settings",
-            r#"{"bashEditDiffEnabled":true,"fastMode":true}"#,
+            r#"{"fastMode":true}"#,
             "--resume",
             "native",
             &mcp_config[0],
@@ -8391,8 +8468,8 @@ mod tests {
     /// are Claude Code 2.1.323's SDK control schema; the fields are MCP
     /// 2025-11-25 `PrimitiveSchemaDefinition`s (schema.ts).
     #[test]
-    fn an_mcp_form_is_asked_as_questions_and_answered_in_its_schemas_types() {
-        let form = r#"{"type":"control_request","request_id":"REQUEST","request":{"subtype":"elicitation","mcp_server_name":"deployer","message":"Where should this go?","mode":"form","requested_schema":{"type":"object","properties":{"public":{"type":"boolean","title":"Public"},"region":{"type":"string","title":"Region","description":"A region code","default":"eu-west"},"replicas":{"type":"integer","minimum":1},"tier":{"type":"string","title":"Tier","oneOf":[{"const":"std","title":"Standard"},{"const":"pro","title":"Professional"}]},"zones":{"type":"array","title":"Zones","items":{"type":"string","enum":["a","b","c"]}}},"required":["region"]},"property_order":["region","replicas","public","tier","zones"]}}"#;
+    fn an_mcp_form_is_asked_as_questions_with_its_defaults_and_answered_in_its_types() {
+        let form = r#"{"type":"control_request","request_id":"REQUEST","request":{"subtype":"elicitation","mcp_server_name":"deployer","message":"Where should this go?","mode":"form","requested_schema":{"type":"object","properties":{"public":{"type":"boolean","title":"Public","default":true},"region":{"type":"string","title":"Region","description":"A region code","default":"eu-west"},"replicas":{"type":"integer","minimum":1},"tier":{"type":"string","title":"Tier","oneOf":[{"const":"std","title":"Standard"},{"const":"pro","title":"Professional"}],"default":"pro"},"zones":{"type":"array","title":"Zones","items":{"type":"string","enum":["a","b","c"]}}},"required":["region"]},"property_order":["region","replicas","public","tier","zones"]}}"#;
         let mut m = Mapper::new();
         m.start_turn();
         let events = feed(&mut m, &form.replace("REQUEST", "elicit-1"));
@@ -8409,7 +8486,12 @@ mod tests {
                     })
                     .collect(),
                 multi_select: id == "zones",
-                prefill: (id == "region").then(|| "eu-west".into()),
+                prefill: match id {
+                    "region" => Some("eu-west".into()),
+                    "public" => Some("true".into()),
+                    "tier" => Some("Professional".into()),
+                    _ => None,
+                },
             };
         let asked_by = "deployer: Where should this go?";
         let [
@@ -8467,9 +8549,9 @@ mod tests {
     /// A URL-mode `elicitation` and `mcp_message` are requests of Claude Code
     /// 2.1.323's SDK control schema that Tcode has no way to serve. The Agent
     /// SDK of that version declines an elicitation it has no handler for and
-    /// answers the error "Unsupported control request subtype: …" to a
-    /// request it does not know; a request with no answer holds its tool call
-    /// open for good.
+    /// answers the error "Unsupported control request subtype: …", code
+    /// `unsupported_request`, to a request it does not know (0.3.323,
+    /// `sdk.mjs`); a request with no answer holds its tool call open for good.
     #[test]
     fn a_control_request_tcode_cannot_serve_is_answered() {
         let mut m = Mapper::new();
@@ -8500,7 +8582,7 @@ mod tests {
         assert_eq!(
             m.take_outgoing(),
             [
-                json!({"type":"control_response","response":{"subtype":"error","request_id":"mcp-1","error":"Unsupported control request subtype: mcp_message"}})
+                json!({"type":"control_response","response":{"subtype":"error","request_id":"mcp-1","error":"Unsupported control request subtype: mcp_message","error_code":"unsupported_request"}})
             ]
         );
     }
