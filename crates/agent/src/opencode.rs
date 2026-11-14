@@ -2305,28 +2305,41 @@ impl Mapper {
 
     /// A subagent in the background ends with the report OpenCode writes its
     /// parent, a synthetic message whose metadata names the child session and
-    /// how its job ended (`subagent-completion.ts`).
-    fn subagent_reported(&mut self, payload: &Value) -> Option<AgentEvent> {
+    /// how its job ended (`subagent-completion.ts`). A call naming a child
+    /// that is still running joins that run (`subagent.ts`), so the report
+    /// ends every call waiting on the child.
+    fn subagent_reported(&mut self, payload: &Value) -> Vec<AgentEvent> {
         let metadata = &payload["metadata"];
         if metadata["source"] != "subagent" {
-            return None;
+            return Vec::new();
         }
-        let status = match metadata["state"].as_str()? {
-            "completed" => ItemStatus::Completed,
-            "error" => ItemStatus::Failed,
-            "cancelled" => ItemStatus::Interrupted,
-            _ => return None,
+        let status = match metadata["state"].as_str() {
+            Some("completed") => ItemStatus::Completed,
+            Some("error") => ItemStatus::Failed,
+            Some("cancelled") => ItemStatus::Interrupted,
+            _ => return Vec::new(),
         };
-        let item_id = self.children.get(metadata["childID"].as_str()?)?.clone()?;
-        if !self.tools.get(&item_id)?.background {
-            return None;
-        }
-        let mut item = self.tool_item(&item_id, status, None, None)?;
-        self.tools.remove(&item_id);
-        if let ItemContent::Subagent { summary, .. } = &mut item.content {
-            *summary = payload["text"].as_str().map(subagent_output);
-        }
-        Some(AgentEvent::ItemCompleted(item))
+        let Some(child) = metadata["childID"].as_str() else {
+            return Vec::new();
+        };
+        let mut calls: Vec<String> = self
+            .tools
+            .iter()
+            .filter(|(_, tool)| tool.background && tool.child_session.as_deref() == Some(child))
+            .map(|(item_id, _)| item_id.clone())
+            .collect();
+        calls.sort();
+        calls
+            .into_iter()
+            .filter_map(|item_id| {
+                let mut item = self.tool_item(&item_id, status, None, None)?;
+                self.tools.remove(&item_id);
+                if let ItemContent::Subagent { summary, .. } = &mut item.content {
+                    *summary = payload["text"].as_str().map(subagent_output);
+                }
+                Some(AgentEvent::ItemCompleted(item))
+            })
+            .collect()
     }
 
     /// The canonical item for a tool call. `result` is the terminal
