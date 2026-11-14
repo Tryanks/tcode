@@ -1806,10 +1806,13 @@ impl HarnessDialog {
         let id = profile.id.clone();
         let open_id = id.clone();
         let login_id = id.clone();
+        let enabled_id = id.clone();
         let kind = profile.kind;
         let label = name.clone();
-        crate::material::accessible_clickable(
-            crate::material::group_row(cx),
+        let tooltip_name = name.clone();
+        let enabled = profile.settings.enabled;
+        let body = crate::material::accessible_clickable(
+            h_flex(),
             SharedString::from(format!("harness-account-{id}")),
             gpui::Role::Button,
             label,
@@ -1819,9 +1822,11 @@ impl HarnessDialog {
             let id = id.clone();
             move || format!("harness-account-{id}")
         })
+        .flex_1()
+        .min_w_0()
+        .gap(cx.theme().tokens.spacing.md)
+        .items_center()
         .cursor_pointer()
-        .relative()
-        .child(crate::material::row_hover(px(0.), cx))
         .child(crate::provider_card::profile_glyph(store, kind, Some(&id)))
         .child(
             v_flex()
@@ -1873,11 +1878,24 @@ impl HarnessDialog {
                     })),
             )
         })
-        .child(Icon::new(IconName::ChevronRight).text_color(cx.theme().muted_foreground))
         .on_click(cx.listener(move |this, _, window, cx| {
             this.navigate(Page::Profile(open_id.clone()), window, cx)
-        }))
-        .into_any_element()
+        }));
+        crate::material::group_row(cx)
+            .child(body)
+            .child(
+                Switch::new(SharedString::from(format!("harness-account-enabled-{id}")))
+                    .checked(enabled)
+                    .tooltip(crate::tr!("providers.enable", name = tooltip_name))
+                    .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                        this.update_profile(
+                            enabled_id.clone(),
+                            ProfileSettingsPatch::SetEnabled { enabled: *checked },
+                            cx,
+                        );
+                    })),
+            )
+            .into_any_element()
     }
 
     /// Who an account is signed in as, and how to sign it in or out.
@@ -2811,29 +2829,6 @@ impl HarnessDialog {
         } else {
             self.render_sign_in(&description, &profile_id, window, cx)
         });
-        let enabled_profile = profile_id.clone();
-        column = column.child(crate::material::grouped(
-            vec![
-                ToggleRow::new(
-                    "harness-account-enabled",
-                    crate::tr!("providers.harness.account_enabled").into_owned(),
-                    self.store
-                        .read(cx)
-                        .provider_profile_settings(&profile_id)
-                        .enabled,
-                    self.compact(),
-                    cx.listener(move |this, checked: &bool, _, cx| {
-                        this.update_profile(
-                            enabled_profile.clone(),
-                            ProfileSettingsPatch::SetEnabled { enabled: *checked },
-                            cx,
-                        );
-                    }),
-                )
-                .into_any_element(),
-            ],
-            cx,
-        ));
         column = column.child(self.render_identity(&profile_id, window, cx));
         if !endpoint {
             column = column.child(self.render_models(&profile_id, window, cx));
