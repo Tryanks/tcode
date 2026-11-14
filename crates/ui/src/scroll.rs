@@ -1103,7 +1103,9 @@ mod tests {
 
     /// A pull past the page's top over an area at its own top stretches the
     /// page; pushing back up in the same gesture is still the page's, so the
-    /// area does not take its release and the stretch lets go.
+    /// area does not take its release and the stretch lets go. Only where
+    /// gpui-base's bounce stretches a page at all.
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
     #[gpui::test]
     fn a_stretched_page_keeps_its_gesture_to_the_release(cx: &mut TestAppContext) {
         let (view, cx) = nested(cx, 100.);
