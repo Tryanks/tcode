@@ -1584,8 +1584,9 @@ impl TimelineView {
         .render(v_flex().w_full().mb(-gap))
     }
 
-    /// One window of a Work Log: a computer run, an edit's file windows, or
-    /// one activity, with `newer` windows after it in its list.
+    /// One window of a Work Log: a computer run, an edit's file windows, the
+    /// one window of the files a command changed, or one activity, with
+    /// `newer` windows after it in its list.
     fn compose_activity_window(
         &mut self,
         activities: &[&TimelineEntry],
