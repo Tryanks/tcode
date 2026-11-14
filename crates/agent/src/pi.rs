@@ -374,7 +374,7 @@ async fn run_actor(
         actor.events
             .emit(AgentEvent::Warning {
                 message: format!(
-                    "pi connects only the MCP servers in its own configuration, so Tcode's {} tools are unavailable in this session",
+                    "Tcode does not connect its {} tools to pi, so they are unavailable in this session",
                     unattached.join(", ")
                 ),
             })
@@ -2183,9 +2183,10 @@ fn resume_session(resume: &Option<ResumeCursor>) -> Option<&str> {
 /// The tcode tool families this session does without, named the way the user
 /// knows them from Settings.
 ///
-/// pi takes MCP servers from its own configuration files only (1.5.2's
-/// `docs/mcp.md`): neither its command line nor its RPC protocol registers
-/// one for a session, so explicitly enabled tcode MCP servers stay behind.
+/// pi 1.5.2 connects the MCP servers of its configuration files
+/// (`docs/mcp.md`) and those an extension registers (`pi.registerMcpServer`,
+/// `docs/extensions.md`). Tcode registers none, so explicitly enabled tcode
+/// MCP servers stay behind.
 fn unattached_servers(opts: &SessionOptions) -> Vec<&'static str> {
     [(
         crate::McpRegistration::SERVER_NAME_COMPUTER_USE,
