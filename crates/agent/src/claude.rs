@@ -5330,16 +5330,32 @@ fn elicitation_questions(
                     .map(ToString::to_string);
                 ElicitationKind::Number
             }
-            "boolean" => ElicitationKind::Boolean,
+            "boolean" => {
+                prefill = schema
+                    .get("default")
+                    .and_then(Value::as_bool)
+                    .map(|default| default.to_string());
+                ElicitationKind::Boolean
+            }
             "array" => {
                 let items = schema.get("items")?;
-                ElicitationKind::Choices(match items.get("anyOf").or_else(|| items.get("oneOf")) {
+                ElicitationKind::Choices(match items.get("anyOf") {
                     Some(choices) => titled(choices)?,
                     None => named(items.get("enum")?, &Value::Null)?,
                 })
             }
             _ => return None,
         };
+        // A choice's default is offered as its option's label, which the
+        // answer maps back to the value.
+        if let ElicitationKind::Choice(choices) = &kind
+            && let Some(default) = text(schema, "default")
+        {
+            prefill = choices
+                .iter()
+                .find(|(_, value)| *value == default)
+                .map(|(label, _)| label.clone());
+        }
         let labels: Vec<&str> = match &kind {
             ElicitationKind::Text | ElicitationKind::Number => Vec::new(),
             ElicitationKind::Boolean => vec!["true", "false"],
@@ -8452,8 +8468,8 @@ mod tests {
     /// are Claude Code 2.1.323's SDK control schema; the fields are MCP
     /// 2025-11-25 `PrimitiveSchemaDefinition`s (schema.ts).
     #[test]
-    fn an_mcp_form_is_asked_as_questions_and_answered_in_its_schemas_types() {
-        let form = r#"{"type":"control_request","request_id":"REQUEST","request":{"subtype":"elicitation","mcp_server_name":"deployer","message":"Where should this go?","mode":"form","requested_schema":{"type":"object","properties":{"public":{"type":"boolean","title":"Public"},"region":{"type":"string","title":"Region","description":"A region code","default":"eu-west"},"replicas":{"type":"integer","minimum":1},"tier":{"type":"string","title":"Tier","oneOf":[{"const":"std","title":"Standard"},{"const":"pro","title":"Professional"}]},"zones":{"type":"array","title":"Zones","items":{"type":"string","enum":["a","b","c"]}}},"required":["region"]},"property_order":["region","replicas","public","tier","zones"]}}"#;
+    fn an_mcp_form_is_asked_as_questions_with_its_defaults_and_answered_in_its_types() {
+        let form = r#"{"type":"control_request","request_id":"REQUEST","request":{"subtype":"elicitation","mcp_server_name":"deployer","message":"Where should this go?","mode":"form","requested_schema":{"type":"object","properties":{"public":{"type":"boolean","title":"Public","default":true},"region":{"type":"string","title":"Region","description":"A region code","default":"eu-west"},"replicas":{"type":"integer","minimum":1},"tier":{"type":"string","title":"Tier","oneOf":[{"const":"std","title":"Standard"},{"const":"pro","title":"Professional"}],"default":"pro"},"zones":{"type":"array","title":"Zones","items":{"type":"string","enum":["a","b","c"]}}},"required":["region"]},"property_order":["region","replicas","public","tier","zones"]}}"#;
         let mut m = Mapper::new();
         m.start_turn();
         let events = feed(&mut m, &form.replace("REQUEST", "elicit-1"));
@@ -8470,7 +8486,12 @@ mod tests {
                     })
                     .collect(),
                 multi_select: id == "zones",
-                prefill: (id == "region").then(|| "eu-west".into()),
+                prefill: match id {
+                    "region" => Some("eu-west".into()),
+                    "public" => Some("true".into()),
+                    "tier" => Some("Professional".into()),
+                    _ => None,
+                },
             };
         let asked_by = "deployer: Where should this go?";
         let [
