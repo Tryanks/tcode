@@ -3905,7 +3905,6 @@ fn elicitation_result(
 
     let mut content = serde_json::Map::new();
     let mut unusable = Vec::new();
-    let mut answered = false;
     for field in fields {
         let answer = answers
             .get(&field.key)
@@ -3916,7 +3915,6 @@ fn elicitation_result(
             }
             continue;
         };
-        answered = true;
         let value = match field.kind {
             ElicitFieldKind::Text => non_empty_string(answer).map(Value::String),
             ElicitFieldKind::Enum => {
@@ -3947,7 +3945,9 @@ fn elicitation_result(
         }
     }
 
-    if !answered {
+    // No answers at all is the user dismissing the form; a form whose
+    // optional fields were all left empty is still accepted.
+    if answers.is_empty() {
         Ok(json!({ "action": "decline" }))
     } else if unusable.is_empty() {
         Ok(json!({ "action": "accept", "content": content }))
@@ -4080,7 +4080,7 @@ fn parse_elicitation_form(
             question: question.to_owned(),
             options,
             multi_select: matches!(kind, ElicitFieldKind::MultiEnum),
-            optional: false,
+            optional: !required.contains(key),
             prefill: None,
         });
         fields.push(ElicitField {

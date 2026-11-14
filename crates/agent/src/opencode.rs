@@ -1737,7 +1737,7 @@ fn form_question(field: &Value) -> Option<UserInputQuestion> {
         question,
         options,
         multi_select: field["type"] == "multiselect",
-        optional: false,
+        optional: field["required"] != true,
         prefill: match &field["default"] {
             Value::String(text) => Some(text.clone()),
             Value::Number(number) => Some(number.to_string()),
@@ -1757,6 +1757,10 @@ fn form_answer(fields: &[(String, String)], answers: &Map<String, Value>) -> Map
                 Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
                 _ => Vec::new(),
             };
+            // A field left empty is left out of the answer, not sent empty.
+            if texts.iter().all(|text| text.is_empty()) {
+                return None;
+            }
             let value = match kind.as_str() {
                 "multiselect" => json!(texts),
                 "boolean" => json!(texts.first().is_some_and(|text| *text == "true")),
@@ -4118,7 +4122,8 @@ mod tests {
     }
 
     /// A question tool's form is a question per field, and the answer goes
-    /// back as OpenCode recorded it.
+    /// back as OpenCode recorded it. The field names no `required`, which
+    /// OpenCode 2.3.0's `form.ts` reads as answerable empty.
     #[test]
     fn a_question_arrives_as_a_form_and_the_answer_is_what_opencode_recorded() {
         let frames = frames("question_turn.jsonl");
@@ -4131,7 +4136,7 @@ mod tests {
             json!([{
                 "id": "q0", "header": "Preferred color", "question": "Which color do you prefer?",
                 "options": [{"label": "Red", "description": "Prefer red"}, {"label": "Blue", "description": "Prefer blue"}],
-                "multi_select": false,
+                "multi_select": false, "optional": true,
             }])
         );
         let kinds: Vec<(String, String)> = fields
