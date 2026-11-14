@@ -422,6 +422,9 @@ impl AppState {
         if self
             .find_meta(&target)
             .is_some_and(|meta| meta.provider.caps().rewind.is_none())
+            && !self
+                .resident(&target)
+                .is_some_and(|active| active.timeline.has_relays())
         {
             return Answer::Now(Err(format!(
                 "refused: thread {target}'s provider has no native rewind"

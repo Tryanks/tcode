@@ -170,6 +170,8 @@ rewind:
     hidden: "Hides this message and everything after it (%{count} turns). Undo until your next message."
     hidden_one: "Hides this message and its turn. Undo until your next message."
     branch: "Continues on a new branch from before this message. The current branch is kept."
+    returns: "Removes this message and everything after it (%{count} turns). The thread goes back to %{harness}, in the session it ran there."
+    returns_one: "Removes this message and its turn. The thread goes back to %{harness}, in the session it ran there."
     steer: "Removes this added prompt and what followed it."
     files_only: "The conversation stays; files go back to before this message."
     prompt_back: "The message goes back into the composer."

@@ -280,6 +280,8 @@ pub(super) struct PendingRelay {
     /// unless both are accounts of a provider that carries the native session
     /// between them (`SessionMeta::session_transfer_from`).
     pub(super) from_profile: Option<String>,
+    pub(super) from_acp_agent: Option<String>,
+    pub(super) from_options: Vec<OptionSelection>,
 }
 
 impl ActiveSession {

@@ -346,6 +346,11 @@ pub use wire::{
 // RewindStatus running_turn or full group rejection.
 //
 // Version 29 (v0.4.2): PreviewClient's on_host.
+//
+// Unreleased: the provider_relay event and timeline entry carry left
+// (LeftSession), the native session the handoff left with the profile and
+// options the thread had there, and ForkStatus carries
+// left_only.
 pub const PROTOCOL_VERSION: u32 = 29;
 
 #[cfg(test)]

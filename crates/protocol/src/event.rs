@@ -1005,6 +1005,10 @@ pub struct ForkStatus {
     /// A rewind is being made, and the turns it touches are not settled.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub blocked: bool,
+    /// The session the thread is in has no such fork: only the turns of a
+    /// session a handoff left do ([`tcode_core::session::Timeline::left_session`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub left_only: bool,
 }
 
 /// A thread's rewind, as its harness declares it and the thread refines it.

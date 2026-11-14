@@ -119,6 +119,19 @@ fn summary(panel: &Panel) -> String {
         return crate::tr!("rewind.summary.steer").into_owned();
     }
     let count = target.later_turns.max(1);
+    if target.returns {
+        let key = if count == 1 {
+            "rewind.summary.returns_one"
+        } else {
+            "rewind.summary.returns"
+        };
+        return crate::i18n::translate_with_args(
+            key,
+            &["count", "harness"],
+            &[count.to_string(), target.harness.clone()],
+        )
+        .into_owned();
+    }
     match target.rewind.later_history {
         LaterHistory::HiddenUntilNextSend => {
             counted("rewind.summary.hidden_one", "rewind.summary.hidden", count)

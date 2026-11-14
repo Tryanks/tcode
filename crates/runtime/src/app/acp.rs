@@ -321,6 +321,8 @@ impl AppState {
                 from_provider: active.meta.provider,
                 from_model: active.meta.model.clone(),
                 from_profile: active.meta.profile_id.clone(),
+                from_acp_agent: None,
+                from_options: active.meta.option_selections.clone(),
             });
             if active.pending_relay.is_some() && matches!(source.from_provider, ProviderKind::Acp) {
                 active.pending_relay = None;
