@@ -3896,7 +3896,7 @@ mod tests {
                 "the agent's own diff is the one account of the file"
             );
         });
-        std::fs::remove_dir_all(&cwd).unwrap();
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 
     /// A permission request ends without the user in the two ways ACP
