@@ -1822,6 +1822,17 @@ struct ToolState {
     raw_input: Option<Value>,
     raw_output: Option<Value>,
     announced: bool,
+    /// The files Tcode wrote for this call through `fs/write_text_file`.
+    writes: Vec<FileWrite>,
+}
+
+/// A file Tcode wrote for the agent: what it held before, `None` when the
+/// write created it, and what it holds now.
+#[derive(Debug, Clone)]
+struct FileWrite {
+    path: PathBuf,
+    old_text: Option<String>,
+    new_text: String,
 }
 
 /// The text block currently streaming (assistant prose or thinking).
@@ -2059,6 +2070,10 @@ impl State {
                     raw_input: call.raw_input,
                     raw_output: call.raw_output,
                     announced: true,
+                    writes: match self.tools.get_mut(&id) {
+                        Some(previous) => std::mem::take(&mut previous.writes),
+                        None => Vec::new(),
+                    },
                 };
                 let item = self.tool_item(&id, &tool);
                 let existed = self
@@ -2162,33 +2177,57 @@ impl State {
         }
     }
 
-    /// The canonical item for a tool call, keyed by [`acp::ToolKind`].
+    /// Records a file Tcode wrote for the agent on the call that asked for
+    /// it, and returns that call's item as it now stands. `fs/write_text_file`
+    /// names no call: the one in flight that locates the file is it, and a
+    /// write no single call locates is recorded on none.
+    fn record_write(&mut self, write: FileWrite) -> Option<AgentEvent> {
+        let cwd = &self.cwd;
+        let mut asking = self.tools.iter_mut().filter(|(_, tool)| {
+            matches!(
+                tool.status,
+                acp::ToolCallStatus::Pending | acp::ToolCallStatus::InProgress
+            ) && tool
+                .locations
+                .iter()
+                .any(|location| cwd.join(&location.path) == write.path)
+        });
+        let (id, tool) = asking.next()?;
+        if asking.next().is_some() {
+            return None;
+        }
+        let id = id.clone();
+        match tool
+            .writes
+            .iter_mut()
+            .find(|known| known.path == write.path)
+        {
+            Some(known) => known.new_text = write.new_text,
+            None => tool.writes.push(write),
+        }
+        let tool = tool.clone();
+        tool.announced
+            .then(|| AgentEvent::ItemUpdated(self.tool_item(&id, &tool)))
+    }
+
+    /// The canonical item for a tool call, keyed by [`acp::ToolKind`]. A call
+    /// that shows diffs is a file change whatever its kind, which ACP has for
+    /// choosing an icon and defaults to `other`; a command and a thought keep
+    /// their own shape and show theirs as text.
     fn tool_item(&self, id: &str, tool: &ToolState) -> ThreadItem {
         let status = map_status(tool.status);
+        let changes = file_changes(tool);
         let content = match tool.kind {
             acp::ToolKind::Execute => ItemContent::CommandExecution {
                 command: command_of(tool),
                 input: Vec::new(),
-                output: self.tool_output(tool),
+                output: self.tool_output(tool, true),
                 exit_code: self.exit_code_of(tool),
                 status,
                 changes: Vec::new(),
             },
-            acp::ToolKind::Edit | acp::ToolKind::Delete | acp::ToolKind::Move => {
-                let changes = file_changes(tool);
-                if changes.is_empty() {
-                    tool_call_content(tool, status, self.tool_output(tool))
-                } else {
-                    let output = self.tool_output(tool);
-                    ItemContent::FileChange {
-                        changes,
-                        status,
-                        output: (!output.is_empty()).then_some(output),
-                    }
-                }
-            }
             acp::ToolKind::Think => {
-                let text = self.tool_output(tool);
+                let text = self.tool_output(tool, true);
                 ItemContent::Reasoning {
                     text: if text.is_empty() {
                         tool.title.clone()
@@ -2197,7 +2236,15 @@ impl State {
                     },
                 }
             }
-            _ => tool_call_content(tool, status, self.tool_output(tool)),
+            _ if !changes.is_empty() => {
+                let output = self.tool_output(tool, false);
+                ItemContent::FileChange {
+                    changes,
+                    status,
+                    output: (!output.is_empty()).then_some(output),
+                }
+            }
+            _ => tool_call_content(tool, status, self.tool_output(tool, false)),
         };
         ThreadItem {
             id: id.into(),
@@ -2207,8 +2254,9 @@ impl State {
     }
 
     /// Everything the tool produced, as display text: its content blocks plus
-    /// the live output of any terminal it embedded.
-    fn tool_output(&self, tool: &ToolState) -> String {
+    /// the live output of any terminal it embedded, and `with_diffs` its
+    /// diffs, for an item that shows them nowhere else.
+    fn tool_output(&self, tool: &ToolState, with_diffs: bool) -> String {
         let mut parts: Vec<String> = Vec::new();
         for content in &tool.content {
             match content {
@@ -2229,9 +2277,13 @@ impl State {
                         }
                     }
                 }
-                // Diffs render as FileChange, not as text.
                 _ => {}
             }
+        }
+        if with_diffs {
+            parts.extend(diffs(tool).map(|(path, old_text, new_text, start)| {
+                unified_diff(&path, old_text.unwrap_or(""), new_text, start)
+            }));
         }
         if parts.is_empty()
             && let Some(raw) = &tool.raw_output
@@ -2377,35 +2429,56 @@ fn cursor_mcp_call(raw_input: &Value) -> Option<(String, &Value)> {
     Some((name, raw_input.get("args").unwrap_or(&Value::Null)))
 }
 
-/// `diff` content blocks → canonical [`FileChange`]s (with a unified diff, so
-/// the diff panel renders them like every other provider's edits).
-fn file_changes(tool: &ToolState) -> Vec<FileChange> {
-    let mut changes: Vec<FileChange> = tool
+/// The diffs a call shows, each a path, the text before and after, and where
+/// the texts begin: the agent's own `diff` content, or when it sent none, the
+/// files Tcode wrote for it. An agent that reports its own diff has said what
+/// the write did, so the write is not a second change to the same file.
+fn diffs(tool: &ToolState) -> impl Iterator<Item = (String, Option<&str>, &str, (usize, usize))> {
+    let mut own = tool
         .content
         .iter()
         .filter_map(|content| match content {
-            acp::ToolCallContent::Diff(diff) => {
-                let path = diff.path.to_string_lossy().into_owned();
-                Some(FileChange {
-                    kind: match (tool.kind, diff.old_text.as_deref()) {
-                        (acp::ToolKind::Delete, _) => FileChangeKind::Delete,
-                        (acp::ToolKind::Move, _) => FileChangeKind::Rename,
-                        (_, None | Some("")) => FileChangeKind::Create,
-                        _ => FileChangeKind::Modify,
-                    },
-                    diff: Some(unified_diff(
-                        &path,
-                        diff.old_text.as_deref().unwrap_or(""),
-                        &diff.new_text,
-                        hunk_start(diff.meta.as_ref()),
-                    )),
-                    path,
-                })
-            }
+            acp::ToolCallContent::Diff(diff) => Some((
+                diff.path.to_string_lossy().into_owned(),
+                diff.old_text.as_deref(),
+                diff.new_text.as_str(),
+                hunk_start(diff.meta.as_ref()),
+            )),
             _ => None,
         })
+        .peekable();
+    let written = own.peek().is_none().then_some(&tool.writes);
+    own.chain(written.into_iter().flatten().map(|write| {
+        (
+            write.path.to_string_lossy().into_owned(),
+            write.old_text.as_deref(),
+            write.new_text.as_str(),
+            (1, 1),
+        )
+    }))
+}
+
+/// A call's [`diffs`] → canonical [`FileChange`]s (with a unified diff, so
+/// the diff panel renders them like every other provider's edits).
+fn file_changes(tool: &ToolState) -> Vec<FileChange> {
+    let mut changes: Vec<FileChange> = diffs(tool)
+        .map(|(path, old_text, new_text, start)| FileChange {
+            kind: match (tool.kind, old_text) {
+                (acp::ToolKind::Delete, _) => FileChangeKind::Delete,
+                (acp::ToolKind::Move, _) => FileChangeKind::Rename,
+                (_, None | Some("")) => FileChangeKind::Create,
+                _ => FileChangeKind::Modify,
+            },
+            diff: Some(unified_diff(&path, old_text.unwrap_or(""), new_text, start)),
+            path,
+        })
         .collect();
-    if changes.is_empty() {
+    if changes.is_empty()
+        && matches!(
+            tool.kind,
+            acp::ToolKind::Edit | acp::ToolKind::Delete | acp::ToolKind::Move
+        )
+    {
         // Deletes and renames carry no diff, and an edit none until it is
         // applied (Cursor's arrives with its completion): the locations are
         // the files it changes.
@@ -2555,6 +2628,12 @@ fn approval_request(
     let title = fields.title.clone().unwrap_or_default();
     let kind = fields.kind.unwrap_or_default();
     let raw_input = fields.raw_input.clone().unwrap_or(Value::Null);
+    let changes = file_changes(&ToolState {
+        kind,
+        content: fields.content.clone().unwrap_or_default(),
+        locations: fields.locations.clone().unwrap_or_default(),
+        ..Default::default()
+    });
     let approval_kind = match kind {
         acp::ToolKind::Execute => ApprovalKind::ExecCommand {
             command: command_of(&ToolState {
@@ -2565,23 +2644,12 @@ fn approval_request(
             cwd: None,
             description: None,
         },
+        _ if !changes.is_empty() => ApprovalKind::FileChange { changes },
         acp::ToolKind::Edit | acp::ToolKind::Delete | acp::ToolKind::Move => {
-            let changes = file_changes(&ToolState {
-                title: title.clone(),
-                kind,
-                content: fields.content.clone().unwrap_or_default(),
-                locations: fields.locations.clone().unwrap_or_default(),
-                raw_input: fields.raw_input.clone(),
-                ..Default::default()
-            });
-            if changes.is_empty() {
-                ApprovalKind::ToolUse {
-                    name: title.clone(),
-                    input: raw_input,
-                    detail: title,
-                }
-            } else {
-                ApprovalKind::FileChange { changes }
+            ApprovalKind::ToolUse {
+                name: title.clone(),
+                input: raw_input,
+                detail: title,
             }
         }
         acp::ToolKind::Read | acp::ToolKind::Search | acp::ToolKind::Fetch => {
@@ -2755,9 +2823,27 @@ impl Client {
                 )
             })?;
         }
-        smol::fs::write(&path, args.content).await.map_err(|err| {
+        // What the file held decides whether the write created or modified
+        // it. One that cannot be read as text is left to the call's own
+        // account of it.
+        let old_text = match smol::fs::read_to_string(&path).await {
+            Ok(text) => Some(Some(text)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Some(None),
+            Err(_) => None,
+        };
+        smol::fs::write(&path, &args.content).await.map_err(|err| {
             acp::Error::new(-32603, format!("could not write {}: {err}", path.display()))
         })?;
+        let update = old_text.and_then(|old_text| {
+            self.state.lock_recover().record_write(FileWrite {
+                path,
+                old_text,
+                new_text: args.content,
+            })
+        });
+        if let Some(update) = update {
+            let _ = self.events.send(update).await;
+        }
         Ok(acp::WriteTextFileResponse::new())
     }
 
@@ -3281,6 +3367,14 @@ mod tests {
                 FileChangeKind::Rename,
                 "--- a/file.rs\n+++ b/file.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n",
             ),
+            // The kind a call has when its agent names none (schema 1.5.0).
+            (
+                "other",
+                Some("old\n"),
+                "new\n",
+                FileChangeKind::Modify,
+                "--- a/file.rs\n+++ b/file.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+            ),
         ] {
             let events = state().apply_update(update(json!({
                 "sessionUpdate":"tool_call", "toolCallId":"file", "title":"Change file",
@@ -3707,6 +3801,89 @@ mod tests {
             approval_outcome(&ApprovalDecision::Cancel, &approval.options),
             Some(acp::RequestPermissionOutcome::Cancelled)
         ));
+    }
+
+    /// `fs/write_text_file` (ACP schema 1.5.0, `WriteTextFileRequest`) names
+    /// no tool call. gemini-cli 0.68.0 writes through it from inside an
+    /// `edit` call that locates the file, and completes the call with a
+    /// `diff` for a file it modified but only the text "Created …" for one it
+    /// created (`zedIntegration`'s `runTool`, `EditToolInvocation.execute`).
+    #[test]
+    fn a_file_written_for_a_call_is_that_calls_change_once() {
+        let cwd = std::env::temp_dir().join(format!("tcode-acp-write-{}", uuid::Uuid::new_v4()));
+        let path = cwd.join("notes/todo.md");
+        let shown = path.to_string_lossy().into_owned();
+        let call = |id: &str| {
+            update(json!({
+                "sessionUpdate":"tool_call", "toolCallId":id, "title":"Edit todo.md",
+                "kind":"edit", "status":"in_progress", "locations":[{"path":path}]
+            }))
+        };
+        let changes = |event: AgentEvent| match event {
+            AgentEvent::ItemUpdated(item) | AgentEvent::ItemCompleted(item) => match item.content {
+                ItemContent::FileChange { changes, .. } => changes,
+                other => panic!("expected a file change, got {other:?}"),
+            },
+            other => panic!("expected the call's item, got {other:?}"),
+        };
+        smol::block_on(async {
+            let (events, received) = smol::channel::unbounded();
+            let client = Client {
+                events,
+                state: Arc::new(Mutex::new(State::new(cwd.clone()))),
+            };
+            let apply = |update| client.state.lock_recover().apply_update(update);
+            let write = async |text: &str| {
+                client
+                    .write_text_file(acp::WriteTextFileRequest::new("session-1", &path, text))
+                    .await
+                    .unwrap();
+            };
+
+            apply(call("call-1"));
+            write("- buy milk\n").await;
+            let created = [FileChange {
+                path: shown.clone(),
+                kind: FileChangeKind::Create,
+                diff: Some(format!(
+                    "--- /dev/null\n+++ b/{shown}\n@@ -0,0 +1,1 @@\n+- buy milk\n"
+                )),
+            }];
+            assert_eq!(changes(received.try_recv().unwrap()), created);
+            let completed = apply(update(json!({
+                "sessionUpdate":"tool_call_update", "toolCallId":"call-1", "status":"completed",
+                "content":[{"type":"content","content":{"type":"text","text":"Created notes/todo.md"}}]
+            })));
+            assert_eq!(changes(completed.into_iter().next().unwrap()), created);
+
+            apply(call("call-2"));
+            write("- buy milk\n- call Ada\n").await;
+            let modified = format!(
+                "--- a/{shown}\n+++ b/{shown}\n@@ -1,1 +1,2 @@\n - buy milk\n+- call Ada\n"
+            );
+            assert_eq!(
+                changes(received.try_recv().unwrap()),
+                [FileChange {
+                    path: shown.clone(),
+                    kind: FileChangeKind::Modify,
+                    diff: Some(modified.clone()),
+                }]
+            );
+            let completed = apply(update(json!({
+                "sessionUpdate":"tool_call_update", "toolCallId":"call-2", "status":"completed",
+                "content":[{"type":"diff","path":"todo.md","oldText":"- buy milk\n","newText":"- buy milk\n- call Ada\n"}]
+            })));
+            assert_eq!(
+                changes(completed.into_iter().next().unwrap()),
+                [FileChange {
+                    path: "todo.md".into(),
+                    kind: FileChangeKind::Modify,
+                    diff: Some(modified.replace(&shown, "todo.md")),
+                }],
+                "the agent's own diff is the one account of the file"
+            );
+        });
+        std::fs::remove_dir_all(&cwd).unwrap();
     }
 
     /// A permission request ends without the user in the two ways ACP
