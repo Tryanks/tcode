@@ -2288,11 +2288,6 @@ impl State {
                 _ => {}
             }
         }
-        if with_diffs {
-            parts.extend(diffs(tool).map(|(path, old_text, new_text, start)| {
-                unified_diff(&path, old_text.unwrap_or(""), new_text, start)
-            }));
-        }
         if parts.is_empty()
             && let Some(raw) = &tool.raw_output
         {
@@ -2301,6 +2296,11 @@ impl State {
                 None if !raw.is_null() => parts.push(raw.to_string()),
                 None => {}
             }
+        }
+        if with_diffs {
+            parts.extend(diffs(tool).map(|(path, old_text, new_text, start)| {
+                unified_diff(&path, old_text.unwrap_or(""), new_text, start)
+            }));
         }
         parts.join("\n")
     }
