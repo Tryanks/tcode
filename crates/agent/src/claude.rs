@@ -5443,7 +5443,6 @@ fn file_changes(name: &str, input: &Value) -> Vec<FileChange> {
     }
 }
 
-/// Render Claude's structured edit hunks as a unified diff body.
 /// The file change that follows a command whose Bash result carries
 /// `bashEditDiff`: the files Claude Code saw change while it ran. Those it
 /// gives a diff for come first (`files`), then the rest of `changedFiles`,
@@ -5494,6 +5493,7 @@ pub fn command_changes(command_id: &str, tool_use_result: Option<&Value>) -> Opt
     })
 }
 
+/// Render Claude's structured edit hunks as a unified diff body.
 fn render_structured_patch(value: &Value) -> Option<String> {
     let hunks = value.as_array()?;
     let mut rendered = Vec::new();
