@@ -859,6 +859,9 @@ struct Actor {
     continuing: bool,
     /// Turns that continue a failed one rather than answer a prompt.
     continuations: HashSet<String>,
+    /// The `summary` of each `configWarning`. Codex says each again to the
+    /// thread as a `warning` with the same text (0.169.0), shown once.
+    config_warnings: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -957,6 +960,7 @@ async fn run_actor(
         instructions: opts.instructions.clone(),
         continuing: false,
         continuations: HashSet::new(),
+        config_warnings: HashSet::new(),
     };
 
     let started = AgentEvent::SessionStarted {
@@ -3177,7 +3181,9 @@ impl Actor {
                 self.events.emit(AgentEvent::Error { message, fatal }).await;
             }
             "warning" | "guardianWarning" => {
-                if let Some(message) = params.get("message").and_then(Value::as_str) {
+                if let Some(message) = params.get("message").and_then(Value::as_str)
+                    && !self.config_warnings.contains(message)
+                {
                     self.events
                         .emit(AgentEvent::Warning {
                             message: message.into(),
@@ -3186,21 +3192,25 @@ impl Actor {
                 }
             }
             "configWarning" | "deprecationNotice" => {
-                if let Some(message) = notice_text(params) {
-                    self.events.emit(AgentEvent::Warning { message }).await;
-                }
-            }
-            // The canonical stream has no MCP server state; only a server
-            // that failed to start is said.
-            "mcpServer/startupStatus/updated" => {
-                if params.get("status").and_then(Value::as_str) == Some("failed") {
-                    let said = ["name", "error", "failureReason"]
-                        .iter()
-                        .filter_map(|field| params.get(*field).and_then(Value::as_str))
-                        .collect::<Vec<_>>();
+                if let Some(summary) = params.get("summary").and_then(Value::as_str) {
+                    if method == "configWarning" {
+                        self.config_warnings.insert(summary.to_owned());
+                    }
                     self.events
                         .emit(AgentEvent::Warning {
-                            message: format!("MCP server failed to start: {}", said.join(": ")),
+                            message: notice_text(summary, params),
+                        })
+                        .await;
+                }
+            }
+            // A server's other states have no place in the canonical stream.
+            "mcpServer/startupStatus/updated" => {
+                if params.get("status").and_then(Value::as_str) == Some("failed")
+                    && let Some(error) = params.get("error").and_then(Value::as_str)
+                {
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: error.into(),
                         })
                         .await;
                 }
@@ -4889,25 +4899,15 @@ fn normalize_file_change_diff(change: &mut FileChange) {
     change.diff = Some(patch);
 }
 
-/// The fields of a `ConfigWarningNotification` or `DeprecationNoticeNotification`
-/// (app-server protocol v2, codex-cli 0.169.0), one per line as Codex gave them.
-fn notice_text(params: &Value) -> Option<String> {
-    let mut text = params.get("summary").and_then(Value::as_str)?.to_owned();
-    if let Some(details) = params.get("details").and_then(Value::as_str) {
-        text.push('\n');
-        text.push_str(details);
+/// A `ConfigWarningNotification` or `DeprecationNoticeNotification`
+/// (app-server protocol v2, codex-cli 0.169.0): its summary, then its details
+/// where it has them. A configuration Codex could not read names the file and
+/// place in `details` already; `path` and `range` say them again as data.
+fn notice_text(summary: &str, params: &Value) -> String {
+    match params.get("details").and_then(Value::as_str) {
+        Some(details) => format!("{summary}\n{details}"),
+        None => summary.to_owned(),
     }
-    if let Some(path) = params.get("path").and_then(Value::as_str) {
-        text.push('\n');
-        text.push_str(path);
-        let start = |field| params.pointer(field).and_then(Value::as_u64);
-        if let (Some(line), Some(column)) =
-            (start("/range/start/line"), start("/range/start/column"))
-        {
-            text.push_str(&format!(":{line}:{column}"));
-        }
-    }
-    Some(text)
 }
 
 fn map_usage(value: &Value) -> Option<TokenUsage> {
@@ -5656,6 +5656,7 @@ mod tests {
                 instructions: None,
                 continuing: false,
                 continuations: HashSet::new(),
+                config_warnings: HashSet::new(),
             },
             event_rx,
         )
@@ -8017,53 +8018,57 @@ mod tests {
     }
 
     /// What Codex says outside a turn's items reaches the user in its own
-    /// words. Shapes are `ConfigWarningNotification`, `DeprecationNoticeNotification`,
-    /// `GuardianWarningNotification` and `McpServerStatusUpdatedNotification` of
-    /// `ServerNotification.json` (`codex app-server generate-json-schema
-    /// --experimental`, codex-cli 0.169.0); the content is invented.
+    /// words, and a configuration warning Codex repeats to the thread is shown
+    /// once. Shapes are `ConfigWarningNotification`, `WarningNotification`,
+    /// `DeprecationNoticeNotification`, `GuardianWarningNotification` and
+    /// `McpServerStatusUpdatedNotification` of `ServerNotification.json`
+    /// (`codex app-server generate-json-schema --experimental`, codex-cli
+    /// 0.169.0); the content is invented.
     #[test]
     fn notices_outside_a_turn_reach_the_user_as_codex_gave_them() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            for (line, said) in [
-                (
-                    json!({"method": "configWarning", "params": {
-                        "summary": "unknown key quux", "details": "remove it or rename it",
-                        "path": "/home/user/.codex/config.toml",
-                        "range": {"start": {"line": 3, "column": 1},
-                            "end": {"line": 3, "column": 5}}}}),
-                    vec![
-                        "unknown key quux",
-                        "remove it or rename it",
-                        "/home/user/.codex/config.toml:3:1",
-                    ],
-                ),
-                (
-                    json!({"method": "deprecationNotice", "params": {
-                        "summary": "flag frob is going away", "details": null}}),
-                    vec!["flag frob is going away"],
-                ),
-                (
-                    json!({"method": "guardianWarning", "params": {
-                        "threadId": "thread-1", "message": "reviewer is behind"}}),
-                    vec!["reviewer is behind"],
-                ),
-                (
-                    json!({"method": "mcpServer/startupStatus/updated", "params": {
-                        "name": "tracker", "status": "failed", "threadId": "thread-1",
-                        "error": "handshake refused",
-                        "failureReason": "reauthenticationRequired"}}),
-                    vec!["tracker", "handshake refused", "reauthenticationRequired"],
-                ),
+            let ignored = "Codex is ignoring 1 unrecognized configuration setting.\n  \
+                user (/home/user/.codex/config.toml): `quux` is ignored.";
+            for line in [
+                json!({"method": "configWarning", "params": {"summary": ignored, "details": null}}),
+                json!({"method": "warning", "params": {"threadId": "thread-1", "message": ignored}}),
+                json!({"method": "configWarning", "params": {
+                    "summary": "Invalid configuration; using defaults.",
+                    "details": "/home/user/.codex/config.toml:3:7: invalid type: integer `5`, expected a string",
+                    "path": "/home/user/.codex/config.toml",
+                    "range": {"start": {"line": 3, "column": 7}, "end": {"line": 3, "column": 7}}}}),
+                json!({"method": "deprecationNotice", "params": {
+                    "summary": "`[features].frob` is deprecated and ignored.",
+                    "details": "Remove `frob` from [features] in config.toml."}}),
+                json!({"method": "guardianWarning", "params": {
+                    "threadId": "thread-1", "message": "reviewer is behind"}}),
+                json!({"method": "mcpServer/startupStatus/updated", "params": {
+                    "name": "tracker", "status": "failed", "threadId": "thread-1",
+                    "error": "MCP client for `tracker` failed to start: handshake refused",
+                    "failureReason": null}}),
             ] {
                 actor.handle_line(&line.to_string()).await;
-                let AgentEvent::Warning { message } = events.try_recv().unwrap() else {
-                    panic!("{line} gave no warning");
-                };
-                for part in said {
-                    assert!(message.contains(part), "{message:?} lacks {part:?}");
-                }
             }
+            let mut shown = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                let AgentEvent::Warning { message } = event else {
+                    panic!("{event:?} is no warning");
+                };
+                shown.push(message);
+            }
+            assert_eq!(
+                shown,
+                [
+                    ignored,
+                    "Invalid configuration; using defaults.\n\
+                        /home/user/.codex/config.toml:3:7: invalid type: integer `5`, expected a string",
+                    "`[features].frob` is deprecated and ignored.\n\
+                        Remove `frob` from [features] in config.toml.",
+                    "reviewer is behind",
+                    "MCP client for `tracker` failed to start: handshake refused",
+                ]
+            );
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
