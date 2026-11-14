@@ -324,6 +324,7 @@ sidebar:
   layout_flat: "フラットなスレッド一覧に切り替え"
   layout_grouped: "プロジェクトごとにグループ化"
   filter_empty: "このプロジェクトにはまだスレッドがありません。"
+  shared_threads_hidden: "共有スペースで非表示にしたプロジェクトのスレッドは、プロジェクト別の表示に表示されます。"
   project: "プロジェクト %{name}"
   host: "ホスト %{name}"
   manage_hosts: "ホストを管理"
@@ -1850,6 +1851,8 @@ spaces:
     removed: "削除されたプロジェクト"
     unknown: "%{machine} 上のプロジェクト"
     remove: "%{name} の共有を停止"
+    hide_from_threads: "スレッド一覧に表示しない"
+    hide_from_threads_description: "このマシンとペアリング済みのデバイスでは、これらのプロジェクトのスレッドはプロジェクト別の表示にのみ表示されます。メンバーには影響しません。"
   members:
     title: "メンバー"
     empty: "まだ誰も参加していません。"

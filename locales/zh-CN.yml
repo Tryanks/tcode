@@ -324,6 +324,7 @@ sidebar:
   layout_flat: "切换为平铺线程列表"
   layout_grouped: "按项目分组"
   filter_empty: "该项目还没有线程。"
+  shared_threads_hidden: "被共享空间隐藏的项目，其线程在“按项目分组”视图中显示。"
   project: "项目 %{name}"
   host: "主机 %{name}"
   manage_hosts: "管理主机"
@@ -1843,6 +1844,8 @@ spaces:
     removed: "已移除的项目"
     unknown: "%{machine} 上的项目"
     remove: "停止分享 %{name}"
+    hide_from_threads: "在平铺线程列表中隐藏"
+    hide_from_threads_description: "本机和已配对的设备只在“按项目分组”中显示这些项目的线程。成员不受影响。"
   members:
     title: "成员"
     empty: "还没有人加入。"

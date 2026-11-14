@@ -42,6 +42,8 @@ pub struct SpaceRecord {
     pub link_failures: u8,
     #[serde(default = "tcode_protocol::SpacePolicy::unrestricted")]
     pub policy: tcode_protocol::SpacePolicy,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden_from_threads: bool,
 }
 
 /// `traverse.json`: this machine's key, name, allow list and pairing switch.

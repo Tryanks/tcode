@@ -553,6 +553,12 @@ pub enum SpaceAction {
         id: String,
         policy: SpacePolicy,
     },
+    /// Whether the machine's own screens leave the space's projects out of
+    /// the threads view. Members see no change.
+    SetHiddenFromThreads {
+        id: String,
+        hidden: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -566,6 +572,10 @@ pub struct SpaceInfo {
     pub link_dead: bool,
     pub members: Vec<HostedDevice>,
     pub policy: SpacePolicy,
+    /// The machine's own screens list the space's projects' threads only by
+    /// project, not in the threads view.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden_from_threads: bool,
 }
 
 /// What a space's members may do with its projects beyond reading and

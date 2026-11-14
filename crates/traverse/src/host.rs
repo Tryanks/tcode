@@ -961,6 +961,7 @@ impl Shared {
                 link_enabled: space.link_enabled,
                 link_dead: space.link_failures >= MAX_PAIRING_FAILURES,
                 policy: space.policy.clone(),
+                hidden_from_threads: space.hidden_from_threads,
                 members: state
                     .identity
                     .devices
@@ -991,6 +992,7 @@ impl Shared {
                     link_enabled: true,
                     link_failures: 0,
                     policy: tcode_protocol::SpacePolicy::new_space(),
+                    hidden_from_threads: false,
                 });
                 created = Some(id);
             }
@@ -1048,7 +1050,8 @@ impl Shared {
                     | SpaceAction::SetProjects { id, .. }
                     | SpaceAction::RegenerateLink { id }
                     | SpaceAction::SetLinkEnabled { id, .. }
-                    | SpaceAction::SetPolicy { id, .. } => id,
+                    | SpaceAction::SetPolicy { id, .. }
+                    | SpaceAction::SetHiddenFromThreads { id, .. } => id,
                     _ => unreachable!(),
                 };
                 let index = state
@@ -1102,6 +1105,9 @@ impl Shared {
                     }
                     SpaceAction::SetPolicy { policy, .. } => {
                         state.identity.spaces[index].policy = policy
+                    }
+                    SpaceAction::SetHiddenFromThreads { hidden, .. } => {
+                        state.identity.spaces[index].hidden_from_threads = hidden
                     }
                     _ => unreachable!(),
                 }

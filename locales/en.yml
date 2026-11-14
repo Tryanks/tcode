@@ -324,6 +324,7 @@ sidebar:
   layout_flat: "Switch to flat thread list"
   layout_grouped: "Group by project"
   filter_empty: "No threads in this project yet."
+  shared_threads_hidden: "Threads of projects a space hides are listed by project."
   project: "Project %{name}"
   host: "Machine %{name}"
   manage_hosts: "Manage machines"
@@ -1850,6 +1851,8 @@ spaces:
     removed: "Removed project"
     unknown: "Project on %{machine}"
     remove: "Stop sharing %{name}"
+    hide_from_threads: "Hide from the threads list"
+    hide_from_threads_description: "This machine and its paired devices list these projects' threads only by project. Members see no change."
   members:
     title: "Members"
     empty: "No one has joined yet."
