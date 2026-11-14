@@ -1825,7 +1825,6 @@ impl ToolItem {
                     output: String::new(),
                     exit_code: None,
                     status: ItemStatus::InProgress,
-                    changes: Vec::new(),
                 },
             )
         } else if is_file_tool(&name) {
@@ -1881,10 +1880,6 @@ impl ToolItem {
                     output,
                     exit_code,
                     status,
-                    changes: tool_use_result
-                        .and_then(|result| result.get("bashEditDiff"))
-                        .map(command_changes)
-                        .unwrap_or_default(),
                 }
             }
             ToolItem::File { mut changes } => {
@@ -3326,7 +3321,6 @@ impl Mapper {
                 output,
                 exit_code: (status == ItemStatus::Completed).then_some(0),
                 status,
-                changes: Vec::new(),
             },
         })]
     }
@@ -3970,7 +3964,6 @@ impl Mapper {
                         output,
                         exit_code: None,
                         status: ItemStatus::InProgress,
-                        changes: Vec::new(),
                     }
                 }
                 item @ (ToolItem::Command { .. }
@@ -5445,45 +5438,6 @@ fn file_changes(name: &str, input: &Value) -> Vec<FileChange> {
 }
 
 /// Render Claude's structured edit hunks as a unified diff body.
-/// The files a Bash result's `bashEditDiff` says the command changed: those
-/// it gives a diff for (`files`), then the rest of `changedFiles`, whose
-/// operation Claude Code does not say.
-fn command_changes(edit_diff: &Value) -> Vec<FileChange> {
-    let list = |key: &str| edit_diff.get(key).and_then(Value::as_array);
-    let flag = |file: &Value, key: &str| file.get(key).and_then(Value::as_bool) == Some(true);
-    let mut changes: Vec<FileChange> = list("files")
-        .into_iter()
-        .flatten()
-        .filter_map(|file| {
-            Some(FileChange {
-                path: file.get("filePath")?.as_str()?.to_owned(),
-                kind: if flag(file, "created") {
-                    FileChangeKind::Create
-                } else if flag(file, "deleted") {
-                    FileChangeKind::Delete
-                } else {
-                    FileChangeKind::Modify
-                },
-                diff: file.get("hunks").and_then(render_structured_patch),
-            })
-        })
-        .collect();
-    for path in list("changedFiles")
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-    {
-        if !changes.iter().any(|change| change.path == path) {
-            changes.push(FileChange {
-                path: path.to_owned(),
-                kind: FileChangeKind::Modify,
-                diff: None,
-            });
-        }
-    }
-    changes
-}
-
 fn render_structured_patch(value: &Value) -> Option<String> {
     let hunks = value.as_array()?;
     let mut rendered = Vec::new();
@@ -7269,58 +7223,7 @@ mod tests {
                 output: "Get-ChildItem: Cannot find path 'build'.".into(),
                 exit_code: Some(2),
                 status: ItemStatus::Failed,
-                changes: Vec::new(),
             }
-        );
-    }
-
-    /// A Bash result's `bashEditDiff` names the files the command changed:
-    /// `files` with hunks and `created`/`deleted`, and `changedFiles` for
-    /// those it gives no diff (the Bash `tool_response` table of the hooks
-    /// reference, as Claude Code 2.1.323 writes it on the stream; content
-    /// invented).
-    #[test]
-    fn a_command_carries_the_files_claude_says_it_changed() {
-        let mut mapper = Mapper::new();
-        feed(
-            &mut mapper,
-            r#"{"type":"assistant","message":{"id":"msg_sed","content":[{"type":"tool_use","id":"toolu_sed","name":"Bash","input":{"command":"./regenerate.sh"}}]}}"#,
-        );
-        let completed = feed(
-            &mut mapper,
-            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_sed","content":"","is_error":false}]},"tool_use_result":{"stdout":"","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false,"bashEditDiff":{"files":[{"filePath":"/work/src/lib.rs","hunks":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":2,"lines":[" one","+two"]}]},{"filePath":"/work/new.rs","hunks":[{"oldStart":0,"oldLines":0,"newStart":1,"newLines":1,"lines":["+new"]}],"created":true},{"filePath":"/work/old.rs","hunks":[{"oldStart":1,"oldLines":1,"newStart":0,"newLines":0,"lines":["-old"]}],"deleted":true}],"moreFiles":1,"changedFiles":["/work/src/lib.rs","/work/new.rs","/work/old.rs","/work/generated.rs"]}}}"#,
-        );
-        let [AgentEvent::ItemCompleted(item)] = completed.as_slice() else {
-            panic!("{completed:?}");
-        };
-        let ItemContent::CommandExecution { changes, .. } = &item.content else {
-            panic!("{item:?}");
-        };
-        let change = |path: &str, kind, diff: Option<&str>| FileChange {
-            path: path.into(),
-            kind,
-            diff: diff.map(str::to_owned),
-        };
-        assert_eq!(
-            changes,
-            &[
-                change(
-                    "/work/src/lib.rs",
-                    FileChangeKind::Modify,
-                    Some("@@ -1,1 +1,2 @@\n one\n+two"),
-                ),
-                change(
-                    "/work/new.rs",
-                    FileChangeKind::Create,
-                    Some("@@ -0,0 +1,1 @@\n+new"),
-                ),
-                change(
-                    "/work/old.rs",
-                    FileChangeKind::Delete,
-                    Some("@@ -1,1 +0,0 @@\n-old"),
-                ),
-                change("/work/generated.rs", FileChangeKind::Modify, None),
-            ]
         );
     }
 

@@ -1021,7 +1021,6 @@ pub(in crate::chat) mod tests {
                 output: String::new(),
                 exit_code: Some(0),
                 status: ItemStatus::Completed,
-                changes: Vec::new(),
             }),
         )
     }

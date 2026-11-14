@@ -238,7 +238,6 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
                 output,
                 exit_code,
                 status,
-                changes: _,
             }) => {
                 let outcome = if let Some(code) = exit_code {
                     format!("exit {code}: {}", one_line(output))

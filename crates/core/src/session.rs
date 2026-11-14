@@ -881,10 +881,8 @@ pub struct Timeline {
     boundaries: TurnBoundaries,
     /// Monotonic counter for synthetic entry ids.
     next_synthetic_id: u64,
-    /// Items whose file changes are known to have happened: FileChange items
-    /// that completed successfully and commands the harness reported changes
-    /// for. The ids rebuild deterministically from persisted ItemCompleted
-    /// events during replay.
+    /// FileChange items known to have completed successfully. The ids rebuild
+    /// deterministically from persisted ItemCompleted events during replay.
     committed_file_change_items: HashSet<String>,
     /// Tool-time accounting for the open turn (see [`TurnMeta::timing`]).
     tool_clock: ToolClock,
@@ -1570,12 +1568,13 @@ impl Timeline {
                     Arc::make_mut(&mut self.entries[position]).finished_ts = ts;
                 }
                 self.track_tool_item(ts, item, ToolLifecycle::Completed);
-                // A command's reported changes happened whatever it exited with.
-                if match &item.content {
-                    ItemContent::FileChange { status, .. } => *status == ItemStatus::Completed,
-                    ItemContent::CommandExecution { changes, .. } => !changes.is_empty(),
-                    _ => false,
-                } {
+                if matches!(
+                    &item.content,
+                    ItemContent::FileChange {
+                        status: ItemStatus::Completed,
+                        ..
+                    }
+                ) {
                     self.committed_file_change_items.insert(item.id.clone());
                     if let Some(turn) = self.item_turn(&item.id) {
                         self.refresh_partial_turn_changes(turn);
@@ -2097,10 +2096,9 @@ impl Timeline {
                 return None;
             }
             match &entry.content {
-                EntryContent::Item(
-                    ItemContent::FileChange { changes, .. }
-                    | ItemContent::CommandExecution { changes, .. },
-                ) => Some(changes.as_slice()),
+                EntryContent::Item(ItemContent::FileChange { changes, .. }) => {
+                    Some(changes.as_slice())
+                }
                 _ => None,
             }
         });
@@ -2272,7 +2270,6 @@ impl Timeline {
                 output: text.into(),
                 exit_code: None,
                 status: ItemStatus::InProgress,
-                changes: Vec::new(),
             }),
         };
         let turn = self.ensure_turn();
@@ -2340,7 +2337,6 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
                 output,
                 exit_code,
                 status,
-                changes,
             }),
         ) => EntryContent::Item(ItemContent::CommandExecution {
             command,
@@ -2348,7 +2344,6 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
             output: merge_text(old_output, output),
             exit_code,
             status,
-            changes,
         }),
         (
             EntryContent::Item(ItemContent::FileChange {
@@ -2449,7 +2444,6 @@ mod tests {
             output: output.into(),
             exit_code: None,
             status,
-            changes: Vec::new(),
         };
         let delta = |kind, text: &str| AgentEvent::Delta {
             item_id: match kind {
@@ -3180,56 +3174,6 @@ mod tests {
     }
 
     #[test]
-    fn a_turns_changes_include_the_files_a_command_is_reported_to_have_changed() {
-        let change = |path: &str, diff: &str| FileChange {
-            path: path.into(),
-            kind: FileChangeKind::Modify,
-            diff: Some(diff.into()),
-        };
-        let mut timeline = Timeline::fold_events([user_msg("user-1", "edit it"), turn_started()]);
-        timeline.apply_at(
-            None,
-            &AgentEvent::ItemCompleted(ThreadItem {
-                id: "edit-1".into(),
-                parent_item_id: None,
-                content: ItemContent::FileChange {
-                    changes: vec![change("src/lib.rs", "-old\n+new\n")],
-                    status: ItemStatus::Completed,
-                    output: None,
-                },
-            }),
-        );
-        // The command failed; what it changed before failing still changed.
-        timeline.apply_at(
-            None,
-            &AgentEvent::ItemCompleted(ThreadItem {
-                id: "cmd-1".into(),
-                parent_item_id: None,
-                content: ItemContent::CommandExecution {
-                    command: "./regenerate.sh".into(),
-                    input: Vec::new(),
-                    output: String::new(),
-                    exit_code: Some(1),
-                    status: ItemStatus::Failed,
-                    changes: vec![change("generated.rs", "+made\n")],
-                },
-            }),
-        );
-        let changes = timeline.turns[0]
-            .changes
-            .as_ref()
-            .expect("the turn's changes");
-        assert_eq!(changes.completeness, ChangeCompleteness::Partial);
-        assert_eq!(
-            changes.changes,
-            [
-                change("src/lib.rs", "-old\n+new\n"),
-                change("generated.rs", "+made\n"),
-            ]
-        );
-    }
-
-    #[test]
     fn completed_file_snapshot_keeps_diff_from_started_snapshot() {
         let path = "/tmp/tcode-outside-workspace.txt";
         let timeline = Timeline::fold_events([
@@ -3561,7 +3505,6 @@ mod tests {
                             output: text.into(),
                             exit_code: Some(0),
                             status: ItemStatus::Completed,
-                            changes: Vec::new(),
                         },
                     },
                 })
@@ -3597,7 +3540,6 @@ mod tests {
                         output,
                         exit_code,
                         status,
-                        changes: _,
                     }) => {
                         assert_eq!(command, "echo hi");
                         assert_eq!(*exit_code, Some(0));
@@ -3961,7 +3903,6 @@ mod tests {
                 output: String::new(),
                 exit_code: None,
                 status,
-                changes: Vec::new(),
             },
         }
     }

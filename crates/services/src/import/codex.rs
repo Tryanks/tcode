@@ -403,7 +403,6 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                     output: String::new(),
                                     exit_code: None,
                                     status: ItemStatus::InProgress,
-                                    changes: Vec::new(),
                                 }
                             }
                             _ => ItemContent::ToolCall {
@@ -678,7 +677,6 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                 output: String::new(),
                                 exit_code: None,
                                 status: ItemStatus::Completed,
-                                changes: Vec::new(),
                             },
                             payload.get("id").and_then(Value::as_str),
                         );

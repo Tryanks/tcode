@@ -603,7 +603,6 @@ fn command(
         output: output.into(),
         exit_code,
         status,
-        changes: Vec::new(),
     })
 }
 
@@ -690,7 +689,6 @@ fn a_codex_rollout_imports_as_codex_recorded_it() {
                 output: ">>> 1\n>>> ".into(),
                 exit_code: Some(0),
                 status: ItemStatus::Completed,
-                changes: Vec::new(),
             }),
             command(
                 "make lint",
@@ -845,7 +843,6 @@ fn a_claude_transcript_imports_as_claude_recorded_it() {
                 output: "make: *** No targets.  Stop.".into(),
                 exit_code: Some(2),
                 status: ItemStatus::Failed,
-                changes: Vec::new(),
             }),
             Some(ItemContent::FileChange {
                 changes: vec![agent::FileChange {
@@ -878,7 +875,6 @@ fn a_claude_transcript_imports_as_claude_recorded_it() {
                 output: String::new(),
                 exit_code: None,
                 status: ItemStatus::Interrupted,
-                changes: Vec::new(),
             }),
         ]
     );

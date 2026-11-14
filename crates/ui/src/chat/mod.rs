@@ -1558,7 +1558,6 @@ pub(crate) mod tests {
                 output: String::new(),
                 exit_code: Some(0),
                 status: agent::ItemStatus::Completed,
-                changes: Vec::new(),
             }),
         )
     }
@@ -1572,7 +1571,6 @@ pub(crate) mod tests {
                 output: format!("output of {id}\n"),
                 exit_code: Some(0),
                 status: ItemStatus::Completed,
-                changes: Vec::new(),
             }),
         )
     }

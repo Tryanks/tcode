@@ -853,7 +853,6 @@ fn background_work_open_at_a_fork_point_ends_as_interrupted_in_the_fork() {
                         output: "listening".into(),
                         exit_code: None,
                         status: ItemStatus::InProgress,
-                        changes: Vec::new(),
                     },
                 }),
                 AgentEvent::ItemBackgrounded {

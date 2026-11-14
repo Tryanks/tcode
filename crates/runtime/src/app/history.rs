@@ -125,7 +125,6 @@ fn wire_event(event: &AgentEvent) -> Option<(AgentEvent, Option<u64>)> {
             output,
             exit_code,
             status,
-            changes,
         } => (
             ItemContent::CommandExecution {
                 command: command.clone(),
@@ -133,7 +132,6 @@ fn wire_event(event: &AgentEvent) -> Option<(AgentEvent, Option<u64>)> {
                 output: output_tail(output).to_owned(),
                 exit_code: *exit_code,
                 status: *status,
-                changes: changes.clone(),
             },
             Some(output.len() as u64),
         ),

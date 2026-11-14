@@ -351,8 +351,7 @@ pub use wire::{
 // (LeftSession), the native session the handoff left with the profile and
 // options the thread had there, the agent event stream gains relay_undone,
 // and ForkStatus carries
-// left_only. A command_execution item carries changes, the files the
-// harness reports the command changed.
+// left_only.
 pub const PROTOCOL_VERSION: u32 = 29;
 
 #[cfg(test)]

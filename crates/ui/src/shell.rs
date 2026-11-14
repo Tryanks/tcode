@@ -16438,7 +16438,6 @@ pub(crate) mod tests {
                         output: "line 0\nline 1\n".into(),
                         exit_code: None,
                         status: agent::ItemStatus::InProgress,
-                        changes: Vec::new(),
                     },
                 )),
             ],

@@ -86,7 +86,6 @@ fn command(command: &str, output: String) -> ItemContent {
         output,
         exit_code: Some(1),
         status: agent::ItemStatus::Failed,
-        changes: Vec::new(),
     }
 }
 

@@ -2360,7 +2360,6 @@ impl Mapper {
                     // A command in the background has no result but its exit.
                     .or_else(|| tool.shell_end.and_then(|end| end.exit)),
                 status,
-                changes: Vec::new(),
             },
             "edit" | "write" | "patch" => ItemContent::FileChange {
                 changes: file_changes(&tool.name, input, text.as_deref(), metadata),
