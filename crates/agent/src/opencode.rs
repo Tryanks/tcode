@@ -600,7 +600,7 @@ struct OpenCodeActor {
 struct ShellPoll {
     /// The call ended with its output: nothing more is read.
     stop: AtomicBool,
-    /// The shell exited: what it wrote last is one more read away.
+    /// The shell exited: what is left of its output is read, then nothing.
     exited: AtomicBool,
 }
 
@@ -1696,7 +1696,7 @@ fn form_answer(fields: &[(String, String)], answers: &Map<String, Value>) -> Map
 }
 
 /// Reads a shell's output as it grows, and says when it has stopped reading:
-/// a command in the background settles only after what it wrote last.
+/// a command in the background settles only after all it wrote.
 fn poll_shell_output(
     http: &Http,
     shell_id: &str,
@@ -1706,8 +1706,7 @@ fn poll_shell_output(
 ) {
     let mut cursor = 0;
     while !poll.stop.load(Ordering::Relaxed) {
-        // Read before asking: a page asked for after the exit holds all the
-        // shell wrote.
+        // Read before asking: once the shell has exited, its output is whole.
         let exited = poll.exited.load(Ordering::Relaxed);
         let Ok(page) = http.get(&format!("/api/shell/{shell_id}/output?cursor={cursor}")) else {
             // The server drops a shell once its command is settled.
@@ -1726,7 +1725,11 @@ fn poll_shell_output(
         }
         cursor = page["cursor"].as_u64().unwrap_or(cursor);
         if exited {
-            break;
+            // A page holds at most 64 KiB; `size` is all there is to read.
+            if page["size"].as_u64().is_none_or(|size| cursor >= size) {
+                break;
+            }
+            continue;
         }
         std::thread::sleep(SHELL_POLL_INTERVAL);
     }
@@ -1746,7 +1749,7 @@ enum Action {
     StopShell {
         item_id: String,
     },
-    /// The shell exited: its poll reads once more and ends.
+    /// The shell exited: its poll reads the rest and ends.
     DrainShell {
         item_id: String,
     },
