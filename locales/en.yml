@@ -1303,6 +1303,7 @@ diff:
   modified: "modified"
   deleted: "deleted"
   renamed: "renamed"
+  changed: "changed"
   unmodified_lines: "%{count} unmodified lines"
   empty: "No file changes in this scope"
   loading: "Loading diff…"

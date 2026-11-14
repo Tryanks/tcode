@@ -5520,7 +5520,7 @@ pub fn command_changes(command_id: &str, tool_use_result: Option<&Value>) -> Opt
         if !changes.iter().any(|change| change.path == path) {
             changes.push(FileChange {
                 path: path.to_owned(),
-                kind: FileChangeKind::Modify,
+                kind: FileChangeKind::Changed,
                 diff: None,
             });
         }
@@ -7412,7 +7412,7 @@ mod tests {
                         FileChangeKind::Delete,
                         Some("@@ -1,1 +0,0 @@\n-old"),
                     ),
-                    change("/work/generated.rs", FileChangeKind::Modify, None),
+                    change("/work/generated.rs", FileChangeKind::Changed, None),
                 ],
                 status: ItemStatus::Completed,
                 output: None,

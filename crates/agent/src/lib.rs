@@ -3398,6 +3398,8 @@ pub enum FileChangeKind {
     Modify,
     Delete,
     Rename,
+    /// The harness reports the file changed and does not say how.
+    Changed,
 }
 
 /// A provider-supplied, multi-file Git-style unified diff, split into the

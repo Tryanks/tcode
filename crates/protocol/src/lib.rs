@@ -352,7 +352,8 @@ pub use wire::{
 // options the thread had there, the agent event stream gains relay_undone,
 // and ForkStatus carries
 // left_only. A file_change item carries command, the command item whose
-// run the harness saw change its files.
+// run the harness saw change its files. A file change's kind gains changed,
+// a file the harness reports changed without saying how.
 pub const PROTOCOL_VERSION: u32 = 29;
 
 #[cfg(test)]

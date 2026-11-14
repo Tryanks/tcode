@@ -1356,6 +1356,7 @@ fn kind_name(kind: FileChangeKind) -> &'static str {
         FileChangeKind::Modify => "modify",
         FileChangeKind::Delete => "delete",
         FileChangeKind::Rename => "rename",
+        FileChangeKind::Changed => "changed",
     }
 }
 

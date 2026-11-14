@@ -1195,7 +1195,7 @@ pub(crate) fn kind_rail(kind: FileChangeKind, cx: &App) -> Option<Hsla> {
         FileChangeKind::Create => Some(cx.theme().success),
         FileChangeKind::Delete => Some(cx.theme().danger),
         FileChangeKind::Rename => Some(cx.theme().info),
-        FileChangeKind::Modify => None,
+        FileChangeKind::Modify | FileChangeKind::Changed => None,
     }
 }
 
@@ -1213,6 +1213,7 @@ fn render_file_header<H: DiffListHost>(
         FileChangeKind::Create => Some((crate::tr!("diff.created"), cx.theme().success_foreground)),
         FileChangeKind::Delete => Some((crate::tr!("diff.deleted"), cx.theme().danger_foreground)),
         FileChangeKind::Rename => Some((crate::tr!("diff.renamed"), cx.theme().info_foreground)),
+        FileChangeKind::Changed => Some((crate::tr!("diff.changed"), muted)),
         FileChangeKind::Modify => None,
     };
     let (viewport_width, scrolled) = host.diff_list().map_or((px(0.), px(0.)), |list| {

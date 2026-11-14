@@ -1303,6 +1303,7 @@ diff:
   modified: "変更"
   deleted: "削除"
   renamed: "名前変更"
+  changed: "変更あり"
   unmodified_lines: "変更のない %{count} 行"
   empty: "この範囲にファイルの変更はありません"
   loading: "差分を読み込み中…"

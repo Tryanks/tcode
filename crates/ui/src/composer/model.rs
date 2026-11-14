@@ -522,6 +522,7 @@ pub(super) fn file_change_kind_label(kind: FileChangeKind) -> std::borrow::Cow<'
         FileChangeKind::Modify => crate::tr!("diff.modified"),
         FileChangeKind::Delete => crate::tr!("diff.deleted"),
         FileChangeKind::Rename => crate::tr!("diff.renamed"),
+        FileChangeKind::Changed => crate::tr!("diff.changed"),
     }
 }
 

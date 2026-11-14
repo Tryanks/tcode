@@ -116,6 +116,7 @@ pub(in crate::chat) fn file_header(file: &EditedFile, status: ItemStatus) -> Hea
         FileChangeKind::Modify => (IconName::Pencil, Verb("edit")),
         FileChangeKind::Delete => (IconName::Trash, Verb("delete")),
         FileChangeKind::Rename => (IconName::Replace, Verb("rename")),
+        FileChangeKind::Changed => (IconName::File, Verb("change")),
     };
     let applied = !matches!(status, ItemStatus::Failed | ItemStatus::Declined);
     Header::new(icon, verb)

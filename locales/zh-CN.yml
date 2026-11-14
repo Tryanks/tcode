@@ -1296,6 +1296,7 @@ diff:
   modified: "已修改"
   deleted: "已删除"
   renamed: "已重命名"
+  changed: "已更改"
   unmodified_lines: "%{count} 行未修改"
   empty: "此范围内没有文件更改"
   loading: "正在加载 Diff…"
