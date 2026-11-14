@@ -190,11 +190,13 @@ pub(in crate::chat) fn shell_body(run: ShellRun<'_>, ctx: &mut ToolCtx<'_, '_>) 
 }
 
 type Handler<E> = Box<dyn Fn(&E, &mut Window, &mut App) + 'static>;
+/// Scrolls an output, answering whether it moved.
+type Wheel = Box<dyn Fn(&ScrollEvent, &mut App) -> bool + 'static>;
 
 /// What the reader does in a panel's output: the wheel scrolls it, a press
 /// and a drag select in it, and Copy takes the selection.
 pub(crate) struct OutputHandlers {
-    wheel: Handler<ScrollEvent>,
+    wheel: Wheel,
     press: Handler<MouseDownEvent>,
     drag: Handler<MouseMoveEvent>,
     release: Handler<MouseUpEvent>,
@@ -204,15 +206,18 @@ pub(crate) struct OutputHandlers {
 fn output_handlers(id: &str, ctx: &mut ToolCtx<'_, '_>) -> OutputHandlers {
     let wheel = {
         let id = id.to_owned();
-        ctx.cx.listener(move |this, event: &ScrollEvent, _, cx| {
+        let view = ctx.cx.entity().downgrade();
+        move |event: &ScrollEvent, cx: &mut App| {
             let delta = f32::from(event.delta.pixel_delta(px(TERMINAL_CELL_HEIGHT)).y);
-            let moved = this.command_panels.borrow_mut().scroll(&id, delta);
-            if moved {
-                // The timeline stays where it is while the output scrolls.
-                cx.stop_propagation();
-                cx.notify();
-            }
-        })
+            view.update(cx, |this, cx| {
+                let moved = this.command_panels.borrow_mut().scroll(&id, delta);
+                if moved {
+                    cx.notify();
+                }
+                moved
+            })
+            .unwrap_or(false)
+        }
     };
     let press = {
         let id = id.to_owned();
@@ -272,19 +277,34 @@ fn output_handlers(id: &str, ctx: &mut ToolCtx<'_, '_>) -> OutputHandlers {
 
 /// Takes the wheel over an output for `wheel` before the timeline around it
 /// does: the timeline's bounce takes a wheel event as it is captured, ahead
-/// of anything the output would hear as it bubbles.
+/// of anything the output would hear as it bubbles. A gesture goes by
+/// [`crate::scroll::gesture`], as a nested area's does.
 ///
-/// Gap: gpui-base's `ScrollableMask` is that capture for a `ScrollbarHandle`,
+/// Gap: [`crate::scroll::AreaMask`] is that capture for a `ScrollbarHandle`,
 /// which is read and moved without a context; an output's rows are the
 /// view's, scrolled through it.
-fn wheel_capture(wheel: Handler<ScrollEvent>) -> impl IntoElement {
+fn wheel_capture(key: crate::scroll::gesture::AreaKey, wheel: Wheel) -> impl IntoElement {
+    use crate::scroll::gesture::{self, Turn};
     canvas(
         |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
         move |_, hitbox, window, _| {
             let hitbox = hitbox.id;
             window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
-                if phase.capture() && hitbox.should_handle_scroll(window) {
-                    wheel(event, window, cx);
+                if !(phase.capture() && hitbox.should_handle_scroll(window)) {
+                    return;
+                }
+                let turn = gesture::turn(key, event, window, cx);
+                if turn == Turn::Theirs {
+                    return;
+                }
+                if wheel(event, cx) {
+                    if turn == Turn::Open {
+                        gesture::take(key, event, window, cx);
+                    }
+                    // The timeline stays where it is while the output scrolls.
+                    cx.stop_propagation();
+                } else if turn == Turn::Mine {
+                    cx.stop_propagation();
                 }
             });
         },
@@ -647,6 +667,8 @@ impl Panel {
 
         let watched = screen.watched;
         let output_id = id.to_string();
+        let output_key =
+            crate::scroll::gesture::AreaKey::named(&format!("command-output-{output_id}"));
         let output_bounds = self.output_bounds.clone();
         let focus = self.focus.clone();
         // The rows held for the screen are a guess; when the host's screen
@@ -681,7 +703,7 @@ impl Panel {
                         .on_mouse_up(MouseButton::Left, release)
                         .on_action(copy)
                         .child(output)
-                        .child(wheel_capture(wheel)),
+                        .child(wheel_capture(output_key, wheel)),
                 )
             })
             .when_some(on_cols_change, |panel, on_cols_change| {
