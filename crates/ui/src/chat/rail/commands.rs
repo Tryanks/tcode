@@ -598,6 +598,7 @@ mod tests {
                     output: String::new(),
                     exit_code,
                     status,
+                    changes: Vec::new(),
                 },
             })
         };

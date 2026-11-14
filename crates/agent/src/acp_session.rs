@@ -2172,6 +2172,7 @@ impl State {
                 output: self.tool_output(tool),
                 exit_code: self.exit_code_of(tool),
                 status,
+                changes: Vec::new(),
             },
             acp::ToolKind::Edit | acp::ToolKind::Delete | acp::ToolKind::Move => {
                 let changes = file_changes(tool);
@@ -3229,6 +3230,7 @@ mod tests {
                     output,
                     exit_code,
                     status,
+                    changes: _,
                 } => {
                     assert_eq!(command, "cargo test", "rawInput must survive the patch");
                     assert_eq!(output, "ok");

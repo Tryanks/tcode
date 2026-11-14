@@ -1991,6 +1991,7 @@ mod tests {
                             .into(),
                         exit_code: Some(0),
                         status: agent::ItemStatus::Completed,
+                        changes: Vec::new(),
                     },
                 }),
             )
@@ -2008,6 +2009,7 @@ mod tests {
                         output: String::new(),
                         exit_code: Some(0),
                         status: agent::ItemStatus::Completed,
+                        changes: Vec::new(),
                     },
                 }),
             )
@@ -2141,6 +2143,7 @@ mod tests {
                 output: String::new(),
                 exit_code: None,
                 status: agent::ItemStatus::InProgress,
+                changes: Vec::new(),
             },
         })]);
         let running = topic("run-1", 40);

@@ -415,7 +415,11 @@ impl Activity {
                     output,
                     exit_code,
                     status,
+                    changes,
                 } => {
+                    for change in changes {
+                        push_unique(&mut self.files, change.path.clone());
+                    }
                     self.commands.push(OutlineCommand {
                         command_head: head(command, COMMAND_HEAD_CHARS),
                         exit_code: *exit_code,
@@ -1198,6 +1202,7 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
                 output,
                 exit_code,
                 status,
+                changes: _,
             } => {
                 let exit = exit_code
                     .map(|code| format!("exit {code}"))

@@ -813,6 +813,7 @@ mod tests {
                 output: String::new(),
                 exit_code: (status == ItemStatus::Completed).then_some(0),
                 status,
+                changes: Vec::new(),
             },
         };
         let completed = |turn: &str| AgentEvent::TurnCompleted {
@@ -1031,6 +1032,7 @@ mod tests {
                     output: String::new(),
                     exit_code: None,
                     status: ItemStatus::InProgress,
+                    changes: Vec::new(),
                 },
             }),
         ];

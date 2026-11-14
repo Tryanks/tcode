@@ -1720,6 +1720,7 @@ fn tool_item(id: &str, tool: &PiTool, status: ItemStatus) -> ThreadItem {
                 .and_then(Value::as_i64)
                 .and_then(|code| i32::try_from(code).ok()),
             status,
+            changes: Vec::new(),
         },
         "edit" | "write" => ItemContent::FileChange {
             changes: input
@@ -2622,6 +2623,7 @@ mod tests {
                     output: "hi\n\n\nCommand exited with code 3".into(),
                     exit_code: Some(3),
                     status: ItemStatus::Failed,
+                    changes: Vec::new(),
                 },
                 ItemContent::FileChange {
                     changes: vec![FileChange {

@@ -2204,6 +2204,7 @@ impl Mapper {
                     .and_then(|metadata| metadata["exit"].as_i64())
                     .and_then(|exit| i32::try_from(exit).ok()),
                 status,
+                changes: Vec::new(),
             },
             "edit" | "write" | "patch" => ItemContent::FileChange {
                 changes: file_changes(&tool.name, input, text.as_deref(), metadata),

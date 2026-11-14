@@ -263,6 +263,7 @@ fn kind_activity(entry: &TimelineEntry, live_reasoning: bool, cwd: &Path) -> Act
             output,
             exit_code,
             status,
+            changes: _,
         } => {
             let header = shell::command_header(command, output, *exit_code, *status);
             Activity {
