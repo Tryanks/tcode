@@ -2942,7 +2942,10 @@ impl Actor {
                             .await;
                     }
                 }
-                let usage = self.usage_by_turn.remove(&id);
+                let mut usage = self.usage_by_turn.remove(&id);
+                if let Some(usage) = usage.as_mut() {
+                    usage.duration_ms = turn.get("durationMs").and_then(Value::as_u64);
+                }
                 let checkpoint =
                     (!id.is_empty() && !self.continuations.remove(&id)).then(|| id.clone());
                 self.events
@@ -3147,11 +3150,31 @@ impl Actor {
                     .unwrap_or(false);
                 self.events.emit(AgentEvent::Error { message, fatal }).await;
             }
-            "warning" | "configWarning" | "deprecationNotice" => {
+            "warning" | "guardianWarning" => {
                 if let Some(message) = params.get("message").and_then(Value::as_str) {
                     self.events
                         .emit(AgentEvent::Warning {
                             message: message.into(),
+                        })
+                        .await;
+                }
+            }
+            "configWarning" | "deprecationNotice" => {
+                if let Some(message) = notice_text(params) {
+                    self.events.emit(AgentEvent::Warning { message }).await;
+                }
+            }
+            // The canonical stream has no MCP server state; only a server
+            // that failed to start is said.
+            "mcpServer/startupStatus/updated" => {
+                if params.get("status").and_then(Value::as_str) == Some("failed") {
+                    let said = ["name", "error", "failureReason"]
+                        .iter()
+                        .filter_map(|field| params.get(*field).and_then(Value::as_str))
+                        .collect::<Vec<_>>();
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: format!("MCP server failed to start: {}", said.join(": ")),
                         })
                         .await;
                 }
@@ -4839,6 +4862,27 @@ fn normalize_file_change_diff(change: &mut FileChange) {
         patch.push_str("\n\\ No newline at end of file\n");
     }
     change.diff = Some(patch);
+}
+
+/// The fields of a `ConfigWarningNotification` or `DeprecationNoticeNotification`
+/// (app-server protocol v2, codex-cli 0.169.0), one per line as Codex gave them.
+fn notice_text(params: &Value) -> Option<String> {
+    let mut text = params.get("summary").and_then(Value::as_str)?.to_owned();
+    if let Some(details) = params.get("details").and_then(Value::as_str) {
+        text.push('\n');
+        text.push_str(details);
+    }
+    if let Some(path) = params.get("path").and_then(Value::as_str) {
+        text.push('\n');
+        text.push_str(path);
+        let start = |field| params.pointer(field).and_then(Value::as_u64);
+        if let (Some(line), Some(column)) =
+            (start("/range/start/line"), start("/range/start/column"))
+        {
+            text.push_str(&format!(":{line}:{column}"));
+        }
+    }
+    Some(text)
 }
 
 fn map_usage(value: &Value) -> Option<TokenUsage> {
@@ -7942,6 +7986,59 @@ mod tests {
         });
     }
 
+    /// What Codex says outside a turn's items reaches the user in its own
+    /// words. Shapes are `ConfigWarningNotification`, `DeprecationNoticeNotification`,
+    /// `GuardianWarningNotification` and `McpServerStatusUpdatedNotification` of
+    /// `ServerNotification.json` (`codex app-server generate-json-schema
+    /// --experimental`, codex-cli 0.169.0); the content is invented.
+    #[test]
+    fn notices_outside_a_turn_reach_the_user_as_codex_gave_them() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            for (line, said) in [
+                (
+                    json!({"method": "configWarning", "params": {
+                        "summary": "unknown key quux", "details": "remove it or rename it",
+                        "path": "/home/user/.codex/config.toml",
+                        "range": {"start": {"line": 3, "column": 1},
+                            "end": {"line": 3, "column": 5}}}}),
+                    vec![
+                        "unknown key quux",
+                        "remove it or rename it",
+                        "/home/user/.codex/config.toml:3:1",
+                    ],
+                ),
+                (
+                    json!({"method": "deprecationNotice", "params": {
+                        "summary": "flag frob is going away", "details": null}}),
+                    vec!["flag frob is going away"],
+                ),
+                (
+                    json!({"method": "guardianWarning", "params": {
+                        "threadId": "thread-1", "message": "reviewer is behind"}}),
+                    vec!["reviewer is behind"],
+                ),
+                (
+                    json!({"method": "mcpServer/startupStatus/updated", "params": {
+                        "name": "tracker", "status": "failed", "threadId": "thread-1",
+                        "error": "handshake refused",
+                        "failureReason": "reauthenticationRequired"}}),
+                    vec!["tracker", "handshake refused", "reauthenticationRequired"],
+                ),
+            ] {
+                actor.handle_line(&line.to_string()).await;
+                let AgentEvent::Warning { message } = events.try_recv().unwrap() else {
+                    panic!("{line} gave no warning");
+                };
+                for part in said {
+                    assert!(message.contains(part), "{message:?} lacks {part:?}");
+                }
+            }
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
     #[test]
     fn maps_fixture_envelopes_and_approval_response() {
         smol::block_on(async {
@@ -8001,6 +8098,7 @@ mod tests {
                         used_tokens: Some(12),
                         total_processed_tokens: Some(123),
                         context_window: Some(200000),
+                        duration_ms: Some(1000),
                         ..
                     }),
                     ..
