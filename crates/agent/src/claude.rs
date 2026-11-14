@@ -4323,15 +4323,19 @@ impl Mapper {
             // control schema has Claude Code discard an error and take any
             // other answer for the user's (2.1.323, `request_user_dialog`).
             Some("request_user_dialog") => return Vec::new(),
-            // The Agent SDK's answer to a request it has no handler for.
+            // The Agent SDK's answer to a request it has no handler for
+            // (0.3.323, `sdk.mjs`), which the control schema names a designed
+            // refusal by its `error_code`.
             subtype => {
-                self.outgoing.push(control_error(
+                let mut refusal = control_error(
                     &request_id,
                     &format!(
                         "Unsupported control request subtype: {}",
                         subtype.unwrap_or_default()
                     ),
-                ));
+                );
+                refusal["response"]["error_code"] = json!("unsupported_request");
+                self.outgoing.push(refusal);
                 return Vec::new();
             }
         }
@@ -8524,9 +8528,9 @@ mod tests {
     /// A URL-mode `elicitation` and `mcp_message` are requests of Claude Code
     /// 2.1.323's SDK control schema that Tcode has no way to serve. The Agent
     /// SDK of that version declines an elicitation it has no handler for and
-    /// answers the error "Unsupported control request subtype: …" to a
-    /// request it does not know; a request with no answer holds its tool call
-    /// open for good.
+    /// answers the error "Unsupported control request subtype: …", code
+    /// `unsupported_request`, to a request it does not know (0.3.323,
+    /// `sdk.mjs`); a request with no answer holds its tool call open for good.
     #[test]
     fn a_control_request_tcode_cannot_serve_is_answered() {
         let mut m = Mapper::new();
@@ -8557,7 +8561,7 @@ mod tests {
         assert_eq!(
             m.take_outgoing(),
             [
-                json!({"type":"control_response","response":{"subtype":"error","request_id":"mcp-1","error":"Unsupported control request subtype: mcp_message"}})
+                json!({"type":"control_response","response":{"subtype":"error","request_id":"mcp-1","error":"Unsupported control request subtype: mcp_message","error_code":"unsupported_request"}})
             ]
         );
     }
