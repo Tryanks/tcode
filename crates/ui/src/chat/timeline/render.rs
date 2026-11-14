@@ -1601,6 +1601,9 @@ impl TimelineView {
         let entry = activities[0];
         let recency = AutoActivityRecency::from_newer_activity_count(newer);
         if let Some(edit) = tools::diff::edit(entry, cwd) {
+            if edit.by_command && edit.files.len() > 1 {
+                return vec![self.compose_changed_files(entry, cwd, &edit, recency, window, cx)];
+            }
             return self.compose_edit_rows(entry, cwd, &edit, auto_expand, recency, window, cx);
         }
         let row = self.compose_activity_row(
@@ -1637,6 +1640,54 @@ impl TimelineView {
         self.shared
             .arrive(&key, &SharedString::new_static(site), cx);
         self.shared.element(key, row).into_any_element()
+    }
+
+    /// The one window of the files a command changed, which opens on a
+    /// window per file.
+    fn compose_changed_files(
+        &mut self,
+        entry: &TimelineEntry,
+        cwd: &Path,
+        edit: &tools::diff::Edit,
+        recency: AutoActivityRecency,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = format!("activity-{}", entry.id);
+        let turn = entry.turn;
+        let expanded = self.auto_activity_expanded((turn, &entry.id), &key, false, recency, cx);
+        let detail = match tools::window::fold(&self.motion, &entry.id, expanded, window, cx) {
+            Some(shown) => {
+                let files = self.compose_edit_rows(entry, cwd, edit, false, recency, window, cx);
+                tools::window::Detail::Fold(
+                    shown,
+                    v_flex().w_full().gap_1().children(files).into_any_element(),
+                    self.activity_body_key(entry, edit.status),
+                )
+            }
+            None => tools::window::Detail::Shut,
+        };
+        let entry_id = entry.id.clone();
+        tools::window::tool_window(
+            tools::window::WindowSpec {
+                key: entry.id.clone(),
+                header: tools::diff::files_header(edit),
+                status: edit.status,
+                error: None,
+                elapsed_ms: None,
+                compact: false,
+                copy: Vec::new(),
+                whole_output: None,
+                path: None,
+                hover: self.hover.clone(),
+                motion: self.motion.clone(),
+            },
+            detail,
+            cx.listener(move |this, _, _, cx| {
+                this.toggle_activity_expanded((turn, &entry_id), &key, expanded, cx);
+            }),
+            cx,
+        )
     }
 
     /// An edit's windows, one per file it touched. A harness's own diff

@@ -71,14 +71,24 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             let Some((index, call)) = pending.remove(id) else {
                                 continue;
                             };
+                            let mut changed = None;
                             if let Some(ConvertedEntry::Item {
                                 item, finished_ts, ..
                             }) = entries.get_mut(index)
                             {
-                                item.content = call.finish(block, value.get("toolUseResult"));
+                                let result = value.get("toolUseResult");
+                                item.content = call.finish(block, result);
                                 // The call ran until the row of its result.
                                 *finished_ts = Some(ts);
+                                if matches!(item.content, ItemContent::CommandExecution { .. }) {
+                                    changed = agent::claude::command_changes(&item.id, result);
+                                }
                             }
+                            entries.extend(changed.map(|item| ConvertedEntry::Item {
+                                ts,
+                                finished_ts: None,
+                                item: Box::new(item),
+                            }));
                         }
                     }
                 }

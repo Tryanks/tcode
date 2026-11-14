@@ -3094,6 +3094,10 @@ tools:
       running: "閲覧中"
       done: "閲覧済み"
       asked: "閲覧"
+    change:
+      running: "変更中"
+      done: "変更済み"
+      asked: "変更"
     edit:
       running: "編集中"
       done: "編集済み"

@@ -3087,6 +3087,10 @@ tools:
       running: "查看中"
       done: "已查看"
       asked: "查看"
+    change:
+      running: "更改中"
+      done: "已更改"
+      asked: "更改"
     edit:
       running: "编辑中"
       done: "已编辑"

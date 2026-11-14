@@ -1837,6 +1837,7 @@ impl ToolItem {
                     changes,
                     status: ItemStatus::InProgress,
                     output: None,
+                    command: None,
                 },
             )
         } else {
@@ -1905,6 +1906,7 @@ impl ToolItem {
                     changes,
                     status,
                     output: (!text.is_empty()).then_some(text),
+                    command: None,
                 }
             }
             ToolItem::Tool { name, input } => {
@@ -4007,6 +4009,9 @@ impl Mapper {
                 AgentEvent::ItemCompleted
             };
             let is_subagent = matches!(content, ItemContent::Subagent { .. });
+            let changed = matches!(content, ItemContent::CommandExecution { .. })
+                .then(|| command_changes(&tool_use_id, msg.get("tool_use_result")))
+                .flatten();
             let event = event(ThreadItem {
                 id: tool_use_id.clone(),
                 parent_item_id,
@@ -4017,6 +4022,7 @@ impl Mapper {
             } else {
                 out.push(event);
             }
+            out.extend(changed.map(AgentEvent::ItemCompleted));
             if backgrounded {
                 out.push(AgentEvent::ItemBackgrounded {
                     item_id: tool_use_id.clone(),
@@ -5438,6 +5444,56 @@ fn file_changes(name: &str, input: &Value) -> Vec<FileChange> {
 }
 
 /// Render Claude's structured edit hunks as a unified diff body.
+/// The file change that follows a command whose Bash result carries
+/// `bashEditDiff`: the files Claude Code saw change while it ran. Those it
+/// gives a diff for come first (`files`), then the rest of `changedFiles`,
+/// whose operation it does not say.
+pub fn command_changes(command_id: &str, tool_use_result: Option<&Value>) -> Option<ThreadItem> {
+    let edit_diff = tool_use_result?.get("bashEditDiff")?;
+    let list = |key: &str| edit_diff.get(key).and_then(Value::as_array);
+    let flag = |file: &Value, key: &str| file.get(key).and_then(Value::as_bool) == Some(true);
+    let mut changes: Vec<FileChange> = list("files")
+        .into_iter()
+        .flatten()
+        .filter_map(|file| {
+            Some(FileChange {
+                path: file.get("filePath")?.as_str()?.to_owned(),
+                kind: if flag(file, "created") {
+                    FileChangeKind::Create
+                } else if flag(file, "deleted") {
+                    FileChangeKind::Delete
+                } else {
+                    FileChangeKind::Modify
+                },
+                diff: file.get("hunks").and_then(render_structured_patch),
+            })
+        })
+        .collect();
+    for path in list("changedFiles")
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if !changes.iter().any(|change| change.path == path) {
+            changes.push(FileChange {
+                path: path.to_owned(),
+                kind: FileChangeKind::Modify,
+                diff: None,
+            });
+        }
+    }
+    (!changes.is_empty()).then(|| ThreadItem {
+        id: format!("{command_id}:changes"),
+        parent_item_id: None,
+        content: ItemContent::FileChange {
+            changes,
+            status: ItemStatus::Completed,
+            output: None,
+            command: Some(command_id.to_owned()),
+        },
+    })
+}
+
 fn render_structured_patch(value: &Value) -> Option<String> {
     let hunks = value.as_array()?;
     let mut rendered = Vec::new();
@@ -7176,6 +7232,7 @@ mod tests {
                 }],
                 status: ItemStatus::Completed,
                 output: Some("The file /home/user/project/a.txt has been updated successfully. (file state is current in your context — no need to Read it back)".into()),
+                command: None,
             }
         );
         // A subagent's tool result comes without the output object, so its
@@ -7225,6 +7282,67 @@ mod tests {
                 status: ItemStatus::Failed,
             }
         );
+    }
+
+    /// A Bash result's `bashEditDiff` names the files the command changed:
+    /// `files` with hunks and `created`/`deleted`, and `changedFiles` for
+    /// those it gives no diff (the Bash `tool_response` table of the hooks
+    /// reference, as Claude Code 2.1.323 writes it on the stream; content
+    /// invented). They follow the command as one file change that names it.
+    #[test]
+    fn the_files_a_command_changed_follow_it_as_one_file_change() {
+        let mut mapper = Mapper::new();
+        feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg_sed","content":[{"type":"tool_use","id":"toolu_sed","name":"Bash","input":{"command":"./regenerate.sh"}}]}}"#,
+        );
+        let completed = feed(
+            &mut mapper,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_sed","content":"","is_error":false}]},"tool_use_result":{"stdout":"","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false,"bashEditDiff":{"files":[{"filePath":"/work/src/lib.rs","hunks":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":2,"lines":[" one","+two"]}]},{"filePath":"/work/new.rs","hunks":[{"oldStart":0,"oldLines":0,"newStart":1,"newLines":1,"lines":["+new"]}],"created":true},{"filePath":"/work/old.rs","hunks":[{"oldStart":1,"oldLines":1,"newStart":0,"newLines":0,"lines":["-old"]}],"deleted":true}],"moreFiles":1,"changedFiles":["/work/src/lib.rs","/work/new.rs","/work/old.rs","/work/generated.rs"]}}}"#,
+        );
+        let [
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: command_id,
+                content: ItemContent::CommandExecution { .. },
+                ..
+            }),
+            AgentEvent::ItemCompleted(changed),
+        ] = completed.as_slice()
+        else {
+            panic!("{completed:?}");
+        };
+        let change = |path: &str, kind, diff: Option<&str>| FileChange {
+            path: path.into(),
+            kind,
+            diff: diff.map(str::to_owned),
+        };
+        assert_eq!(
+            changed.content,
+            ItemContent::FileChange {
+                changes: vec![
+                    change(
+                        "/work/src/lib.rs",
+                        FileChangeKind::Modify,
+                        Some("@@ -1,1 +1,2 @@\n one\n+two"),
+                    ),
+                    change(
+                        "/work/new.rs",
+                        FileChangeKind::Create,
+                        Some("@@ -0,0 +1,1 @@\n+new"),
+                    ),
+                    change(
+                        "/work/old.rs",
+                        FileChangeKind::Delete,
+                        Some("@@ -1,1 +0,0 @@\n-old"),
+                    ),
+                    change("/work/generated.rs", FileChangeKind::Modify, None),
+                ],
+                status: ItemStatus::Completed,
+                output: None,
+                command: Some(command_id.clone()),
+            }
+        );
+        assert_ne!(&changed.id, command_id);
     }
 
     /// A Read is a read of the file it names: its lines as the output object

@@ -1212,6 +1212,7 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
                 changes,
                 status,
                 output,
+                command: _,
             } => (
                 "file_change",
                 changes
@@ -1738,6 +1739,7 @@ mod tests {
                 }],
                 status: ItemStatus::Completed,
                 output: None,
+                command: None,
             },
         ))
     }

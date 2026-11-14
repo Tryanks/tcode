@@ -4291,6 +4291,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             // `FileChangeThreadItem` (v2, 0.167.1) says nothing of the patch's
             // result beyond its status.
             output: None,
+            command: None,
         },
         "mcpToolCall" | "dynamicToolCall" => {
             let result = item

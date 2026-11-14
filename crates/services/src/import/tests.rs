@@ -615,6 +615,7 @@ fn readme_revised(status: ItemStatus) -> Option<ItemContent> {
         }],
         status,
         output: Some("Success. Updated the following files:\nM README.md\n".into()),
+        command: None,
     })
 }
 
@@ -854,6 +855,7 @@ fn a_claude_transcript_imports_as_claude_recorded_it() {
                 output: Some(
                     "The file /work/example/README.md has been updated successfully.".into()
                 ),
+                command: None,
             }),
             Some(ItemContent::Plan {
                 markdown: "Revise the readme:\n\n1. Reword it.".into(),

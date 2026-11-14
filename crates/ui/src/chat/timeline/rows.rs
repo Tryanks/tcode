@@ -470,7 +470,9 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             changes,
             status,
             output,
+            command,
         }) => {
+            command.is_some().hash(hash);
             changes.len().hash(hash);
             for change in changes {
                 change.path.len().hash(hash);

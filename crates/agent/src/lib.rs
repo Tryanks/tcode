@@ -3196,6 +3196,11 @@ pub enum ItemContent {
         /// its tool returned, or why it failed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
+        /// The command item whose run changed these files, when the harness
+        /// saw them change while it ran instead of a tool asking for each
+        /// change (Claude Code's `bashEditDiff`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
     },
     ToolCall {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]

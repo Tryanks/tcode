@@ -2369,6 +2369,7 @@ impl Mapper {
                 } else {
                     error.or(text)
                 },
+                command: None,
             },
             "subagent" => ItemContent::Subagent {
                 agent_type: input["agent"].as_str().unwrap_or_default().to_owned(),

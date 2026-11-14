@@ -2241,6 +2241,7 @@ impl State {
                     changes,
                     status,
                     output: (!output.is_empty()).then_some(output),
+                    command: None,
                 }
             }
             _ => tool_call_content(tool, status, self.tool_output(tool, false)),

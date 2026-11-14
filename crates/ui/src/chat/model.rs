@@ -1143,6 +1143,7 @@ pub(in crate::chat) mod tests {
                     changes: vec![],
                     status: ItemStatus::Completed,
                     output: None,
+                    command: None,
                 }),
             ),
             command("cmd-2"),
@@ -1260,6 +1261,7 @@ pub(in crate::chat) mod tests {
                     .collect(),
                 status: ItemStatus::Completed,
                 output: None,
+                command: None,
             }),
         )
     }

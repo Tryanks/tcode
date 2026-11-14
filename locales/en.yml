@@ -3094,6 +3094,10 @@ tools:
       running: "Viewing"
       done: "Viewed"
       asked: "View"
+    change:
+      running: "Changing"
+      done: "Changed"
+      asked: "Change"
     edit:
       running: "Editing"
       done: "Edited"
