@@ -824,7 +824,7 @@ pub struct ThreadWakes {
     /// When its earliest scheduled message is due (unix seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_at: Option<u64>,
-    /// Its `notify_when` watches on other threads.
+    /// The threads its `notify_when` watches follow.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub notify: u32,
 }

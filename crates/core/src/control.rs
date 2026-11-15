@@ -376,14 +376,13 @@ pub enum WatchEvent {
     PrChanged,
 }
 
-/// A wake the caller asked for on other threads' events.
+/// A wake the caller asked for on other threads' events. Each thread in it wakes the caller
+/// once and then leaves it, so a watch nobody cancels cannot keep waking a thread for good.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlWatch {
     pub id: String,
     pub thread_ids: Vec<String>,
     pub events: BTreeSet<WatchEvent>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub once: bool,
     /// The space whose member's turn asked for it: what it wakes runs under
     /// that space's policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]

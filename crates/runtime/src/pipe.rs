@@ -1021,6 +1021,10 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             app.dismiss_settle_suggestion(&session_id, cx)
         }
         Command::RevokeSelfSettle { session_id } => app.revoke_self_settle(&session_id, cx),
+        Command::StopWatchingThreads {
+            session_id,
+            thread_ids,
+        } => app.stop_watching_threads(&session_id, &thread_ids, cx),
         Command::CancelAgent { session_id } => app.cancel_child(&session_id, cx),
         Command::SetAutoSettle {
             session_id,

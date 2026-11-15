@@ -1612,8 +1612,11 @@ impl AppState {
             .collect();
         for mut meta in changed {
             self.end_pull_request_watches(&mut meta);
+            // An archived thread runs no turn a callback could wake.
+            meta.control_watches.clear();
             self.persist_meta(&meta, cx);
         }
+        self.end_control_watches_on(&ids.iter().map(String::as_str).collect(), cx);
     }
 
     /// Rename a thread (context-menu inline edit). Empty titles are rejected.
@@ -1705,6 +1708,7 @@ impl AppState {
         }
         self.sessions
             .retain(|meta| !deleted.contains(meta.id.as_str()));
+        self.end_control_watches_on(&deleted, cx);
         self.thread_activity
             .retain(|id, _| !deleted.contains(id.as_str()));
         self.settlement_deadlines

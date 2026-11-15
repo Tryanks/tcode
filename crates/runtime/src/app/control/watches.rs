@@ -9,7 +9,6 @@ struct WatchAnswer<'a> {
     id: &'a str,
     thread_ids: &'a [String],
     events: &'a BTreeSet<WatchEvent>,
-    once: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     skipped: Vec<BatchResult>,
 }
@@ -20,7 +19,6 @@ impl<'a> From<&'a ControlWatch> for WatchAnswer<'a> {
             id: &watch.id,
             thread_ids: &watch.thread_ids,
             events: &watch.events,
-            once: watch.once,
             skipped: Vec::new(),
         }
     }
@@ -43,6 +41,20 @@ fn wire_name(value: impl Serialize) -> String {
 /// blank line, which is where the notice is split again (`tcode_core::notice`).
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Drop from each watch the threads `ends` names for it, and the watches left following none.
+fn unwatch(watches: &mut Vec<ControlWatch>, ends: impl Fn(&ControlWatch, &str) -> bool) {
+    for watch in watches.iter_mut() {
+        let kept = watch
+            .thread_ids
+            .iter()
+            .filter(|id| !ends(watch, id))
+            .cloned()
+            .collect();
+        watch.thread_ids = kept;
+    }
+    watches.retain(|watch| !watch.thread_ids.is_empty());
 }
 
 /// `[<status>, ]turn <n> from "<opening message>"`: which turn ended, numbered as `outline`
@@ -124,7 +136,6 @@ impl AppState {
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             thread_ids,
             events: params.events.into_iter().collect(),
-            once: params.once.unwrap_or(false),
             space: cx.space.clone(),
         };
         let answer = serde_json::json!(WatchAnswer {
@@ -175,7 +186,7 @@ impl AppState {
     }
 
     /// Wake every thread that asked to hear `event` on `target_id`, once per watcher
-    /// however many of its watches match; a `once` watch is gone after it fires. A thread
+    /// however many of its watches match, and drop `target_id` from those watches. A thread
     /// hears its own events only when it named itself.
     pub(in crate::app) fn fire_control_watches(
         &mut self,
@@ -223,16 +234,45 @@ impl AppState {
                 .iter()
                 .filter(|watch| fires(watch))
                 .find_map(|watch| watch.space.clone());
-            let before = meta.control_watches.len();
-            meta.control_watches
-                .retain(|watch| !(watch.once && fires(watch)));
-            if meta.control_watches.len() != before {
-                self.store_meta(meta, cx);
-            }
+            unwatch(&mut meta.control_watches, |watch, id| {
+                id == target_id && watch.events.contains(&event)
+            });
+            self.store_meta(meta, cx);
             let mut watch_cx = cx.clone();
             watch_cx.space = space;
             self.deliver_orchestrate_callback_to_parent(&watcher, text.clone(), &mut watch_cx);
         }
+    }
+
+    /// Stop every thread watching `ids`, archived or deleted threads that show no further
+    /// event to report.
+    pub(in crate::app) fn end_control_watches_on(&mut self, ids: &HashSet<&str>, cx: &mut HostCx) {
+        let changed: Vec<SessionMeta> = self
+            .sessions
+            .iter()
+            .filter_map(|held| {
+                let mut meta = held.clone();
+                unwatch(&mut meta.control_watches, |_, id| ids.contains(id));
+                (meta.control_watches != held.control_watches).then_some(meta)
+            })
+            .collect();
+        for meta in changed {
+            self.store_meta(meta, cx);
+        }
+    }
+
+    /// The user's stop: `session_id` no longer watches `thread_ids`.
+    pub fn stop_watching_threads(
+        &mut self,
+        session_id: &str,
+        thread_ids: &[String],
+        cx: &mut HostCx,
+    ) {
+        self.change_meta(session_id, cx, |meta| {
+            unwatch(&mut meta.control_watches, |_, id| {
+                thread_ids.iter().any(|stopped| stopped == id)
+            });
+        });
     }
 
     /// `: <what happened>`, read from the target as it stands when the event fires.

@@ -577,6 +577,9 @@ struct ThreadFollowUp(ThreadKey, bool);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_thread, no_json)]
 struct ThreadPark(ThreadKey, bool);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
+struct ThreadStopWatches(ThreadKey);
 
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode, no_json)]
@@ -2139,6 +2142,21 @@ impl SessionsSidebar {
         if let Some(store) = self.store_of(&action.0.host) {
             store.update(cx, |store, _| {
                 store.set_parked(action.0.session_id.clone(), action.1)
+            });
+        }
+    }
+
+    fn on_stop_watches(
+        &mut self,
+        action: &ThreadStopWatches,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(store) = self.store_of(&action.0.host) {
+            store.update(cx, |store, _| {
+                let session_id = action.0.session_id.clone();
+                let watched = store.watched_threads(&session_id);
+                store.stop_watching_threads(session_id, watched)
             });
         }
     }
@@ -4431,6 +4449,7 @@ impl SessionsSidebar {
         let auto_settle_enabled = state.auto_settle_enabled;
         let follow_up = meta.follow_up.is_some();
         let parked = meta.parked_at.is_some();
+        let watching = state.wakes.notify > 0;
         let hover = self.hover.clone();
         let row_key = state.row_key.clone();
         let grant = crate::control::thread_grant_line(&store.read(cx).settings().control, meta);
@@ -4559,6 +4578,12 @@ impl SessionsSidebar {
                     .into_owned(),
                     Box::new(ThreadPark(id.clone(), !parked)),
                 )
+                .when(watching, |menu| {
+                    menu.menu(
+                        crate::tr!("sidebar.ctx_stop_watches").into_owned(),
+                        Box::new(ThreadStopWatches(id.clone())),
+                    )
+                })
                 .separator()
                 .label(crate::tr!("sidebar.ctx_auto_settle"))
                 .menu_with_check(
@@ -5900,6 +5925,7 @@ impl SessionsSidebar {
             .on_action(cx.listener(Self::on_auto_settle))
             .on_action(cx.listener(Self::on_follow_up))
             .on_action(cx.listener(Self::on_park))
+            .on_action(cx.listener(Self::on_stop_watches))
             .on_action(cx.listener(Self::on_make_active))
             .on_action(cx.listener(Self::on_pin))
             .on_action(cx.listener(Self::on_unpin))
@@ -6945,6 +6971,7 @@ impl Render for SessionsSidebar {
         .on_action(cx.listener(Self::on_auto_settle))
         .on_action(cx.listener(Self::on_follow_up))
         .on_action(cx.listener(Self::on_park))
+        .on_action(cx.listener(Self::on_stop_watches))
         .on_action(cx.listener(Self::on_make_active))
         .on_action(cx.listener(Self::on_pin))
         .on_action(cx.listener(Self::on_unpin))
