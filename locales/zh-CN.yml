@@ -1780,8 +1780,6 @@ web_auth:
 
 project_icon:
   title: "更改项目图标"
-  action: "更改 %{project} 的图标"
-  action_on: "更改 %{host} 上 %{project} 的图标"
   search: "筛选文件夹和图片…"
   this_machine: "本机"
   project_folder: "项目文件夹"

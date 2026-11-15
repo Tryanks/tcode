@@ -1787,8 +1787,6 @@ web_auth:
 
 project_icon:
   title: "プロジェクトのアイコンを変更"
-  action: "%{project} のアイコンを変更"
-  action_on: "%{host} の %{project} のアイコンを変更"
   search: "フォルダーと画像を絞り込み…"
   this_machine: "このマシン"
   project_folder: "プロジェクトフォルダー"
