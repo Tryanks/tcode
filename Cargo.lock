@@ -12149,6 +12149,7 @@ dependencies = [
  "tcode-ui",
  "url",
  "wayland-client",
+ "wayland-protocols",
  "windows 0.62.2",
 ]
 

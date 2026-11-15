@@ -25,6 +25,8 @@ use tcode_ui::widgets::button::{Button, ButtonVariants as _};
 
 mod editor;
 mod migration;
+#[cfg(target_os = "linux")]
+mod wayland_blur;
 
 /// macOS vibrancy can be disabled with `TCODE_NO_VIBRANCY=1` as a diagnostic
 /// escape hatch (opaque window + flattened palette).
@@ -32,63 +34,24 @@ fn vibrancy_enabled() -> bool {
     cfg!(target_os = "macos") && !std::env::var("TCODE_NO_VIBRANCY").is_ok_and(|v| v == "1")
 }
 
-/// GPUI 0.1.13 does not say whether its Linux backend bound a blur protocol,
-/// so probe the Wayland registry here. Drop this once GPUI exposes it.
-#[cfg(target_os = "linux")]
-fn linux_blur_available() -> bool {
-    use std::sync::OnceLock;
-    use wayland_client::{
-        Connection, Dispatch, QueueHandle,
-        globals::{GlobalListContents, registry_queue_init},
-        protocol::wl_registry,
-    };
-
-    struct Registry;
-    impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Registry {
-        fn event(
-            _: &mut Self,
-            _: &wl_registry::WlRegistry,
-            _: wl_registry::Event,
-            _: &GlobalListContents,
-            _: &Connection,
-            _: &QueueHandle<Self>,
-        ) {
-        }
+/// Whether the window's system material is a compositor blur: Windows
+/// Acrylic, or a Wayland compositor that blurs behind the window. GPUI's X11
+/// `Blurred` is only a transparent window, so X11 never counts.
+fn compositor_blur(cx: &App) -> bool {
+    #[cfg(target_os = "linux")]
+    if cx.compositor_name() == "Wayland" {
+        return wayland_blur::available();
     }
-
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        if !std::env::var_os("WAYLAND_DISPLAY").is_some_and(|display| !display.is_empty()) {
-            return false;
-        }
-        let Ok(connection) = Connection::connect_to_env() else {
-            return false;
-        };
-        let Ok((globals, _queue)) = registry_queue_init::<Registry>(&connection) else {
-            return false;
-        };
-        globals.contents().with_list(|globals| {
-            globals.iter().any(|global| {
-                matches!(
-                    global.interface.as_str(),
-                    "ext_background_effect_manager_v1" | "org_kde_kwin_blur_manager"
-                )
-            })
-        })
-    })
+    let _ = cx;
+    cfg!(target_os = "windows")
 }
 
-#[cfg(not(target_os = "linux"))]
-fn linux_blur_available() -> bool {
-    false
+fn translucent_canvas_enabled(cx: &App) -> bool {
+    compositor_blur(cx) || vibrancy_enabled()
 }
 
-fn translucent_canvas_enabled() -> bool {
-    cfg!(target_os = "windows") || linux_blur_available() || vibrancy_enabled()
-}
-
-fn main_window_background() -> WindowBackgroundAppearance {
-    if cfg!(target_os = "windows") || linux_blur_available() {
+fn main_window_background(cx: &App) -> WindowBackgroundAppearance {
+    if compositor_blur(cx) {
         WindowBackgroundAppearance::Blurred
     } else if vibrancy_enabled() {
         // `run_shell` slides Liquid Glass under a transparent window; GPUI's
@@ -331,9 +294,9 @@ fn window_options(cx: &App, throttle_inactive: bool) -> WindowOptions {
         // on whatever its compositor/backend already chose.)
         window_decorations: cfg!(target_os = "windows").then_some(WindowDecorations::Client),
         // Persistent windows use the platform's system material:
-        // macOS sidebar vibrancy, Windows Acrylic, Linux Wayland compositor
-        // blur when the compositor advertises it, or an opaque fallback.
-        window_background: main_window_background(),
+        // macOS sidebar vibrancy, Windows Acrylic, a Wayland compositor's
+        // blur, or an opaque fallback.
+        window_background: main_window_background(cx),
         ..Default::default()
     };
     // gpui reads the inactive-window frame cap only as it creates the window,
@@ -786,10 +749,10 @@ fn main() {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let application_fonts: Vec<Cow<'static, [u8]>> = vec![Cow::Borrowed(assets::DM_SANS)];
         // Translucent canvas colors composite over macOS vibrancy, Windows
-        // Acrylic and a Linux Wayland compositor blur. Opaque windows flatten
+        // Acrylic and a Wayland compositor's blur. Opaque windows flatten
         // them to the solid base; macOS fullscreen applies the same fallback in
         // material::opaque_canvas.
-        let theme_json: Cow<'static, str> = if translucent_canvas_enabled() {
+        let theme_json: Cow<'static, str> = if translucent_canvas_enabled(cx) {
             Cow::Borrowed(tcode_ui::THEME_JSON)
         } else {
             Cow::Owned(tcode_ui::flattened_theme_json())
