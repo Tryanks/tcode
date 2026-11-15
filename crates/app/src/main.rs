@@ -26,6 +26,9 @@ use tcode_ui::widgets::button::{Button, ButtonVariants as _};
 mod editor;
 mod migration;
 
+/// The Wayland app id and X11 `WM_CLASS` of every Linux window. The desktop
+/// finds the window's name and icon through it, so it must stay the
+/// `StartupWMClass` and file name of the `.desktop` entry `release.yml` writes.
 const APP_ID: &str = "com.tryanks.tcode";
 
 /// macOS vibrancy can be disabled with `TCODE_NO_VIBRANCY=1` as a diagnostic
@@ -216,6 +219,7 @@ fn exit_with_startup_failure(error: std::io::Error) -> ! {
         cx.on_app_quit(|_| async { std::process::exit(1) }).detach();
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(420.), px(160.)), cx)),
+            app_id: Some(APP_ID.to_owned()),
             ..Default::default()
         };
         let opened = cx.open_window(options, |_, cx| {
