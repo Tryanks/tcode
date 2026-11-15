@@ -10,7 +10,8 @@ use crate::widgets::menu::{ContextMenuExt as _, CopyText, OpenUrl, PopupMenu};
 use gpui::{
     Action, AnyElement, App, Bounds, Element, ElementId, Entity, GlobalElementId, Hitbox,
     HitboxBehavior, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, ParentElement as _, Pixels, StyleRefinement, Styled, Window, div,
+    LongPressEvent, MouseButton, MouseDownEvent, ParentElement as _, Pixels, StyleRefinement,
+    Styled, TouchPhase, Window, div,
 };
 use gpui_base::StyledExt as _;
 use serde::Deserialize;
@@ -188,6 +189,7 @@ impl Element for MarkdownView {
             });
         }
         let focus_handle = state.read(cx).focus_handle.clone();
+        let compact = crate::window_seam::window_is_compact(window, cx);
         let element = div()
             .key_context(super::CONTEXT)
             .track_focus(&focus_handle)
@@ -235,9 +237,15 @@ impl Element for MarkdownView {
                             markdown.base_dir().map(Path::to_path_buf),
                         )
                     };
+                    // A phone's menu opens by a long press, and holds only
+                    // what lies under the finger: the selection has its own
+                    // edit menu, and a press on plain text selects instead.
+                    if compact && pending.is_none() {
+                        return menu;
+                    }
                     let menu = match selected {
-                        Some(selected) => menu.selection_items(selected, true),
-                        None => menu,
+                        Some(selected) if !compact => menu.selection_items(selected, true),
+                        _ => menu,
                     };
                     let menu = match pending {
                         None => menu,
@@ -329,11 +337,12 @@ impl Element for MarkdownView {
                         }
                     };
                     match &extension {
-                        Some(extension) => extension(menu.separator(), window, cx),
-                        None => menu,
+                        Some(extension) if !compact => extension(menu.separator(), window, cx),
+                        _ => menu,
                     }
                 }
             })
+            .touch(compact)
             .into_any_element();
         let mut element = match state.read(cx).own_document() {
             Some(document) => SelectionArea::new(&document, element)
@@ -379,15 +388,27 @@ impl Element for MarkdownView {
         cx: &mut App,
     ) {
         let hitbox = &prepaint.hitbox;
-        // Capture-phase so this runs before the Inline children's bubble-phase
-        // handlers repopulate the pending link: a right-click on a non-link
-        // area must not resurface the previous link's context menu.
+        // Ahead of the children, which record what lies under the press: a
+        // press on a non-link area must not resurface the previous link's
+        // context menu.
         window.on_mouse_event({
             let hitbox = hitbox.clone();
             let state = request_layout.0.clone();
             move |event: &MouseDownEvent, phase, window, cx| {
                 if phase.capture()
                     && event.button == MouseButton::Right
+                    && hitbox.is_hovered(window)
+                {
+                    state.update(cx, |state, cx| state.set_pending_context(None, cx));
+                }
+            }
+        });
+        window.on_mouse_event({
+            let hitbox = hitbox.clone();
+            let state = request_layout.0.clone();
+            move |event: &LongPressEvent, phase, window, cx| {
+                if phase.capture()
+                    && event.phase == TouchPhase::Started
                     && hitbox.is_hovered(window)
                 {
                     state.update(cx, |state, cx| state.set_pending_context(None, cx));

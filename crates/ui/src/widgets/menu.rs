@@ -694,68 +694,69 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
         let builder = self.builder;
         let touch = self.touch;
         let reveal = self.reveal;
-        let open = Rc::new(
-            move |position: Point<Pixels>,
-                  long_press: bool,
+        let build = Rc::new(move |window: &mut Window, cx: &mut App| {
+            let builder = builder.clone();
+            PopupMenu::build(window, cx, |mut menu, window, cx| {
+                menu.touch = touch;
+                builder(menu, window, cx)
+            })
+        });
+        let present = Rc::new(
+            move |menu: Entity<PopupMenu>,
+                  position: Point<Pixels>,
                   state: Entity<ContextMenuState>,
                   window: &mut Window,
                   cx: &mut App| {
-                let builder = builder.clone();
-                // Deeper bubble handlers have already run, but entity updates
-                // they queued may not be applied yet; build after this event
-                // settles so the builder reads their state.
-                window.defer(cx, move |window, cx| {
-                    let menu = PopupMenu::build(window, cx, |mut menu, window, cx| {
-                        menu.touch = touch;
-                        builder(menu, window, cx)
-                    });
-                    // A builder can decide there is nothing to offer (e.g. a
-                    // right-click on non-link Markdown text): open nothing.
-                    if menu.read(cx).is_empty() {
-                        return;
-                    }
-                    if long_press {
-                        crate::haptics::long_press();
-                    }
-                    let previous_focus = window.focused(cx);
-                    let menu_focus = menu.focus_handle(cx);
-                    let deferred = gpui_base::GlobalState::register_deferred_popover(cx);
-                    // Weak: the subscription is stored on `state`, so a strong
-                    // capture would keep it, and its deferred registration,
-                    // alive after the trigger unmounts.
-                    let subscription = window.subscribe(&menu, cx, {
-                        let state = state.downgrade();
-                        move |_, _: &DismissEvent, window, cx| {
-                            let _ = state.update(cx, |state, _| {
-                                state.closing = true;
-                                state._deferred = None;
-                            });
-                            if menu_focus.contains_focused(window, cx)
-                                && let Some(previous) = &previous_focus
-                            {
-                                previous.focus(window, cx);
-                            }
-                            window.refresh();
+                let previous_focus = window.focused(cx);
+                let menu_focus = menu.focus_handle(cx);
+                let deferred = gpui_base::GlobalState::register_deferred_popover(cx);
+                // Weak: the subscription is stored on `state`, so a strong
+                // capture would keep it, and its deferred registration,
+                // alive after the trigger unmounts.
+                let subscription = window.subscribe(&menu, cx, {
+                    let state = state.downgrade();
+                    move |_, _: &DismissEvent, window, cx| {
+                        let _ = state.update(cx, |state, _| {
+                            state.closing = true;
+                            state._deferred = None;
+                        });
+                        if menu_focus.contains_focused(window, cx)
+                            && let Some(previous) = &previous_focus
+                        {
+                            previous.focus(window, cx);
                         }
-                    });
-                    menu.focus_handle(cx).focus(window, cx);
-                    state.update(cx, |state, _| {
-                        state.menu = Some(menu);
-                        state.closing = false;
-                        state.position = position;
-                        state._subscription = Some(subscription);
-                        state._deferred = Some(deferred);
-                    });
-                    window.refresh();
+                        window.refresh();
+                    }
                 });
+                menu.focus_handle(cx).focus(window, cx);
+                state.update(cx, |state, _| {
+                    state.menu = Some(menu);
+                    state.closing = false;
+                    state.position = position;
+                    state._subscription = Some(subscription);
+                    state._deferred = Some(deferred);
+                });
+                window.refresh();
             },
         );
         let mut trigger = self.trigger.on_mouse_down(MouseButton::Right, {
             let state = state.clone();
-            let open = open.clone();
+            let (build, present) = (build.clone(), present.clone());
             move |event: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
-                open(event.position, false, state.clone(), window, cx);
+                let (build, present) = (build.clone(), present.clone());
+                let (position, state) = (event.position, state.clone());
+                // Deeper bubble handlers have already run, but entity updates
+                // they queued may not be applied yet; build after this event
+                // settles so the builder reads their state.
+                window.defer(cx, move |window, cx| {
+                    let menu = build(window, cx);
+                    // A builder can decide there is nothing to offer (e.g. a
+                    // right-click on non-link Markdown text): open nothing.
+                    if !menu.read(cx).is_empty() {
+                        present(menu, position, state, window, cx);
+                    }
+                });
             }
         });
         if touch {
@@ -766,21 +767,31 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                     move |bounds, _, window, _| {
                         window.on_mouse_event(
                             move |event: &gpui::LongPressEvent, phase, window, cx| {
-                                if phase == gpui::DispatchPhase::Bubble
-                                    && event.phase == gpui::TouchPhase::Started
-                                    && bounds.contains(&event.position)
+                                if phase != gpui::DispatchPhase::Bubble
+                                    || event.phase != gpui::TouchPhase::Started
+                                    || !bounds.contains(&event.position)
                                 {
-                                    window.capture_long_press(&state);
-                                    window.prevent_default();
-                                    cx.stop_propagation();
-                                    open(event.position, true, state.clone(), window, cx);
+                                    return;
                                 }
+                                // Built now, ahead of what lies under the
+                                // finger: a menu with nothing to offer leaves
+                                // the press to it (a long press on Markdown
+                                // text selects the word).
+                                let menu = build(window, cx);
+                                if menu.read(cx).is_empty() {
+                                    return;
+                                }
+                                window.capture_long_press(&state);
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                crate::haptics::long_press();
+                                present(menu, event.position, state.clone(), window, cx);
                             },
                         );
                     },
                 )
                 .absolute()
-                .size_full(),
+                .inset_0(),
             );
         }
         trigger = trigger.child(dismissal.release_listener());
