@@ -316,6 +316,7 @@ impl AppState {
                 | Command::SetParked { .. }
                 | Command::DismissSettleSuggestion { .. }
                 | Command::RevokeSelfSettle { .. }
+                | Command::StopWatchingThreads { .. }
         ) {
             return if self.sessions.iter().any(|meta| meta.id == session_id)
                 || self.resident(session_id).is_some()

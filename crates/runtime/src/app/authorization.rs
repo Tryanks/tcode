@@ -410,6 +410,7 @@ impl AppState {
                 | Command::SetParked { session_id, .. }
                 | Command::DismissSettleSuggestion { session_id }
                 | Command::RevokeSelfSettle { session_id }
+                | Command::StopWatchingThreads { session_id, .. }
                 | Command::CancelAgent { session_id }
                 | Command::UnsettleSession { session_id }
                 | Command::SetAutoSettle { session_id, .. }

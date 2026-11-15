@@ -459,6 +459,11 @@ pub enum Command {
     RevokeSelfSettle {
         session_id: String,
     },
+    /// Stop the thread's `notify_when` watches following `thread_ids`.
+    StopWatchingThreads {
+        session_id: String,
+        thread_ids: Vec<String>,
+    },
     /// Orchestrate `cancel` for a dispatched child: stop it without
     /// delivering its result.
     CancelAgent {
@@ -812,6 +817,7 @@ impl Command {
             | Self::SetParked { session_id, .. }
             | Self::DismissSettleSuggestion { session_id }
             | Self::RevokeSelfSettle { session_id }
+            | Self::StopWatchingThreads { session_id, .. }
             | Self::CancelAgent { session_id }
             | Self::UnsettleSession { session_id, .. }
             | Self::PinSession { session_id, .. }

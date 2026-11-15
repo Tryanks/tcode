@@ -2459,6 +2459,23 @@ impl WorkspaceStore {
             .collect();
     }
 
+    /// The threads `session_id`'s `notify_when` watches follow, in the order it first named
+    /// them.
+    pub(crate) fn watched_threads(&self, session_id: &str) -> Vec<String> {
+        let mut threads: Vec<String> = Vec::new();
+        for id in self
+            .thread_meta(session_id)
+            .into_iter()
+            .flat_map(|meta| &meta.control_watches)
+            .flat_map(|watch| &watch.thread_ids)
+        {
+            if !threads.contains(id) {
+                threads.push(id.clone());
+            }
+        }
+        threads
+    }
+
     /// The thread's links as its index entry carries them.
     pub fn pull_requests(
         &self,

@@ -356,7 +356,8 @@ pub use wire::{
 // a file the harness reports changed without saying how. A user-input
 // question carries optional, set when the asker accepts it left unanswered.
 // SpaceInfo carries hidden_from_threads, set by SpaceAction
-// set_hidden_from_threads.
+// set_hidden_from_threads. The protocol adds the StopWatchingThreads command,
+// and ThreadWakes' notify counts the threads watched rather than the watches.
 pub const PROTOCOL_VERSION: u32 = 29;
 
 #[cfg(test)]

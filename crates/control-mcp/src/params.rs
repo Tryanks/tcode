@@ -615,9 +615,6 @@ pub struct NotifyWhenParams {
     )]
     pub events: Vec<WatchEvent>,
     #[serde(default)]
-    #[schemars(description = "Remove the watch after it fires once.")]
-    pub once: Option<bool>,
-    #[serde(default)]
     #[schemars(description = "Idempotency key.")]
     pub request_id: Option<String>,
 }

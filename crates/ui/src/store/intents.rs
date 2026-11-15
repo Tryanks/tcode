@@ -392,6 +392,12 @@ impl WorkspaceStore {
     pub fn revoke_self_settle(&mut self, session_id: String) {
         self.dispatch(Command::RevokeSelfSettle { session_id });
     }
+    pub fn stop_watching_threads(&mut self, session_id: String, thread_ids: Vec<String>) {
+        self.dispatch(Command::StopWatchingThreads {
+            session_id,
+            thread_ids,
+        });
+    }
     pub fn make_session_active(&mut self, session_id: String) {
         self.dispatch(Command::UnsettleSession { session_id });
     }

@@ -683,7 +683,12 @@ impl<'a> ActivityProjection<'a> {
                     .filter_map(|time| time.duration_since(UNIX_EPOCH).ok())
                     .map(|duration| duration.as_secs())
                     .min(),
-                notify: meta.control_watches.len() as u32,
+                notify: meta
+                    .control_watches
+                    .iter()
+                    .flat_map(|watch| &watch.thread_ids)
+                    .collect::<HashSet<_>>()
+                    .len() as u32,
             },
             waiting_for_approval: !approvals.is_empty(),
             waiting_for_input: input.is_some(),
