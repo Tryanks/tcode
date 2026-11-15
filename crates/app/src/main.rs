@@ -28,6 +28,11 @@ mod migration;
 #[cfg(target_os = "linux")]
 mod wayland_blur;
 
+/// The Wayland app id and X11 `WM_CLASS` of every Linux window. The desktop
+/// finds the window's name and icon through it, so it must stay the
+/// `StartupWMClass` and file name of the `.desktop` entry `release.yml` writes.
+const APP_ID: &str = "com.tryanks.tcode";
+
 /// macOS vibrancy can be disabled with `TCODE_NO_VIBRANCY=1` as a diagnostic
 /// escape hatch (opaque window + flattened palette).
 fn vibrancy_enabled() -> bool {
@@ -228,6 +233,7 @@ fn exit_with_startup_failure(error: std::io::Error) -> ! {
         cx.on_app_quit(|_| async { std::process::exit(1) }).detach();
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(420.), px(160.)), cx)),
+            app_id: Some(APP_ID.to_owned()),
             ..Default::default()
         };
         let opened = cx.open_window(options, |_, cx| {
@@ -264,6 +270,7 @@ fn window_options(cx: &App, throttle_inactive: bool) -> WindowOptions {
             size(px(tcode_ui::DEFAULT_WINDOW_WIDTH), px(800.)),
             cx,
         )),
+        app_id: Some(APP_ID.to_owned()),
         window_min_size: Some(size(px(360.), px(480.))),
         // macOS: seamless titlebar — transparent, with the traffic lights
         // nudged down to sit vertically centered in the 52px top strip.

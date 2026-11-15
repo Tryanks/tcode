@@ -353,7 +353,7 @@ jobs:
           Icon=com.tryanks.tcode
           Terminal=false
           Categories=Development;
-          StartupWMClass=tcode
+          StartupWMClass=com.tryanks.tcode
           DESKTOP
           cat > "$stage/README.txt" <<README
           Tcode ${VERSION}

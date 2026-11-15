@@ -4839,6 +4839,7 @@ pub(crate) mod tests {
                                         link_dead: false,
                                         members: vec![],
                                         policy: tcode_protocol::SpacePolicy::unrestricted(),
+                                        hidden_from_threads: false,
                                     })
                                     .collect();
                                 HostMessage::QueryResult {

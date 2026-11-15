@@ -10,7 +10,7 @@
 //! change made on one repaints the others.
 
 use crate::widgets::TooltipTrigger as _;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 #[cfg(not(target_family = "wasm"))]
 use std::time::Instant;
@@ -91,6 +91,15 @@ pub(crate) struct AgentChoice {
 pub(crate) struct SetSpacePolicy {
     pub space_id: String,
     pub policy: tcode_protocol::SpacePolicy,
+}
+
+/// Set whether the machine's own screens list a space's projects in the
+/// threads view.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_spaces, no_json)]
+pub(crate) struct SetHiddenFromThreads {
+    pub space_id: String,
+    pub hidden: bool,
 }
 
 /// Which machine a [`Spaces`] manages.
@@ -267,6 +276,15 @@ impl Spaces {
             .iter()
             .filter(|space| space.project_ids.iter().any(|id| id == project_id))
             .map(|space| space.name.clone())
+            .collect()
+    }
+
+    /// The projects a space hides from the threads view.
+    pub(crate) fn hidden_from_threads(&self) -> HashSet<String> {
+        self.spaces()
+            .iter()
+            .filter(|space| space.hidden_from_threads)
+            .flat_map(|space| space.project_ids.iter().cloned())
             .collect()
     }
 
@@ -708,7 +726,7 @@ pub(crate) fn for_store(store: &Entity<WorkspaceStore>, cx: &mut App) -> Option<
 
 /// Repaint a view whenever the spaces it shows change.
 #[derive(Default)]
-pub(crate) struct SpacesObserver(Option<(EntityId, Subscription)>);
+pub(crate) struct SpacesObserver(Option<(Entity<Spaces>, Subscription)>);
 
 impl SpacesObserver {
     pub(crate) fn watch<V: 'static>(
@@ -717,19 +735,17 @@ impl SpacesObserver {
         cx: &mut Context<V>,
     ) {
         match spaces {
-            Some(spaces)
-                if self
-                    .0
-                    .as_ref()
-                    .is_some_and(|(id, _)| *id == spaces.entity_id()) => {}
+            Some(spaces) if self.watched() == Some(spaces) => {}
             Some(spaces) => {
-                self.0 = Some((
-                    spaces.entity_id(),
-                    cx.observe(spaces, |_, _, cx| cx.notify()),
-                ))
+                self.0 = Some((spaces.clone(), cx.observe(spaces, |_, _, cx| cx.notify())))
             }
             None => self.0 = None,
         }
+    }
+
+    /// The spaces last watched.
+    pub(crate) fn watched(&self) -> Option<&Entity<Spaces>> {
+        self.0.as_ref().map(|(spaces, _)| spaces)
     }
 }
 
@@ -1446,6 +1462,22 @@ mod section {
             );
         }
 
+        fn on_set_hidden_from_threads(
+            &mut self,
+            action: &SetHiddenFromThreads,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.act(
+                SpaceAction::SetHiddenFromThreads {
+                    id: action.space_id.clone(),
+                    hidden: action.hidden,
+                },
+                window,
+                cx,
+            );
+        }
+
         /// What the space's members may do: which agents and models, how
         /// approvals are settled, and what beyond threads they reach. A
         /// change reconnects the members; a running turn finishes as it began.
@@ -2027,6 +2059,26 @@ mod section {
             )
             .child(shared.render(v_flex().w_full().mb(gpui::rems(-0.5))))
             .child(h_flex().child(add))
+            .child(crate::material::group(cx).child(self.hidden_from_threads_row(space, compact)))
+            .into_any_element()
+        }
+
+        /// Whether this machine's own screens leave the space's projects out
+        /// of the threads view; the project view lists them either way.
+        fn hidden_from_threads_row(&self, space: &SpaceInfo, compact: bool) -> AnyElement {
+            let hidden = space.hidden_from_threads;
+            let action = SetHiddenFromThreads {
+                space_id: space.id.clone(),
+                hidden: !hidden,
+            };
+            ToggleRow::new(
+                SharedString::from(format!("space-hidden-from-threads-{}", space.id)),
+                crate::tr!("spaces.projects.hide_from_threads"),
+                hidden,
+                compact,
+                move |_: &bool, window, cx| window.dispatch_action(Box::new(action.clone()), cx),
+            )
+            .description(crate::tr!("spaces.projects.hide_from_threads_description"))
             .into_any_element()
         }
 
@@ -2202,6 +2254,7 @@ mod section {
                 .on_action(cx.listener(Self::on_toggle_share))
                 .on_action(cx.listener(Self::on_move_member))
                 .on_action(cx.listener(Self::on_set_policy))
+                .on_action(cx.listener(Self::on_set_hidden_from_threads))
                 .child(
                     v_flex()
                         .w_full()

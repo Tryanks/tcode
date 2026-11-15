@@ -6725,6 +6725,8 @@ impl Render for AppShell {
             // Both layouts must select UI text explicitly: GPUI's default
             // fallback stack prefers Lilex once the terminal font is loaded.
             .font_family(cx.theme().font_family.clone())
+            // First, so it hears each scroll packet before any area acts on it.
+            .child(crate::scroll::gesture_recorder())
             .children(dismissal.map(|dismissal| dismissal.release_listener().into_any_element()))
             .child(body)
             // Each host's pages, which panes of several hosts show at once.

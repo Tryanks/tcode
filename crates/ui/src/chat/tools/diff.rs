@@ -15,7 +15,7 @@ use gpui::{
     SharedString, Styled as _, StyledText, UniformListScrollHandle, div,
     prelude::FluentBuilder as _, px, uniform_list,
 };
-use gpui_base::{ScrollableMask, h_flex};
+use gpui_base::h_flex;
 use tcode_core::session::{EntryContent, TimelineEntry};
 
 use super::copy;
@@ -293,8 +293,12 @@ fn render_inline_diff(key: &str, diff: &InlineDiff, cx: &App) -> AnyElement {
         .w_full()
         .min_w_0()
         .child(lines)
-        .child(ScrollableMask::new(Axis::Vertical, &scroll).id(id.clone()))
-        .child(ScrollableMask::new(Axis::Horizontal, &scroll).id(id))
+        .child(crate::scroll::AreaMask::new(
+            Axis::Vertical,
+            &scroll,
+            id.clone(),
+        ))
+        .child(crate::scroll::AreaMask::new(Axis::Horizontal, &scroll, id))
         .debug_selector(|| "file-edit-diff".into())
         .into_any_element()
 }

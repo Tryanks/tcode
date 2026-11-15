@@ -4,9 +4,16 @@
 //! GPUI's own scroll containers apply every wheel or pan delta that reaches
 //! them, so two nested viewports would both move on one gesture, and a
 //! horizontal-only container maps vertical input onto its axis. The areas here
-//! pair a viewport with a [`ScrollableMask`] sibling: the mask consumes the
-//! events its viewport can use in the capture phase and lets the rest bubble
-//! to the ancestor scroller.
+//! pair a viewport with an [`AreaMask`] sibling: the mask takes the events its
+//! viewport can use in the capture phase and lets the rest bubble to the
+//! ancestor scroller, and a gesture stays with the area that first moved for
+//! it ([`gesture`]).
+
+pub(crate) mod gesture;
+mod mask;
+
+pub(crate) use gesture::recorder as gesture_recorder;
+pub(crate) use mask::AreaMask;
 
 use std::{ops::Range, panic::Location, rc::Rc};
 
@@ -25,16 +32,15 @@ use gpui::{
     UniformListScrollHandle, Window, canvas, div, list, prelude::FluentBuilder as _, px,
     uniform_list,
 };
-use gpui_base::{
-    InteractiveElementExt as _, ScrollBounce, ScrollableMask, ScrollbarHandle, StyledExt as _,
-};
+use gpui_base::{InteractiveElementExt as _, ScrollBounce, ScrollbarHandle, StyledExt as _};
 
 pub(crate) trait ScrollableElement:
     InteractiveElement + Styled + ParentElement + Element
 {
     /// A vertical viewport with Tcode's overlay scrollbar. Nested inside
-    /// another scroller it owns vertical input while it can move and chains to
-    /// the ancestor at its edges.
+    /// another scroller it takes a vertical gesture that begins where it can
+    /// move, and keeps it at its edges; one that begins at an edge it cannot
+    /// move past goes to the ancestor.
     #[track_caller]
     fn overflow_y_scrollbar(self) -> Scrollable<Self> {
         Scrollable::new(self)
@@ -42,7 +48,7 @@ pub(crate) trait ScrollableElement:
 
     /// A bounded vertical viewport without a scrollbar, for menus, option
     /// lists and detail panes that can sit inside a page or the timeline.
-    /// It owns vertical input while it can move and chains at its edges.
+    /// It takes gestures as [`Self::overflow_y_scrollbar`] does.
     #[track_caller]
     fn overflow_y_scroll_area(self) -> ScrollArea<Self> {
         ScrollArea::new(self, Axis::Vertical)
@@ -249,9 +255,11 @@ where
             .refine_style(&root_style)
             .relative()
             .child(scroll_area)
-            .child(
-                ScrollableMask::new(Axis::Vertical, &scroll_handle).id((self.id.clone(), "mask")),
-            )
+            .child(AreaMask::new(
+                Axis::Vertical,
+                &scroll_handle,
+                (self.id.clone(), "mask"),
+            ))
             .child(ScrollbarLayer {
                 id: (self.id, "scrollbar").into(),
                 scroll_handle: Rc::new(scroll_handle),
@@ -362,7 +370,7 @@ where
             .relative()
             .refine_style(&root_style)
             .child(viewport)
-            .child(ScrollableMask::new(self.axis, &scroll_handle).id((self.id, "mask")))
+            .child(AreaMask::new(self.axis, &scroll_handle, (self.id, "mask")))
     }
 }
 
@@ -915,9 +923,7 @@ fn overlays<H: ScrollbarHandle + Clone>(
     handle: &H,
     scrollbar: bool,
 ) -> (AnyElement, Option<AnyElement>) {
-    let mask = ScrollableMask::new(Axis::Vertical, handle)
-        .id((id.clone(), "mask"))
-        .into_any_element();
+    let mask = AreaMask::new(Axis::Vertical, handle, (id.clone(), "mask")).into_any_element();
     let scrollbar = scrollbar.then(|| {
         ScrollbarLayer {
             id: (id.clone(), "scrollbar").into(),
@@ -971,7 +977,153 @@ fn root_style_from(style: &StyleRefinement) -> StyleRefinement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Context, Render, TestAppContext, point, px};
+    use gpui::{Context, Render, TestAppContext, TouchPhase, VisualTestContext, point, px};
+
+    /// A page with a 100 px nested area `before` px down its content.
+    struct Nested {
+        page: ScrollHandle,
+        area: ScrollHandle,
+        before: Pixels,
+    }
+
+    impl Render for Nested {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(200.))
+                .h(px(300.))
+                .flex()
+                .flex_col()
+                .child(gesture_recorder())
+                .child(page_viewport(
+                    "nested-page-bounce",
+                    &self.page,
+                    div()
+                        .id("nested-page")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .lock_scroll_axis()
+                        .track_scroll(&self.page)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .debug_selector(|| "nested-page-top".into())
+                                        .h(self.before)
+                                        .flex_none(),
+                                )
+                                .child(
+                                    div()
+                                        .id("nested-area")
+                                        .h(px(100.))
+                                        .flex_none()
+                                        .overflow_y_scroll_area()
+                                        .track_scroll(&self.area)
+                                        .child(div().h(px(400.)).flex_none()),
+                                )
+                                .child(div().h(px(1000.)).flex_none()),
+                        ),
+                ))
+        }
+    }
+
+    fn nested(
+        cx: &mut TestAppContext,
+        before: f32,
+    ) -> (gpui::Entity<Nested>, &mut VisualTestContext) {
+        cx.update(crate::test_client::init);
+        let (view, cx) = cx.add_window_view(|_, _| Nested {
+            page: ScrollHandle::new(),
+            area: ScrollHandle::new(),
+            before: px(before),
+        });
+        crate::test_frames::draw_settled(cx);
+        (view, cx)
+    }
+
+    /// One packet of a pan or of its momentum, a display frame apart: GPUI
+    /// delivers every one at the point the finger first touched.
+    fn packet(cx: &mut VisualTestContext, dy: f32, phase: TouchPhase) {
+        cx.simulate_event(gpui::ScrollEvent {
+            position: point(px(100.), px(150.)),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(dy))),
+            touch_phase: phase,
+            source: gpui::ScrollSource::Touch,
+            ..Default::default()
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        crate::test_frames::draw(cx);
+    }
+
+    /// A flick: a pan, its release and the momentum after it.
+    fn flick(cx: &mut VisualTestContext, dy: f32, steps: usize) {
+        packet(cx, dy, TouchPhase::Started);
+        for _ in 0..steps {
+            packet(cx, dy, TouchPhase::Moved);
+        }
+        packet(cx, dy, TouchPhase::Ended);
+        for _ in 0..steps {
+            packet(cx, dy, TouchPhase::Moved);
+        }
+        packet(cx, 0., TouchPhase::Ended);
+    }
+
+    fn offsets(view: &gpui::Entity<Nested>, cx: &mut VisualTestContext) -> (Pixels, Pixels) {
+        view.read_with(cx, |view, _| (view.page.offset().y, view.area.offset().y))
+    }
+
+    /// A gesture belongs to the area that first moved for it until its
+    /// momentum runs out: a nested area the page scrolls under the finger
+    /// does not take the rest, and a nested area at its end does not hand
+    /// the rest to the page.
+    #[gpui::test]
+    fn a_scroll_gesture_stays_with_the_area_that_first_moved_for_it(cx: &mut TestAppContext) {
+        // The flick begins on the page, above the area; the area reaches the
+        // finger after the first 100 px.
+        let (view, cx) = nested(cx, 250.);
+        flick(cx, -30., 10);
+        let (page, area) = offsets(&view, cx);
+        assert_eq!(
+            area,
+            px(0.),
+            "the area that slid under the finger stays put"
+        );
+        assert!(page < px(-300.), "the page takes the whole flick: {page:?}");
+
+        // The flick begins in the area, which has 300 px to give.
+        let (view, cx) = nested(cx, 100.);
+        flick(cx, -40., 10);
+        let (page, area) = offsets(&view, cx);
+        assert_eq!(area, px(-300.), "the area runs to its end");
+        assert_eq!(page, px(0.), "and keeps the rest of its flick there");
+    }
+
+    /// A pull past the page's top over an area at its own top stretches the
+    /// page; pushing back up in the same gesture is still the page's, so the
+    /// area does not take its release and the stretch lets go. Only where
+    /// gpui-base's bounce stretches a page at all.
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
+    #[gpui::test]
+    fn a_stretched_page_keeps_its_gesture_to_the_release(cx: &mut TestAppContext) {
+        let (view, cx) = nested(cx, 100.);
+        let top = cx.debug_bounds("nested-page-top").unwrap().top();
+        packet(cx, 10., TouchPhase::Started);
+        packet(cx, 40., TouchPhase::Moved);
+        packet(cx, 40., TouchPhase::Moved);
+        assert!(cx.debug_bounds("nested-page-top").unwrap().top() > top);
+        packet(cx, -20., TouchPhase::Moved);
+        packet(cx, -10., TouchPhase::Ended);
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(offsets(&view, cx).1, px(0.), "the area is left alone");
+        assert_eq!(
+            cx.debug_bounds("nested-page-top").unwrap().top(),
+            top,
+            "the page's edge is back where it rests"
+        );
+    }
 
     /// A live list of 20 px rows, keyed by what each shows, in a 100 px
     /// viewport.
