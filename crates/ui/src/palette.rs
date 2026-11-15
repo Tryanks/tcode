@@ -79,7 +79,6 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
 /// A concrete action a palette row triggers.
 #[derive(Clone)]
 enum Action {
-    ChangeProjectIcon(HostKey, tcode_core::project::Project),
     NewThread {
         host: HostKey,
         cwd: std::path::PathBuf,
@@ -112,8 +111,7 @@ impl Action {
     /// The host whose state the row shows.
     fn host(&self) -> Option<&HostKey> {
         match self {
-            Self::ChangeProjectIcon(host, _)
-            | Self::NewThread { host, .. }
+            Self::NewThread { host, .. }
             | Self::QuickChat(host)
             | Self::CheckUpdates(host)
             | Self::MoreHits(host) => Some(host),
@@ -541,23 +539,6 @@ impl CommandPalette {
                         project_id: project.id.clone(),
                     },
                 );
-                if store.scope().is_full() {
-                    push_action(
-                        match &named {
-                            Some(host) => crate::tr!(
-                                "project_icon.action_on",
-                                project = project.name.clone(),
-                                host = host.clone()
-                            ),
-                            None => {
-                                crate::tr!("project_icon.action", project = project.name.clone())
-                            }
-                        }
-                        .into_owned(),
-                        IconName::Folder,
-                        Action::ChangeProjectIcon(key.clone(), project),
-                    );
-                }
             }
         }
         push_action(
@@ -952,12 +933,6 @@ impl CommandPalette {
     fn activate(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
         let store = action.host().and_then(|host| self.store_of(host, cx));
         match action {
-            Action::ChangeProjectIcon(_, project) => {
-                self.close(cx);
-                if let Some(store) = store {
-                    crate::project_icon::open(store, project, window, cx);
-                }
-            }
             Action::NewThread {
                 cwd, project_id, ..
             } => {
@@ -1151,10 +1126,6 @@ impl CommandPalette {
                 .w_full()
                 .cursor_pointer()
                 .child(match (&item.action, &store) {
-                    (Action::ChangeProjectIcon(_, project), Some(store)) => {
-                        crate::project_icon::artwork(store.read(cx).image_host(), project, 16.)
-                            .into_any_element()
-                    }
                     (Action::NewThread { project_id, .. }, Some(store)) => store
                         .read(cx)
                         .project(project_id)

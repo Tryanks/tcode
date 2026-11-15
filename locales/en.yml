@@ -1787,8 +1787,6 @@ web_auth:
 
 project_icon:
   title: "Change project icon"
-  action: "Change icon for %{project}"
-  action_on: "Change icon for %{project} on %{host}"
   search: "Filter folders and images…"
   this_machine: "This machine"
   project_folder: "Project folder"
