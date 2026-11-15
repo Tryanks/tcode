@@ -12150,6 +12150,7 @@ dependencies = [
  "url",
  "wayland-client",
  "wayland-protocols",
+ "wayland-protocols-plasma",
  "windows 0.62.2",
 ]
 

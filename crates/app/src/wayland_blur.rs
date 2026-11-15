@@ -10,15 +10,14 @@
 use std::sync::OnceLock;
 
 use wayland_client::{
-    Connection, Dispatch, QueueHandle, WEnum,
+    Connection, Dispatch, Proxy as _, QueueHandle, WEnum,
     globals::{GlobalListContents, registry_queue_init},
     protocol::wl_registry,
 };
 use wayland_protocols::ext::background_effect::v1::client::ext_background_effect_manager_v1::{
     self, Capability, ExtBackgroundEffectManagerV1,
 };
-
-const KDE_BLUR_MANAGER: &str = "org_kde_kwin_blur_manager";
+use wayland_protocols_plasma::blur::client::org_kde_kwin_blur_manager::OrgKdeKwinBlurManager;
 
 /// Decided once: the theme and every window must agree on it.
 pub(crate) fn available() -> bool {
@@ -42,7 +41,7 @@ fn probe() -> bool {
         }
         Err(_) => globals.contents().with_list(|list| {
             list.iter()
-                .any(|global| global.interface == KDE_BLUR_MANAGER)
+                .any(|global| global.interface == OrgKdeKwinBlurManager::interface().name)
         }),
     }
 }
