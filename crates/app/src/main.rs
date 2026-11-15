@@ -25,6 +25,8 @@ use tcode_ui::widgets::button::{Button, ButtonVariants as _};
 
 mod editor;
 mod migration;
+#[cfg(target_os = "linux")]
+mod wayland_blur;
 
 /// The Wayland app id and X11 `WM_CLASS` of every Linux window. The desktop
 /// finds the window's name and icon through it, so it must stay the
@@ -37,12 +39,24 @@ fn vibrancy_enabled() -> bool {
     cfg!(target_os = "macos") && !std::env::var("TCODE_NO_VIBRANCY").is_ok_and(|v| v == "1")
 }
 
-fn translucent_canvas_enabled() -> bool {
-    cfg!(target_os = "windows") || vibrancy_enabled()
+/// Whether the window's system material is a compositor blur: Windows
+/// Acrylic, or a Wayland compositor that blurs behind the window. GPUI's X11
+/// `Blurred` is only a transparent window, so X11 never counts.
+fn compositor_blur(cx: &App) -> bool {
+    #[cfg(target_os = "linux")]
+    if cx.compositor_name() == "Wayland" {
+        return wayland_blur::available();
+    }
+    let _ = cx;
+    cfg!(target_os = "windows")
 }
 
-fn main_window_background() -> WindowBackgroundAppearance {
-    if cfg!(target_os = "windows") {
+fn translucent_canvas_enabled(cx: &App) -> bool {
+    compositor_blur(cx) || vibrancy_enabled()
+}
+
+fn main_window_background(cx: &App) -> WindowBackgroundAppearance {
+    if compositor_blur(cx) {
         WindowBackgroundAppearance::Blurred
     } else if vibrancy_enabled() {
         // `run_shell` slides Liquid Glass under a transparent window; GPUI's
@@ -287,8 +301,9 @@ fn window_options(cx: &App, throttle_inactive: bool) -> WindowOptions {
         // on whatever its compositor/backend already chose.)
         window_decorations: cfg!(target_os = "windows").then_some(WindowDecorations::Client),
         // Persistent windows use the platform's system material:
-        // macOS sidebar vibrancy, Windows Acrylic, or an opaque fallback.
-        window_background: main_window_background(),
+        // macOS sidebar vibrancy, Windows Acrylic, a Wayland compositor's
+        // blur, or an opaque fallback.
+        window_background: main_window_background(cx),
         ..Default::default()
     };
     // gpui reads the inactive-window frame cap only as it creates the window,
@@ -740,10 +755,11 @@ fn main() {
         ];
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let application_fonts: Vec<Cow<'static, [u8]>> = vec![Cow::Borrowed(assets::DM_SANS)];
-        // Translucent canvas colors composite over macOS vibrancy and Windows
-        // Acrylic. Opaque windows flatten them to the solid base; macOS
-        // fullscreen applies the same fallback in material::opaque_canvas.
-        let theme_json: Cow<'static, str> = if translucent_canvas_enabled() {
+        // Translucent canvas colors composite over macOS vibrancy, Windows
+        // Acrylic and a Wayland compositor's blur. Opaque windows flatten
+        // them to the solid base; macOS fullscreen applies the same fallback in
+        // material::opaque_canvas.
+        let theme_json: Cow<'static, str> = if translucent_canvas_enabled(cx) {
             Cow::Borrowed(tcode_ui::THEME_JSON)
         } else {
             Cow::Owned(tcode_ui::flattened_theme_json())
