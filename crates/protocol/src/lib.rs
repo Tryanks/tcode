@@ -347,7 +347,7 @@ pub use wire::{
 //
 // Version 29 (v0.4.2): PreviewClient's on_host.
 //
-// Unreleased: the provider_relay event and timeline entry carry left
+// Version 30 (v0.4.4): the provider_relay event and timeline entry carry left
 // (LeftSession), the native session the handoff left with the profile and
 // options the thread had there, the agent event stream gains relay_undone,
 // and ForkStatus carries
@@ -358,7 +358,7 @@ pub use wire::{
 // SpaceInfo carries hidden_from_threads, set by SpaceAction
 // set_hidden_from_threads. The protocol adds the StopWatchingThreads command,
 // and ThreadWakes' notify counts the threads watched rather than the watches.
-pub const PROTOCOL_VERSION: u32 = 29;
+pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]
 mod tests;
