@@ -1312,4 +1312,35 @@ mod tests {
         assert!(cx.debug_bounds("edit-menu-copy").is_some());
         assert!(cx.debug_bounds("edit-menu-cut").is_none());
     }
+
+    /// On a phone, a long press on a link offers the link's menu instead of
+    /// selecting its word, and one on plain text still selects.
+    #[gpui::test]
+    fn long_press_on_a_link_offers_its_menu_on_a_phone(cx: &mut TestAppContext) {
+        let (_, markdown, cx) = open_body("Alpha beta\n\n[click](https://example.com)", cx);
+        cx.update(|_, cx| {
+            crate::window_seam::force_mobile_layout(cx);
+            crate::widgets::menu::init(cx);
+        });
+        cx.simulate_resize(size(px(360.), px(640.)));
+        draw(cx);
+        let (text, link) = cx.update(|_, cx| {
+            let state = markdown.read(cx);
+            let text = state.list_state.bounds_for_item(0).unwrap();
+            let link = state.list_state.bounds_for_item(1).unwrap();
+            (
+                point(px(5.), text.center().y),
+                point(px(5.), link.center().y),
+            )
+        });
+
+        long_press(cx, link);
+        assert_eq!(selected(&markdown, cx), "");
+        tap(cx, "menu-item-0");
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+
+        long_press(cx, text);
+        assert_eq!(selected(&markdown, cx), "Alpha");
+        assert!(cx.debug_bounds("menu-item-0").is_none());
+    }
 }

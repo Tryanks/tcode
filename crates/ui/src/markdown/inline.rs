@@ -12,8 +12,8 @@ use crate::widgets::tooltip::Tooltip;
 use gpui::{
     App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId, Entity, GlobalElementId,
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, InteractiveText, IntoElement,
-    LayoutId, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText,
-    TextLayout, Window, point, px, quad,
+    LayoutId, LongPressEvent, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point,
+    SharedString, StyledText, TextLayout, TouchPhase, Window, point, px, quad,
 };
 
 use super::{
@@ -111,6 +111,28 @@ impl Inline {
         position: Point<Pixels>,
     ) -> Option<LinkMark> {
         Self::link_and_range_for_position(layout, links, position).map(|(_, link)| link)
+    }
+
+    /// Record the link at `position`, if any, for the view's context menu.
+    /// A press beside a link keeps the enclosing block's target (a code
+    /// block's).
+    fn record_link(
+        view: &Entity<MarkdownState>,
+        layout: &TextLayout,
+        links: &[(Range<usize>, LinkMark)],
+        text: &SharedString,
+        position: Point<Pixels>,
+        cx: &mut App,
+    ) {
+        let Some((range, link)) = Self::link_and_range_for_position(layout, links, position) else {
+            return;
+        };
+        let pending = PendingContextTarget::Link(PendingLinkMenu {
+            target: view.read(cx).resolve_link(&link.url),
+            text: text.get(range).map(SharedString::from).unwrap_or_default(),
+            raw_url: link.url,
+        });
+        view.update(cx, |state, cx| state.set_pending_context(Some(pending), cx));
     }
 
     /// The rows `range` is laid out on: on each, where
@@ -432,26 +454,27 @@ impl Element for Inline {
                         view.update(cx, |state, _| state.link_press_origin = origin);
                     }
                     MouseButton::Right => {
-                        let pending =
-                            Self::link_and_range_for_position(&layout, &links, event.position).map(
-                                |(range, link)| {
-                                    let target = view.read(cx).resolve_link(&link.url);
-                                    let text =
-                                        text.get(range).map(SharedString::from).unwrap_or_default();
-                                    PendingContextTarget::Link(PendingLinkMenu {
-                                        target,
-                                        text,
-                                        raw_url: link.url,
-                                    })
-                                },
-                            );
-                        // A press beside a link keeps the enclosing block's
-                        // target (a code block's), which bubbled first.
-                        if pending.is_some() {
-                            view.update(cx, |state, cx| state.set_pending_context(pending, cx));
-                        }
+                        Self::record_link(&view, &layout, &links, &text, event.position, cx);
                     }
                     _ => {}
+                }
+            }
+        });
+
+        // In the capture phase: the view's touch menu decides whether to
+        // take the press before the text under it hears it.
+        window.on_mouse_event({
+            let hitbox = hitbox.clone();
+            let layout = text_layout.clone();
+            let links = self.links.clone();
+            let text = self.text.clone();
+            let view = self.view.clone();
+            move |event: &LongPressEvent, phase, window, cx| {
+                if phase.capture()
+                    && event.phase == TouchPhase::Started
+                    && hitbox.is_hovered(window)
+                {
+                    Self::record_link(&view, &layout, &links, &text, event.position, cx);
                 }
             }
         });
