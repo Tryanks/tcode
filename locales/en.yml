@@ -61,6 +61,7 @@ chat:
   full_output_failed: "Could not load the full output: %{error}"
   changed_files: "CHANGED FILES (%{count})"
   changed_files_partial: "· PARTIAL"
+  changed_files_uncounted: "%{count} without line counts"
   more_files: "+%{count} more"
   show_fewer_files: "Show fewer"
   view_diff: "View diff"

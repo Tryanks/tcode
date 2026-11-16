@@ -544,8 +544,8 @@ fn build_from_patch(
     RenderedFile {
         path: display_path,
         kind: input.kind,
-        added: Some(parsed.added.into()),
-        removed: Some(parsed.removed.into()),
+        added: input.patch.map(|_| parsed.added.into()),
+        removed: input.patch.map(|_| parsed.removed.into()),
         all_rows,
         pairs,
         hunks,

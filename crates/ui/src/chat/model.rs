@@ -633,10 +633,7 @@ pub(crate) fn turn_time_clauses(
 
 /// Count added / removed lines in a unified diff (ignoring the `+++`/`---`
 /// file headers).
-pub(crate) fn diff_stats(diff: Option<&str>) -> (u32, u32) {
-    let Some(diff) = diff else {
-        return (0, 0);
-    };
+fn diff_stats(diff: &str) -> (u32, u32) {
     let mut added = 0;
     let mut removed = 0;
     let mut in_hunk = false;
@@ -667,14 +664,51 @@ pub(crate) struct LiveEditRow {
     pub(crate) diff: Option<String>,
 }
 
-/// The `+N` / `-N` a live edit row should display, if any.
+/// The lines a turn's changes add and remove, over the files whose lines
+/// could be counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChangeTotals {
+    pub(crate) added: u32,
+    pub(crate) deleted: u32,
+    /// How many files the totals leave out: the provider named them and gave
+    /// no lines to count.
+    pub(crate) uncounted: usize,
+}
+
+impl ChangeTotals {
+    pub(crate) fn of(changes: &[agent::FileChange]) -> Self {
+        let mut totals = Self {
+            added: 0,
+            deleted: 0,
+            uncounted: 0,
+        };
+        for change in changes {
+            match live_edit_counts(change.diff.as_deref()) {
+                Some((added, deleted)) => {
+                    totals.added += added;
+                    totals.deleted += deleted;
+                }
+                None => totals.uncounted += 1,
+            }
+        }
+        totals
+    }
+
+    /// What a header says beside the totals when they leave files out.
+    pub(crate) fn uncounted_label(&self) -> Option<String> {
+        (self.uncounted > 0).then(|| {
+            crate::tr!("chat.changed_files_uncounted", count = self.uncounted).into_owned()
+        })
+    }
+}
+
+/// The `+N` / `-N` a file's row or chip should display, if any.
 ///
 /// A diff that carries no added or removed lines — absent, empty,
 /// whitespace-only, or nothing but `+++`/`---` headers — has nothing truthful
-/// to show: "+0 -0" reads as "this edit changed nothing". The finished-turn
-/// CHANGED FILES card keeps its own `diff_stats` totals unchanged.
+/// to show: "+0 -0" reads as "this edit changed nothing".
 pub(crate) fn live_edit_counts(diff: Option<&str>) -> Option<(u32, u32)> {
-    let (added, deleted) = diff_stats(Some(diff?));
+    let (added, deleted) = diff_stats(diff?);
     (added != 0 || deleted != 0).then_some((added, deleted))
 }
 
@@ -1395,8 +1429,8 @@ pub(in crate::chat) mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(live_edit_rows(&changes, Path::new("/work/repo")), expected);
-        assert_eq!(diff_stats(Some("--- a/f\n+++ b/f\n")), (0, 0));
-        assert_eq!(diff_stats(Some(REAL_DIFF)), (2, 1));
+        assert_eq!(diff_stats("--- a/f\n+++ b/f\n"), (0, 0));
+        assert_eq!(diff_stats(REAL_DIFF), (2, 1));
     }
 
     #[test]
