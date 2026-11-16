@@ -11,7 +11,7 @@ pty = ["rio-vt/pty", "dep:libc", "dep:portable-pty"]
 
 [dependencies]
 async-channel = "2"
-rio-vt = { version = "0.5.24", default-features = false }
+rio-vt = { version = "0.5.29", default-features = false }
 tcode-protocol = { path = "../protocol", default-features = false }
 
 [target.'cfg(unix)'.dependencies]

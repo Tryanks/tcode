@@ -297,19 +297,19 @@ impl GridEmulator {
             return;
         }
 
-        let (expired_sync, wakeup, sync_deadline) = {
+        // rio applies the bytes of a synchronized update as they arrive and
+        // holds presentation instead, so a held read wakes no one.
+        let (wakeup, sync_deadline) = {
             let mut state = self.core.state.lock();
-            let expired_sync = stop_expired_sync(&mut state);
+            let expired_sync = end_expired_sync(&mut state);
             let GridState { term, parser } = &mut *state;
             parser.advance(term, bytes);
-            let wakeup = parser.sync_bytes_count() < bytes.len();
-            let sync_deadline = parser.sync_timeout().sync_timeout();
-            (expired_sync, wakeup, sync_deadline)
+            (
+                expired_sync || !term.synchronized_output(),
+                term.sync_update_deadline(),
+            )
         };
 
-        if expired_sync {
-            let _ = self.core.notifications.try_send(GridEvent::Wakeup);
-        }
         if wakeup {
             let _ = self.core.notifications.try_send(GridEvent::Wakeup);
         }
@@ -548,15 +548,10 @@ impl GridEmulator {
     }
 }
 
-fn stop_expired_sync(state: &mut GridState) -> bool {
-    let expired = state
-        .parser
-        .sync_timeout()
-        .sync_timeout()
-        .is_some_and(|deadline| deadline <= Instant::now());
+fn end_expired_sync(state: &mut GridState) -> bool {
+    let expired = state.term.sync_update_expired(Instant::now());
     if expired {
-        let GridState { term, parser } = state;
-        parser.stop_sync(term);
+        state.term.end_sync_update();
     }
     expired
 }
@@ -571,7 +566,7 @@ fn schedule_sync_timeout(core: Weak<GridCore>, deadline: Instant) {
             };
             let expired = {
                 let mut state = core.state.lock();
-                stop_expired_sync(&mut state)
+                end_expired_sync(&mut state)
             };
             if expired {
                 let _ = core.notifications.try_send(GridEvent::Wakeup);
