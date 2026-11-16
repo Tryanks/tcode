@@ -667,11 +667,12 @@ pub(crate) struct LiveEditRow {
     pub(crate) diff: Option<String>,
 }
 
-/// The `+N` / `-N` a file's row or chip should display, if any.
+/// The `+N` / `-N` a live edit row should display, if any.
 ///
 /// A diff that carries no added or removed lines — absent, empty,
 /// whitespace-only, or nothing but `+++`/`---` headers — has nothing truthful
-/// to show: "+0 -0" reads as "this edit changed nothing".
+/// to show: "+0 -0" reads as "this edit changed nothing". The finished-turn
+/// CHANGED FILES card keeps its own `diff_stats` totals unchanged.
 pub(crate) fn live_edit_counts(diff: Option<&str>) -> Option<(u32, u32)> {
     let (added, deleted) = diff_stats(Some(diff?));
     (added != 0 || deleted != 0).then_some((added, deleted))
