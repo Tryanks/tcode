@@ -133,11 +133,7 @@ impl Api {
             store,
             environment: environment.into_iter().collect(),
             hosts: RwLock::default(),
-            // No pooling: ureq retries a stale pooled socket, and a write must never be retried.
-            agent: ureq::AgentBuilder::new()
-                .redirects(0)
-                .max_idle_connections(0)
-                .build(),
+            agent: crate::forge::http::agent(),
             tokens: Mutex::default(),
             rate_limits: Mutex::default(),
         })
@@ -478,25 +474,26 @@ impl Api {
         }
         let url = format!("https://{authority}{path}");
         let started = Instant::now();
-        let mut call = self
-            .agent
-            .request(request.method, &url)
-            .timeout(DEADLINE)
-            .set("Accept", request.accept)
-            .set("User-Agent", "tcode");
+        let mut call = ureq::http::Request::builder()
+            .method(request.method)
+            .uri(&url)
+            .header("Accept", request.accept)
+            .header("User-Agent", "tcode");
         if let Some(credential) = &credential {
             // GitLab takes a personal access token and glab's OAuth token alike as a bearer.
-            call = call.set("Authorization", &format!("Bearer {}", credential.token));
+            call = call.header("Authorization", format!("Bearer {}", credential.token));
         }
-        let answer = match &request.body {
-            Some(body) => call
-                .set("Content-Type", "application/json")
-                .send_bytes(&serde_json::to_vec(body).unwrap_or_default()),
-            None => call.call(),
-        };
-        let response = match answer {
-            Ok(response) | Err(ureq::Error::Status(_, response)) => response,
-            Err(ureq::Error::Transport(_)) => {
+        if request.body.is_some() {
+            call = call.header("Content-Type", "application/json");
+        }
+        let body = request
+            .body
+            .as_ref()
+            .map(|body| serde_json::to_vec(body).unwrap_or_default());
+        let response = match crate::forge::http::send(&self.agent, call, body.as_deref(), DEADLINE)
+        {
+            Ok(response) => response,
+            Err(_) => {
                 return Err(if started.elapsed() >= DEADLINE {
                     error(ForgeErrorKind::Deadline, "GitLab request deadline")
                 } else {
@@ -504,7 +501,7 @@ impl Api {
                 });
             }
         };
-        let status = response.status();
+        let status = response.status().as_u16();
         log::debug!(
             "gitlab host={} path={} operation={} status={}",
             authority,
@@ -512,12 +509,13 @@ impl Api {
             request.operation,
             status
         );
-        let header = |name: &str| response.header(name).map(str::to_owned);
+        let header = |name: &str| crate::forge::http::text(&response, name).map(str::to_owned);
         let next_page = header("x-next-page").and_then(|page| page.trim().parse().ok());
         let retry_after = header("retry-after");
         let reset = header("ratelimit-reset");
         let mut body = Vec::new();
         response
+            .into_body()
             .into_reader()
             .take(request.limit.map_or(u64::MAX, |limit| limit as u64 + 1))
             .read_to_end(&mut body)

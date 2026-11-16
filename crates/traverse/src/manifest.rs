@@ -336,12 +336,17 @@ fn fetch(url: &Url) -> Result<Vec<u8>, String> {
         return Ok(body);
     }
     let response = ureq::get(url.as_str())
-        .set("User-Agent", "tcode")
-        .timeout(FETCH_TIMEOUT)
+        .header("User-Agent", "tcode")
+        .config()
+        .timeout_global(Some(FETCH_TIMEOUT))
+        .proxy(None)
+        .max_redirects(4)
+        .build()
         .call()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{url}: {error}"))?;
     let mut body = Vec::new();
     response
+        .into_body()
         .into_reader()
         .take(MAX_RESPONSE_BYTES + 1)
         .read_to_end(&mut body)

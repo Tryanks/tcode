@@ -1199,19 +1199,24 @@ pub(crate) fn rpc(
     body: serde_json::Value,
 ) -> (serde_json::Value, Option<String>) {
     let mut request = ureq::post(url)
-        .set("Authorization", &format!("Bearer {token}"))
-        .set("Accept", "application/json, text/event-stream")
-        .set("Content-Type", "application/json");
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/json, text/event-stream")
+        .header("Content-Type", "application/json")
+        .config()
+        .proxy(None)
+        .build();
     if let Some(session) = session {
         request = request
-            .set("Mcp-Session-Id", session)
-            .set("MCP-Protocol-Version", "2025-11-25");
+            .header("Mcp-Session-Id", session)
+            .header("MCP-Protocol-Version", "2025-11-25");
     }
-    let response = request
-        .send_bytes(&serde_json::to_vec(&body).unwrap())
-        .unwrap();
-    let session = response.header("Mcp-Session-Id").map(str::to_owned);
-    let text = response.into_string().unwrap();
+    let mut response = request.send(serde_json::to_vec(&body).unwrap()).unwrap();
+    let session = response
+        .headers()
+        .get("Mcp-Session-Id")
+        .and_then(|session| session.to_str().ok())
+        .map(str::to_owned);
+    let text = response.body_mut().read_to_string().unwrap();
     let json = text
         .lines()
         .filter_map(|line| line.strip_prefix("data: "))

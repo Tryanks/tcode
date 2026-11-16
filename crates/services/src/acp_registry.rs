@@ -251,11 +251,16 @@ pub fn parse(bytes: &[u8]) -> Result<Registry, RegistryError> {
 
 fn http_get(url: &str) -> Result<Vec<u8>, RegistryError> {
     let response = ureq::get(url)
-        .timeout(Duration::from_secs(30))
+        .config()
+        .timeout_global(Some(Duration::from_secs(30)))
+        .proxy(None)
+        .max_redirects(4)
+        .build()
         .call()
-        .map_err(|err| RegistryError::Network(err.to_string()))?;
+        .map_err(|err| RegistryError::Network(format!("{url}: {err}")))?;
     let mut bytes = Vec::new();
     response
+        .into_body()
         .into_reader()
         .read_to_end(&mut bytes)
         .map_err(|err| RegistryError::Network(err.to_string()))?;
@@ -348,12 +353,18 @@ pub fn uninstall(data_dir: &Path, id: &str) -> std::io::Result<()> {
 
 fn download(url: &str, cancelled: &AtomicBool) -> Result<Vec<u8>, RegistryError> {
     let response = ureq::get(url)
+        .config()
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .proxy(None)
+        .max_redirects(4)
+        .build()
         .call()
-        .map_err(|err| RegistryError::Network(err.to_string()))?;
+        .map_err(|err| RegistryError::Network(format!("{url}: {err}")))?;
     let total: Option<u64> = response
-        .header("Content-Length")
-        .and_then(|len| len.parse().ok());
-    let mut reader = response.into_reader();
+        .headers()
+        .get("Content-Length")
+        .and_then(|len| len.to_str().ok()?.parse().ok());
+    let mut reader = response.into_body().into_reader();
     let mut bytes = Vec::with_capacity(total.unwrap_or(0) as usize);
     let mut buf = [0u8; 64 * 1024];
     loop {

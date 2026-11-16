@@ -51,7 +51,7 @@ mdns-sd = { version = "0.21", default-features = false, features = ["async", "lo
 pbkdf2 = { version = "0.13", optional = true }
 russh = { version = "0.65", default-features = false, features = ["ring"], optional = true }
 # 3.x needs a newer wasm-bindgen-futures than the one crates/web pins.
-russh-sftp = { version = "2.4", optional = true }
+russh-sftp = { version = "3.0", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = { version = "0.11", optional = true }
@@ -59,7 +59,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-ut
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"], optional = true }
 tcode-services = { path = "../services", optional = true }
 term = { path = "../term", optional = true }
-ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 
@@ -67,7 +67,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 libc = { version = "0.2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-core-foundation = { version = "0.9", optional = true }
+core-foundation = { version = "0.10", optional = true }
 system-configuration-sys = { version = "0.6", optional = true }
 
 [target.'cfg(windows)'.dependencies]

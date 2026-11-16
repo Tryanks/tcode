@@ -28,7 +28,7 @@ term = { path = "../term" }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-ureq = { version = "2", default-features = false, features = ["tls"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 filetime = "0.2"
 tcode-traverse = { path = "../traverse", default-features = false }
 

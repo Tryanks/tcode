@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use agent_client_protocol::{UntypedMessage, schema::v1 as acp};
+use agent_client_protocol::{UntypedMessage, v1::schema as acp};
 use serde_json::{Map, Value, json};
 
 use crate::acp_session::{
@@ -673,13 +673,7 @@ impl Dialect for Grok {
             });
         }
         let offers_api_key = setup.init.auth_methods.iter().any(|method| {
-            let id = match method {
-                acp::AuthMethod::Agent(method) => &method.id,
-                acp::AuthMethod::EnvVar(method) => &method.id,
-                acp::AuthMethod::Terminal(method) => &method.id,
-                _ => return false,
-            };
-            id.0.as_ref() == API_KEY_AUTH_METHOD
+            matches!(method, acp::AuthMethod::Agent(method) if method.id.0.as_ref() == API_KEY_AUTH_METHOD)
         });
         let authenticated = if offers_api_key {
             connection
@@ -690,7 +684,7 @@ impl Dialect for Grok {
         } else {
             Ok(())
         };
-        let auth_failure = |err: &acp::Error| {
+        let auth_failure = |err: &agent_client_protocol::Error| {
             let detail = match &authenticated {
                 Err(auth) => describe(auth),
                 Ok(()) => describe(err),
@@ -837,7 +831,7 @@ impl Dialect for Grok {
     fn turn_end(
         &self,
         _state: &mut State,
-        result: Result<acp::PromptResponse, acp::Error>,
+        result: Result<acp::PromptResponse, agent_client_protocol::Error>,
     ) -> TurnEnd {
         let (status, message) = match (prompt_status(&result), &result) {
             ((TurnStatus::Failed, _), Err(err)) => (TurnStatus::Failed, Some(failure_message(err))),
@@ -947,7 +941,7 @@ impl Dialect for Grok {
         session: Session,
         method: String,
         params: Value,
-    ) -> Result<Value, acp::Error> {
+    ) -> Result<Value, agent_client_protocol::Error> {
         if method == EXIT_PLAN_MODE {
             let decision = session
                 .ask_plan(
@@ -1033,7 +1027,7 @@ impl Dialect for Grok {
 }
 
 /// Grok fails a turn with `-32603 Internal error`, its own words in `data`.
-fn failure_message(err: &acp::Error) -> String {
+fn failure_message(err: &agent_client_protocol::Error) -> String {
     err.data
         .as_ref()
         .and_then(|data| data.get("message"))
@@ -1200,7 +1194,7 @@ fn fork_params(
 async fn rewind_points(
     connection: &acp_session::Connection,
     session_id: &acp::SessionId,
-) -> Result<Vec<(usize, Option<String>)>, acp::Error> {
+) -> Result<Vec<(usize, Option<String>)>, agent_client_protocol::Error> {
     let response = connection
         .send_request(UntypedMessage {
             method: REWIND_POINTS.into(),
@@ -1354,11 +1348,11 @@ fn refusal(error: &str) -> RewindFailure {
 
 /// The questions of an `_x.ai/ask_user_question` request. Grok keys answers
 /// by question text.
-fn questions(params: &Value) -> Result<Vec<UserInputQuestion>, acp::Error> {
+fn questions(params: &Value) -> Result<Vec<UserInputQuestion>, agent_client_protocol::Error> {
     let questions = params
         .get("questions")
         .and_then(Value::as_array)
-        .ok_or_else(acp::Error::invalid_params)?;
+        .ok_or_else(agent_client_protocol::Error::invalid_params)?;
     Ok(questions
         .iter()
         .filter_map(|question| {
