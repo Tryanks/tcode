@@ -169,15 +169,10 @@ pub struct GitHubApi {
 }
 
 impl GitHubApi {
-    /// Pooling is disabled because ureq retries an idempotent request without a body on a
-    /// stale pooled socket, and a label's DELETE is one.
     pub fn host(credentials: Arc<Credentials>) -> Arc<Self> {
         Arc::new(Self {
             credentials,
-            agent: ureq::AgentBuilder::new()
-                .redirects(0)
-                .max_idle_connections(0)
-                .build(),
+            agent: crate::forge::http::agent(),
             gate: Gate::default(),
             ledger: Mutex::new(Ledger::default()),
         })
@@ -312,8 +307,7 @@ impl GitHubApi {
             .as_ref()
             .map_or("anonymous", |credential| &credential.fingerprint);
         // Callers run this inside HostCx::unblock, so a dropped waiter leaves the job, and
-        // its permit, alive until the socket closes. ureq 2 does not apply its deadline to
-        // DNS resolution; a stalled lookup is bounded by the system resolver instead.
+        // its permit, alive until the request's deadline, name lookup included.
         let _permit = self.gate.acquire();
         let lease = self.ledger.lock().unwrap().admit(
             &host,
@@ -332,11 +326,10 @@ impl GitHubApi {
         };
         let timeout = options.timeout.min(DEADLINE_CAP);
         let started = Instant::now();
-        let mut request = self
-            .agent
-            .request(input.method, &url)
-            .timeout(timeout)
-            .set(
+        let mut request = ureq::http::Request::builder()
+            .method(input.method)
+            .uri(&url)
+            .header(
                 "Accept",
                 if graphql.is_some() {
                     "application/json"
@@ -344,46 +337,34 @@ impl GitHubApi {
                     input.accept.unwrap_or("application/vnd.github+json")
                 },
             )
-            .set("X-GitHub-Api-Version", "2022-11-28")
-            .set("User-Agent", "tcode");
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "tcode");
         if let Some(credential) = &credential {
-            request = request.set("Authorization", &format!("Bearer {}", credential.token));
+            request = request.header("Authorization", format!("Bearer {}", credential.token));
         }
         if let Some(etag) = input.if_none_match {
-            request = request.set("If-None-Match", etag);
+            request = request.header("If-None-Match", etag);
         }
-        let answer = if let Some(body) = input.body {
-            request
-                .set("Content-Type", "application/json")
-                .send_bytes(&serde_json::to_vec(body).map_err(|_| GitHubError::InvalidResponse)?)
-        } else {
-            request.call()
-        };
-        let response = match answer {
-            Ok(response) | Err(ureq::Error::Status(_, response)) => response,
-            Err(ureq::Error::Transport(error)) => {
-                use std::error::Error as _;
-                let timed_out = error
-                    .source()
-                    .and_then(|error| error.downcast_ref::<std::io::Error>())
-                    .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut);
-                return Err(if timed_out || started.elapsed() >= timeout {
-                    GitHubError::Deadline
-                } else {
-                    GitHubError::Request
-                });
+        if input.body.is_some() {
+            request = request.header("Content-Type", "application/json");
+        }
+        let sent = input
+            .body
+            .map(|body| serde_json::to_vec(body).map_err(|_| GitHubError::InvalidResponse))
+            .transpose()?;
+        // Past the deadline ureq answers with its own timeout, from the call or wrapped in
+        // the error of a body read.
+        let failed = |error: ureq::Error| {
+            if matches!(error, ureq::Error::Timeout(_)) || started.elapsed() >= timeout {
+                GitHubError::Deadline
+            } else {
+                GitHubError::Request
             }
         };
-        let status = response.status();
-        let headers: Headers = response
-            .headers_names()
-            .into_iter()
-            .filter_map(|name| {
-                response
-                    .header(&name)
-                    .map(|value| (name.to_ascii_lowercase(), value.to_owned()))
-            })
-            .collect();
+        let response = crate::forge::http::send(&self.agent, request, sent.as_deref(), timeout)
+            .map_err(failed)?;
+        let status = response.status().as_u16();
+        let headers: Headers = crate::forge::http::headers(&response);
         self.ledger.lock().unwrap().observe(host, scope, &headers);
         log::debug!(
             "github host={} path={} operation={} status={} limit={:?} remaining={:?} reset={:?} document={}",
@@ -398,20 +379,15 @@ impl GitHubApi {
         );
         let mut body = Vec::new();
         // A 304 has no message body, even when GitHub includes the cached
-        // representation's Content-Encoding. Reading it asks ureq 2 to decode an empty gzip stream.
+        // representation's Content-Encoding. Reading it asks ureq to decode an empty gzip
+        // stream, which fails.
         if status != 304 {
             response
+                .into_body()
                 .into_reader()
                 .take(options.body_limit.map_or(u64::MAX, |cap| cap as u64 + 1))
                 .read_to_end(&mut body)
-                .map_err(|error| {
-                    if error.kind() == std::io::ErrorKind::TimedOut || started.elapsed() >= timeout
-                    {
-                        GitHubError::Deadline
-                    } else {
-                        GitHubError::Request
-                    }
-                })?;
+                .map_err(|error| failed(error.into()))?;
         }
         let truncated = options.body_limit.is_some_and(|cap| body.len() > cap);
         if let Some(cap) = options.body_limit {

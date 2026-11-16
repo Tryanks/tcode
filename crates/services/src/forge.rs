@@ -7,7 +7,7 @@ pub(crate) mod account;
 pub(crate) mod anchors;
 pub(crate) mod checkout;
 pub use checkout::Checkout;
-mod http;
+pub(crate) mod http;
 mod rate_limit;
 mod viewed;
 

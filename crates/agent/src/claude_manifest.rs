@@ -736,21 +736,30 @@ mod refresh {
     fn fetch(url: &str, now: u64) -> Result<Option<Value>, String> {
         let cached = with_state(|state| state.source_responses.get(url).cloned());
         let mut request = ureq::get(url)
-            .set("User-Agent", "tcode")
-            .timeout(FETCH_TIMEOUT);
+            .header("User-Agent", "tcode")
+            .config()
+            .timeout_global(Some(FETCH_TIMEOUT))
+            .proxy(None)
+            .max_redirects(4)
+            .build();
         if let Some((etag, _)) = &cached {
-            request = request.set("If-None-Match", etag);
+            request = request.header("If-None-Match", etag);
         }
-        let response = request.call().map_err(|error| error.to_string())?;
+        let response = request.call().map_err(|error| format!("{url}: {error}"))?;
         // A 304 can retain Content-Encoding despite having no response body.
         // Do not pass it through the decompressor.
         if response.status() == 304 {
             let (_, body) = cached.ok_or("304 without a cached manifest")?;
             return with_state(|state| state.install(now, &body));
         }
-        let etag = response.header("ETag").map(str::to_owned);
+        let etag = response
+            .headers()
+            .get("ETag")
+            .and_then(|etag| etag.to_str().ok())
+            .map(str::to_owned);
         let mut body = Vec::new();
         response
+            .into_body()
             .into_reader()
             .take(MAX_RESPONSE_BYTES + 1)
             .read_to_end(&mut body)

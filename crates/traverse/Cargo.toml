@@ -59,7 +59,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-ut
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"], optional = true }
 tcode-services = { path = "../services", optional = true }
 term = { path = "../term", optional = true }
-ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 

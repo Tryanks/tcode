@@ -3269,18 +3269,18 @@ impl Server {
     }
 
     fn subscribe(&self) -> Result<(Receiver<Transport>, Sender<Transport>), AgentError> {
-        let response = self
-            .http
-            .agent
-            .get(&format!("{}/api/event", self.http.base))
-            .set("Authorization", &self.http.authorization)
-            .call()
-            .map_err(http_error)?;
+        let response = accepted(
+            self.http.answer(
+                ureq::http::Request::get(format!("{}/api/event", self.http.base))
+                    .header("Authorization", &self.http.authorization),
+                None,
+            )?,
+        )?;
         let (sender, receiver) = smol::channel::unbounded();
         let reader_sender = sender.clone();
         std::thread::Builder::new()
             .name("opencode-sse".into())
-            .spawn(move || read_sse(response.into_reader(), reader_sender))
+            .spawn(move || read_sse(response.into_body().into_reader(), reader_sender))
             .map_err(|err| AgentError::Spawn(format!("spawning OpenCode SSE reader: {err}")))?;
         Ok((receiver, sender))
     }
@@ -3362,8 +3362,15 @@ impl Http {
             ),
             directory: directory.to_path_buf(),
             // No deadline: stopping the session kills the server, which ends
-            // every request it has not answered.
-            agent: ureq::AgentBuilder::new().build(),
+            // every request it has not answered. The server is on this machine, so no
+            // proxy the environment names stands between.
+            agent: ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .proxy(None)
+                .max_redirects(4)
+                .timeout_connect(Some(Duration::from_secs(30)))
+                .build()
+                .new_agent(),
         }
     }
 
@@ -3374,35 +3381,56 @@ impl Http {
         }
     }
 
-    fn request(&self, method: &str, path: &str) -> ureq::Request {
-        self.agent
-            .request(method, &format!("{}{path}", self.base))
-            .set("Authorization", &self.authorization)
-            .set(
+    fn request(&self, method: &str, path: &str) -> ureq::http::request::Builder {
+        ureq::http::Request::builder()
+            .method(method)
+            .uri(format!("{}{path}", self.base))
+            .header("Authorization", &self.authorization)
+            .header(
                 "x-opencode-directory",
-                &uri_component(&self.directory.to_string_lossy()),
+                uri_component(&self.directory.to_string_lossy()),
             )
     }
 
+    /// The server's answer to `request`, whatever its status.
+    fn answer(
+        &self,
+        request: ureq::http::request::Builder,
+        body: Option<&Value>,
+    ) -> Result<Response, AgentError> {
+        let url = request.uri_ref().map(ToString::to_string);
+        match body {
+            Some(body) => request
+                .header("Content-Type", "application/json")
+                .body(body.to_string())
+                .map_err(ureq::Error::from)
+                .and_then(|request| self.agent.run(request)),
+            None => request
+                .body(())
+                .map_err(ureq::Error::from)
+                .and_then(|request| self.agent.run(request)),
+        }
+        .map_err(|error| {
+            AgentError::Protocol(format!(
+                "OpenCode HTTP: {}: {error}",
+                url.unwrap_or_default()
+            ))
+        })
+    }
+
     fn get(&self, path: &str) -> Result<Value, AgentError> {
-        parse_response(self.request("GET", path).call().map_err(http_error)?)
+        parse_response(self.answer(self.request("GET", path), None)?)
     }
 
     fn status(&self, path: &str) -> Result<u16, AgentError> {
-        match self.request("GET", path).call() {
-            Ok(response) => Ok(response.status()),
-            Err(ureq::Error::Status(status, _)) => Ok(status),
-            Err(err) => Err(http_error(err)),
-        }
+        Ok(self
+            .answer(self.request("GET", path), None)?
+            .status()
+            .as_u16())
     }
 
     fn send(&self, method: &str, path: &str, body: &Value) -> Result<Value, AgentError> {
-        parse_response(
-            self.request(method, path)
-                .set("Content-Type", "application/json")
-                .send_string(&body.to_string())
-                .map_err(http_error)?,
-        )
+        parse_response(self.answer(self.request(method, path), Some(body))?)
     }
 
     fn post(&self, path: &str, body: &Value) -> Result<Value, AgentError> {
@@ -3418,7 +3446,7 @@ impl Http {
     }
 
     fn delete(&self, path: &str) -> Result<(), AgentError> {
-        parse_response(self.request("DELETE", path).call().map_err(http_error)?).map(drop)
+        parse_response(self.answer(self.request("DELETE", path), None)?).map(drop)
     }
 }
 
@@ -3444,12 +3472,18 @@ fn uri_component(value: &str) -> String {
         .collect()
 }
 
-fn parse_response(response: ureq::Response) -> Result<Value, AgentError> {
+type Response = ureq::http::Response<ureq::Body>;
+
+fn parse_response(response: Response) -> Result<Value, AgentError> {
+    let response = accepted(response)?;
     if response.status() == 204 {
         return Ok(Value::Null);
     }
     let mut text = String::new();
-    response.into_reader().read_to_string(&mut text)?;
+    response
+        .into_body()
+        .into_reader()
+        .read_to_string(&mut text)?;
     if text.trim().is_empty() {
         return Ok(Value::Null);
     }
@@ -3457,29 +3491,30 @@ fn parse_response(response: ureq::Response) -> Result<Value, AgentError> {
         .map_err(|err| AgentError::Protocol(format!("invalid OpenCode JSON response: {err}")))
 }
 
-fn http_error(error: ureq::Error) -> AgentError {
-    match error {
-        ureq::Error::Status(status, response) => {
-            let mut body = String::new();
-            let _ = response
-                .into_reader()
-                .take(64 * 1024)
-                .read_to_string(&mut body);
-            let detail = serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|body| body["message"].as_str().map(str::to_owned))
-                .unwrap_or(body);
-            AgentError::Provider(format!(
-                "OpenCode HTTP {status}: {}",
-                if detail.trim().is_empty() {
-                    "empty response"
-                } else {
-                    detail.trim()
-                }
-            ))
-        }
-        ureq::Error::Transport(error) => AgentError::Protocol(format!("OpenCode HTTP: {error}")),
+/// An answer the server did not refuse; a refusal as its status and the server's words.
+fn accepted(response: Response) -> Result<Response, AgentError> {
+    let status = response.status().as_u16();
+    if status < 400 {
+        return Ok(response);
     }
+    let mut body = String::new();
+    let _ = response
+        .into_body()
+        .into_reader()
+        .take(64 * 1024)
+        .read_to_string(&mut body);
+    let detail = serde_json::from_str::<Value>(&body)
+        .ok()
+        .and_then(|body| body["message"].as_str().map(str::to_owned))
+        .unwrap_or(body);
+    Err(AgentError::Provider(format!(
+        "OpenCode HTTP {status}: {}",
+        if detail.trim().is_empty() {
+            "empty response"
+        } else {
+            detail.trim()
+        }
+    )))
 }
 
 enum Transport {

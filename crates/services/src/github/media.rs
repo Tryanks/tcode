@@ -3,6 +3,7 @@
 //! github.com credential and hands back bounded bytes.
 
 use super::{GitHubApi, GitHubError};
+use crate::forge::http::text;
 use std::{
     io::Read as _,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -174,17 +175,14 @@ pub(super) fn fetch(
             if remaining.is_zero() {
                 return Err(GitHubError::Deadline);
             }
-            let mut request = api
-                .agent
-                .get(target.as_str())
-                .timeout(remaining)
-                .set("User-Agent", "tcode")
-                .set("Accept-Encoding", "identity");
+            let mut request = ureq::http::Request::get(target.as_str())
+                .header("User-Agent", "tcode")
+                .header("Accept-Encoding", "identity");
             let credentialed = target.host_str().is_some_and(|host| {
                 CREDENTIALED_HOSTS.contains(&host.to_ascii_lowercase().as_str())
             });
             if let (true, Some(token)) = (credentialed, &token) {
-                request = request.set("Authorization", &format!("Bearer {token}"));
+                request = request.header("Authorization", format!("Bearer {token}"));
             }
             // An entity tag is quoted; anything else is the Last-Modified date it came from.
             if let Some(validator) = validator {
@@ -193,33 +191,29 @@ pub(super) fn fetch(
                 } else {
                     "If-Modified-Since"
                 };
-                request = request.set(header, validator);
+                request = request.header(header, validator);
             }
-            let response = match request.call() {
-                Ok(response) => response,
-                Err(ureq::Error::Status(status, _)) => {
-                    return Err(match status {
-                        404 => GitHubError::NotFound,
-                        status => GitHubError::Response {
-                            status,
-                            messages: Vec::new(),
-                        },
-                    });
-                }
-                Err(ureq::Error::Transport(_)) => {
-                    return Err(if started.elapsed() >= TIMEOUT {
+            let response =
+                crate::forge::http::send(&api.agent, request, None, remaining).map_err(|_| {
+                    if started.elapsed() >= TIMEOUT {
                         GitHubError::Deadline
                     } else {
                         GitHubError::Request
+                    }
+                })?;
+            match response.status().as_u16() {
+                404 => return Err(GitHubError::NotFound),
+                status @ 400.. => {
+                    return Err(GitHubError::Response {
+                        status,
+                        messages: Vec::new(),
                     });
                 }
-            };
-            if !(300..400).contains(&response.status()) || response.status() == 304 {
-                break 'hops response;
+                300..=303 | 305..=399 => {}
+                _ => break 'hops response,
             }
             // A chain this long is not GitHub answering with bytes.
-            let next = response
-                .header("location")
+            let next = text(&response, "location")
                 .and_then(|location| target.join(location).ok())
                 .filter(|next| next.scheme() == "https" && hop < MAX_REDIRECTS)
                 .ok_or(GitHubError::InvalidResponse)?;
@@ -234,8 +228,7 @@ pub(super) fn fetch(
     if response.status() == 304 {
         return Ok(PullRequestMedia::NotModified { expires_at });
     }
-    let mime = response
-        .header("content-type")
+    let mime = text(&response, "content-type")
         .and_then(media_type)
         .or_else(|| type_from_name(&target).map(str::to_owned))
         .or_else(|| type_from_name(source.url()).map(str::to_owned))
@@ -243,19 +236,17 @@ pub(super) fn fetch(
     if !mime.starts_with("image/") {
         return Ok(PullRequestMedia::External { mime });
     }
-    let declared = response
-        .header("content-length")
-        .and_then(|value| value.parse::<u64>().ok());
+    let declared = text(&response, "content-length").and_then(|value| value.parse::<u64>().ok());
     if declared.is_some_and(|length| length > MAX_PULL_REQUEST_MEDIA_BYTES as u64) {
         return Err(GitHubError::BodyTooLarge);
     }
-    let validator = response
-        .header("etag")
-        .or_else(|| response.header("last-modified"))
+    let validator = text(&response, "etag")
+        .or_else(|| text(&response, "last-modified"))
         .map(str::to_owned);
     let limit = tcode_protocol::max_pull_request_media_bytes(&mime, validator.as_deref());
     let mut bytes = Vec::new();
     response
+        .into_body()
         .into_reader()
         .take(limit as u64 + 1)
         .read_to_end(&mut bytes)

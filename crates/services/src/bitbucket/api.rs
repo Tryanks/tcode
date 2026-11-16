@@ -169,12 +169,8 @@ impl Api {
             store,
             environment: environment.into_iter().collect(),
             hosts: RwLock::default(),
-            // No pooling: ureq retries a stale pooled socket, and a write must never be retried.
             // Redirects are followed by hand, on the API's origin only.
-            agent: ureq::AgentBuilder::new()
-                .redirects(0)
-                .max_idle_connections(0)
-                .build(),
+            agent: crate::forge::http::agent(),
             rate_limits: Mutex::default(),
             viewers: Mutex::default(),
         })
@@ -371,24 +367,29 @@ impl Api {
         let started = Instant::now();
         let mut redirects = 0;
         let response = loop {
-            let mut call = self
-                .agent
-                .request(request.method, url.as_str())
-                .timeout(DEADLINE.saturating_sub(started.elapsed()))
-                .set("Accept", request.accept)
-                .set("User-Agent", "tcode");
+            let mut call = ureq::http::Request::builder()
+                .method(request.method)
+                .uri(url.as_str())
+                .header("Accept", request.accept)
+                .header("User-Agent", "tcode");
             if let Some(credential) = &credential {
-                call = call.set("Authorization", &credential.authorization);
+                call = call.header("Authorization", &credential.authorization);
             }
-            let answer = match &request.body {
-                Some(body) => call
-                    .set("Content-Type", "application/json")
-                    .send_bytes(&serde_json::to_vec(body).unwrap_or_default()),
-                None => call.call(),
-            };
-            let response = match answer {
-                Ok(response) | Err(ureq::Error::Status(_, response)) => response,
-                Err(ureq::Error::Transport(_)) => {
+            if request.body.is_some() {
+                call = call.header("Content-Type", "application/json");
+            }
+            let body = request
+                .body
+                .as_ref()
+                .map(|body| serde_json::to_vec(body).unwrap_or_default());
+            let response = match crate::forge::http::send(
+                &self.agent,
+                call,
+                body.as_deref(),
+                DEADLINE.saturating_sub(started.elapsed()),
+            ) {
+                Ok(response) => response,
+                Err(_) => {
                     return Err(if started.elapsed() >= DEADLINE {
                         error(ForgeErrorKind::Deadline, "Bitbucket request deadline")
                     } else {
@@ -403,13 +404,12 @@ impl Api {
                 "bitbucket path={} operation={} status={}",
                 url.path(),
                 request.operation,
-                response.status()
+                response.status().as_u16()
             );
             // `/diff` and `/diffstat` answer with a redirect to the comparison they name. One
             // off the API's origin is refused, so the credential never leaves it.
-            if (300..400).contains(&response.status()) && request.method == "GET" {
-                let next = response
-                    .header("location")
+            if response.status().is_redirection() && request.method == "GET" {
+                let next = crate::forge::http::text(&response, "location")
                     .and_then(|location| url.join(location).ok())
                     .filter(|next| crate::forge::same_origin(next, &url))
                     .ok_or_else(|| {
@@ -427,10 +427,11 @@ impl Api {
             }
             break response;
         };
-        let status = response.status();
-        let retry_after = response.header("retry-after").map(str::to_owned);
+        let status = response.status().as_u16();
+        let retry_after = crate::forge::http::text(&response, "retry-after").map(str::to_owned);
         let mut body = Vec::new();
         response
+            .into_body()
             .into_reader()
             .take(request.limit.map_or(u64::MAX, |limit| limit as u64 + 1))
             .read_to_end(&mut body)

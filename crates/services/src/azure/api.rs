@@ -176,13 +176,9 @@ impl Api {
             store,
             environment: environment.into_iter().collect(),
             hosts: RwLock::default(),
-            // No pooling: ureq retries a stale pooled socket, and a write must never be retried.
-            // No redirects: Azure answers a missing sign-in with one, and the credential never
-            // follows it off dev.azure.com.
-            agent: ureq::AgentBuilder::new()
-                .redirects(0)
-                .max_idle_connections(0)
-                .build(),
+            // It follows no redirect: Azure answers a missing sign-in with one, and the
+            // credential never follows it off dev.azure.com.
+            agent: crate::forge::http::agent(),
             az: Mutex::default(),
             rate_limits: Mutex::default(),
             viewers: Mutex::default(),
@@ -460,36 +456,41 @@ impl Api {
             request.path, request.version
         );
         let started = Instant::now();
-        let mut call = self
-            .agent
-            .request(request.method, &url)
-            .timeout(DEADLINE)
-            .set("Accept", request.accept)
-            .set("User-Agent", "tcode")
+        let mut call = ureq::http::Request::builder()
+            .method(request.method)
+            .uri(&url)
+            .header("Accept", request.accept)
+            .header("User-Agent", "tcode")
             // Without it a missing or refused sign-in answers with a redirect to a sign-in page.
-            .set("X-TFS-FedAuthRedirect", "Suppress");
+            .header("X-TFS-FedAuthRedirect", "Suppress");
         if let Some(credential) = &credential {
-            call = call.set("Authorization", &credential.authorization);
+            call = call.header("Authorization", &credential.authorization);
         }
-        let answer = match &request.body {
-            Some(body) => call
-                .set(
-                    "Content-Type",
-                    if request.method == "PATCH" && body.is_array() {
-                        "application/json-patch+json"
-                    } else {
-                        "application/json"
-                    },
-                )
-                .send_bytes(&serde_json::to_vec(body).unwrap_or_default()),
-            None => call.call(),
-        };
-        let response = match answer {
-            Ok(response) | Err(ureq::Error::Status(_, response)) => response,
-            Err(ureq::Error::Transport(transport)) => {
-                // ureq checks every header before sending; its message quotes the header, which
-                // may be the credential, so only its kind is told.
-                return Err(if transport.kind() == ureq::ErrorKind::BadHeader {
+        if let Some(body) = &request.body {
+            call = call.header(
+                "Content-Type",
+                if request.method == "PATCH" && body.is_array() {
+                    "application/json-patch+json"
+                } else {
+                    "application/json"
+                },
+            );
+        }
+        let body = request
+            .body
+            .as_ref()
+            .map(|body| serde_json::to_vec(body).unwrap_or_default());
+        let response = match crate::forge::http::send(&self.agent, call, body.as_deref(), DEADLINE)
+        {
+            Ok(response) => response,
+            Err(failure) => {
+                // A header that cannot be sent, which may be the credential, is told by its
+                // kind alone and never quoted.
+                let header = matches!(
+                    &failure,
+                    ureq::Error::Http(http) if http.is::<ureq::http::header::InvalidHeaderValue>()
+                );
+                return Err(if header {
                     error(
                         ForgeErrorKind::InvalidInput,
                         "Azure DevOps request not sent (ureq: invalid header)",
@@ -504,7 +505,7 @@ impl Api {
                 });
             }
         };
-        let status = response.status();
+        let status = response.status().as_u16();
         log::debug!(
             "azure host={} path={} operation={} status={}",
             authority,
@@ -512,11 +513,12 @@ impl Api {
             request.operation,
             status
         );
-        let header = |name: &str| response.header(name).map(str::to_owned);
+        let header = |name: &str| crate::forge::http::text(&response, name).map(str::to_owned);
         let retry_after = header("retry-after");
         let reset = header("x-ratelimit-reset");
         let mut body = Vec::new();
         response
+            .into_body()
             .into_reader()
             .take(request.limit.map_or(u64::MAX, |limit| limit as u64 + 1))
             .read_to_end(&mut body)

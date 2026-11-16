@@ -406,11 +406,16 @@ async fn latest(probe: &SystemProbe, query: &LatestQuery) -> Result<Option<Strin
         LatestQuery::Registry(package) => {
             let url = format!("https://registry.npmjs.org/{package}/latest");
             let response = ureq::get(&url)
-                .timeout(Duration::from_secs(10))
+                .config()
+                .timeout_global(Some(Duration::from_secs(10)))
+                .proxy(None)
+                .max_redirects(4)
+                .build()
                 .call()
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| format!("{url}: {error}"))?;
             let mut bytes = Vec::new();
             response
+                .into_body()
                 .into_reader()
                 .read_to_end(&mut bytes)
                 .map_err(|error| format!("{url}: {error}"))?;
@@ -426,11 +431,16 @@ async fn latest(probe: &SystemProbe, query: &LatestQuery) -> Result<Option<Strin
         LatestQuery::Claude { channel, maximum } => {
             let url = format!("https://downloads.claude.ai/claude-code-releases/{channel}");
             let response = ureq::get(&url)
-                .timeout(Duration::from_secs(10))
+                .config()
+                .timeout_global(Some(Duration::from_secs(10)))
+                .proxy(None)
+                .max_redirects(4)
+                .build()
                 .call()
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| format!("{url}: {error}"))?;
             let mut version = String::new();
             response
+                .into_body()
                 .into_reader()
                 .read_to_string(&mut version)
                 .map_err(|error| format!("{url}: {error}"))?;

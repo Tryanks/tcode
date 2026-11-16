@@ -57,6 +57,80 @@ pub(crate) fn in_order(steps: Vec<Step<'_>>) -> Outcome {
     Outcome::Applied
 }
 
+/// The client a host's API is reached with. An answer of any status comes back to be read,
+/// a redirect included: following one, or refusing to, is the caller's. Each request has a
+/// connection of its own: a pooled one the server closes as the request is written gives no
+/// answer, which for a write reads as possibly applied. A proxy named in the environment is
+/// not used.
+pub(crate) fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .max_redirects_will_error(false)
+        .max_idle_connections(0)
+        .proxy(None)
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .build()
+        .new_agent()
+}
+
+/// Sends `request` once, with `body` when there is one, and gives the host's answer. The
+/// deadline runs from the name lookup to the last byte read of the answer's body.
+pub(crate) fn send(
+    agent: &ureq::Agent,
+    request: ureq::http::request::Builder,
+    body: Option<&[u8]>,
+    deadline: Duration,
+) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+    fn run(
+        agent: &ureq::Agent,
+        request: ureq::http::Request<impl ureq::AsSendBody>,
+        deadline: Duration,
+    ) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+        let request = agent
+            .configure_request(request)
+            .timeout_global(Some(deadline))
+            .build();
+        agent.run(request)
+    }
+    // Given no body, ureq sends a POST, PUT or PATCH an empty chunked one; an empty slice
+    // makes it `Content-Length: 0`.
+    let carries = matches!(
+        request.method_ref().map(ureq::http::Method::as_str),
+        Some("POST" | "PUT" | "PATCH")
+    );
+    if body.is_some() || carries {
+        run(agent, request.body(body.unwrap_or_default())?, deadline)
+    } else {
+        run(agent, request.body(())?, deadline)
+    }
+}
+
+/// The headers of an answer whose values are text, by lowercase name; a repeated one is its
+/// first.
+pub(crate) fn headers<Map: FromIterator<(String, String)>>(
+    answer: &ureq::http::Response<ureq::Body>,
+) -> Map {
+    answer
+        .headers()
+        .keys()
+        .filter_map(|name| {
+            Some((
+                name.as_str().to_owned(),
+                text(answer, name.as_str())?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+/// A header of an answer, when its value is text.
+pub(crate) fn text<'a>(
+    answer: &'a ureq::http::Response<ureq::Body>,
+    name: &str,
+) -> Option<&'a str> {
+    answer.headers().get(name)?.to_str().ok()
+}
+
 /// Whether two URLs are one origin: scheme, host and port. A token goes nowhere else, so a
 /// redirect to another port of the same host never carries it.
 pub(crate) fn same_origin(left: &url::Url, right: &url::Url) -> bool {
@@ -86,13 +160,11 @@ pub(crate) fn media(
     let mut response = None;
     for _ in 0..=3 {
         let remaining = DEADLINE.saturating_sub(started.elapsed());
-        let mut request = agent
-            .get(target.as_str())
-            .timeout(remaining)
-            .set("User-Agent", "tcode")
-            .set("Accept-Encoding", "identity");
+        let mut request = ureq::http::Request::get(target.as_str())
+            .header("User-Agent", "tcode")
+            .header("Accept-Encoding", "identity");
         if let Some(authorization) = authorization.filter(|_| same_origin(&target, url)) {
-            request = request.set("Authorization", authorization);
+            request = request.header("Authorization", authorization);
         }
         if let Some(validator) = validator {
             let header = if validator.starts_with('"') || validator.starts_with("W/") {
@@ -100,18 +172,18 @@ pub(crate) fn media(
             } else {
                 "If-Modified-Since"
             };
-            request = request.set(header, validator);
+            request = request.header(header, validator);
         }
-        let answer = match request.call() {
-            Ok(answer) => answer,
-            Err(ureq::Error::Status(404, _)) => {
-                return Err(error(ForgeErrorKind::NotFound, "not found"));
-            }
-            Err(_) => return Err(failed()),
-        };
-        if (300..400).contains(&answer.status()) && answer.status() != 304 {
-            target = answer
-                .header("location")
+        let answer = send(agent, request, None, remaining).map_err(|_| failed())?;
+        let status = answer.status().as_u16();
+        if status == 404 {
+            return Err(error(ForgeErrorKind::NotFound, "not found"));
+        }
+        if status >= 400 {
+            return Err(failed());
+        }
+        if (300..400).contains(&status) && status != 304 {
+            target = text(&answer, "location")
                 .and_then(|location| target.join(location).ok())
                 .filter(|next| next.scheme() == "https")
                 .ok_or_else(failed)?;
@@ -128,8 +200,7 @@ pub(crate) fn media(
     if response.status() == 304 {
         return Ok(PullRequestMedia::NotModified { expires_at });
     }
-    let mime = response
-        .header("content-type")
+    let mime = text(&response, "content-type")
         .and_then(media::media_type)
         .or_else(|| media::type_from_name(&target).map(str::to_owned))
         .or_else(|| media::type_from_name(url).map(str::to_owned))
@@ -137,13 +208,13 @@ pub(crate) fn media(
     if !mime.starts_with("image/") {
         return Ok(PullRequestMedia::External { mime });
     }
-    let validator = response
-        .header("etag")
-        .or_else(|| response.header("last-modified"))
+    let validator = text(&response, "etag")
+        .or_else(|| text(&response, "last-modified"))
         .map(str::to_owned);
     let limit = max_pull_request_media_bytes(&mime, validator.as_deref());
     let mut bytes = Vec::new();
     response
+        .into_body()
         .into_reader()
         .take(limit as u64 + 1)
         .read_to_end(&mut bytes)

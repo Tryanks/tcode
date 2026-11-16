@@ -63,31 +63,20 @@ pub(crate) fn ask(
     authorization: &str,
     headers: &[(&str, &str)],
 ) -> Result<Answer, TokenCheck> {
-    let mut request = agent
-        .get(url)
-        .timeout(DEADLINE)
-        .set("Accept", "application/json")
-        .set("User-Agent", "tcode")
-        .set("Authorization", authorization);
+    let mut request = ureq::http::Request::get(url)
+        .header("Accept", "application/json")
+        .header("User-Agent", "tcode")
+        .header("Authorization", authorization);
     for (name, value) in headers {
-        request = request.set(name, value);
+        request = request.header(*name, *value);
     }
-    let response = match request.call() {
-        Ok(response) | Err(ureq::Error::Status(_, response)) => response,
-        Err(ureq::Error::Transport(_)) => return Err(TokenCheck::Unreachable { status: None }),
-    };
-    let status = response.status();
-    let headers = response
-        .headers_names()
-        .into_iter()
-        .filter_map(|name| {
-            response
-                .header(&name)
-                .map(|value| (name.to_ascii_lowercase(), value.to_owned()))
-        })
-        .collect();
+    let response = super::http::send(agent, request, None, DEADLINE)
+        .map_err(|_| TokenCheck::Unreachable { status: None })?;
+    let status = response.status().as_u16();
+    let headers = super::http::headers(&response);
     let mut bytes = Vec::new();
     let read = response
+        .into_body()
         .into_reader()
         .take(BODY_LIMIT + 1)
         .read_to_end(&mut bytes);
