@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use agent_client_protocol::schema::v1 as acp;
+use agent_client_protocol::v1::schema as acp;
 use serde_json::{Map, Value, json};
 
 use super::{Cursor, Questions};
@@ -117,7 +117,8 @@ fn turn_status(events: &[AgentEvent]) -> TurnStatus {
 #[test]
 fn a_signed_out_start_says_how_to_sign_in() {
     let refused: Value = serde_json::from_str(RECORDED.lines().nth(2).unwrap()).unwrap();
-    let error: acp::Error = serde_json::from_value(refused["error"].clone()).unwrap();
+    let error: agent_client_protocol::Error =
+        serde_json::from_value(refused["error"].clone()).unwrap();
     let failure = super::start_failure(&error, "could not start a session");
     assert!(
         matches!(&failure, crate::AgentError::Provider(message)

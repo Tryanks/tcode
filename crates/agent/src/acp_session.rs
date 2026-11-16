@@ -24,7 +24,7 @@ use std::sync::{
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use agent_client_protocol::{self as sdk, schema::ProtocolVersion, schema::v1 as acp};
+use agent_client_protocol::{self as sdk, schema::ProtocolVersion, v1::schema as acp};
 use serde::Deserialize as _;
 use serde_json::{Map, Value, json};
 use smol::channel::{Receiver, Sender};
@@ -91,7 +91,7 @@ pub(crate) fn config_selection<'a>(
 /// answers `initialize` (cline 3.0.39) would hold its catalog forever.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub(crate) type Connection = sdk::ConnectionTo<sdk::Agent>;
+pub(crate) type Connection = sdk::v1::ConnectionTo<sdk::Agent>;
 
 trait MutexExt<T> {
     fn lock_recover(&self) -> MutexGuard<'_, T>;
@@ -151,7 +151,7 @@ pub(crate) trait Dialect: Send + Sync + 'static {
     fn turn_end(
         &self,
         state: &mut State,
-        result: Result<acp::PromptResponse, acp::Error>,
+        result: Result<acp::PromptResponse, sdk::Error>,
     ) -> TurnEnd;
 
     /// Deliver [`SessionCommand::Steer`] into the running turn.
@@ -178,8 +178,8 @@ pub(crate) trait Dialect: Send + Sync + 'static {
         _session: Session,
         method: String,
         _params: Value,
-    ) -> impl Future<Output = Result<Value, acp::Error>> + Send {
-        async move { Err(acp::Error::method_not_found().data(method)) }
+    ) -> impl Future<Output = Result<Value, sdk::Error>> + Send {
+        async move { Err(sdk::Error::method_not_found().data(method)) }
     }
 
     /// An agent→client notification other than a `session/update` the schema
@@ -294,7 +294,7 @@ impl Setup<'_> {
     pub(crate) async fn load(
         &self,
         request: acp::LoadSessionRequest,
-    ) -> Result<acp::LoadSessionResponse, acp::Error> {
+    ) -> Result<acp::LoadSessionResponse, sdk::Error> {
         self.state.lock_recover().loading = true;
         let (loaded_tx, loaded) = smol::channel::bounded(1);
         let state = self.state.clone();
@@ -311,7 +311,7 @@ impl Setup<'_> {
                 });
         let loaded = match registered {
             Ok(()) => loaded.recv().await.unwrap_or_else(|_| {
-                Err(acp::Error::internal_error().data("the agent closed before answering"))
+                Err(sdk::Error::internal_error().data("the agent closed before answering"))
             }),
             Err(err) => Err(err),
         };
@@ -538,7 +538,7 @@ where
                 })
                 .detach();
                 let outcome = sdk::Client
-                    .builder()
+                    .v1()
                     .name(format!("tcode-acp-query-{name}"))
                     .connect_with(sdk::ByteStreams::new(stdin, stdout), async |connection| {
                         Ok(
@@ -699,7 +699,7 @@ async fn run_actor<D: Dialect>(
     );
     let session_started = Arc::new(AtomicBool::new(false));
     let connection_result = sdk::Client
-        .builder()
+        .v1()
         .name(format!("tcode-acp-{name}"))
         // Untyped, so a `sessionUpdate` kind the schema does not know reaches
         // the dialect instead of failing to parse and being dropped.
@@ -889,7 +889,7 @@ async fn connected_actor<D: Dialect>(
     io_done: &Receiver<String>,
     session_started: &AtomicBool,
     pending_deliveries: &Arc<Mutex<VecDeque<u64>>>,
-) -> Result<Exit, acp::Error> {
+) -> Result<Exit, sdk::Error> {
     enum Startup {
         Handshake(Result<(Established, bool), AgentError>),
         Io(String),
@@ -1057,7 +1057,7 @@ async fn connected_actor<D: Dialect>(
 
 struct TurnOutcome {
     turn_id: String,
-    result: Result<acp::PromptResponse, acp::Error>,
+    result: Result<acp::PromptResponse, sdk::Error>,
 }
 
 /// `initialize`, then the dialect's session establishment. Also reports
@@ -1339,7 +1339,7 @@ async fn finish_turn<D: Dialect>(
 /// request_cancelled` error is an agent aborting the prompt outright instead
 /// of returning `stopReason: cancelled`.
 pub(crate) fn prompt_status(
-    result: &Result<acp::PromptResponse, acp::Error>,
+    result: &Result<acp::PromptResponse, sdk::Error>,
 ) -> (TurnStatus, Option<String>) {
     match result {
         Ok(response) => stop_reason_status(response.stop_reason),
@@ -1458,11 +1458,11 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ObservedWriter<W> {
 }
 
 /// ACP's `auth_required` error.
-pub(crate) fn is_auth_required(err: &acp::Error) -> bool {
+pub(crate) fn is_auth_required(err: &sdk::Error) -> bool {
     i32::from(err.code) == -32000
 }
 
-pub(crate) fn describe(err: &acp::Error) -> String {
+pub(crate) fn describe(err: &sdk::Error) -> String {
     match &err.data {
         Some(data) => format!("{} ({data})", err.message),
         None => err.message.clone(),
@@ -1494,12 +1494,12 @@ async fn set_option(
     session_id: &acp::SessionId,
     origin: &OptionOrigin,
     value: &Value,
-) -> Result<Option<Vec<acp::SessionConfigOption>>, acp::Error> {
+) -> Result<Option<Vec<acp::SessionConfigOption>>, sdk::Error> {
     match origin {
         OptionOrigin::Launch => Ok(None),
         OptionOrigin::Mode => {
             let Some(mode) = value.as_str() else {
-                return Err(acp::Error::invalid_params());
+                return Err(sdk::Error::invalid_params());
             };
             connection
                 .send_request(acp::SetSessionModeRequest::new(
@@ -1516,7 +1516,7 @@ async fn set_option(
                 Value::String(value) => acp::SessionConfigOptionValue::value_id(
                     acp::SessionConfigValueId::new(value.as_str()),
                 ),
-                _ => return Err(acp::Error::invalid_params()),
+                _ => return Err(sdk::Error::invalid_params()),
             };
             let response = connection
                 .send_request(acp::SetSessionConfigOptionRequest::new(
@@ -2727,7 +2727,7 @@ impl Client {
         &self,
         args: acp::RequestPermissionRequest,
         withdrawn: impl Future<Output = ()>,
-    ) -> Result<acp::RequestPermissionResponse, acp::Error> {
+    ) -> Result<acp::RequestPermissionResponse, sdk::Error> {
         let (request_id, turn) = {
             let mut state = self.state.lock_recover();
             state.approval_seq += 1;
@@ -2784,7 +2784,7 @@ impl Client {
                     })
                     .await;
             }
-            return Err(acp::Error::request_cancelled());
+            return Err(sdk::Error::request_cancelled());
         };
         let outcome = match approval_outcome(&decision, &options) {
             Some(outcome) => outcome,
@@ -2806,10 +2806,10 @@ impl Client {
     async fn read_text_file(
         &self,
         args: acp::ReadTextFileRequest,
-    ) -> Result<acp::ReadTextFileResponse, acp::Error> {
+    ) -> Result<acp::ReadTextFileResponse, sdk::Error> {
         let path = self.state.lock_recover().cwd.join(&args.path);
         let content = smol::fs::read_to_string(&path).await.map_err(|err| {
-            acp::Error::new(-32603, format!("could not read {}: {err}", path.display()))
+            sdk::Error::new(-32603, format!("could not read {}: {err}", path.display()))
         })?;
         // `line` is 1-based; `limit` counts lines from there.
         let content = match (args.line, args.limit) {
@@ -2827,11 +2827,11 @@ impl Client {
     async fn write_text_file(
         &self,
         args: acp::WriteTextFileRequest,
-    ) -> Result<acp::WriteTextFileResponse, acp::Error> {
+    ) -> Result<acp::WriteTextFileResponse, sdk::Error> {
         let path = self.state.lock_recover().cwd.join(&args.path);
         if let Some(parent) = path.parent() {
             smol::fs::create_dir_all(parent).await.map_err(|err| {
-                acp::Error::new(
+                sdk::Error::new(
                     -32603,
                     format!("could not create {}: {err}", parent.display()),
                 )
@@ -2846,7 +2846,7 @@ impl Client {
             Err(_) => None,
         };
         smol::fs::write(&path, &args.content).await.map_err(|err| {
-            acp::Error::new(-32603, format!("could not write {}: {err}", path.display()))
+            sdk::Error::new(-32603, format!("could not write {}: {err}", path.display()))
         })?;
         let update = old_text.and_then(|old_text| {
             self.state.lock_recover().record_write(FileWrite {
@@ -2865,7 +2865,7 @@ impl Client {
         &self,
         args: acp::CreateTerminalRequest,
         connection: &Connection,
-    ) -> Result<acp::CreateTerminalResponse, acp::Error> {
+    ) -> Result<acp::CreateTerminalResponse, sdk::Error> {
         let cwd = match &args.cwd {
             Some(cwd) => self.state.lock_recover().cwd.join(cwd),
             None => self.state.lock_recover().cwd.clone(),
@@ -2891,7 +2891,7 @@ impl Client {
     async fn terminal_output(
         &self,
         args: acp::TerminalOutputRequest,
-    ) -> Result<acp::TerminalOutputResponse, acp::Error> {
+    ) -> Result<acp::TerminalOutputResponse, sdk::Error> {
         let terminal = self.terminal(&args.terminal_id)?;
         let output = terminal.output.lock_recover().clone();
         let truncated = *terminal.truncated.lock_recover();
@@ -2902,7 +2902,7 @@ impl Client {
     async fn wait_for_terminal_exit(
         &self,
         args: acp::WaitForTerminalExitRequest,
-    ) -> Result<acp::WaitForTerminalExitResponse, acp::Error> {
+    ) -> Result<acp::WaitForTerminalExitResponse, sdk::Error> {
         let terminal = self.terminal(&args.terminal_id)?;
         // The sender is dropped once the process exits, closing the channel.
         let _ = terminal.done.recv().await;
@@ -2917,7 +2917,7 @@ impl Client {
     async fn kill_terminal(
         &self,
         args: acp::KillTerminalRequest,
-    ) -> Result<acp::KillTerminalResponse, acp::Error> {
+    ) -> Result<acp::KillTerminalResponse, sdk::Error> {
         self.terminal(&args.terminal_id)?.kill();
         Ok(acp::KillTerminalResponse::new())
     }
@@ -2925,7 +2925,7 @@ impl Client {
     async fn release_terminal(
         &self,
         args: acp::ReleaseTerminalRequest,
-    ) -> Result<acp::ReleaseTerminalResponse, acp::Error> {
+    ) -> Result<acp::ReleaseTerminalResponse, sdk::Error> {
         let terminal = self
             .state
             .lock_recover()
@@ -2936,13 +2936,13 @@ impl Client {
         }
         Ok(acp::ReleaseTerminalResponse::new())
     }
-    fn terminal(&self, id: &acp::TerminalId) -> Result<Arc<Terminal>, acp::Error> {
+    fn terminal(&self, id: &acp::TerminalId) -> Result<Arc<Terminal>, sdk::Error> {
         self.state
             .lock_recover()
             .terminals
             .get(id.0.as_ref())
             .cloned()
-            .ok_or_else(|| acp::Error::new(-32002, format!("unknown terminal `{}`", id.0)))
+            .ok_or_else(|| sdk::Error::new(-32002, format!("unknown terminal `{}`", id.0)))
     }
 }
 
@@ -2967,9 +2967,9 @@ impl Terminal {
         env: &[acp::EnvVariable],
         cwd: &Path,
         limit: Option<u64>,
-    ) -> Result<Arc<Self>, acp::Error> {
+    ) -> Result<Arc<Self>, sdk::Error> {
         let program = crate::resolve_binary(None, command)
-            .map_err(|err| acp::Error::new(-32603, err.to_string()))?;
+            .map_err(|err| sdk::Error::new(-32603, err.to_string()))?;
         let mut cmd = crate::process::async_harness_command(&program);
         cmd.args(args)
             .current_dir(cwd)
@@ -2981,13 +2981,13 @@ impl Terminal {
         }
         let mut child =
             crate::process::ProcessTree::new(cmd.spawn().map_err(|err| {
-                acp::Error::new(-32603, format!("could not run `{command}`: {err}"))
+                sdk::Error::new(-32603, format!("could not run `{command}`: {err}"))
             })?);
         let stdout = child.stdout.take().ok_or_else(|| {
-            acp::Error::new(-32603, format!("`{command}` started without piped stdout"))
+            sdk::Error::new(-32603, format!("`{command}` started without piped stdout"))
         })?;
         let stderr = child.stderr.take().ok_or_else(|| {
-            acp::Error::new(-32603, format!("`{command}` started without piped stderr"))
+            sdk::Error::new(-32603, format!("`{command}` started without piped stderr"))
         })?;
         let (done_tx, done) = smol::channel::bounded::<()>(1);
 
@@ -3080,7 +3080,7 @@ fn exit_status(status: &std::process::ExitStatus) -> acp::TerminalExitStatus {
 }
 
 /// The updates written out here take their shapes from the ACP schema
-/// (`agent-client-protocol-schema` 1.5.0, `schema::v1`), whose types parse
+/// (`agent-client-protocol-schema` 1.18.0, `v1::schema`), whose types parse
 /// each one; their contents are made up.
 #[cfg(test)]
 mod tests {
@@ -3380,7 +3380,7 @@ mod tests {
                 FileChangeKind::Rename,
                 "--- a/file.rs\n+++ b/file.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n",
             ),
-            // The kind a call has when its agent names none (schema 1.5.0).
+            // The kind a call has when its agent names none (schema 1.18.0).
             (
                 "other",
                 Some("old\n"),
@@ -3536,7 +3536,7 @@ mod tests {
 
     /// A `read` call is a read of the file its location names, from the
     /// line it names (`ToolKind::Read`, `ToolCallLocation {path, line}` of
-    /// agent-client-protocol-schema 1.5.0).
+    /// agent-client-protocol-schema 1.18.0).
     #[test]
     fn a_read_is_the_file_and_line_it_locates() {
         let events = state().apply_update(update(json!({
@@ -3816,7 +3816,7 @@ mod tests {
         ));
     }
 
-    /// `fs/write_text_file` (ACP schema 1.5.0, `WriteTextFileRequest`) names
+    /// `fs/write_text_file` (ACP schema 1.18.0, `WriteTextFileRequest`) names
     /// no tool call. gemini-cli 0.68.0 writes through it from inside an
     /// `edit` call that locates the file, and completes the call with a
     /// `diff` for a file it modified but only the text "Created …" for one it
@@ -3900,7 +3900,7 @@ mod tests {
     }
 
     /// A permission request ends without the user in the two ways ACP
-    /// (schema 1.5.0) has: Tcode answers `cancelled` on an interrupt, as
+    /// (schema 1.18.0) has: Tcode answers `cancelled` on an interrupt, as
     /// `session/cancel` requires, and the agent withdraws it with
     /// `$/cancel_request`. Either way it is reported resolved.
     #[test]

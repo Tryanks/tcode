@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use agent_client_protocol::schema::v1 as acp;
+use agent_client_protocol::v1::schema as acp;
 use serde_json::{Value, json};
 
 use crate::acp_session::{
@@ -141,7 +141,7 @@ impl Dialect for Registry {
     fn turn_end(
         &self,
         state: &mut State,
-        result: Result<acp::PromptResponse, acp::Error>,
+        result: Result<acp::PromptResponse, agent_client_protocol::Error>,
     ) -> TurnEnd {
         let (status, message) = prompt_status(&result);
         // The prompt result counts the session's tokens; how much of the
@@ -267,26 +267,19 @@ async fn new_session(
     }
 }
 
-/// Which auth method to drive over the protocol: an `env_var` method first (it
-/// only validates variables we have already injected, so it is cheap and
-/// non-interactive), otherwise the agent's first choice.
+/// Which auth method to drive over the protocol: the first the agent
+/// handles itself. A `terminal` method is the agent's own interactive program
+/// and is never passed to `authenticate`.
 fn preferred_auth_method(methods: &[acp::AuthMethod]) -> Option<acp::AuthMethod> {
     methods
         .iter()
-        .find(|method| matches!(method, acp::AuthMethod::EnvVar(_)))
-        .or_else(|| {
-            methods
-                .iter()
-                .find(|method| auth_method_id(method).is_some())
-        })
+        .find(|method| auth_method_id(method).is_some())
         .cloned()
 }
 
 fn auth_method_id(method: &acp::AuthMethod) -> Option<acp::AuthMethodId> {
     match method {
         acp::AuthMethod::Agent(method) => Some(method.id.clone()),
-        acp::AuthMethod::EnvVar(method) => Some(method.id.clone()),
-        acp::AuthMethod::Terminal(method) => Some(method.id.clone()),
         _ => None,
     }
 }
@@ -296,21 +289,7 @@ fn auth_hint(agent: &AcpAgent, init: &acp::InitializeResponse) -> String {
     let methods: Vec<String> = init
         .auth_methods
         .iter()
-        .map(|method| match method {
-            acp::AuthMethod::Agent(method) => method.name.clone(),
-            acp::AuthMethod::EnvVar(method) => format!(
-                "{} ({})",
-                method.name,
-                method
-                    .vars
-                    .iter()
-                    .map(|var| var.name.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            acp::AuthMethod::Terminal(method) => method.name.clone(),
-            _ => "unknown".to_string(),
-        })
+        .map(|method| method.name().to_owned())
         .collect();
     let offered = if methods.is_empty() {
         String::new()
@@ -329,7 +308,7 @@ mod tests {
 
     /// ACP's `session/prompt` result counts tokens (`PromptResponse.usage`,
     /// unstable `end_turn_token_usage`); how much of the window is in use is
-    /// `usage_update`'s `used` and `size` (agent-client-protocol-schema 1.5.0,
+    /// `usage_update`'s `used` and `size` (agent-client-protocol-schema 1.18.0,
     /// `v1/agent.rs` `Usage`, `v1/client.rs` `UsageUpdate`). The turn's usage
     /// replaces the session's, so it carries the window on.
     #[test]

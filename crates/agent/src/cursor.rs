@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-use agent_client_protocol::{UntypedMessage, schema::v1 as acp};
+use agent_client_protocol::{UntypedMessage, v1::schema as acp};
 use serde_json::{Map, Value, json};
 
 use crate::acp_session::{
@@ -335,7 +335,7 @@ impl Dialect for Cursor {
     fn turn_end(
         &self,
         _state: &mut State,
-        result: Result<acp::PromptResponse, acp::Error>,
+        result: Result<acp::PromptResponse, agent_client_protocol::Error>,
     ) -> TurnEnd {
         let (mut status, message) = prompt_status(&result);
         // The failure text stays in the transcript as Cursor wrote it.
@@ -372,7 +372,7 @@ impl Dialect for Cursor {
         session: Session,
         method: String,
         params: Value,
-    ) -> Result<Value, acp::Error> {
+    ) -> Result<Value, agent_client_protocol::Error> {
         match method.as_str() {
             ASK_QUESTION => {
                 let questions = Questions::parse(&params)?;
@@ -452,7 +452,7 @@ impl Dialect for Cursor {
     }
 }
 
-fn start_failure(err: &acp::Error, context: &str) -> AgentError {
+fn start_failure(err: &agent_client_protocol::Error, context: &str) -> AgentError {
     if is_auth_required(err) {
         signed_out()
     } else {
@@ -537,7 +537,7 @@ async fn set_config_option(
     session_id: &acp::SessionId,
     config_id: &str,
     value: &str,
-) -> Result<Vec<acp::SessionConfigOption>, acp::Error> {
+) -> Result<Vec<acp::SessionConfigOption>, agent_client_protocol::Error> {
     let response = setup
         .connection
         .send_request(acp::SetSessionConfigOptionRequest::new(
@@ -567,11 +567,11 @@ struct Question {
 }
 
 impl Questions {
-    fn parse(params: &Value) -> Result<Self, acp::Error> {
+    fn parse(params: &Value) -> Result<Self, agent_client_protocol::Error> {
         let questions = params
             .get("questions")
             .and_then(Value::as_array)
-            .ok_or_else(acp::Error::invalid_params)?;
+            .ok_or_else(agent_client_protocol::Error::invalid_params)?;
         Ok(Self {
             title: params
                 .get("title")
