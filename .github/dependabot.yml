@@ -27,6 +27,9 @@ updates:
         update-types: ["version-update:semver-minor"]
       - dependency-name: gtk
         update-types: ["version-update:semver-minor"]
+      # crates/ui holds gpui-fast at 0.1.14, the last release gpui-base 0.9.1
+      # builds against. Lift with that pin.
+      - dependency-name: "gpui-fast*"
       # crates/platform/gpui-ios caps libc below 0.2.190, which gates dyld
       # bindings and in6_ifreq to macOS (#668). Lift with that cap.
       - dependency-name: libc

@@ -21,7 +21,7 @@ unicode-segmentation = "1"
 
 [dev-dependencies]
 gpui = { package = "gpui-fast", version = "0.1.13", features = ["test-support"], default-features = false }
-gpui-base = { version = "0.9.0", features = ["gpui-fast"] }
+gpui-base = { version = "0.9.1", features = ["gpui-fast"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 core-foundation = "0.10"

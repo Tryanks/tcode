@@ -77,8 +77,11 @@ tcode-client = { path = "../client" }
 tcode-core = { path = "../core", default-features = false }
 tcode-protocol = { path = "../protocol", default-features = false }
 qrcode = { version = "0.14", default-features = false }
-gpui = { package = "gpui-fast", version = "0.1.13", default-features = false }
-gpui-base = { version = "0.9.0", features = ["gpui-fast"] }
+# Held at 0.1.14: later gpui-fast releases implement IntoElement for every
+# Element, which conflicts with the impls gpui-base 0.9.1 writes out. Lift
+# once a gpui-base release builds against them.
+gpui = { package = "gpui-fast", version = "=0.1.14", default-features = false }
+gpui-base = { version = "0.9.1", features = ["gpui-fast"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 base64 = "0.23"
 async-channel = "2"
@@ -109,7 +112,7 @@ web-time = "1"
 # iOS off), so it is left to the composition roots.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tcode-traverse = { path = "../traverse", default-features = false, optional = true }
-reqwest-client = { package = "gpui-pre-reqwest-client", version = "=0.3.11" }
+reqwest-client = { package = "gpui-pre-reqwest-client", version = "=0.3.12" }
 # Android apps do not have the Unix certificate files used by native-roots discovery.
 reqwest = { package = "gpui-pre-reqwest", version = "=0.12.15", default-features = false, features = ["rustls-tls-webpki-roots"] }
 
@@ -117,8 +120,8 @@ reqwest = { package = "gpui-pre-reqwest", version = "=0.12.15", default-features
 # the GPUI window, so its whole dependency set is target-scoped. Windows drives
 # WebView2 itself (`preview_panel::webview2`).
 [target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))'.dependencies]
-gpui-kit = { version = "0.9.0", default-features = false, features = ["gpui-fast"], optional = true }
-gpui-webview = { version = "0.9.0", features = ["gpui-fast"], optional = true }
+gpui-kit = { version = "0.9.1", default-features = false, features = ["gpui-fast"], optional = true }
+gpui-webview = { version = "0.9.1", features = ["gpui-fast"], optional = true }
 wry = { version = "0.53.3", package = "lb-wry", features = ["mac-proxy"], optional = true }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", target_os = "ios"))'.dependencies]
