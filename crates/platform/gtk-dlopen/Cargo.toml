@@ -10,5 +10,5 @@ description = "Loads GTK 3, WebKitGTK 4.1 and the libraries they bind when asked
 libc = "0.2"
 
 [build-dependencies]
-object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
+object = { version = "0.41", default-features = false, features = ["read_core", "elf", "std"] }
 pkg-config = "0.3"
