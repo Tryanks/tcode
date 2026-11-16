@@ -18,6 +18,15 @@ updates:
         update-types: ["version-update:semver-minor"]
       - dependency-name: webview2-com
         update-types: ["version-update:semver-minor"]
+      # webkit2gtk 2.0.1, the version lb-wry 0.53 resolves, is built on the
+      # gtk-rs 0.18 family; a newer cairo-rs, gdk or gtk is a second set of
+      # types its surfaces and widgets do not convert to. Lift with that pin.
+      - dependency-name: cairo-rs
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: gdk
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: gtk
+        update-types: ["version-update:semver-minor"]
       # crates/platform/gpui-ios caps libc below 0.2.190, which gates dyld
       # bindings and in6_ifreq to macOS (#668). Lift with that cap.
       - dependency-name: libc

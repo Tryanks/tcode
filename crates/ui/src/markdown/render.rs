@@ -465,14 +465,6 @@ impl VirtualizedBlockList {
     }
 }
 
-impl IntoElement for VirtualizedBlockList {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for VirtualizedBlockList {
     type RequestLayoutState = Option<ColumnLayout>;
     type PrepaintState = Option<AnyElement>;
@@ -1362,13 +1354,6 @@ struct CodeSliceMeasure {
     span: Range<usize>,
     path: String,
     view: Entity<MarkdownState>,
-}
-
-impl IntoElement for CodeSliceMeasure {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
 }
 
 impl Element for CodeSliceMeasure {

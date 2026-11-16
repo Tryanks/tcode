@@ -254,14 +254,6 @@ impl SizeGlide {
     }
 }
 
-impl IntoElement for SizeGlide {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 /// How a [`SizeGlide`] lays its content out this frame.
 pub(crate) enum GlideLayout {
     /// The content is the element's layout.

@@ -11,9 +11,9 @@ use crate::theme::ActiveTheme as _;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
     App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId, Entity, GlobalElementId,
-    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, InteractiveText, IntoElement,
-    LayoutId, LongPressEvent, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point,
-    SharedString, StyledText, TextLayout, TouchPhase, Window, point, px, quad,
+    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, InteractiveText, LayoutId,
+    LongPressEvent, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, SharedString,
+    StyledText, TextLayout, TouchPhase, Window, point, px, quad,
 };
 
 use super::{
@@ -251,14 +251,6 @@ impl Inline {
             ),
             window,
         );
-    }
-}
-
-impl IntoElement for Inline {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
     }
 }
 

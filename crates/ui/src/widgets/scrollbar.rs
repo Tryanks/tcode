@@ -25,9 +25,9 @@ use web_time::Instant;
 
 use gpui::{
     Anchor, App, Bounds, ContentMask, CursorStyle, Element, ElementId, EntityId, GlobalElementId,
-    Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, IsZero as _, LayoutId,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Position, ScrollEvent, Size,
-    Style, TouchDragEvent, TouchPhase, Window, fill, point, px, relative, size,
+    Hitbox, HitboxBehavior, Hsla, InspectorElementId, IsZero as _, LayoutId, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Position, ScrollEvent, Size, Style,
+    TouchDragEvent, TouchPhase, Window, fill, point, px, relative, size,
 };
 use gpui_base::animation::{ease_in_cubic, ease_out_cubic};
 use gpui_base::{ScrollbarEntrance, ScrollbarHandle, ScrollbarMode};
@@ -459,14 +459,6 @@ struct Bar {
     opacity: f32,
     position: f32,
     wanted: bool,
-}
-
-impl IntoElement for Scrollbar {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
 }
 
 impl Element for Scrollbar {

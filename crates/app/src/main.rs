@@ -232,7 +232,7 @@ fn exit_with_startup_failure(error: std::io::Error) -> ! {
         // runs before it.
         cx.on_app_quit(|_| async { std::process::exit(1) }).detach();
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(420.), px(160.)), cx)),
+            window_bounds: Some(WindowBounds::centered(None, size(px(420.), px(160.)), cx)),
             app_id: Some(APP_ID.to_owned()),
             ..Default::default()
         };
@@ -267,6 +267,7 @@ fn exit_with_startup_failure(error: std::io::Error) -> ! {
 fn window_options(cx: &App, throttle_inactive: bool) -> WindowOptions {
     let mut options = WindowOptions {
         window_bounds: Some(WindowBounds::centered(
+            None,
             size(px(tcode_ui::DEFAULT_WINDOW_WIDTH), px(800.)),
             cx,
         )),

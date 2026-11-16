@@ -120,14 +120,6 @@ pub(crate) struct Origin {
     child: AnyElement,
 }
 
-impl IntoElement for Origin {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for Origin {
     type RequestLayoutState = ();
     type PrepaintState = ();
@@ -263,14 +255,6 @@ impl Morph {
         content: impl Into<SharedString>,
     ) -> Self {
         self.mark = Some((origins.clone(), frame.into(), content.into()));
-        self
-    }
-}
-
-impl IntoElement for Morph {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
         self
     }
 }

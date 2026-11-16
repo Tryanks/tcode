@@ -12,9 +12,8 @@
 use std::{cell::RefCell, rc::Rc};
 
 use gpui::{
-    App, Axis, Bounds, ContentMask, Element, ElementId, GlobalElementId, Hitbox, IntoElement,
-    IsZero as _, LayoutId, OngoingScroll, Pixels, Position, ScrollEvent, Style, Window, px,
-    relative,
+    App, Axis, Bounds, ContentMask, Element, ElementId, GlobalElementId, Hitbox, IsZero as _,
+    LayoutId, OngoingScroll, Pixels, Position, ScrollEvent, Style, Window, px, relative,
 };
 use gpui_base::{OngoingScrollExt as _, ScrollbarHandle};
 
@@ -36,14 +35,6 @@ impl<H: ScrollbarHandle + Clone> AreaMask<H> {
             id: id.into(),
             handle: handle.clone(),
         }
-    }
-}
-
-impl<H: ScrollbarHandle + Clone + 'static> IntoElement for AreaMask<H> {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
     }
 }
 

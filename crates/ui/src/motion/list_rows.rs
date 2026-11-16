@@ -712,14 +712,6 @@ pub(crate) enum GlideLayout {
     Clipped { lift: Pixels, clip: bool },
 }
 
-impl IntoElement for RowGlide {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for RowGlide {
     type RequestLayoutState = GlideLayout;
     type PrepaintState = ();

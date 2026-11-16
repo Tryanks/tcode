@@ -350,14 +350,6 @@ pub(crate) fn corners_of(corners: Corners<Pixels>) -> CornersRefinement<Absolute
     }
 }
 
-impl IntoElement for Ringed {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl gpui::Element for Ringed {
     type RequestLayoutState = AnyElement;
     type PrepaintState = ();

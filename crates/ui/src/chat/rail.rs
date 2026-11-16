@@ -269,14 +269,6 @@ pub(super) struct Slots {
     pub(super) slots: Vec<AnyElement>,
 }
 
-impl gpui::IntoElement for Slots {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl gpui::Element for Slots {
     type RequestLayoutState = ();
     type PrepaintState = Option<AnyElement>;

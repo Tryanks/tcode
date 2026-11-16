@@ -448,14 +448,6 @@ struct Mark {
     style: StyleRefinement,
 }
 
-impl IntoElement for Mark {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl gpui::Element for Mark {
     type RequestLayoutState = ();
     type PrepaintState = ();

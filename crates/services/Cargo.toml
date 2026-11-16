@@ -29,7 +29,7 @@ turso = { version = "=0.8.3", default-features = false }
 ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
-zstd = { version = "0.13", default-features = false, features = ["zdict_builder"] }
+zstd = { version = "0.14", default-features = false, features = ["zdict_builder"] }
 zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
 
 [target.'cfg(unix)'.dependencies]

@@ -27,7 +27,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, ElementId, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, Pixels, SharedString, Window, point, px, size,
+    InspectorElementId, LayoutId, Pixels, SharedString, Window, point, px, size,
 };
 
 /// How tall a body that scrolls stays, at least, while the cards share a
@@ -250,14 +250,6 @@ struct PlacedCard {
     bounds: Bounds<Pixels>,
     /// The part of the card its body shows in.
     body: Bounds<Pixels>,
-}
-
-impl IntoElement for RailStack {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
 }
 
 impl gpui::Element for RailStack {

@@ -323,14 +323,6 @@ pub(crate) enum RevealLayout {
     Clipped,
 }
 
-impl IntoElement for Reveal {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl gpui::Element for Reveal {
     type RequestLayoutState = RevealLayout;
     type PrepaintState = ();

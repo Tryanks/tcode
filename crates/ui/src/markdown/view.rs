@@ -115,14 +115,6 @@ impl Styled for MarkdownView {
     }
 }
 
-impl IntoElement for MarkdownView {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 /// What the view laid out for the frame.
 pub struct MarkdownViewPrepaintState {
     hitbox: Hitbox,
