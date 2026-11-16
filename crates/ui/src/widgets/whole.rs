@@ -26,14 +26,6 @@ pub(crate) struct Whole {
     cut: bool,
 }
 
-impl IntoElement for Whole {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for Whole {
     type RequestLayoutState = ();
     type PrepaintState = ();

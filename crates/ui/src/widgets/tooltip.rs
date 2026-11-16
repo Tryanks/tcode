@@ -128,14 +128,6 @@ struct TooltipArea {
     build: TooltipBuilder,
 }
 
-impl IntoElement for TooltipArea {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for TooltipArea {
     type RequestLayoutState = ();
     type PrepaintState = (Entity<TooltipOwner>, Hitbox);

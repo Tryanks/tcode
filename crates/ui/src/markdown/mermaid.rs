@@ -960,14 +960,6 @@ impl<E> Fitted<E> {
     }
 }
 
-impl<E: IntoElement + Styled + 'static> IntoElement for Fitted<E> {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl<E: IntoElement + Styled + 'static> Element for Fitted<E> {
     type RequestLayoutState = ();
     type PrepaintState = Option<AnyElement>;

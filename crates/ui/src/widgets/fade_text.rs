@@ -11,8 +11,8 @@ use std::ops::Range;
 
 use gpui::{
     App, Bounds, ContentMask, Element, ElementId, GlobalElementId, HighlightStyle, Hsla,
-    InspectorElementId, IntoElement, LayoutId, Overflow, Pixels, ShapedLine, SharedString, Style,
-    TextAlign, TextRun, TextStyle, Window, point, px, size,
+    InspectorElementId, LayoutId, Overflow, Pixels, ShapedLine, SharedString, Style, TextAlign,
+    TextRun, TextStyle, Window, point, px, size,
 };
 
 /// How far before the clipped edge the text starts fading, in ems.
@@ -63,14 +63,6 @@ pub struct FadeTextLayout {
     line_height: Pixels,
     /// How far down the line is painted to stand on its own font's baseline.
     drop: Pixels,
-}
-
-impl IntoElement for FadeText {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
 }
 
 impl Element for FadeText {

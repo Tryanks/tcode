@@ -189,14 +189,6 @@ struct Scope {
     child: AnyElement,
 }
 
-impl IntoElement for Scope {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl gpui::Element for Scope {
     type RequestLayoutState = ();
     type PrepaintState = ();
@@ -273,14 +265,6 @@ struct Part {
     key: SharedString,
     reflow: Reflow,
     child: AnyElement,
-}
-
-impl IntoElement for Part {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
 }
 
 impl Part {

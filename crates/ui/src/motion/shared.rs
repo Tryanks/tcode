@@ -204,14 +204,6 @@ pub(crate) struct Shared {
     child: Option<AnyElement>,
 }
 
-impl IntoElement for Shared {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for Shared {
     type RequestLayoutState = ();
     type PrepaintState = ();

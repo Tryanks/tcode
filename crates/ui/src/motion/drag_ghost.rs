@@ -406,14 +406,6 @@ struct Slot {
     child: AnyElement,
 }
 
-impl IntoElement for Slot {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl gpui::Element for Slot {
     type RequestLayoutState = ();
     type PrepaintState = ();

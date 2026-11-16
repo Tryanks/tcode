@@ -407,14 +407,6 @@ struct Scope {
     child: AnyElement,
 }
 
-impl IntoElement for Scope {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl gpui::Element for Scope {
     type RequestLayoutState = ();
     type PrepaintState = ();
@@ -482,14 +474,6 @@ struct FlipRow {
     bounds: FlipBounds,
     origin: Rc<Cell<Point<Pixels>>>,
     child: AnyElement,
-}
-
-impl IntoElement for FlipRow {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
 }
 
 impl gpui::Element for FlipRow {

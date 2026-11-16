@@ -74,14 +74,6 @@ impl<E: IntoElement + Styled + 'static> FittedImage<E> {
     }
 }
 
-impl<E: IntoElement + Styled + 'static> IntoElement for FittedImage<E> {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl<E: IntoElement + Styled + 'static> Element for FittedImage<E> {
     type RequestLayoutState = FittedLayout;
     type PrepaintState = Option<AnyElement>;

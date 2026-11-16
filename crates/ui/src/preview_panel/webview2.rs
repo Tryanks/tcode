@@ -1017,14 +1017,6 @@ struct PageElement {
     view: Entity<WebView>,
 }
 
-impl IntoElement for PageElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for PageElement {
     type RequestLayoutState = ();
     type PrepaintState = bool;

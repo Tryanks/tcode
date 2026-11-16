@@ -85,14 +85,6 @@ struct FlipRow {
     child: AnyElement,
 }
 
-impl IntoElement for FlipRow {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl gpui::Element for FlipRow {
     type RequestLayoutState = ();
     type PrepaintState = ();

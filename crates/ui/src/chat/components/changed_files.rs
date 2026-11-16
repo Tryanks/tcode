@@ -13,7 +13,7 @@ use gpui::{
 };
 use gpui_base::{h_flex, v_flex};
 
-use super::super::model::diff_stats;
+use super::super::model::{diff_stats, live_edit_counts};
 
 /// How long a row drawn here takes to fold in or out, or to move to a new place.
 const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
@@ -118,15 +118,14 @@ pub(crate) fn changed_files(
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| display.clone());
-            let (added, deleted) = diff_stats(change.diff.as_deref());
+            let counts = live_edit_counts(change.diff.as_deref());
             (
                 SharedString::from(format!("file-{}", change.path)),
                 Chip::File {
                     name,
                     display,
                     path: change.path.clone(),
-                    added,
-                    deleted,
+                    counts,
                 },
             )
         })
@@ -219,7 +218,7 @@ pub(crate) fn changed_file_rows(
                 .parent()
                 .map(|parent| parent.to_string_lossy().into_owned())
                 .filter(|parent| !parent.is_empty());
-            let (added, deleted) = diff_stats(change.diff.as_deref());
+            let counts = live_edit_counts(change.diff.as_deref());
             (
                 SharedString::from(format!("file-{}", change.path)),
                 RailRow {
@@ -227,8 +226,7 @@ pub(crate) fn changed_file_rows(
                     folder,
                     display,
                     path: change.path.clone(),
-                    added,
-                    deleted,
+                    counts,
                     open: std::rc::Rc::new(open),
                 },
             )
@@ -278,8 +276,8 @@ struct RailRow {
     folder: Option<String>,
     display: String,
     path: String,
-    added: u32,
-    deleted: u32,
+    /// `None` when the provider named the file without its diff.
+    counts: Option<(u32, u32)>,
     open: std::rc::Rc<ClickHandler>,
 }
 
@@ -331,22 +329,14 @@ fn rail_row(index: usize, cwd: &Path, key: &SharedString, row: &RailRow, cx: &Ap
                     .child(crate::widgets::fade_text(folder))
             })),
     )
-    .child(
+    .children(row.counts.map(|(added, deleted)| {
         h_flex()
             .flex_none()
             .gap_1()
             .whitespace_nowrap()
-            .child(
-                div()
-                    .text_color(theme.success)
-                    .child(format!("+{}", row.added)),
-            )
-            .child(
-                div()
-                    .text_color(theme.danger)
-                    .child(format!("-{}", row.deleted)),
-            ),
-    )
+            .child(div().text_color(theme.success).child(format!("+{added}")))
+            .child(div().text_color(theme.danger).child(format!("-{deleted}")))
+    }))
     .on_click(move |event, window, cx| open(event, window, cx))
     .context_menu({
         let path = row.path.clone();
@@ -373,8 +363,8 @@ enum Chip {
         name: String,
         display: String,
         path: String,
-        added: u32,
-        deleted: u32,
+        /// `None` when the provider named the file without its diff.
+        counts: Option<(u32, u32)>,
     },
     /// The control that shows more files, or fewer.
     More(SharedString),
@@ -394,8 +384,7 @@ fn chip_element(
             name,
             display,
             path,
-            added,
-            deleted,
+            counts,
         } => Button::new(SharedString::from(format!(
             "changed-file-chip-{index}-{key}"
         )))
@@ -411,16 +400,16 @@ fn chip_element(
         .font_family(cx.theme().mono_font_family.clone())
         .text_token(&cx.theme().tokens.typography.xs)
         .child(crate::widgets::fade_text(name.clone()))
-        .child(
+        .children(counts.map(|(added, deleted)| {
             div()
                 .text_color(cx.theme().success)
-                .child(format!("+{added}")),
-        )
-        .child(
+                .child(format!("+{added}"))
+        }))
+        .children(counts.map(|(_, deleted)| {
             div()
                 .text_color(cx.theme().danger)
-                .child(format!("-{deleted}")),
-        )
+                .child(format!("-{deleted}"))
+        }))
         .on_click(on_click)
         .context_menu({
             let path = path.clone();

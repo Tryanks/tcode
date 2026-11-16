@@ -394,14 +394,6 @@ fn around(
     )
 }
 
-impl<E: IntoElement + Styled + 'static> IntoElement for Raised<E> {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl<E: IntoElement + Styled + 'static> gpui::Element for Raised<E> {
     type RequestLayoutState = RaisedLayout;
     type PrepaintState = ();
@@ -1228,14 +1220,6 @@ pub struct ClickableLayout {
     surface: gpui::AnyElement,
     focus: gpui::FocusHandle,
     corners: gpui::CornersRefinement<gpui::AbsoluteLength>,
-}
-
-impl<E: gpui::Element + gpui::InteractiveElement + Styled + 'static> IntoElement for Clickable<E> {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
 }
 
 impl<E: gpui::Element + gpui::InteractiveElement + Styled + 'static> gpui::Element

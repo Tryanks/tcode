@@ -34,14 +34,6 @@ struct TimedMarkdown {
     construction_time: Arc<Mutex<Duration>>,
 }
 
-impl gpui::IntoElement for TimedMarkdown {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for TimedMarkdown {
     type RequestLayoutState = <MarkdownView as Element>::RequestLayoutState;
     type PrepaintState = <MarkdownView as Element>::PrepaintState;
