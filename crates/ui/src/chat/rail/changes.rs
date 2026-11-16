@@ -9,7 +9,7 @@ use gpui::{AnyElement, App, Context, SharedString, Window};
 
 use super::RailView;
 use crate::chat::components::changed_files::{ClickHandler, changed_file_rows};
-use crate::chat::model::diff_stats;
+use crate::chat::model::ChangeTotals;
 
 /// How long the files of one turn take to cross-fade into a later turn's.
 const CHANGE: Duration = Duration::from_millis(200);
@@ -46,7 +46,7 @@ type HeldChanges = Rc<RefCell<Option<(usize, Rc<[FileChange]>)>>>;
 
 /// A turn's changed-line totals, with the turn; forgotten as
 /// [`HeldChanges`] is.
-type Totals = Rc<RefCell<Option<(usize, (u32, u32))>>>;
+type Totals = Rc<RefCell<Option<(usize, ChangeTotals)>>>;
 
 const HELD: &str = "rail-changes-held";
 const TOTALS: &str = "rail-changes-totals";
@@ -68,7 +68,7 @@ pub(super) fn summary(rail: &RailView, cx: &App) -> Option<SharedString> {
     let totals = rail.motion.keep::<Totals>(TOTALS);
     let store = rail.workspace_store.read(cx);
     let session = rail.session_id.as_deref();
-    let (files, partial, ended, (added, deleted)) = store
+    let (files, partial, ended, sums) = store
         .with_entries_for(
             session,
             |timeline| {
@@ -78,14 +78,7 @@ pub(super) fn summary(rail: &RailView, cx: &App) -> Option<SharedString> {
                 let sums = match *totals {
                     Some((at, sums)) if at == turn => sums,
                     _ => {
-                        let sums =
-                            changes
-                                .changes
-                                .iter()
-                                .fold((0, 0), |(added, deleted), change| {
-                                    let (a, d) = diff_stats(change.diff.as_deref());
-                                    (added + a, deleted + d)
-                                });
+                        let sums = ChangeTotals::of(&changes.changes);
                         *totals = Some((turn, sums));
                         sums
                     }
@@ -120,7 +113,8 @@ pub(super) fn summary(rail: &RailView, cx: &App) -> Option<SharedString> {
         files = format!("{files} {}", crate::tr!("chat.changed_files_partial"));
     }
     parts.push(files);
-    parts.push(format!("+{added} −{deleted}"));
+    parts.push(format!("+{} −{}", sums.added, sums.deleted));
+    parts.extend(sums.uncounted_label());
     Some(parts.join(" · ").into())
 }
 

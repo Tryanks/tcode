@@ -61,6 +61,7 @@ chat:
   full_output_failed: "出力全体を読み込めませんでした：%{error}"
   changed_files: "変更されたファイル（%{count}）"
   changed_files_partial: "· 一部のみ"
+  changed_files_uncounted: "%{count} 件は行数なし"
   more_files: "+%{count} 件"
   show_fewer_files: "表示を減らす"
   view_diff: "差分を表示"

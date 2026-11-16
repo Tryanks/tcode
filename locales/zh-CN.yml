@@ -61,6 +61,7 @@ chat:
   full_output_failed: "无法加载完整输出：%{error}"
   changed_files: "已更改文件（%{count}）"
   changed_files_partial: "· 部分归因"
+  changed_files_uncounted: "%{count} 个未计行数"
   more_files: "+%{count} 个更多"
   show_fewer_files: "收起"
   view_diff: "查看 Diff"
