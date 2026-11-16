@@ -253,8 +253,6 @@ fn http_get(url: &str) -> Result<Vec<u8>, RegistryError> {
     let response = ureq::get(url)
         .config()
         .timeout_global(Some(Duration::from_secs(30)))
-        .proxy(None)
-        .max_redirects(4)
         .build()
         .call()
         .map_err(|err| RegistryError::Network(format!("{url}: {err}")))?;
@@ -353,11 +351,6 @@ pub fn uninstall(data_dir: &Path, id: &str) -> std::io::Result<()> {
 
 fn download(url: &str, cancelled: &AtomicBool) -> Result<Vec<u8>, RegistryError> {
     let response = ureq::get(url)
-        .config()
-        .timeout_connect(Some(Duration::from_secs(30)))
-        .proxy(None)
-        .max_redirects(4)
-        .build()
         .call()
         .map_err(|err| RegistryError::Network(format!("{url}: {err}")))?;
     let total: Option<u64> = response

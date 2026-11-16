@@ -408,8 +408,6 @@ async fn latest(probe: &SystemProbe, query: &LatestQuery) -> Result<Option<Strin
             let response = ureq::get(&url)
                 .config()
                 .timeout_global(Some(Duration::from_secs(10)))
-                .proxy(None)
-                .max_redirects(4)
                 .build()
                 .call()
                 .map_err(|error| format!("{url}: {error}"))?;
@@ -433,8 +431,6 @@ async fn latest(probe: &SystemProbe, query: &LatestQuery) -> Result<Option<Strin
             let response = ureq::get(&url)
                 .config()
                 .timeout_global(Some(Duration::from_secs(10)))
-                .proxy(None)
-                .max_redirects(4)
                 .build()
                 .call()
                 .map_err(|error| format!("{url}: {error}"))?;

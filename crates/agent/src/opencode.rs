@@ -3367,8 +3367,6 @@ impl Http {
             agent: ureq::Agent::config_builder()
                 .http_status_as_error(false)
                 .proxy(None)
-                .max_redirects(4)
-                .timeout_connect(Some(Duration::from_secs(30)))
                 .build()
                 .new_agent(),
         }
