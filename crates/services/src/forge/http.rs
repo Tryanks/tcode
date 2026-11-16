@@ -58,18 +58,13 @@ pub(crate) fn in_order(steps: Vec<Step<'_>>) -> Outcome {
 }
 
 /// The client a host's API is reached with. An answer of any status comes back to be read,
-/// a redirect included: following one, or refusing to, is the caller's. Each request has a
-/// connection of its own: a pooled one the server closes as the request is written gives no
-/// answer, which for a write reads as possibly applied. A proxy named in the environment is
-/// not used.
+/// a redirect included: following one, or refusing to, is the caller's, because the caller
+/// knows where its credential may go and ureq's own rule compares hosts without their ports.
 pub(crate) fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(0)
         .max_redirects_will_error(false)
-        .max_idle_connections(0)
-        .proxy(None)
-        .timeout_connect(Some(Duration::from_secs(30)))
         .build()
         .new_agent()
 }

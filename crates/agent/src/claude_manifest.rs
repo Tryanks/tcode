@@ -739,8 +739,6 @@ mod refresh {
             .header("User-Agent", "tcode")
             .config()
             .timeout_global(Some(FETCH_TIMEOUT))
-            .proxy(None)
-            .max_redirects(4)
             .build();
         if let Some((etag, _)) = &cached {
             request = request.header("If-None-Match", etag);

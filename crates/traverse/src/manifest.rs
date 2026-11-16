@@ -339,8 +339,6 @@ fn fetch(url: &Url) -> Result<Vec<u8>, String> {
         .header("User-Agent", "tcode")
         .config()
         .timeout_global(Some(FETCH_TIMEOUT))
-        .proxy(None)
-        .max_redirects(4)
         .build()
         .call()
         .map_err(|error| format!("{url}: {error}"))?;
