@@ -243,6 +243,17 @@ impl DevicePreferences {
         }
     }
 
+    /// Keep how the desktop window closed for the next time it opens. With
+    /// no `size`, the one already kept stays.
+    pub(crate) fn set_window(size: Option<(u32, u32)>, maximized: bool, cx: &mut App) {
+        Self::update(cx, |saved| {
+            if size.is_some() {
+                saved.window_size = size;
+            }
+            saved.window_maximized = maximized;
+        });
+    }
+
     /// Whether this device folded the stack map's note about GitHub stacks away.
     pub(crate) fn stack_note_collapsed(cx: &App) -> bool {
         Self::saved(cx)
@@ -324,7 +335,8 @@ impl DevicePreferences {
     }
 
     /// Restore this device's theme, language, name, attachment limit and
-    /// panel width to their defaults; its sidebar and workspace are kept.
+    /// panel width to their defaults; its sidebar, workspace and window are
+    /// kept.
     pub(crate) fn restore_defaults(window: &mut Window, cx: &mut App) {
         Self::update(cx, |saved| {
             *saved = ClientPreferences {
@@ -333,6 +345,8 @@ impl DevicePreferences {
                 navigation: saved.navigation.take(),
                 sidebar_collapsed: saved.sidebar_collapsed,
                 sidebar_layout: saved.sidebar_layout.take(),
+                window_size: saved.window_size,
+                window_maximized: saved.window_maximized,
                 workspace: saved.workspace.take(),
                 ..ClientPreferences::default()
             };
