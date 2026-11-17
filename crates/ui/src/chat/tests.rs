@@ -942,7 +942,9 @@ impl ScriptedThread {
 
     /// Answer the history page the client asked for with at most `records`
     /// of the records before the window, and say where it ended. `None`
-    /// when it asked for none. A client keeps one page in flight.
+    /// when it asked for none. A client keeps one page in flight. The turn
+    /// marks it asked for meanwhile are answered from the whole log, as a
+    /// host folds them.
     pub(in crate::chat) fn answer_page(&mut self, records: usize) -> Option<u64> {
         use tcode_protocol::{ClientPayload, Query, QueryResponse};
         let asked: Vec<_> = std::iter::from_fn(|| self.outgoing.try_recv().ok())
@@ -950,6 +952,20 @@ impl ScriptedThread {
             .filter_map(|message| match message.payload {
                 ClientPayload::Query(Query::SessionHistoryPage { before, .. }) => {
                     Some((message.id, before))
+                }
+                ClientPayload::Query(Query::ThreadTurnMarks { .. }) => {
+                    let marks =
+                        tcode_core::turn_marks::turn_marks(&Timeline::fold_stored(&self.records));
+                    self.incoming
+                        .try_send(
+                            tcode_protocol::encode_line(&HostMessage::QueryResult {
+                                id: message.id,
+                                result: Ok(QueryResponse::ThreadTurnMarks(marks)),
+                            })
+                            .unwrap(),
+                        )
+                        .unwrap();
+                    None
                 }
                 _ => None,
             })

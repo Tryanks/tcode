@@ -9,6 +9,7 @@ mod render;
 mod residency;
 mod rewind;
 pub(super) mod rows;
+mod spine;
 
 use crate::motion::list_rows::{Arrival, Glide, RowGlide};
 pub(super) use expansion::{
@@ -54,6 +55,8 @@ pub(crate) struct TimelineView {
     /// see [`ChatView::motion`].
     pub(in crate::chat) motion: crate::motion::owned::Owned,
     pub(in crate::chat) list_state: ListState,
+    /// The marks left of the content column: see [`spine::SpineView`].
+    spine: Entity<spine::SpineView>,
     /// The list as the handle its bounce scrolls.
     followed: crate::scroll::FollowedList,
     /// The timeline changed since the list last mirrored it. GPUI's list
@@ -227,7 +230,17 @@ impl TimelineView {
                 this.hold_still_for_selection(*gesture, cx)
             }),
         ];
+        let spine_timeline = cx.entity().downgrade();
+        let spine = cx.new(|_| {
+            spine::SpineView::new(
+                workspace_store.clone(),
+                spine_timeline,
+                session_id.clone(),
+                scene,
+            )
+        });
         let mut this = Self {
+            spine,
             workspace_store,
             window_state,
             session_id,
@@ -294,6 +307,8 @@ impl TimelineView {
         session_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.spine
+            .update(cx, |spine, cx| spine.set_session(session_id.clone(), cx));
         self.session_id = session_id;
         self.timeline_stale = true;
         cx.notify();
@@ -615,6 +630,18 @@ impl TimelineView {
                                 .w_full()
                                 .min_w_0()
                                 .max_w(px(CONTENT_MAX_WIDTH))
+                                .when(!side && !compact, |column| {
+                                    column.child(
+                                        div()
+                                            .absolute()
+                                            .top_0()
+                                            .bottom_0()
+                                            .right(gpui::relative(1.))
+                                            .mr(px(spine::SLOT_GAP))
+                                            .w(px(spine::SLOT))
+                                            .child(self.spine.clone()),
+                                    )
+                                })
                                 .child(
                                     div()
                                         .debug_selector(move || {

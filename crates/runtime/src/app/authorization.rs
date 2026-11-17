@@ -529,6 +529,7 @@ impl AppState {
                 | Query::RenderThreadExport { session_id, .. }
                 | Query::ReadItemOutput { session_id, .. }
                 | Query::ThreadAnchorTurn { session_id, .. }
+                | Query::ThreadTurnMarks { session_id }
                 | Query::ReadItemImage { session_id, .. }
                 | Query::ReadItemImagePreview { session_id, .. }
                 | Query::BeginUpload { session_id, .. }
