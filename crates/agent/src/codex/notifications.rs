@@ -357,13 +357,25 @@ impl Actor {
                     .and_then(Value::as_str)
                     .map(str::to_owned)
                     .unwrap_or_else(|| format!("Codex reported an error: {params}"));
-                let fatal = !params
+                let retried = params
                     .get("willRetry")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                self.events.emit(AgentEvent::Error { message, fatal }).await;
+                self.events
+                    .emit(if retried {
+                        AgentEvent::RequestRetry { message }
+                    } else {
+                        AgentEvent::Error {
+                            message,
+                            fatal: true,
+                        }
+                    })
+                    .await;
             }
-            "warning" | "guardianWarning" => {
+            // The auto-reviewer's account of a review, which
+            // `item/autoApprovalReview/*` already draws as an item.
+            "guardianWarning" => {}
+            "warning" => {
                 if let Some(message) = params.get("message").and_then(Value::as_str)
                     && !self.config_warnings.contains(message)
                 {

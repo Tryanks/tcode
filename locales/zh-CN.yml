@@ -1476,6 +1476,7 @@ notice:
   dirty_tree: "有未提交的更改"
   tcode_update_available: "Tcode %{version} 可用"
   review_recorded: "已记录审查：%{items} 项，覆盖范围 %{coverage}"
+  usage_limit_reached: "%{harness} 已达到用量上限"
   reference_boundary_crossed: "“%{thread}”中的模型引用了来自其他项目或其他 Harness 的“%{title}”：它从中读取的内容会发送给该模型的提供方"
 attach:
   unsupported_type: "无法将“%{name}”读取为图片。"

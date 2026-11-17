@@ -2657,7 +2657,7 @@ impl Mapper {
 }
 
 /// Claude Code keeps the turn open while it retries a failed API request, up to
-/// `max_retries` times, so each attempt is a non-fatal error rather than an end.
+/// `max_retries` times.
 fn api_retry_notice(msg: &Value) -> AgentEvent {
     let count = |key| msg.get(key).and_then(Value::as_u64);
     let mut cause = msg
@@ -2678,9 +2678,8 @@ fn api_retry_notice(msg: &Value) -> AgentEvent {
     let max = count("max_retries").map_or("?".into(), |n| n.to_string());
     let delay =
         count("retry_delay_ms").map_or("?".into(), |ms| format!("{:.1}s", ms as f64 / 1000.0));
-    AgentEvent::Error {
+    AgentEvent::RequestRetry {
         message: format!("claude API request failed ({cause}); retry {attempt}/{max} in {delay}"),
-        fatal: false,
     }
 }
 

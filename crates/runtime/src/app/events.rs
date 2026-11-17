@@ -396,6 +396,19 @@ impl AppState {
                 }
             }
             AgentEvent::UsageLimitReached { resets_at } => {
+                if let Some(profile) = self.find_meta(session_id).map(|meta| {
+                    meta.profile_id
+                        .clone()
+                        .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider).to_owned())
+                }) && self.usage_limits_told.insert(profile, *resets_at) != Some(*resets_at)
+                {
+                    emit_runtime(
+                        cx,
+                        RuntimeEvent::Notice(RuntimeNotice::UsageLimitReached {
+                            harness: self.thread_harness_name(session_id),
+                        }),
+                    );
+                }
                 if self.settings.resume_on_limit_reset {
                     let not_before = UNIX_EPOCH + Duration::from_secs(*resets_at);
                     let default_window = self.default_context_window(session_id);
@@ -482,6 +495,7 @@ impl AppState {
                 log::warn!("provider warning in {session_id}: {message}");
             }
             AgentEvent::Error { .. }
+            | AgentEvent::RequestRetry { .. }
             | AgentEvent::ProviderRelay { .. }
             | AgentEvent::RelayUndone { .. }
             | AgentEvent::ServedModel { .. }

@@ -478,6 +478,7 @@ impl Activity {
                 self.errors.push(head(error, HEAD_CHARS));
             }
             EntryContent::Warning { .. }
+            | EntryContent::RequestRetry { .. }
             | EntryContent::ProviderRelay { .. }
             | EntryContent::ModelChanged { .. }
             | EntryContent::ContextCompacted(_)
@@ -1275,6 +1276,7 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
         EntryContent::Error { message, .. } => ("error", message.clone()),
         EntryContent::ProviderStartError { error } => ("provider_start_error", error.clone()),
         EntryContent::Warning { message } => ("warning", message.clone()),
+        EntryContent::RequestRetry { message } => ("request_retry", message.clone()),
         EntryContent::ProviderRelay {
             from_provider,
             to_provider,

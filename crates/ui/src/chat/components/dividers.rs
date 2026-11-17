@@ -198,6 +198,15 @@ pub(crate) fn context_window_changed_divider(id: &str, window: u64, cx: &App) ->
     )
 }
 
+pub(crate) fn request_retry_divider(id: &str, message: &str, cx: &App) -> AnyElement {
+    divider(
+        SharedString::from(format!("request-retry-{id}")),
+        message.to_owned(),
+        cx.theme().muted_foreground,
+        cx,
+    )
+}
+
 pub(crate) fn settings_kept_divider(id: &str, cx: &App) -> AnyElement {
     divider(
         SharedString::from(format!("settings-kept-{id}")),

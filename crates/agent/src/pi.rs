@@ -1416,7 +1416,7 @@ impl PiMapper {
                     }]
                 }
             }
-            "auto_retry_start" => vec![AgentEvent::Warning {
+            "auto_retry_start" => vec![AgentEvent::RequestRetry {
                 message: format!(
                     "pi retry {}/{} in {} ms: {}",
                     crate::json_u64(message.get("attempt")).unwrap_or(0),

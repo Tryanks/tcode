@@ -1483,6 +1483,7 @@ notice:
   dirty_tree: "未コミットの変更があります"
   tcode_update_available: "Tcode %{version} が利用可能です"
   review_recorded: "レビューを記録しました：%{items} 項目、カバレッジ %{coverage}"
+  usage_limit_reached: "%{harness} が使用量の上限に達しました"
   reference_boundary_crossed: "「%{thread}」のモデルが、別のプロジェクトまたはハーネスの「%{title}」を参照しました。そこで読み取った内容は、そのモデルの提供元に送信されます"
 attach:
   unsupported_type: "「%{name}」を画像として読み込めませんでした。"

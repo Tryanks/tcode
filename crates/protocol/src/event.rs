@@ -1446,6 +1446,12 @@ pub enum RuntimeError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum RuntimeNotice {
+    /// A profile's usage window is exhausted, told once per window however
+    /// many of its threads meet it. `harness` is its display name, with its
+    /// account.
+    UsageLimitReached {
+        harness: String,
+    },
     TcodeUpdateAvailable {
         version: String,
     },
@@ -1486,9 +1492,9 @@ pub enum NoticeSeverity {
 impl RuntimeNotice {
     pub fn severity(&self) -> NoticeSeverity {
         match self {
-            Self::WorktreeMergeFailed { .. } | Self::ReferenceBoundaryCrossed { .. } => {
-                NoticeSeverity::Warning
-            }
+            Self::UsageLimitReached { .. }
+            | Self::WorktreeMergeFailed { .. }
+            | Self::ReferenceBoundaryCrossed { .. } => NoticeSeverity::Warning,
             Self::TcodeUpdateAvailable { .. }
             | Self::SwitchedBranch { .. }
             | Self::WorktreeSeeded { .. }

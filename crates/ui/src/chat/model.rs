@@ -45,6 +45,7 @@ pub(crate) enum Segment<'a> {
     Assistant(&'a TimelineEntry),
     Plan(&'a TimelineEntry),
     Error(&'a TimelineEntry),
+    RequestRetry(&'a TimelineEntry),
     /// Consecutive warnings of the harness.
     Warnings(Vec<&'a TimelineEntry>),
     /// Consecutive rows of the log this build cannot read.
@@ -284,6 +285,9 @@ pub(crate) fn segment_entries<'a>(
             }
             EntryContent::Withheld { .. } => {
                 single(&mut segments, &mut ranges, Segment::Withheld(entry));
+            }
+            EntryContent::RequestRetry { .. } => {
+                single(&mut segments, &mut ranges, Segment::RequestRetry(entry));
             }
             EntryContent::Warning { .. } => {
                 flush_activities(
