@@ -520,6 +520,24 @@ impl WorkspaceStore {
         })
     }
 
+    /// The marks of every turn of `session_id` the user spoke in, as the
+    /// host folds them from the whole log.
+    pub(crate) fn thread_turn_marks(
+        &self,
+        session_id: &str,
+        cx: &mut App,
+    ) -> Task<Result<Vec<tcode_core::turn_marks::TurnMark>, String>> {
+        let session_id = session_id.to_owned();
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::ThreadTurnMarks { session_id }).await {
+                Ok(QueryResponse::ThreadTurnMarks(marks)) => Ok(marks),
+                Ok(other) => Err(format!("unexpected turn-marks response: {other:?}")),
+                Err(error) => Err(error.message),
+            },
+        )
+    }
+
     pub fn absolute_turn_for(&self, session_id: Option<&str>, local: usize) -> usize {
         local
             + self

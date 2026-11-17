@@ -1582,6 +1582,7 @@ fn dispatch_query(
             session_id,
             position,
         } => app.thread_anchor_turn(&session_id, position, cx),
+        Query::ThreadTurnMarks { session_id } => app.thread_turn_marks(&session_id, cx),
         Query::ReadItemImage {
             session_id,
             item_id,

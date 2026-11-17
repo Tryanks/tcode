@@ -758,7 +758,9 @@ impl WorkspaceStore {
     pub fn show_thread_at_turn(&mut self, session_id: String, turn: usize, cx: &mut Context<Self>) {
         self.pending_chat_turn = Some((session_id.clone(), turn));
         self.show_thread(session_id, cx);
-        // Showing the thread already shown changes nothing else.
+        // Showing the thread already shown changes nothing else, and a turn
+        // above the window it holds is read in from here.
+        self.load_pending_chat_history(cx);
         cx.notify();
     }
     /// Open a thread, then scroll it to the turn holding the entry at
