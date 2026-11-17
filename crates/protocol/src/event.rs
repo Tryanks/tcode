@@ -1446,7 +1446,6 @@ pub enum RuntimeError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum RuntimeNotice {
-    ProviderMessage(String),
     TcodeUpdateAvailable {
         version: String,
     },
@@ -1487,9 +1486,9 @@ pub enum NoticeSeverity {
 impl RuntimeNotice {
     pub fn severity(&self) -> NoticeSeverity {
         match self {
-            Self::ProviderMessage(_)
-            | Self::WorktreeMergeFailed { .. }
-            | Self::ReferenceBoundaryCrossed { .. } => NoticeSeverity::Warning,
+            Self::WorktreeMergeFailed { .. } | Self::ReferenceBoundaryCrossed { .. } => {
+                NoticeSeverity::Warning
+            }
             Self::TcodeUpdateAvailable { .. }
             | Self::SwitchedBranch { .. }
             | Self::WorktreeSeeded { .. }

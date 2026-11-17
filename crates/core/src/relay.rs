@@ -43,6 +43,7 @@ fn is_provider_work(content: &EntryContent) -> bool {
         | EntryContent::Feedback { .. }
         | EntryContent::Error { .. }
         | EntryContent::ProviderStartError { .. }
+        | EntryContent::Warning { .. }
         | EntryContent::ProviderRelay { .. }
         | EntryContent::ContextCompacted(_)
         | EntryContent::ContextWindowChanged { .. }
@@ -284,6 +285,9 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
             EntryContent::Error { message, .. }
             | EntryContent::ProviderStartError { error: message } => {
                 activity(&mut body, "error", "provider", &one_line(message));
+            }
+            EntryContent::Warning { message } => {
+                activity(&mut body, "warning", "provider", &one_line(message));
             }
             EntryContent::ProviderRelay {
                 from_provider,

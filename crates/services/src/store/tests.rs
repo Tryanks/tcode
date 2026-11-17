@@ -217,8 +217,8 @@ fn pinned_history_cuts_survive_mutation_and_close_releases_readers() {
     use std::borrow::Cow;
     let dir = DataDir::new();
     let store = dir.store();
-    let old = AgentEvent::Warning {
-        message: "old".repeat(1000),
+    let old = AgentEvent::SessionModel {
+        model: "old".repeat(1000),
     };
     store
         .apply(&[Mutation::append_event("thread", 1, &old).unwrap()])
@@ -228,8 +228,8 @@ fn pinned_history_cuts_survive_mutation_and_close_releases_readers() {
         .append_event(
             "thread",
             2,
-            &AgentEvent::Warning {
-                message: "appended".into(),
+            &AgentEvent::SessionModel {
+                model: "appended".into(),
             },
         )
         .unwrap();
@@ -249,8 +249,8 @@ fn pinned_history_cuts_survive_mutation_and_close_releases_readers() {
         128,
         |record| {
             Cow::Owned(StoredEvent {
-                event: AgentEvent::Warning {
-                    message: "old-preview".into(),
+                event: AgentEvent::SessionModel {
+                    model: "old-preview".into(),
                 },
                 ..record.clone()
             })
@@ -265,8 +265,8 @@ fn pinned_history_cuts_survive_mutation_and_close_releases_readers() {
         seen,
         [(
             0,
-            AgentEvent::Warning {
-                message: "old-preview".into()
+            AgentEvent::SessionModel {
+                model: "old-preview".into()
             }
         )]
     );
@@ -274,7 +274,7 @@ fn pinned_history_cuts_survive_mutation_and_close_releases_readers() {
     store
         .apply(&[Mutation::replace_event_log(
             "thread",
-            b"{\"type\":\"warning\",\"message\":\"replacement\"}\n".to_vec(),
+            b"{\"type\":\"session_model\",\"model\":\"replacement\"}\n".to_vec(),
         )])
         .unwrap();
     publication.publish().unwrap();
@@ -295,8 +295,8 @@ fn pinned_history_cuts_survive_mutation_and_close_releases_readers() {
         .unwrap();
     assert_eq!(
         seen,
-        [AgentEvent::Warning {
-            message: "replacement".into()
+        [AgentEvent::SessionModel {
+            model: "replacement".into()
         }]
     );
     store.close().unwrap();

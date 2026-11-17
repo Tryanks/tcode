@@ -47,6 +47,7 @@ chat:
   settings_kept: "This message still uses the old settings; the new ones apply once background tasks finish"
   unreadable_record_one: "1 record this version of Tcode no longer reads"
   unreadable_records: "%{count} records this version of Tcode no longer reads"
+  warnings: "%{count} warnings"
   record_withheld: "A record of %{size} is too large to send to this device with the conversation"
   load_record: "Load"
   record_loading: "Loading a record of %{size}…"

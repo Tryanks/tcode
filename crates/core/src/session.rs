@@ -26,7 +26,7 @@ pub use streams::{ItemStreams, SupersededStream};
 pub use superseded::{TurnSnapshots, drop_turn_diffs};
 
 /// Bump when the persisted turn-boundary policy changes.
-pub const TURN_INDEX_FOLD_VERSION: u32 = 9;
+pub const TURN_INDEX_FOLD_VERSION: u32 = 10;
 
 fn synthetic_entry_id(
     prefix: &str,
@@ -552,6 +552,10 @@ pub enum EntryContent {
     },
     #[rustfmt::skip]
     ProviderStartError { error: String },
+    /// What the harness warned of, where in the conversation it did.
+    Warning {
+        message: String,
+    },
     /// A tcode-level conversation handoff, rendered as a divider before the
     /// first user message sent to the new provider, with the handoff `prompt`
     /// as sent disclosed under it.
@@ -1651,9 +1655,20 @@ impl Timeline {
                 }
                 self.usage = Some(usage);
             }
-            // Logged once where the live provider event arrives; a fold also
-            // replays stored records, which would log every old warning again.
-            AgentEvent::Warning { .. } => {}
+            AgentEvent::Warning { message } => {
+                let turn = self.ensure_turn();
+                let id = self.synthetic_id("warning", ts);
+                self.entries.push(Arc::new(TimelineEntry {
+                    id,
+                    content: EntryContent::Warning {
+                        message: message.clone(),
+                    },
+                    ts,
+                    finished_ts: None,
+                    background: false,
+                    turn,
+                }));
+            }
             AgentEvent::ProviderStartFailed { error } => {
                 let turn = self.ensure_turn();
                 let id = self.synthetic_id("error", ts);
