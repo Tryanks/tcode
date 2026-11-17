@@ -334,10 +334,11 @@ impl AppState {
                 }
                 Command::RegenerateSessionTitle { session_id } => {
                     session(session_id)?;
-                    self.setup_allowed(
-                        policy,
-                        &super::events::title_session_meta(&self.settings, PathBuf::new()),
-                    )
+                    match self.sessions.iter().find(|meta| &meta.id == session_id) {
+                        Some(thread) => self
+                            .setup_allowed(policy, &self.title_session_meta(thread, Some(policy))),
+                        None => Err(refusal("session")),
+                    }
                 }
                 Command::SetActiveModel {
                     session_id,

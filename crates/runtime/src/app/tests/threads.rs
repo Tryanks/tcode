@@ -252,7 +252,11 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
     // its title is asked for.
     let store = TestStore::new("tcode-regenerate-title");
     let mut settings = Settings::default();
-    settings.title_generation.profile_id = Some("titles".into());
+    settings.title_generation = Some(tcode_core::settings::TitleGenerationSettings {
+        provider: ProviderKind::Codex,
+        model: "title-model".into(),
+        profile_id: Some("titles".into()),
+    });
     settings.profiles.insert(
         "titles".into(),
         ProviderProfile {
@@ -529,6 +533,72 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
                 )
                 .unwrap();
         }
+    }
+}
+
+/// With no title model chosen, a thread is named on its own account: on the
+/// harness's small model where the account lists it, and on the thread's own
+/// model where it does not.
+#[test]
+fn a_thread_with_no_title_model_chosen_is_named_on_its_own_account() {
+    let store = TestStore::new("tcode-own-account-title");
+    let mut settings = Settings::default();
+    settings
+        .provider_mut(ProviderKind::ClaudeCode)
+        .custom_models = vec!["claude-haiku-5-5".into()];
+    tcode_services::settings::SettingsStore::new(store.root().clone())
+        .save(&settings)
+        .unwrap();
+    let threads = [
+        (
+            ProviderKind::ClaudeCode,
+            "claude-opus-5-5",
+            "claude-haiku-5-5",
+        ),
+        (
+            ProviderKind::Pi,
+            "anthropic/claude-opus-5-5",
+            "anthropic/claude-opus-5-5",
+        ),
+    ]
+    .map(|(provider, model, names)| {
+        let meta = SessionMeta::new(provider, store.root().clone(), Some(model.into()));
+        store.upsert_meta(&meta).unwrap();
+        store
+            .append_event(
+                &meta.id,
+                1,
+                &AgentEvent::ItemCompleted(ThreadItem {
+                    id: "user".into(),
+                    parent_item_id: None,
+                    content: ItemContent::UserMessage {
+                        text: "Improve QR sharing".into(),
+                        attachments: Vec::new(),
+                    },
+                }),
+            )
+            .unwrap();
+        (meta.id, provider, names)
+    });
+    let cx = &mut TestAppContext::default();
+    let providers = Providers::default();
+    let state = cx.new_entity({
+        let mut state = TestClientState::new((*store).clone());
+        state.ai_title_generation_enabled = true;
+        state.set_provider_launcher(providers.launcher());
+        state
+    });
+    for (launch, (id, provider, names)) in threads.into_iter().enumerate() {
+        state.dispatch_command(
+            cx,
+            launch as u64 + 1,
+            Command::RegenerateSessionTitle { session_id: id },
+        );
+        let scripted = providers.started(cx, launch);
+        assert_eq!(
+            (scripted.provider, scripted.options.model.as_deref()),
+            (provider, Some(names))
+        );
     }
 }
 

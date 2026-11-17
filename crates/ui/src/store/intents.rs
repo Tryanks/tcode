@@ -8,7 +8,7 @@ use tcode_core::{
     control::{ControlGrant, SettlementAutomation},
     git::GitAction,
     session::ReviewComment,
-    settings::{ChildApprovalMode, ImageMode, ProfileSettingsPatch},
+    settings::{ChildApprovalMode, ImageMode, ProfileSettingsPatch, TitleGenerationSettings},
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
 use tcode_protocol::{
@@ -253,14 +253,8 @@ impl WorkspaceStore {
     pub fn set_browser_allow_evaluate(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::BrowserAllowEvaluate(value));
     }
-    pub fn set_title_generation_provider(&mut self, value: ProviderKind) {
-        self.patch_settings(SettingsPatch::TitleGenerationProvider(value));
-    }
-    pub fn set_title_generation_model(&mut self, value: String) {
-        self.patch_settings(SettingsPatch::TitleGenerationModel(value));
-    }
-    pub fn set_title_generation_profile_id(&mut self, value: Option<String>) {
-        self.patch_settings(SettingsPatch::TitleGenerationProfileId(value));
+    pub fn set_title_generation(&mut self, value: Option<TitleGenerationSettings>) {
+        self.patch_settings(SettingsPatch::TitleGeneration(value));
     }
     pub fn reset_settings(&mut self) {
         self.dispatch(Command::ResetSettings);
