@@ -1,7 +1,7 @@
 use super::*;
 use crate::app::test_support::*;
 use crate::app::{ProviderLauncher, active_session::Runtime};
-use control_mcp::{ControlOp, MoveThreadParams, ReferenceParams, Workspace};
+use control_mcp::{ControlOp, MoveThreadParams, Workspace};
 use tcode_core::control::{ControlScope, ControlTier, ReferenceOrigin};
 
 /// Providers that never come up, so what a call queued stays observable.
@@ -724,109 +724,6 @@ fn control_thread_guards_human_queued_messages_and_forks() {
     });
 }
 
-/// The model references only threads inside its grant's scope; a reference across a project
-/// carries the boundary notice and leaves the referenced thread as it was.
-#[test]
-fn reference_stays_within_the_grant_scope_and_marks_boundaries() {
-    let store = TestStore::new("tcode-control-reference");
-    let cx = &mut TestAppContext::default();
-    let state = host(&store, cx);
-    state.update(cx, |state, _| {
-        state
-            .sessions
-            .push(thread("caller", "a", ProviderKind::ClaudeCode));
-        state
-            .sessions
-            .push(thread("near", "a", ProviderKind::ClaudeCode));
-        state
-            .sessions
-            .push(thread("far", "b", ProviderKind::ClaudeCode));
-    });
-    let reference = |id: &str| {
-        ControlOp::Reference(ReferenceParams {
-            thread_id: id.into(),
-            reason: None,
-        })
-    };
-    let notices = |cx: &mut TestAppContext| -> Vec<RuntimeNotice> {
-        cx.drain_outgoing()
-            .into_iter()
-            .filter_map(|message| match message {
-                tcode_protocol::HostMessage::Event(envelope) => match envelope.event {
-                    ServerEvent::Runtime(RuntimeEvent::Notice(
-                        notice @ RuntimeNotice::ReferenceBoundaryCrossed { .. },
-                    )) => Some(notice),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .collect()
-    };
-    state.update(cx, |state, cx| {
-        assert_eq!(
-            call(state, cx, "caller", reference("far")),
-            Err("refused: thread far is outside your grant's scope (project)".into())
-        );
-        let near = call(state, cx, "caller", reference("near")).unwrap();
-        assert_eq!(near["boundary_notice"], false);
-    });
-    cx.run_until_parked();
-    assert!(notices(cx).is_empty(), "no boundary, no notice");
-
-    let far_before = state.update(cx, |state, cx| {
-        // Observe alone is enough: a reference only makes a thread in scope readable.
-        let mut caller = state.find_meta("caller").unwrap();
-        caller.control_grant = Some(ControlGrant {
-            scope: ControlScope::Host,
-            tiers: [ControlTier::Observe].into_iter().collect(),
-            ..ControlGrant::none()
-        });
-        state.store_meta(caller, cx);
-        let far_before = state.find_meta("far").unwrap();
-        let far = call(state, cx, "caller", reference("far")).unwrap();
-        assert_eq!(far["boundary_notice"], true);
-        far_before
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        notices(cx),
-        [RuntimeNotice::ReferenceBoundaryCrossed {
-            thread: "caller".into(),
-            thread_title: "Thread caller".into(),
-            referenced: "far".into(),
-            title: "Thread far".into(),
-        }],
-        "the user hears of the crossing once, when the model makes it"
-    );
-    state.update(cx, |state, cx| {
-        call(state, cx, "caller", reference("far")).unwrap();
-    });
-    cx.run_until_parked();
-    assert!(
-        notices(cx).is_empty(),
-        "an existing reference is not announced again"
-    );
-
-    state.read(|state| {
-        assert_eq!(state.find_meta("far").unwrap(), far_before);
-        let references = state.find_meta("caller").unwrap().references;
-        assert_eq!(
-            references
-                .iter()
-                .map(|reference| (
-                    reference.thread_id.as_str(),
-                    reference.by,
-                    reference.boundary_notice
-                ))
-                .collect::<Vec<_>>(),
-            [
-                ("near", ReferenceOrigin::Model, false),
-                ("far", ReferenceOrigin::Model, true)
-            ]
-        );
-    });
-}
-
 /// `git` answers with what git did: checkout refuses a dirty tree and a thread whose turn is
 /// running, commit reports git's output, and a clean tree then checks out.
 #[test]
@@ -1046,4 +943,62 @@ fn move_thread_moves_the_caller_within_its_grant_and_keeps_its_turn() {
     });
     cx.run_until_parked();
     assert_eq!(audits(&state).len(), 2);
+}
+
+/// A thread the user names in a draft is referenced without storing the draft: the
+/// reference waits with it, and the draft's first message stores the two together.
+#[test]
+fn a_draft_keeps_its_reference_until_its_first_message_stores_both() {
+    let store = TestStore::new("tcode-control-draft-reference");
+    let root = store.root().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let cx = &mut TestAppContext::default();
+    let state = host(&store, cx);
+    state.update(cx, |state, cx| {
+        let project_id = state.create_project(root.clone(), cx).unwrap();
+        state.persist_meta(&thread("named", &project_id, ProviderKind::ClaudeCode), cx);
+        state.start_draft(project_id, root.clone(), cx);
+    });
+    let draft = state.read(|state| state.active_session_id().unwrap().to_owned());
+
+    state.dispatch_command(
+        cx,
+        1,
+        Command::AddThreadReference {
+            session_id: draft.clone(),
+            thread_id: "named".into(),
+        },
+    );
+    cx.run_until_parked();
+    assert!(
+        store
+            .load_index()
+            .unwrap()
+            .iter()
+            .all(|meta| meta.id != draft),
+        "naming a thread stored the draft"
+    );
+
+    state.dispatch_command(
+        cx,
+        2,
+        Command::SendTurn {
+            session_id: draft.clone(),
+            text: "[@Thread named](tcode-thread://named) what changed?".into(),
+            attachment_paths: Vec::new(),
+        },
+    );
+    cx.run_until_parked();
+    let stored = store
+        .load_index()
+        .unwrap()
+        .into_iter()
+        .find(|meta| meta.id == draft)
+        .expect("the first message stores the draft");
+    let referenced: Vec<_> = stored
+        .references
+        .iter()
+        .map(|reference| reference.thread_id.as_str())
+        .collect();
+    assert_eq!(referenced, ["named"]);
 }

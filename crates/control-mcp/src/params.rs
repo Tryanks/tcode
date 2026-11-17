@@ -626,17 +626,6 @@ pub struct CancelNotifyParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ReferenceParams {
-    #[schemars(
-        description = "The thread to reference; its archived log becomes readable to this thread."
-    )]
-    pub thread_id: String,
-    #[serde(default)]
-    #[schemars(description = "Why, shown to the user beside the reference.")]
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RespondInputParams {
     #[schemars(description = "The thread with the pending user-input request.")]
     pub thread_id: String,
@@ -849,13 +838,4 @@ pub struct MoveThreadResponse {
     pub project_id: String,
     pub project_name: String,
     pub cwd: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReferenceResponse {
-    pub thread_id: String,
-    pub title: String,
-    /// The thread is in another project or runs another provider, so its content goes to
-    /// this thread's model vendor.
-    pub boundary_notice: bool,
 }

@@ -1484,7 +1484,6 @@ notice:
   tcode_update_available: "Tcode %{version} available"
   review_recorded: "Review recorded: %{items} items, coverage %{coverage}"
   usage_limit_reached: "%{harness} has reached its usage limit"
-  reference_boundary_crossed: "The model in “%{thread}” referenced “%{title}” from another project or Harness: what it reads there goes to that model's provider"
 attach:
   unsupported_type: "'%{name}' could not be read as an image."
   decode_failed: "'%{name}' could not be read as an image: %{error}"
@@ -3024,12 +3023,6 @@ control:
     note: "Answer here only. A message in the chat does not approve it."
   reference:
     group: "Threads"
-    model: "model"
-    boundary: "shared"
-    boundary_tooltip: "Its content goes to this thread's model provider."
-    deleted: "deleted"
-    remove: "Remove reference"
-    chip_tooltip: "%{title}: this thread's model may read it on demand. Content already read stays with the model."
     notice_title: "Shared with another model provider"
     notice_description: "“%{title}” is in another project or uses another Harness: what this thread's model reads from it goes to this thread's model provider."
     notice_ok: "Keep the reference"

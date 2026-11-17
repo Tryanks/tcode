@@ -365,17 +365,6 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Reference another thread within your observe scope so its stored log stays readable to this thread through outline, read, search_in_item and file_history. For targeted recovery of specific facts, not for reading whole transcripts; the reference is shown to the user as a chip on this thread, and a reference across a project or provider boundary is announced to the user when you make it. Forks of this thread inherit it."
-    )]
-    async fn reference(
-        &self,
-        ct: CancellationToken,
-        Parameters(p): Parameters<ReferenceParams>,
-    ) -> CallToolResult {
-        self.run(&ct, ControlOp::Reference(p)).await
-    }
-
-    #[tool(
         description = "Answer another thread's pending user-input request in the user's place: for your own subagent, from your brief and the user's instructions; for any other thread only with the privileged category answer_input. answers has one entry per question, keyed by question id: a string (an option label or free text) for a single-choice question, an array of strings for a multi_select one. Every use is logged in both threads. Tool-call approvals are answered with respond_approval, never here."
     )]
     async fn respond_input(

@@ -194,28 +194,19 @@ impl Composer {
     /// provider takes `tcode_control`.
     fn thread_rows(&self, query: &str, cx: &App) -> Vec<MenuRow> {
         let store = self.workspace_store.read(cx);
-        let Some(status) = store
-            .session_status_for(self.session_id.as_deref(), cx)
-            .filter(|status| !status.draft)
-        else {
+        let Some(session_id) = self.session_id.clone() else {
             return Vec::new();
         };
-        let (Some(control), Some(session_id)) = (&status.control, self.session_id.clone()) else {
-            return Vec::new();
-        };
-        if query.is_empty() {
+        let takes_control = store
+            .session_status_for(Some(&session_id), cx)
+            .is_some_and(|status| status.control.is_some());
+        if !takes_control || query.is_empty() {
             return Vec::new();
         }
         let mut scored: Vec<_> = store
             .flat_sessions()
             .into_iter()
             .filter(|meta| meta.id != session_id)
-            .filter(|meta| {
-                !control
-                    .references
-                    .iter()
-                    .any(|reference| reference.thread_id == meta.id)
-            })
             .filter_map(|meta| Some((fuzzy_score(query, &meta.title)?, meta)))
             .collect();
         scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
@@ -231,7 +222,7 @@ impl Composer {
                     .unwrap_or_default(),
                 primary: meta.title,
                 icon: MenuIcon::Thread,
-                accept: MenuAccept::ReferenceThread(meta.id),
+                accept: MenuAccept::InsertThread(meta.id),
                 group: Some("control.reference.group"),
             })
             .collect()
@@ -270,9 +261,9 @@ impl Composer {
                 let link = format!("{} ", serialize_composer_file_link(path));
                 self.replace_trigger(&link, window, cx);
             }
-            MenuAccept::ReferenceThread(id) => {
-                self.replace_trigger("", window, cx);
-                self.reference_thread(id.clone(), window, cx);
+            MenuAccept::InsertThread(id) => {
+                let link = format!("{} ", serialize_composer_thread_link(id, &row.primary));
+                self.replace_trigger(&link, window, cx);
             }
             MenuAccept::InsertSkill(name) => self.replace_trigger(&format!("${name} "), window, cx),
             MenuAccept::InsertCommand(name) => {

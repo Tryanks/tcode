@@ -361,7 +361,10 @@ pub use wire::{
 //
 // Unreleased: the timeline gains the warning entry, and RuntimeNotice loses
 // provider_message. The agent event stream and the timeline gain
-// request_retry, and RuntimeNotice gains usage_limit_reached.
+// request_retry, and RuntimeNotice gains usage_limit_reached. RuntimeNotice
+// loses reference_boundary_crossed, which only the tcode_control reference
+// tool raised; a thread references another only by a link to it in a message
+// the user sends.
 pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]
