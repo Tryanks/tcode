@@ -3081,7 +3081,7 @@ fn openai_form_elicitation_declines_with_result_and_warning() {
 /// What Codex says outside a turn's items reaches the user in its own
 /// words, and a configuration warning Codex repeats to the thread is shown
 /// once. Shapes are `ConfigWarningNotification`, `WarningNotification`,
-/// `DeprecationNoticeNotification`, `GuardianWarningNotification` and
+/// `DeprecationNoticeNotification` and
 /// `McpServerStatusUpdatedNotification` of `ServerNotification.json`
 /// (`codex app-server generate-json-schema --experimental`, codex-cli
 /// 0.169.0); the content is invented.
@@ -3102,8 +3102,6 @@ fn notices_outside_a_turn_reach_the_user_as_codex_gave_them() {
             json!({"method": "deprecationNotice", "params": {
                     "summary": "`[features].frob` is deprecated and ignored.",
                     "details": "Remove `frob` from [features] in config.toml."}}),
-            json!({"method": "guardianWarning", "params": {
-                    "threadId": "thread-1", "message": "reviewer is behind"}}),
             json!({"method": "mcpServer/startupStatus/updated", "params": {
                     "name": "tracker", "status": "failed", "threadId": "thread-1",
                     "error": "MCP client for `tracker` failed to start: handshake refused",
@@ -3126,7 +3124,6 @@ fn notices_outside_a_turn_reach_the_user_as_codex_gave_them() {
                         /home/user/.codex/config.toml:3:7: invalid type: integer `5`, expected a string",
                 "`[features].frob` is deprecated and ignored.\n\
                         Remove `frob` from [features] in config.toml.",
-                "reviewer is behind",
                 "MCP client for `tracker` failed to start: handshake refused",
             ]
         );

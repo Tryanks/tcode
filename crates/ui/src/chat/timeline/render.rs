@@ -324,6 +324,14 @@ impl TimelineView {
                         cx,
                     ));
                 }
+                Segment::RequestRetry(entry) => {
+                    let EntryContent::RequestRetry { message } = &entry.content else {
+                        unreachable!();
+                    };
+                    column = column.child(components::dividers::request_retry_divider(
+                        &entry.id, message, cx,
+                    ));
+                }
                 Segment::Warnings(warnings) => {
                     let messages = warnings
                         .iter()

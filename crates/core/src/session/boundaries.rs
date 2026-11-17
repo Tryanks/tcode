@@ -356,6 +356,7 @@ impl TurnBoundaries {
             | AgentEvent::ProviderStartFailed { .. }
             | AgentEvent::Error { .. }
             | AgentEvent::Warning { .. }
+            | AgentEvent::RequestRetry { .. }
             | AgentEvent::SessionClosed { reason: Some(_) }
             | AgentEvent::Delta { .. }
             | AgentEvent::ContextWindowChanged { .. }

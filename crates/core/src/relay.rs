@@ -44,6 +44,7 @@ fn is_provider_work(content: &EntryContent) -> bool {
         | EntryContent::Error { .. }
         | EntryContent::ProviderStartError { .. }
         | EntryContent::Warning { .. }
+        | EntryContent::RequestRetry { .. }
         | EntryContent::ProviderRelay { .. }
         | EntryContent::ContextCompacted(_)
         | EntryContent::ContextWindowChanged { .. }
@@ -335,6 +336,7 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
             ),
             // The removed turns are no longer the harness's conversation.
             EntryContent::ModelChanged { .. }
+            | EntryContent::RequestRetry { .. }
             | EntryContent::SettingsKept
             | EntryContent::Rewound(_)
             | EntryContent::RewindFailed { .. }

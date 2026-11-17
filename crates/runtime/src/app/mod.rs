@@ -466,6 +466,9 @@ pub struct AppState {
     /// Native plugin catalogs by profile and context, listed on demand.
     plugin_catalogs: Revisioned<HashMap<plugins::CatalogKey, plugins::PluginCatalog>>,
     mcp: McpWiring,
+    /// The reset of the usage window each profile's exhaustion was last told
+    /// for: its other threads meet the same window and say so in themselves.
+    usage_limits_told: HashMap<String, u64>,
     control: control::ControlState,
     callback_approval_requests: HashSet<(String, String)>,
     callback_user_input_requests: HashSet<(String, String)>,
@@ -708,6 +711,7 @@ impl AppState {
             acp_installing: HashMap::new(),
             plugin_catalogs: HashMap::new().into(),
             mcp: McpWiring::default(),
+            usage_limits_told: HashMap::new(),
             control: control::ControlState::new(
                 review_records,
                 reviews_unreadable,

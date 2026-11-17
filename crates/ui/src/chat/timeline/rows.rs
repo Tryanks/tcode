@@ -519,7 +519,9 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             limit_resets_at.hash(hash);
         }
         EntryContent::ProviderStartError { error } => error.len().hash(hash),
-        EntryContent::Warning { message } => message.len().hash(hash),
+        EntryContent::Warning { message } | EntryContent::RequestRetry { message } => {
+            message.hash(hash)
+        }
         EntryContent::ProviderRelay {
             from_provider,
             to_provider,

@@ -2874,6 +2874,13 @@ pub enum AgentEvent {
     Warning {
         message: String,
     },
+    /// The harness tries a failed request again inside its open turn.
+    /// `message` is its account of this attempt, which stands in for the
+    /// attempt before it; a request that fails for good is an
+    /// [`Self::Error`] or ends the turn.
+    RequestRetry {
+        message: String,
+    },
     /// A runtime-synthesized fatal provider startup failure persisted for replay.
     #[rustfmt::skip]
     ProviderStartFailed { error: String },

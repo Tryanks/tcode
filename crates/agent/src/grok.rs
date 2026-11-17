@@ -532,9 +532,8 @@ impl Grok {
             Some("retry_state")
                 if update.get("type").and_then(Value::as_str) == Some("retrying") =>
             {
-                vec![AgentEvent::Error {
+                vec![AgentEvent::RequestRetry {
                     message: retry_message(update),
-                    fatal: false,
                 }]
             }
             Some("image_dropped") => {

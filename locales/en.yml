@@ -1483,6 +1483,7 @@ notice:
   dirty_tree: "There are uncommitted changes"
   tcode_update_available: "Tcode %{version} available"
   review_recorded: "Review recorded: %{items} items, coverage %{coverage}"
+  usage_limit_reached: "%{harness} has reached its usage limit"
   reference_boundary_crossed: "The model in “%{thread}” referenced “%{title}” from another project or Harness: what it reads there goes to that model's provider"
 attach:
   unsupported_type: "'%{name}' could not be read as an image."

@@ -137,6 +137,9 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 NoticeSeverity::Warning => RuntimeEventSeverity::Warning,
             };
             let message = match notice {
+                RuntimeNotice::UsageLimitReached { harness } => {
+                    crate::tr!("notice.usage_limit_reached", harness = harness).into_owned()
+                }
                 RuntimeNotice::TcodeUpdateAvailable { version } => {
                     crate::tr!("notice.tcode_update_available", version = version).into_owned()
                 }

@@ -2166,7 +2166,7 @@ impl Mapper {
                     });
                 }
             }
-            "session.retry.scheduled" if root => mapped.events.push(AgentEvent::Warning {
+            "session.retry.scheduled" if root => mapped.events.push(AgentEvent::RequestRetry {
                 message: format!(
                     "OpenCode retry {}: {}",
                     data["attempt"].as_u64().unwrap_or(0),
