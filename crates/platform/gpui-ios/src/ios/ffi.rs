@@ -391,7 +391,7 @@ pub extern "C" fn gpui_ios_init() {
     });
 }
 
-/// Attaches the process-wide platform to a `UIView` backed by `CAMetalLayer`.
+/// Attaches the process-wide platform to the `UIView` that hosts its Metal layer.
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_ios_attach_view(
     view: *mut c_void,
@@ -404,9 +404,8 @@ pub extern "C" fn gpui_ios_attach_view(
     let Some(view) = NonNull::new(view) else {
         return 0;
     };
-    let (previous_view, previous_metrics) = HOST.with(|host| {
+    HOST.with(|host| {
         let mut host = host.borrow_mut();
-        let previous = (host.view, host.metrics);
         host.view = Some(view);
         host.metrics.width = width;
         host.metrics.height = height;
@@ -416,28 +415,15 @@ pub extern "C" fn gpui_ios_attach_view(
         } else {
             WindowAppearance::Light
         };
-        previous
     });
 
-    let mut replacement_error = None;
     with_window(|window| {
         if window.needs_surface_replacement(view) {
-            replacement_error = window
-                .replace_surface_from_host(view, width, height, scale)
-                .err();
+            window.replace_surface_from_host(view, width, height, scale);
         } else {
             window.resize_from_host(width, height, scale);
         }
     });
-    if let Some(error) = replacement_error {
-        HOST.with(|host| {
-            let mut host = host.borrow_mut();
-            host.view = previous_view;
-            host.metrics = previous_metrics;
-        });
-        log::error!("failed to replace the GPUI iOS Metal surface: {error:#}");
-        return 0;
-    }
     super::with_platform(super::IosPlatform::notify_displays_changed);
     1
 }

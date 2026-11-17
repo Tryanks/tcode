@@ -107,6 +107,20 @@ pub use thread_export::format_size;
 pub use window_seam::force_mobile_layout;
 pub use window_state::WindowState;
 
+/// Keep how the desktop window closed for the next time it opens: whether it
+/// was maximized, and the size it has, or returns to, when it is not. With no
+/// `size` the one already kept stays. Both are read back from
+/// [`tcode_client::host::ClientPreferences`].
+pub fn remember_window(
+    size: Option<gpui::Size<gpui::Pixels>>,
+    maximized: bool,
+    cx: &mut gpui::App,
+) {
+    let points = |length: gpui::Pixels| length.as_f32().round() as u32;
+    let size = size.map(|size| (points(size.width), points(size.height)));
+    device::DevicePreferences::set_window(size, maximized, cx);
+}
+
 /// Where this client may keep its own files (the WebView2 profile is the only
 /// current user). Bootstrap owns the location; the UI never resolves it, so a
 /// remote attachment cannot be tricked into reading the host's data directory.

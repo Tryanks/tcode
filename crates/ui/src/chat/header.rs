@@ -1005,28 +1005,7 @@ impl ChatView {
             .when(hosts_caption, |this| this.pr_0())
             .min_w(px(HEADER_OVERFLOW_MIN_WIDTH + compact_extra));
 
-        // The sidebar toggle: the header's first control, immediately left of
-        // the title. It lives here rather than in the sidebar because a
-        // collapsed sidebar occupies no width at all (`crate::shell`), so a
-        // control mounted inside it would have nowhere to be.
-        let sidebar_toggle = Button::new("toggle-sidebar")
-            .motion(&self.motion)
-            .debug_selector(|| "toggle-sidebar".into())
-            .on_mouse_down(gpui::MouseButton::Left, stop_press)
-            .ghost()
-            .small()
-            .compact()
-            .icon(if collapsed {
-                IconName::PanelLeftOpen
-            } else {
-                IconName::PanelLeft
-            })
-            .tooltip(if collapsed {
-                crate::tr!("sidebar.expand")
-            } else {
-                crate::tr!("sidebar.collapse")
-            })
-            .on_click(|_, _, cx| crate::device::DevicePreferences::toggle_sidebar_collapsed(cx));
+        let sidebar_toggle = self.sidebar_toggle(collapsed);
 
         // An agent's header leads back to the thread it was reached from.
         let parent_link = self.labelled_swap(
@@ -1037,10 +1016,6 @@ impl ChatView {
             |this, labelled, cx| this.parent_link(labelled, cx),
         );
 
-        // A draft shows a muted "New thread" label; an open thread its title;
-        // nothing active shows "No active thread". The title stretch carries no
-        // controls, so it doubles as the window's native drag handle where the
-        // platform needs one.
         // Beside the current pane the title recedes; the pane's content stays
         // as it is.
         let muted = cx.theme().muted_foreground;
@@ -1055,51 +1030,15 @@ impl ChatView {
             window,
             cx,
         );
-        let title_el = if is_draft {
-            crate::material::bar_title(crate::tr!("chat.new_thread"), cx).text_color(muted)
-        } else {
-            match &title {
-                Some(title) => crate::material::bar_title(title.clone(), cx)
-                    .debug_selector(|| "chat-title".into())
-                    .text_color(foreground)
-                    // Keep a few words of the title even when the diff panel and
-                    // the git/Open buttons squeeze the header; without a floor it
-                    // collapses to a lone "I…".
-                    .min_w(px(120.)),
-                None => crate::material::bar_title(crate::tr!("chat.no_active_thread"), cx)
-                    .text_color(muted),
-            }
-        };
+        let title_el = Self::title_element(is_draft, title.as_ref(), foreground, muted, cx);
 
         // The right-side cluster (Open split-button + panel toggles) shows for
         // any active thread, including a draft.
         let show_actions = is_draft || title.is_some();
-        // The title follows where the thread is: its project, or the host's
-        // quick threads, with the project's icon.
         let crumb = show_actions
             .then(|| self.location(cx))
             .flatten()
-            .map(|project| {
-                h_flex()
-                    .flex_shrink_0()
-                    .max_w(px(220.))
-                    .min_w_0()
-                    .gap_1p5()
-                    .items_center()
-                    .debug_selector(|| "chat-crumb".into())
-                    .child(crate::project_icon::artwork(
-                        self.workspace_store.read(cx).image_host(),
-                        &project,
-                        16.,
-                    ))
-                    .child(
-                        crate::material::bar_title(crate::project_icon::label(&project), cx)
-                            .flex_initial()
-                            .min_w_0()
-                            .text_color(foreground),
-                    )
-                    .child(div().flex_none().text_color(muted).child("/"))
-            });
+            .map(|project| self.crumb(&project, foreground, muted, cx));
         let panel = self
             .workspace_store
             .read(cx)
@@ -1115,66 +1054,10 @@ impl ChatView {
             .read(cx)
             .space_allows(|policy| policy.terminals);
         let diff_showing = right_panel_open && right_tab == RightTab::Diff;
-        let agent_tools = self
-            .workspace_store
-            .read(cx)
-            .session_status_for(self.session_id.as_deref(), cx)
-            .is_some_and(|status| status.injected_tools.is_some());
-        let self_settles = self
-            .workspace_store
-            .read(cx)
-            .session_status_for(self.session_id.as_deref(), cx)
-            .and_then(|status| status.control.as_ref())
-            .is_some_and(|control| control.self_settle.is_some());
-        let movable = !is_draft && {
-            let active = self.session_id.as_deref();
-            active
-                .and_then(|id| self.workspace_store.read(cx).thread_meta(id))
-                .is_some_and(|meta| meta.worktree.is_none())
-        };
+        let title_menu = self.title_menu(title.clone(), is_draft, cwd.clone(), cx);
         let zed =
             crate::remote::ZedEntry::of(self.workspace_store.read(cx), cx).map(|entry| entry.label);
         let label_width = show_actions.then(|| self.measure_labels(cwd.clone(), zed, cx));
-        let title_menu = {
-            let title = title.clone();
-            let cwd = cwd.clone();
-            move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
-                let menu = menu.when_some(title.clone(), |menu, title| {
-                    menu.menu(
-                        crate::tr!("chat.copy_title").into_owned(),
-                        Box::new(crate::widgets::menu::CopyText(title)),
-                    )
-                });
-                let menu = menu
-                    .separator()
-                    .menu(
-                        crate::tr!("pull_requests.link_menu").into_owned(),
-                        Box::new(crate::pull_requests::OpenLinkDialog),
-                    )
-                    .when(movable, |menu| {
-                        menu.menu(
-                            crate::tr!("sidebar.ctx_move_thread").into_owned(),
-                            Box::new(OpenMoveThreadDialog),
-                        )
-                    })
-                    .when(self_settles, |menu| {
-                        menu.menu(
-                            crate::tr!("control.self_settle.revoke").into_owned(),
-                            Box::new(RevokeSelfSettle),
-                        )
-                    })
-                    .when(agent_tools, |menu| {
-                        menu.menu(
-                            crate::tr!("pull_requests.agent_sees").into_owned(),
-                            Box::new(crate::pull_requests::ShowAgentTools),
-                        )
-                    });
-                match &cwd {
-                    Some(cwd) => menu.separator().path_items(&cwd.to_string_lossy(), None),
-                    None => menu,
-                }
-            }
-        };
         let header = window_drag_area("chat-header-drag", base, window, cx)
             .child(sidebar_toggle)
             .children(parent_link)
@@ -1256,25 +1139,7 @@ impl ChatView {
             }
             if swap.shows(0) {
                 let mut cue = agents_cue_dot(agents_cue.flatten(), &motion, window, cx);
-                let host = self.workspace_store.read(cx).host_key();
-                let open = cwd.clone().zip(zed).and_then(|(cwd, zed)| {
-                    self.labelled_swap(
-                        "open-labels",
-                        labelled,
-                        window,
-                        cx,
-                        move |this, labelled, cx| {
-                            Some(this.render_open_button(
-                                cwd.clone(),
-                                zed,
-                                host.clone(),
-                                labelled,
-                                &this.motion,
-                                cx,
-                            ))
-                        },
-                    )
-                });
+                let open = self.open_button_swap(cwd.clone(), zed, labelled, window, cx);
                 layers.push((
                     0,
                     h_flex()
@@ -1324,33 +1189,7 @@ impl ChatView {
                                 .children(agents_toggle.map(|toggle| {
                                     toggle.fold_across_gap(
                                         toggle_gap,
-                                        div()
-                                            .relative()
-                                            .child(
-                                                Button::new("agents-panel")
-                                                    .motion(&self.motion)
-                                                    .debug_selector(|| "agents-panel".into())
-                                                    .on_mouse_down(
-                                                        gpui::MouseButton::Left,
-                                                        stop_press,
-                                                    )
-                                                    .ghost()
-                                                    .small()
-                                                    .compact()
-                                                    .icon(IconName::Bot)
-                                                    .selected(agents_showing)
-                                                    .tooltip(crate::tr!("agents.toggle"))
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            this.on_toggle_panel(
-                                                                &TogglePanel::Agents,
-                                                                window,
-                                                                cx,
-                                                            )
-                                                        },
-                                                    )),
-                                            )
-                                            .children(cue.take()),
+                                        self.agents_toggle_button(agents_showing, cue.take(), cx),
                                     )
                                 }))
                                 .children(preview_toggle.map(|toggle| {
@@ -1426,6 +1265,206 @@ impl ChatView {
             .overflow_x_scroll_area()
             .track_scroll(&self.header_scroll)
             .into_any_element()
+    }
+
+    /// The sidebar toggle: the header's first control, immediately left of
+    /// the title. It lives here rather than in the sidebar because a
+    /// collapsed sidebar occupies no width at all (`crate::shell`), so a
+    /// control mounted inside it would have nowhere to be.
+    fn sidebar_toggle(&self, collapsed: bool) -> Button {
+        Button::new("toggle-sidebar")
+            .motion(&self.motion)
+            .debug_selector(|| "toggle-sidebar".into())
+            .on_mouse_down(gpui::MouseButton::Left, stop_press)
+            .ghost()
+            .small()
+            .compact()
+            .icon(if collapsed {
+                IconName::PanelLeftOpen
+            } else {
+                IconName::PanelLeft
+            })
+            .tooltip(if collapsed {
+                crate::tr!("sidebar.expand")
+            } else {
+                crate::tr!("sidebar.collapse")
+            })
+            .on_click(|_, _, cx| crate::device::DevicePreferences::toggle_sidebar_collapsed(cx))
+    }
+
+    /// A draft shows a muted "New thread" label; an open thread its title;
+    /// nothing active shows "No active thread". The title stretch carries no
+    /// controls, so it doubles as the window's native drag handle where the
+    /// platform needs one.
+    fn title_element(
+        is_draft: bool,
+        title: Option<&String>,
+        foreground: gpui::Hsla,
+        muted: gpui::Hsla,
+        cx: &App,
+    ) -> gpui::Div {
+        if is_draft {
+            crate::material::bar_title(crate::tr!("chat.new_thread"), cx).text_color(muted)
+        } else {
+            match title {
+                Some(title) => crate::material::bar_title(title.clone(), cx)
+                    .debug_selector(|| "chat-title".into())
+                    .text_color(foreground)
+                    // Keep a few words of the title even when the diff panel and
+                    // the git/Open buttons squeeze the header; without a floor it
+                    // collapses to a lone "I…".
+                    .min_w(px(120.)),
+                None => crate::material::bar_title(crate::tr!("chat.no_active_thread"), cx)
+                    .text_color(muted),
+            }
+        }
+    }
+
+    /// The title follows where the thread is: its project, or the host's
+    /// quick threads, with the project's icon.
+    fn crumb(
+        &self,
+        project: &tcode_core::project::Project,
+        foreground: gpui::Hsla,
+        muted: gpui::Hsla,
+        cx: &App,
+    ) -> gpui::Div {
+        h_flex()
+            .flex_shrink_0()
+            .max_w(px(220.))
+            .min_w_0()
+            .gap_1p5()
+            .items_center()
+            .debug_selector(|| "chat-crumb".into())
+            .child(crate::project_icon::artwork(
+                self.workspace_store.read(cx).image_host(),
+                project,
+                16.,
+            ))
+            .child(
+                crate::material::bar_title(crate::project_icon::label(project), cx)
+                    .flex_initial()
+                    .min_w_0()
+                    .text_color(foreground),
+            )
+            .child(div().flex_none().text_color(muted).child("/"))
+    }
+
+    fn title_menu(
+        &self,
+        title: Option<String>,
+        is_draft: bool,
+        cwd: Option<PathBuf>,
+        cx: &App,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + use<> {
+        let agent_tools = self
+            .workspace_store
+            .read(cx)
+            .session_status_for(self.session_id.as_deref(), cx)
+            .is_some_and(|status| status.injected_tools.is_some());
+        let self_settles = self
+            .workspace_store
+            .read(cx)
+            .session_status_for(self.session_id.as_deref(), cx)
+            .and_then(|status| status.control.as_ref())
+            .is_some_and(|control| control.self_settle.is_some());
+        let movable = !is_draft && {
+            let active = self.session_id.as_deref();
+            active
+                .and_then(|id| self.workspace_store.read(cx).thread_meta(id))
+                .is_some_and(|meta| meta.worktree.is_none())
+        };
+        move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
+            let menu = menu.when_some(title.clone(), |menu, title| {
+                menu.menu(
+                    crate::tr!("chat.copy_title").into_owned(),
+                    Box::new(crate::widgets::menu::CopyText(title)),
+                )
+            });
+            let menu = menu
+                .separator()
+                .menu(
+                    crate::tr!("pull_requests.link_menu").into_owned(),
+                    Box::new(crate::pull_requests::OpenLinkDialog),
+                )
+                .when(movable, |menu| {
+                    menu.menu(
+                        crate::tr!("sidebar.ctx_move_thread").into_owned(),
+                        Box::new(OpenMoveThreadDialog),
+                    )
+                })
+                .when(self_settles, |menu| {
+                    menu.menu(
+                        crate::tr!("control.self_settle.revoke").into_owned(),
+                        Box::new(RevokeSelfSettle),
+                    )
+                })
+                .when(agent_tools, |menu| {
+                    menu.menu(
+                        crate::tr!("pull_requests.agent_sees").into_owned(),
+                        Box::new(crate::pull_requests::ShowAgentTools),
+                    )
+                });
+            match &cwd {
+                Some(cwd) => menu.separator().path_items(&cwd.to_string_lossy(), None),
+                None => menu,
+            }
+        }
+    }
+
+    fn open_button_swap(
+        &self,
+        cwd: Option<PathBuf>,
+        zed: Option<&'static str>,
+        labelled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let host = self.workspace_store.read(cx).host_key();
+        cwd.zip(zed).and_then(|(cwd, zed)| {
+            self.labelled_swap(
+                "open-labels",
+                labelled,
+                window,
+                cx,
+                move |this, labelled, cx| {
+                    Some(this.render_open_button(
+                        cwd.clone(),
+                        zed,
+                        host.clone(),
+                        labelled,
+                        &this.motion,
+                        cx,
+                    ))
+                },
+            )
+        })
+    }
+
+    fn agents_toggle_button(
+        &self,
+        agents_showing: bool,
+        cue: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        div()
+            .relative()
+            .child(
+                Button::new("agents-panel")
+                    .motion(&self.motion)
+                    .debug_selector(|| "agents-panel".into())
+                    .on_mouse_down(gpui::MouseButton::Left, stop_press)
+                    .ghost()
+                    .small()
+                    .compact()
+                    .icon(IconName::Bot)
+                    .selected(agents_showing)
+                    .tooltip(crate::tr!("agents.toggle"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.on_toggle_panel(&TogglePanel::Agents, window, cx)
+                    })),
+            )
+            .children(cue)
     }
 
     /// What draws nothing and measures, as the header is laid out, how much

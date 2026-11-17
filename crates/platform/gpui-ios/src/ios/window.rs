@@ -1,6 +1,6 @@
-//! GPUI window backed by the Swift host's `CAMetalLayer` UIView.
+//! GPUI window drawn by Metal into a layer hosted by the Swift host's UIView.
 
-use super::{IosDisplay, raw_handles::IosRawHandles};
+use super::IosDisplay;
 use gpui::{
     Bounds, Capslock, DevicePixels, DispatchEventResult, FrameRequestSource, GpuSpecs, Modifiers,
     Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
@@ -8,9 +8,13 @@ use gpui::{
     TextInputStateChange, TouchEvent, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
     WindowControlArea, WindowInsets, WindowParams, WindowVisibility, px, size,
 };
+use gpui_apple::metal_renderer::{InstanceBufferPool, MetalRenderer};
 use gpui_mobile_pacing::FramePacer;
 use gpui_mobile_touch::TwoFingerGestures;
-use gpui_wgpu::{GpuContext, WgpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu};
+use objc2::{msg_send, rc::Retained, runtime::AnyObject};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_quartz_core::{CALayer, CATransaction};
+use parking_lot::Mutex;
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
     RawWindowHandle, UiKitDisplayHandle, UiKitWindowHandle, WindowHandle,
@@ -35,8 +39,6 @@ type VisibilityCallback = Box<dyn FnMut(WindowVisibility)>;
 
 pub(crate) struct IosWindow {
     view: Cell<NonNull<c_void>>,
-    raw_handles: RefCell<IosRawHandles>,
-    gpu_context: GpuContext,
     surface_attached: Cell<bool>,
     /// Set between `sceneDidEnterBackground` and `sceneWillEnterForeground`,
     /// while the host has paused its display link.
@@ -52,7 +54,7 @@ pub(crate) struct IosWindow {
     first_frame_rendered: Cell<bool>,
     insets: RefCell<WindowInsets>,
     input_handler: RefCell<Option<PlatformInputHandler>>,
-    renderer: RefCell<WgpuRenderer>,
+    renderer: RefCell<MetalRenderer>,
     request_frame_callback: RefCell<Option<RequestFrameCallback>>,
     input_callback: RefCell<Option<InputCallback>>,
     active_callback: RefCell<Option<BoolCallback>>,
@@ -99,40 +101,15 @@ impl IosWindow {
             params.bounds.size
         };
         let scale_factor = metrics.scale;
-        let raw_handles = Self::raw_handles(view);
+        let renderer = MetalRenderer::new(
+            Arc::new(Mutex::new(InstanceBufferPool::default())),
+            false,
+            false,
+        )?;
+        log::info!("GPUI iOS Metal renderer created at scale factor {scale_factor:.2}");
 
-        let descriptor = wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL,
-            flags: wgpu::InstanceFlags::default(),
-            backend_options: wgpu::BackendOptions::default(),
-            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-            display: Some(Box::new(raw_handles.clone())),
-        };
-        let instance = wgpu::Instance::new(descriptor);
-        let target = wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: None,
-            raw_window_handle: raw_handles.window,
-        };
-        let bootstrap_surface = unsafe { instance.create_surface_unsafe(target) }?;
-        let drawable_size = size(
-            DevicePixels((f32::from(logical_size.width) * scale_factor).round() as i32),
-            DevicePixels((f32::from(logical_size.height) * scale_factor).round() as i32),
-        );
-        let surface_config = WgpuSurfaceConfig {
-            size: drawable_size,
-            transparent: false,
-            preferred_present_mode: Some(wgpu::PresentMode::Fifo),
-        };
-        let context = WgpuContext::new(instance, &bootstrap_surface, &surface_config, None)?;
-        drop(bootstrap_surface);
-        let gpu_context = Rc::new(RefCell::new(Some(context)));
-        let renderer = WgpuRenderer::new(gpu_context.clone(), &raw_handles, surface_config, None)?;
-        log::info!("GPUI iOS Metal surface created at scale factor {scale_factor:.2}");
-
-        Ok(Self {
+        let window = Self {
             view: Cell::new(view),
-            raw_handles: RefCell::new(raw_handles),
-            gpu_context,
             surface_attached: Cell::new(true),
             in_background: Cell::new(false),
             reported_visibility: Cell::new(None),
@@ -166,18 +143,54 @@ impl IosWindow {
             display_callback: RefCell::new(None),
             using_input_handler: Cell::new(false),
             text_input_active: Cell::new(false),
-        })
+        };
+        window.host_layer(view);
+        window.layout_layer();
+        Ok(window)
     }
 
     pub(crate) fn register(&self) {
         super::ffi::register_window(self);
     }
 
-    fn raw_handles(view: NonNull<c_void>) -> IosRawHandles {
-        IosRawHandles {
-            window: RawWindowHandle::UiKit(UiKitWindowHandle::new(view)),
-            display: RawDisplayHandle::UiKit(UiKitDisplayHandle::new()),
+    /// Puts the renderer's layer under `view`'s subviews.
+    ///
+    /// The renderer owns its layer instead of drawing into the view's backing
+    /// layer: GPUI keeps a window's sprite atlas for the window's lifetime
+    /// and a `MetalRenderer` cannot be moved to another layer, so the one
+    /// renderer has to outlive each view a reconnected scene brings.
+    fn host_layer(&self, view: NonNull<c_void>) {
+        let renderer = self.renderer.borrow();
+        let Some(layer) = renderer.layer() else {
+            return;
+        };
+        // SAFETY: the host passes a live `UIView` on the main thread.
+        let view_layer: Retained<CALayer> =
+            unsafe { msg_send![view.as_ptr().cast::<AnyObject>(), layer] };
+        view_layer.insertSublayer_atIndex(layer, 0);
+    }
+
+    /// Fits the renderer's layer and its drawable to the window's bounds.
+    fn layout_layer(&self) {
+        let size = self.bounds.get().size;
+        let scale_factor = self.scale_factor.get();
+        let (width, height) = (f32::from(size.width), f32::from(size.height));
+        let mut renderer = self.renderer.borrow_mut();
+        if let Some(layer) = renderer.layer() {
+            // A layer no view backs animates its geometry implicitly.
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
+            layer.setContentsScale(scale_factor.into());
+            layer.setFrame(CGRect::new(
+                CGPoint::ZERO,
+                CGSize::new(width.into(), height.into()),
+            ));
+            CATransaction::commit();
         }
+        renderer.update_drawable_size(gpui::size(
+            DevicePixels((width * scale_factor).round().max(1.0) as i32),
+            DevicePixels((height * scale_factor).round().max(1.0) as i32),
+        ));
     }
 
     pub(crate) fn needs_surface_replacement(&self, view: NonNull<c_void>) -> bool {
@@ -190,42 +203,18 @@ impl IosWindow {
         width: f32,
         height: f32,
         scale_factor: f32,
-    ) -> anyhow::Result<()> {
-        let raw_handles = Self::raw_handles(view);
-        let instance = self
-            .gpu_context
-            .borrow()
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("iOS GPU context is unavailable"))?
-            .instance
-            .clone();
-        let drawable_size = size(
-            DevicePixels((width.max(1.0) * scale_factor).round() as i32),
-            DevicePixels((height.max(1.0) * scale_factor).round() as i32),
-        );
-        let mut renderer = self.renderer.borrow_mut();
-        renderer.replace_surface(
-            &raw_handles,
-            WgpuSurfaceConfig {
-                size: drawable_size,
-                transparent: self.background.get() != WindowBackgroundAppearance::Opaque,
-                preferred_present_mode: Some(wgpu::PresentMode::Fifo),
-            },
-            &instance,
-        )?;
-        drop(renderer);
-
+    ) {
+        self.host_layer(view);
         self.view.set(view);
-        *self.raw_handles.borrow_mut() = raw_handles;
         self.surface_attached.set(true);
+        self.layout_layer();
         self.resize_from_host(width, height, scale_factor);
-        // The new drawable stays blank until a frame is drawn into it, even
-        // when no view changed.
+        // The layer shows nothing in its new view until a frame is drawn,
+        // even when no view changed.
         self.forced_frame.set(true);
         self.schedule_frame();
         self.report_visibility();
-        log::info!("GPUI iOS Metal surface replaced at scale factor {scale_factor:.2}");
-        Ok(())
+        log::info!("GPUI iOS Metal layer moved to a new host view");
     }
 
     pub(crate) fn detach_surface_from_host(&self, view: NonNull<c_void>) {
@@ -235,7 +224,9 @@ impl IosWindow {
         self.active_touches.set(0);
         self.touch_gestures.take();
         self.pacing.borrow_mut().suspend();
-        self.renderer.borrow_mut().unconfigure_surface();
+        if let Some(layer) = self.renderer.borrow().layer() {
+            layer.removeFromSuperlayer();
+        }
         self.report_visibility();
     }
 
@@ -384,10 +375,7 @@ impl IosWindow {
 
         self.bounds.set(Bounds::new(Default::default(), size));
         self.scale_factor.set(scale_factor);
-        self.renderer.borrow_mut().update_drawable_size(gpui::size(
-            DevicePixels((width * scale_factor).round().max(1.0) as i32),
-            DevicePixels((height * scale_factor).round().max(1.0) as i32),
-        ));
+        self.layout_layer();
         let mut callback = self.resize_callback.borrow_mut().take();
         if let Some(callback) = callback.as_mut() {
             callback(size, scale_factor);
@@ -511,13 +499,15 @@ impl Drop for IosWindow {
 
 impl HasWindowHandle for IosWindow {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        Ok(unsafe { WindowHandle::borrow_raw(self.raw_handles.borrow().window) })
+        let window = RawWindowHandle::UiKit(UiKitWindowHandle::new(self.view.get()));
+        Ok(unsafe { WindowHandle::borrow_raw(window) })
     }
 }
 
 impl HasDisplayHandle for IosWindow {
     fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
-        Ok(unsafe { DisplayHandle::borrow_raw(self.raw_handles.borrow().display) })
+        let display = RawDisplayHandle::UiKit(UiKitDisplayHandle::new());
+        Ok(unsafe { DisplayHandle::borrow_raw(display) })
     }
 }
 
@@ -693,7 +683,11 @@ impl PlatformWindow for IosWindow {
     }
 
     fn draw(&self, scene: &Scene) {
-        if self.renderer.borrow_mut().draw(scene) && !self.first_frame_rendered.replace(true) {
+        if !self.surface_attached.get() {
+            return;
+        }
+        self.renderer.borrow_mut().draw(scene);
+        if !self.first_frame_rendered.replace(true) {
             super::ffi::host_first_frame_rendered();
         }
     }
@@ -712,7 +706,7 @@ impl PlatformWindow for IosWindow {
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
-        self.renderer.borrow().gpu_specs()
+        None
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
