@@ -126,7 +126,7 @@ impl DevicePreferences {
 
     pub(crate) fn set_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
         Self::update(cx, |saved| saved.appearance = Some(mode));
-        crate::settings_page::apply_theme(mode, window, cx);
+        crate::theme::apply_theme(mode, window, cx);
     }
 
     /// The language this device asks for; `None` is the system's.
@@ -352,7 +352,7 @@ impl DevicePreferences {
             };
         });
         crate::settings::apply_locale(None);
-        crate::settings_page::apply_theme(ThemeMode::System, window, cx);
+        crate::theme::apply_theme(ThemeMode::System, window, cx);
         window.refresh();
     }
 }

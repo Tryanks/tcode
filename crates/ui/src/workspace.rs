@@ -3,7 +3,7 @@
 use tcode_client::host::{WorkspaceHost, WorkspacePreference};
 use tcode_client::pairing::PairedHost;
 
-use crate::remote::AttachmentTarget;
+use crate::attachment::AttachmentTarget;
 use crate::store::HostKey;
 
 /// What a device's workspace is drawn from.

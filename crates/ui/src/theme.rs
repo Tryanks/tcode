@@ -417,3 +417,14 @@ pub fn sync_system_appearance(window: Option<&mut Window>, cx: &mut App) {
         .unwrap_or_else(|| cx.window_appearance());
     change_mode(appearance.into(), window, cx);
 }
+
+/// Apply a settings theme mode to the live window (shared with the palette's
+/// "Toggle theme" action), its colours gliding to the new palette.
+pub(crate) fn apply_theme(mode: crate::settings::ThemeMode, window: &mut Window, cx: &mut App) {
+    let mode = match mode {
+        crate::settings::ThemeMode::Light => ThemeMode::Light,
+        crate::settings::ThemeMode::Dark => ThemeMode::Dark,
+        crate::settings::ThemeMode::System => window.appearance().into(),
+    };
+    glide_mode(mode, window, cx);
+}

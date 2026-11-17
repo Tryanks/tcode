@@ -18,6 +18,7 @@ mod device;
 pub(crate) mod diff;
 mod edge_back;
 mod env_editor;
+mod fuzzy;
 pub(crate) mod git;
 mod haptics;
 mod harness_dialog;
@@ -132,6 +133,17 @@ pub fn set_client_data_dir(dir: std::path::PathBuf) {
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn client_data_dir() -> Option<&'static std::path::Path> {
     CLIENT_DATA_DIR.get().map(std::path::PathBuf::as_path)
+}
+
+/// Whether this client can embed a browser. Views ask before offering an action
+/// that needs one, so nothing renders an enabled control that cannot work.
+///
+/// A build with a backend offers the Preview wherever it runs; what the
+/// machine lacks for it (WebKitGTK, which `gtk_dlopen` loads when the first
+/// page is built, or a runtime directory for the Wayland nest's socket) is
+/// said in the panel when no page opens.
+pub(crate) fn preview_backend() -> bool {
+    cfg!(preview_backend)
 }
 
 mod pull_requests;

@@ -17,12 +17,12 @@
 
 use std::rc::Rc;
 
-use gpui::{App, AppContext as _, Entity, Task};
+use gpui::{App, AppContext as _, Entity, Global, Task, Window};
 use tcode_client::HostLink;
-use tcode_client::host::{ClientHost, Transport};
+use tcode_client::host::{ClientHost, FileFailure, Transport};
+use tcode_client::pairing::PairedHost;
 
-use crate::remote::AttachmentTarget;
-use crate::store::{WorkspaceAttachment, WorkspaceStore};
+use crate::store::{HostKey, WorkspaceAttachment, WorkspaceStore};
 
 /// How this window reaches a host running inside its own process. Desktop
 /// bootstrap supplies one; a client that can never host has none, so
@@ -231,7 +231,7 @@ mod tests {
         let (incoming, from_host) = async_channel::unbounded();
         let attachment = cx.update(|cx| {
             crate::test_client::init(cx);
-            let client = cx.global::<crate::remote::ClientAttachment>().host();
+            let client = cx.global::<ClientAttachment>().host();
             Attachment::open(
                 AttachmentTarget::Local,
                 Some(transport(to_host, from_host)),
@@ -266,5 +266,85 @@ mod tests {
                 ClientPayload::Command(Command::ShutdownAllAndFlush)
             )
         }));
+    }
+}
+
+/// Where this window's workspace comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachmentTarget {
+    Local,
+    Remote(Box<PairedHost>),
+}
+
+impl AttachmentTarget {
+    pub fn key(&self) -> HostKey {
+        match self {
+            Self::Local => HostKey::Local,
+            Self::Remote(host) => HostKey::Remote(host.host_id.clone()),
+        }
+    }
+}
+
+/// What the window is asked to do with a host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostRequest {
+    /// Show `target` in the workspace beside the hosts already there; a
+    /// host that is reached only alone replaces them.
+    Open(AttachmentTarget),
+    /// Take the host out of the workspace, keeping its saved record.
+    Leave(HostKey),
+    /// Move the host one place earlier, or later, among the workspace's.
+    Move { host: HostKey, earlier: bool },
+}
+
+pub type RequestHost = Rc<dyn Fn(HostRequest, &mut Window, &mut App)>;
+
+/// The client's own identity and the way to ask this window for a host.
+///
+/// It is deliberately separate from hosting: a client that can never host still
+/// needs saved hosts, a device name and a way to open one.
+pub struct ClientAttachment {
+    host: Rc<dyn ClientHost>,
+    local: bool,
+    request: RequestHost,
+}
+
+impl Global for ClientAttachment {}
+
+impl ClientAttachment {
+    /// `local` is whether bootstrap gave this window a host inside its own
+    /// process. A phone or browser has none, so "back to local" is not a thing
+    /// it can be offered.
+    pub fn new(
+        host: Rc<dyn ClientHost>,
+        local: bool,
+        request: impl Fn(HostRequest, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        Self {
+            host,
+            local,
+            request: Rc::new(request),
+        }
+    }
+
+    /// Whether [`AttachmentTarget::Local`] is reachable from this window.
+    pub fn can_attach_local(&self) -> bool {
+        self.local
+    }
+
+    pub fn host(&self) -> Rc<dyn ClientHost> {
+        self.host.clone()
+    }
+
+    pub fn requester(&self) -> RequestHost {
+        self.request.clone()
+    }
+
+    pub fn save_host(&self, host: PairedHost) -> Result<(), FileFailure> {
+        self.host.remember_host(host)
+    }
+
+    pub fn remove_host(&self, host_id: &str) -> Result<(), FileFailure> {
+        self.host.remove_host(host_id)
     }
 }
