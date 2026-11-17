@@ -23,6 +23,7 @@
 //! waiting for the host and a finger put on it in flight still undoes the
 //! swipe. The list takes it back if the host refuses.
 
+use crate::sidebar::compact::busy_status;
 use std::collections::{HashSet, VecDeque};
 use std::f32::consts::TAU;
 use std::time::Duration;
