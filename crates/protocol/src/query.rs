@@ -166,6 +166,12 @@ pub enum Query {
         session_id: String,
         position: u64,
     },
+    /// The turns of the whole thread the user spoke in, each indexed among
+    /// every turn the whole log folds to: a client holds a window of the
+    /// log, and only the host can say what was said above it.
+    ThreadTurnMarks {
+        session_id: String,
+    },
     /// Image bytes returned to the model by a read tool; omitted from timeline windows.
     ReadItemImage {
         session_id: String,
@@ -272,6 +278,7 @@ pub enum QueryResponse {
     ItemOutput(String),
     /// `None` when no entry was recorded at or before the position.
     ThreadAnchorTurn(Option<usize>),
+    ThreadTurnMarks(Vec<tcode_core::turn_marks::TurnMark>),
     ArchivedSessions(crate::ArchivedSessions),
     ControlActivity(ControlActivityPage),
     NativeMcpServers(Vec<agent::NativeMcpServer>),

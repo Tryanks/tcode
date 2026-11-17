@@ -396,6 +396,31 @@ impl AppState {
         })
     }
 
+    /// The marks of every turn of the thread the user spoke in.
+    pub(crate) fn thread_turn_marks(
+        &mut self,
+        thread_id: &str,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<tcode_protocol::QueryResponse, tcode_protocol::ProtocolError>> {
+        let marks = |logs: &[IndexedLog]| {
+            tcode_protocol::QueryResponse::ThreadTurnMarks(tcode_core::turn_marks::turn_marks(
+                logs[0].timeline(),
+            ))
+        };
+        let logs = self.indexed_logs(&[thread_id], cx);
+        cx.spawn_background(async move {
+            match logs {
+                Logs::Ready(logs) => Ok(marks(&logs)),
+                Logs::Reading(task) => task.await.map(|logs| marks(&logs)).map_err(|message| {
+                    tcode_protocol::ProtocolError {
+                        code: "thread_turn_marks_unreadable".into(),
+                        message,
+                    }
+                }),
+            }
+        })
+    }
+
     fn content_meta(&self, thread_id: &str) -> Result<SessionMeta, String> {
         self.find_meta(thread_id)
             .ok_or_else(|| format!("unknown thread: {thread_id}"))
