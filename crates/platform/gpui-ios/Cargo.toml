@@ -4,13 +4,12 @@ version = "0.3.7"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
-description = "iOS platform backend for gpui-fast (Metal via gpui_wgpu)"
+description = "iOS platform backend for gpui-fast (Metal via gpui_apple)"
 
 [dependencies]
 gpui-mobile-pacing = { path = "../frame-pacing" }
 gpui-mobile-touch = { path = "../touch" }
 gpui = { package = "gpui-fast", version = "0.1.16", default-features = false }
-gpui_wgpu = { package = "gpui-fast-wgpu", version = "0.1.16" }
 anyhow = "1"
 log = "0.4"
 parking_lot = "0.12"
@@ -28,8 +27,14 @@ core-foundation = "0.10"
 core-graphics = "0.25"
 core-text = "22"
 font-kit = { package = "zed-font-kit", version = "0.14.1-zed" }
+# As the desktop builds do: shaders compile on the device, so a build needs no
+# Metal toolchain.
+gpui_apple = { package = "gpui-fast-apple", version = "0.1.16", features = ["runtime_shaders"] }
 # libc 0.2.190 gates dyld bindings and in6_ifreq to macOS; backtrace 0.3.76
 # and netdev 0.46.3 require them on iOS (#668).
 libc = ">=0.2, <0.2.190"
+objc2 = "0.6"
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer", "CAMetalLayer", "CATransaction", "objc2-core-foundation"] }
 pathfinder_geometry = "0.5"
 uuid = { version = "1", features = ["v5"] }
