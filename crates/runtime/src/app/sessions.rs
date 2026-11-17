@@ -8,8 +8,6 @@ use tcode_core::thread_sort::ThreadSection;
 pub struct SettleEffects {
     pub provider_detached: bool,
     pub pull_request_watches_ended: usize,
-    /// Agent and server messages dropped from the queue; human ones stay.
-    pub queued_dropped: usize,
     /// Open terminals inspected; the ones at an idle shell are closed.
     pub terminals_checked: usize,
     pub unpinned: bool,
@@ -596,7 +594,7 @@ impl AppState {
         if meta.project_id.as_deref() == Some(project_id) && meta.cwd == cwd {
             return Ok(());
         }
-        if !by_own_turn && self.settle_thread_busy(session_id) {
+        if !by_own_turn && self.thread_busy(session_id) {
             return Err(error(
                 "thread_busy",
                 "This thread is busy; wait for it to finish before moving it.".into(),
@@ -1290,7 +1288,16 @@ impl AppState {
         (Some(marker.reopen_settings), session_id)
     }
 
+    /// A queued message, whoever sent it and whenever it is due, holds the thread open:
+    /// settling never drops one.
     pub(super) fn settle_thread_busy(&self, id: &str) -> bool {
+        self.thread_busy(id)
+            || self
+                .resident(id)
+                .is_some_and(|session| !session.queue.is_empty())
+    }
+
+    pub(super) fn thread_busy(&self, id: &str) -> bool {
         self.resident(id).is_some_and(|session| {
             session.preparing_worktree
                 || matches!(session.runtime, Runtime::Starting { .. })
@@ -1331,13 +1338,6 @@ impl AppState {
                     .filter(|link| link.watch.is_some())
                     .count()
             }),
-            queued_dropped: resident.map_or(0, |session| {
-                session
-                    .queue
-                    .iter()
-                    .filter(|message| message.origin != MessageOrigin::Human)
-                    .count()
-            }),
             terminals_checked: resident
                 .map(|session| &session.terminal_workspace)
                 .or_else(|| {
@@ -1352,8 +1352,8 @@ impl AppState {
         }
     }
 
-    /// Settle this thread only: detach its provider, cancel its automatic
-    /// queue and close its idle terminals. Children are separate threads.
+    /// Settle this thread only: detach its provider and close its idle
+    /// terminals. Children are separate threads.
     pub(super) fn settle_session_at(
         &mut self,
         id: &str,
@@ -1375,13 +1375,9 @@ impl AppState {
         meta.active_order = None;
         self.detach_provider_to_idle(id, cx);
         if let Some(session) = self.resident_mut(id) {
-            session
-                .queue
-                .retain(|message| message.origin == MessageOrigin::Human);
             session.meta = meta.clone();
         }
         self.persist_meta(&meta, cx);
-        self.reschedule_scheduled_wake(cx);
         self.close_settled_idle_terminals(id, cx);
         self.fire_control_watches(id, WatchEvent::Settled, cx);
         Some(effects)

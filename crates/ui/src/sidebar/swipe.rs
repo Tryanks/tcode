@@ -471,7 +471,14 @@ impl Uncovered {
     fn of(row: &CompactThreadRow, cx: &App) -> Self {
         action(row).map_or_else(
             || {
-                let (label, color) = busy_status(&row.state, cx);
+                let state = &row.state;
+                let scheduled_only = state.wakes.scheduled_at.is_some()
+                    && !(state.waiting() || row.working || state.background != (0, 0));
+                let (label, color) = if scheduled_only {
+                    (crate::tr!("sidebar.waiting"), cx.theme().muted_foreground)
+                } else {
+                    busy_status(state, cx)
+                };
                 Self::Busy(label.into(), color)
             },
             Self::Action,

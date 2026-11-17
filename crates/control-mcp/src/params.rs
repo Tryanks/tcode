@@ -771,7 +771,6 @@ pub mod settlement_reason {
     pub const PARKED: &str = "parked";
     /// The user dismissed a settle suggestion and nothing happened in the thread since.
     pub const SUGGESTION_DISMISSED: &str = "suggestion_dismissed";
-    /// A queued agent or server message that settling would drop.
     pub const PENDING_AGENT_MESSAGE: &str = "pending_agent_message";
     pub const PENDING_APPROVAL: &str = "pending_approval";
     pub const PENDING_INPUT: &str = "pending_input";

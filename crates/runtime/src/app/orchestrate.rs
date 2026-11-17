@@ -504,10 +504,9 @@ impl AppState {
     /// no request waiting on an answer.
     pub(super) fn thread_quiescent(&self, id: &str) -> bool {
         !self.settle_thread_busy(id)
-            && self.resident(id).is_none_or(|session| {
-                session.queue.is_empty()
-                    && matches!(session.runtime, Runtime::Idle | Runtime::Live(_))
-            })
+            && self
+                .resident(id)
+                .is_none_or(|session| matches!(session.runtime, Runtime::Idle | Runtime::Live(_)))
     }
 
     /// The child meta and its lead, when the child still owes or has owed a

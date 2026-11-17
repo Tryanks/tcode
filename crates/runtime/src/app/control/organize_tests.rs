@@ -81,7 +81,6 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
                 .unwrap()
                 .connect(commands),
         );
-        session.push_or_merge_orchestrate_callback("[orchestrate] a child finished".into());
         state.sessions.push(done);
         state.residents.parked.insert("done".into(), session);
 
@@ -90,6 +89,12 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
         session.turn_in_flight = true;
         state.sessions.push(running);
         state.residents.parked.insert("running".into(), session);
+
+        let queued = thread("queued", store.root());
+        let mut session = ActiveSession::new(queued.clone(), false, Vec::new());
+        session.push_or_merge_orchestrate_callback("[orchestrate] a child finished".into());
+        state.sessions.push(queued);
+        state.residents.parked.insert("queued".into(), session);
 
         state.sessions.push(thread("stale", store.root()));
         let mut far = thread("far", store.root());
@@ -118,6 +123,7 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
                     }),
                 ),
                 change("running", ThreadOp::Settle, None),
+                change("queued", ThreadOp::Settle, None),
                 change(
                     "stale",
                     ThreadOp::Settle,
@@ -134,7 +140,6 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
     let expected_effects = vec![
         "provider detached".to_owned(),
         "1 PR watch ended".to_owned(),
-        "1 non-Human queued message dropped".to_owned(),
         "unpinned".to_owned(),
     ];
     let skipped = |target: &str, reason: &str| BatchResult {
@@ -155,6 +160,7 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
                 side_effects: Some(expected_effects.clone()),
             },
             skipped("running", "busy"),
+            skipped("queued", "busy"),
             skipped("stale", "changed_since_preview"),
             skipped("far", "outside_scope: your grant's scope is project"),
         ]
@@ -163,7 +169,6 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
         let done = state.find_meta("done").unwrap();
         assert!(!done.is_settled() && done.pinned_at.is_some());
         assert!(done.pull_requests[0].watch.is_some());
-        assert_eq!(state.resident("done").unwrap().queue.len(), 1);
         assert!(
             state
                 .control_activity(&Default::default(), 10)
@@ -184,6 +189,7 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
                 side_effects: Some(expected_effects),
             },
             skipped("running", "busy"),
+            skipped("queued", "busy"),
             skipped("stale", "changed_since_preview"),
             skipped("far", "outside_scope: your grant's scope is project"),
         ]
@@ -192,8 +198,9 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
         let done = state.find_meta("done").unwrap();
         assert!(done.is_settled() && done.pinned_at.is_none());
         assert!(done.pull_requests[0].watch.is_none());
+        assert!(!state.find_meta("queued").unwrap().is_settled());
+        assert_eq!(state.resident("queued").unwrap().queue.len(), 1);
         let session = state.resident("done").unwrap();
-        assert!(session.queue.is_empty());
         assert!(matches!(session.runtime, Runtime::Idle));
         assert!(session.timeline.entries.iter().any(|entry| matches!(
             &entry.content,
