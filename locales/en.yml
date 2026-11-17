@@ -627,8 +627,9 @@ settings:
     description: "When Claude Code stops a turn because a usage limit was reached, Tcode resumes it when the limit resets. Off: the error card offers a button to schedule it by hand."
   title_generation:
     title: "Thread title model"
-    description: "Generates and regenerates thread titles, always at low reasoning effort."
+    description: "Generates and regenerates thread titles, always at low reasoning effort. Automatic names each thread on its own account, with a small model when the account has one."
 model_picker:
+  automatic: "Automatic"
   no_models: "No models available."
   models_unlisted: "Couldn't list the models: %{error}"
 computer_use:

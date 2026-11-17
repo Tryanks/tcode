@@ -627,8 +627,9 @@ settings:
     description: "当 Claude Code 因达到用量上限而停止本轮时，Tcode 会在上限重置时自动继续。关闭后，错误卡片上会提供一个按钮供手动安排。"
   title_generation:
     title: "线程标题模型"
-    description: "用于生成和重新生成线程标题，始终使用 low 推理强度。"
+    description: "用于生成和重新生成线程标题，始终使用 low 推理强度。自动时，每个线程用它自己的账号命名，账号有小模型时用小模型。"
 model_picker:
+  automatic: "自动"
   no_models: "暂无可用模型。"
   models_unlisted: "没能取到模型列表：%{error}"
 computer_use:

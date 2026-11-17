@@ -48,9 +48,7 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::ControlDefaultGrant(_)
         | SettingsPatch::ControlProjectGrant { .. }
         | SettingsPatch::SettlementAutomation(_)
-        | SettingsPatch::TitleGenerationProvider(_)
-        | SettingsPatch::TitleGenerationModel(_)
-        | SettingsPatch::TitleGenerationProfileId(_)
+        | SettingsPatch::TitleGeneration(_)
         | SettingsPatch::SidebarLayout(_)
         | SettingsPatch::RemoteHostingEnabled(_)
         | SettingsPatch::Traverse(_)

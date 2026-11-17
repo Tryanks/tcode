@@ -854,12 +854,15 @@ impl AppState {
         if !self.ai_title_generation_enabled || self.title_generating.contains_key(&meta.id) {
             return;
         }
-        let title_meta = title_session_meta(&self.settings, meta.cwd.clone());
         let space = if first_message.is_some() {
             self.turn_space_of(&meta.id)
         } else {
             cx.space.clone()
         };
+        let policy = space
+            .as_deref()
+            .and_then(|space| self.space_policies.get(space));
+        let title_meta = self.title_session_meta(&meta, policy);
         if let Err(error) = self.title_setup_allowed(&title_meta, space.as_deref()) {
             self.report_error(RuntimeError::External(error.message), cx);
             return;
@@ -1091,16 +1094,62 @@ impl AppState {
 
 pub(super) const AI_TITLE_REASONING_EFFORT: &str = "low";
 
-pub(super) fn title_session_meta(settings: &Settings, cwd: PathBuf) -> SessionMeta {
-    let title = &settings.title_generation;
-    let model = (!title.model.trim().is_empty()).then(|| title.model.trim().to_string());
-    let mut meta = SessionMeta::new(title.provider, cwd, model);
-    meta.profile_id = title.profile_id.clone();
-    meta.option_selections.push(OptionSelection {
-        id: agent::EFFORT_OPTION_ID.into(),
-        value: serde_json::Value::String(AI_TITLE_REASONING_EFFORT.into()),
-    });
-    meta
+/// The small models each harness offers, newest first. A harness missing here
+/// has model ids that depend on how the user configured it.
+fn small_models(provider: ProviderKind) -> &'static [&'static str] {
+    match provider {
+        ProviderKind::Codex => &["gpt-6-luna", "gpt-5.6-luna"],
+        ProviderKind::ClaudeCode => &["claude-haiku-5-5", "claude-haiku-4-5"],
+        _ => &[],
+    }
+}
+
+impl AppState {
+    /// The scratch session that names `thread`: the account and model the
+    /// user chose for titles, or else the thread's own account, on the first
+    /// small model it lists and `policy` allows, or else on the thread's model.
+    pub(super) fn title_session_meta(
+        &self,
+        thread: &SessionMeta,
+        policy: Option<&tcode_protocol::SpacePolicy>,
+    ) -> SessionMeta {
+        let mut meta = match &self.settings.title_generation {
+            Some(title) => {
+                let model =
+                    (!title.model.trim().is_empty()).then(|| title.model.trim().to_string());
+                let mut meta = SessionMeta::new(title.provider, thread.cwd.clone(), model);
+                meta.profile_id = title.profile_id.clone();
+                meta
+            }
+            None => {
+                let profile_id = thread.profile_id.as_deref();
+                let listed = self
+                    .settings
+                    .resolved_profile(
+                        profile_id.unwrap_or_else(|| Settings::builtin_profile_id(thread.provider)),
+                    )
+                    .map(|profile| self.profile_models(&profile))
+                    .unwrap_or_default();
+                let small = small_models(thread.provider).iter().find(|id| {
+                    listed.iter().any(|model| model.id == **id)
+                        && policy.is_none_or(|policy| {
+                            self.model_allowed(policy, thread.provider, profile_id, Some(id))
+                                .is_ok()
+                        })
+                });
+                let model = small.map(|id| id.to_string()).or(thread.model.clone());
+                let mut meta = SessionMeta::new(thread.provider, thread.cwd.clone(), model);
+                meta.profile_id = thread.profile_id.clone();
+                meta.acp_agent_id = thread.acp_agent_id.clone();
+                meta
+            }
+        };
+        meta.option_selections.push(OptionSelection {
+            id: agent::EFFORT_OPTION_ID.into(),
+            value: serde_json::Value::String(AI_TITLE_REASONING_EFFORT.into()),
+        });
+        meta
+    }
 }
 
 pub(super) fn title_turn_options() -> TurnOptions {
