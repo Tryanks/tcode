@@ -965,8 +965,10 @@ impl SessionsSidebar {
             settle_blocked: own_flags.settle_blocked,
             background: own_flags.background,
             unsettled: own_flags.unsettled,
+            // A run that failed with a message scheduled after it is waiting for that
+            // message: a turn that hits its usage limit ends failed and queues its own resume.
+            failed: own_flags.failed && own_flags.wakes.scheduled_at.is_none(),
             wakes: own_flags.wakes,
-            failed: own_flags.failed,
             auto_settle_enabled: meta.auto_settle_disabled_at.is_none(),
             is_worktree: meta.worktree.is_some(),
             show_unread: own_flags.unread && !own_flags.working,

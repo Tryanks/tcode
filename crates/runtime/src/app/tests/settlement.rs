@@ -429,7 +429,7 @@ fn a_relaunch_marker_the_host_cannot_write_is_refused_with_the_reason() {
 /// un-settling it holds it active until a message it accepts makes it
 /// ordinarily unsettled again, which a host started again reads.
 #[test]
-fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_admission() {
+fn manual_settlement_is_thread_local_and_waits_for_the_queue_and_the_user() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("manual-settlement");
     stored_thread(
@@ -469,7 +469,7 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
     parent.play([completed_turn("turn")]);
     parent.fence(cx, "parent");
 
-    // A message the user queues for later keeps the thread out.
+    // A message queued for later keeps the thread out, the user's or the host's.
     state
         .command(
             cx,
@@ -537,10 +537,20 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
         resets_at: cx.now_secs() + 3_600,
     }]);
     parent.fence(cx, "parent");
-    assert_eq!(
-        cx.seen().status("parent").queued_messages[0].text,
-        tcode_core::session::RESUME_PROMPT
-    );
+    let resume = cx.seen().status("parent").queued_messages[0].clone();
+    assert_eq!(resume.text, tcode_core::session::RESUME_PROMPT);
+    let activity = cx.seen().activity("parent").unwrap();
+    assert!(activity.settle_blocked && activity.wakes.scheduled_at.is_some());
+    assert!(busy(settle(cx)));
+    state
+        .command(
+            cx,
+            Command::DropQueued {
+                session_id: "parent".into(),
+                id: resume.id,
+            },
+        )
+        .unwrap();
     parent.play([AgentEvent::UserInputRequested {
         request_id: "asynchronous".into(),
         questions: vec![],
@@ -552,10 +562,6 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
     let settled = |cx: &TestAppContext, id: &str| cx.seen().session(id).unwrap().is_settled();
     assert!(settled(cx, "parent"));
     assert!(cx.seen().session("parent").unwrap().unsettled_at.is_none());
-    assert!(
-        cx.seen().status("parent").queued_messages.is_empty(),
-        "the automatic queue goes with the settle"
-    );
     assert!(cx.seen().activity("child").unwrap().turn_running);
     assert!(!settled(cx, "child"));
 

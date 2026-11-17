@@ -631,16 +631,6 @@ fn describe_settle(effects: SettleEffects) -> Vec<String> {
             count(effects.pull_request_watches_ended, "PR watch", "PR watches")
         ));
     }
-    if effects.queued_dropped > 0 {
-        described.push(format!(
-            "{} dropped",
-            count(
-                effects.queued_dropped,
-                "non-Human queued message",
-                "non-Human queued messages"
-            )
-        ));
-    }
     if effects.terminals_checked > 0 {
         described.push(format!(
             "{} checked; those at an idle shell closed",

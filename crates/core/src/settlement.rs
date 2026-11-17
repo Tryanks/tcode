@@ -215,7 +215,7 @@ pub struct SettlementBlockers {
     pub pull_request_watches: bool,
     pub pending_human_message: bool,
     pub scheduled_wake: bool,
-    /// An agent or server message waits in the queue; settling would drop it.
+    /// An agent or server message waits in the queue.
     pub pending_agent_message: bool,
 }
 
