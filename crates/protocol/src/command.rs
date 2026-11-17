@@ -490,10 +490,6 @@ pub enum Command {
         session_id: String,
         order_key: String,
     },
-    ReorderActive {
-        session_id: String,
-        order_key: String,
-    },
     ArchiveSession {
         session_id: String,
     },
@@ -823,7 +819,6 @@ impl Command {
             | Self::PinSession { session_id, .. }
             | Self::UnpinSession { session_id }
             | Self::ReorderPinned { session_id, .. }
-            | Self::ReorderActive { session_id, .. }
             | Self::SetAutoSettle { session_id, .. }
             | Self::ArchiveSession { session_id, .. }
             | Self::MoveSession { session_id, .. }

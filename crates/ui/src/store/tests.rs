@@ -4195,3 +4195,117 @@ fn committing_a_draft_carries_its_conversation_state_to_the_thread(cx: &mut Test
     driver.shutdown(cx, &host);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Active leads with the threads that wait on the user, then the unread,
+/// then the working, then the idle, each by the last message or run its
+/// host reports: a later change to a thread's meta alone moves nothing,
+/// and a working thread is not unread yet.
+#[gpui::test]
+fn active_threads_lead_with_those_that_want_the_user(cx: &mut TestAppContext) {
+    use tcode_protocol::{HostMessage, IndexSnapshot, IndexSummary, SessionActivity, encode_line};
+    cx.update(crate::test_client::init);
+    let (to_host, _outgoing) = async_channel::unbounded();
+    let (incoming, from_host) = async_channel::unbounded();
+    let project = tcode_core::project::Project::from_root("/project".into());
+    // Each thread's meta change, last activity, and whether it waits, works
+    // or is unread.
+    let threads = [
+        ("idle-renamed", 9_000, 100_000, false, false, false),
+        ("working-unread", 3, 45_000, false, true, true),
+        ("unread", 2, 40_000, false, false, true),
+        ("idle-recent", 10, 900_000, false, false, false),
+        ("waiting", 1, 1_000, true, true, false),
+        ("working", 4, 50_000, false, true, false),
+    ];
+    let sessions = threads
+        .iter()
+        .map(|(id, updated, ..)| {
+            let mut meta = SessionMeta::new(agent::ProviderKind::Codex, "/project".into(), None);
+            meta.id = (*id).into();
+            meta.project_id = Some(project.id.clone());
+            meta.created_at = 1;
+            meta.updated_at = *updated;
+            meta
+        })
+        .collect();
+    let activity = threads
+        .iter()
+        .map(|&(id, _, at, waiting, working, unread)| {
+            (
+                id.to_owned(),
+                SessionActivity {
+                    working,
+                    turn_running: working,
+                    background: Default::default(),
+                    unsettled: 0,
+                    wakes: Default::default(),
+                    waiting_for_approval: false,
+                    waiting_for_input: waiting,
+                    settle_blocked: working,
+                    failed: false,
+                    unread,
+                    last_activity_at: Some(at),
+                    fork: tcode_protocol::ForkAvailability::Available,
+                    agent: None,
+                    latest_activity: None,
+                },
+            )
+        })
+        .collect();
+    for (topic, event) in [
+        (
+            Topic::Settings,
+            ServerEvent::SettingsSnapshot(Default::default()),
+        ),
+        (
+            Topic::Index,
+            ServerEvent::IndexSnapshot(IndexSnapshot {
+                sessions,
+                projects: vec![project],
+                summary: IndexSummary {
+                    activity,
+                    ..Default::default()
+                },
+            }),
+        ),
+    ] {
+        incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic,
+                    event,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+    let link = tcode_client::HostLink::new(to_host, from_host);
+    let store = cx.new(|cx| {
+        WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, None, cx)
+    });
+    seed_full_scope(&store, &incoming, deferred, cx);
+    let mut driver = LocalHostDriver::from_link(link);
+    driver.wait_until(cx, "the threads", |cx| {
+        store.read_with(cx, |store, _| !store.flat_sessions().is_empty())
+    });
+    let listed: Vec<String> = store.read_with(cx, |store, _| {
+        store
+            .flat_sessions()
+            .into_iter()
+            .map(|meta| meta.id)
+            .collect()
+    });
+    assert_eq!(
+        listed,
+        [
+            "waiting",
+            "unread",
+            "working",
+            "working-unread",
+            "idle-recent",
+            "idle-renamed"
+        ]
+    );
+}

@@ -1,6 +1,5 @@
 use super::*;
 use tcode_core::control::WatchEvent;
-use tcode_core::thread_sort::ThreadSection;
 
 /// What a settle did, or would do, beyond marking the thread settled. Unsettle restores none
 /// of it.
@@ -1372,7 +1371,6 @@ impl AppState {
         self.end_pull_request_watches(&mut meta);
         meta.pinned_at = None;
         meta.pin_order = None;
-        meta.active_order = None;
         self.detach_provider_to_idle(id, cx);
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
@@ -1441,25 +1439,14 @@ impl AppState {
         self.persist_meta(&meta, cx);
     }
 
-    pub fn reorder_session(
-        &mut self,
-        id: &str,
-        section: ThreadSection,
-        order_key: String,
-        cx: &mut HostCx,
-    ) {
+    pub fn reorder_pinned(&mut self, id: &str, order_key: String, cx: &mut HostCx) {
         let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
             return;
         };
-        let slot = match section {
-            ThreadSection::Pinned => &mut meta.pin_order,
-            ThreadSection::Active => &mut meta.active_order,
-            ThreadSection::Settled => return,
-        };
-        if slot.as_deref() == Some(order_key.as_str()) {
+        if meta.pin_order.as_deref() == Some(order_key.as_str()) {
             return;
         }
-        *slot = Some(order_key);
+        meta.pin_order = Some(order_key);
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
         }
@@ -1626,8 +1613,6 @@ impl AppState {
         }
         if let Some(mut meta) = self.sessions.iter().find(|m| m.id == session_id).cloned() {
             meta.title = title.to_string();
-            meta.updated_at = cx.clock().unix_secs();
-            let meta = meta.clone();
             self.persist_meta(&meta, cx);
         }
     }

@@ -977,14 +977,22 @@ impl SessionsSidebar {
                     line.children(Self::follow_up_glyph(meta, &name, window, cx))
                         .children(self.pin_glyph(meta, &state, window, cx))
                         .children(self.pane_glyph(&state, window, cx))
-                        .child(self.render_flat_thread_right_slot(
-                            meta,
-                            &state,
-                            tcode_core::thread_sort::shown_timestamp(meta),
-                            !state.settle_blocked,
-                            window,
-                            cx,
-                        ))
+                        .child(
+                            self.render_flat_thread_right_slot(
+                                meta,
+                                &state,
+                                shown_timestamp(
+                                    meta,
+                                    flags
+                                        .get(&meta.id)
+                                        .map(|flags| flags.standing)
+                                        .unwrap_or_default(),
+                                ),
+                                !state.settle_blocked,
+                                window,
+                                cx,
+                            ),
+                        )
                 });
 
             let has_project = project_name.is_some();

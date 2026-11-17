@@ -32,7 +32,8 @@ use gpui_base::motion::transition;
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 use tcode_core::thread_sort::{
-    ThreadSection, ThreadSections, merge_by_shown_time, partition_threads,
+    Standing, ThreadSection, ThreadSections, merge_hosts, partition_threads, shown_timestamp,
+    thread_rank,
 };
 use tcode_protocol::{Command, ThreadExportFormat};
 
@@ -351,22 +352,37 @@ fn no_sections<T>() -> ThreadSections<T> {
     }
 }
 
-fn listed_meta<'a>(row: &'a Listed<'_>) -> &'a SessionMeta {
-    row.1
+/// What `lists` hold of a listed thread's standing.
+fn listed_standing(lists: &[HostLists], (host, meta): &Listed) -> Standing {
+    lists
+        .iter()
+        .find(|lists| lists.host == **host)
+        .and_then(|lists| lists.flags.get(&meta.id))
+        .map(|flags| flags.standing)
+        .unwrap_or_default()
 }
 
-/// Each host's sections, in the sidebar's order of hosts, as one list's.
-fn merged<'a>(hosts: Vec<ThreadSections<Listed<'a>>>) -> ThreadSections<Listed<'a>> {
+/// Each host's sections, in the sidebar's order of hosts, as one list's:
+/// Active by the rank each host orders it by, and Pinned and Settled, whose
+/// order is each host's own, by the time each row shows, the latest first.
+fn merged<'a>(
+    hosts: Vec<ThreadSections<Listed<'a>>>,
+    lists: &[HostLists],
+) -> ThreadSections<Listed<'a>> {
     let mut sections = no_sections::<Vec<Listed>>();
     for host in hosts {
         sections.pinned.push(host.pinned);
         sections.active.push(host.active);
         sections.settled.push(host.settled);
     }
+    let shown =
+        |row: &Listed| std::cmp::Reverse(shown_timestamp(row.1, listed_standing(lists, row)));
     ThreadSections {
-        pinned: merge_by_shown_time(sections.pinned, listed_meta),
-        active: merge_by_shown_time(sections.active, listed_meta),
-        settled: merge_by_shown_time(sections.settled, listed_meta),
+        pinned: merge_hosts(sections.pinned, shown),
+        active: merge_hosts(sections.active, |row| {
+            thread_rank(row.1, listed_standing(lists, row))
+        }),
+        settled: merge_hosts(sections.settled, shown),
     }
 }
 
@@ -429,6 +445,7 @@ struct ThreadFlags {
     wakes: tcode_protocol::ThreadWakes,
     /// The host can fork the thread's conversation, now or once it can.
     forks: bool,
+    standing: Standing,
 }
 
 #[derive(Clone)]
@@ -516,7 +533,7 @@ fn project_threads<'a>(
 fn project_group_threads(sessions: &[SessionMeta]) -> (Vec<&SessionMeta>, Vec<&SessionMeta>) {
     let (mut settled, active): (Vec<_>, Vec<_>) =
         sessions.iter().partition(|meta| meta.is_settled());
-    settled.sort_by(|a, b| tcode_core::thread_sort::compare_threads(a, b));
+    settled.sort_by_key(|meta| (thread_rank(meta, Standing::default()), &meta.id));
     (active, settled)
 }
 
@@ -524,7 +541,7 @@ fn project_group_threads(sessions: &[SessionMeta]) -> (Vec<&SessionMeta>, Vec<&S
 /// for a row on the Settled shelf, which sorts by that.
 fn project_view_timestamp(meta: &SessionMeta) -> u64 {
     if meta.is_settled() {
-        tcode_core::thread_sort::shown_timestamp(meta)
+        shown_timestamp(meta, Standing::default())
     } else {
         meta.updated_at
     }
@@ -1117,6 +1134,7 @@ fn session_flags(sessions: &[SessionMeta], store: &WorkspaceStore) -> HashMap<St
                     forks: store.activity(&meta.id).is_some_and(|activity| {
                         activity.fork != tcode_protocol::ForkAvailability::Unsupported
                     }),
+                    standing: store.standing(meta),
                 },
             )
         })

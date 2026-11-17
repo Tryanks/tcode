@@ -116,7 +116,13 @@ impl SessionsSidebar {
                             SharedString::from(crate::project_icon::label(&group.project))
                         });
                     let timestamp = if recent {
-                        tcode_core::thread_sort::shown_timestamp(meta)
+                        shown_timestamp(
+                            meta,
+                            of.flags
+                                .get(&meta.id)
+                                .map(|flags| flags.standing)
+                                .unwrap_or_default(),
+                        )
                     } else {
                         project_view_timestamp(meta)
                     };
@@ -163,6 +169,7 @@ impl SessionsSidebar {
                             tagged_sections(host, project_threads(sessions, None, &lists.hidden))
                         })
                         .collect(),
+                    &lists,
                 );
                 let pinned_and_active_empty = pinned.is_empty() && active.is_empty();
                 // A phone has no hover to reveal section labels, so they stay.

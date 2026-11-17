@@ -1,9 +1,11 @@
-//! Pinning and arranging threads. Rows of the desktop threads view drag within
-//! and between the Pinned, Active and Settled sections; the phone's Arrange
-//! threads page drags by handle; Move up / Move down write the same keys
-//! without a drag. Rows of the project view, and every row in member scope,
-//! are not arranged; on the desktop they still drag, onto the chat column's
-//! panes.
+//! Pinning and arranging threads. Rows of the desktop threads view drag
+//! between the Pinned, Active and Settled sections and within Pinned, the one
+//! section arranged by hand: a thread dropped on Active takes the place its
+//! rank gives it ([`tcode_core::thread_sort::ThreadRank`]). The phone's
+//! Arrange threads page drags by handle; Move up / Move down write the pinned
+//! keys without a drag. Rows of the project view, and every row in member
+//! scope, are not arranged; on the desktop they still drag, onto the chat
+//! column's panes.
 //!
 //! gpui-base has no sortable-list primitive (its dock drag is specific to tab
 //! groups), so the drag composes GPUI's `on_drag`, `on_drag_move` and
@@ -15,7 +17,7 @@ use super::*;
 use crate::motion::drag_ghost;
 use gpui::{DragMoveEvent, KeystrokeEvent, MouseButton, Pixels, WeakEntity, deferred};
 use gpui_base::dock::AnyDrag;
-use tcode_core::thread_sort::{order_key_between, plan_reorder, thread_section};
+use tcode_core::thread_sort::{active_rank, order_key_between, plan_reorder, thread_section};
 
 /// How long a value drawn here takes to glide to a new one.
 const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
@@ -63,6 +65,9 @@ pub(super) struct ThreadDrag {
     /// Where the thread lands in Pinned or Active, as an index among that
     /// section's other rows; `None` leaves it where it was.
     gap: Option<(ThreadSection, usize)>,
+    /// The thread's place among Active's other rows, which its rank alone
+    /// decides.
+    active_slot: usize,
     /// The other rows of each section inside `scope` on the thread's host
     /// as the drag began, which gap indexes count.
     others: ThreadSections<String>,
@@ -129,6 +134,15 @@ pub(super) enum DropZone {
 }
 
 impl ThreadDrag {
+    /// The gap a pointer at `index` among the other rows of `section` asks
+    /// for: that index in Pinned, the thread's own place in Active.
+    fn gap_at(&self, section: ThreadSection, index: usize) -> (ThreadSection, usize) {
+        match section {
+            ThreadSection::Active => (section, self.active_slot),
+            _ => (section, index),
+        }
+    }
+
     fn action(&self) -> Option<DragAction> {
         use ThreadSection::*;
         match (self.from, self.over?) {
@@ -465,12 +479,38 @@ impl SessionsSidebar {
                     .collect()
             };
             let over = dragged.arranges.then_some(dragged.from);
+            let active_slot = this
+                .store_of(&thread.host)
+                .zip(
+                    sections
+                        .section(dragged.from)
+                        .iter()
+                        .find(|(meta, _)| meta.id == thread.session_id),
+                )
+                .map_or(0, |(store, (meta, _))| {
+                    let store = store.read(cx);
+                    let mut standing = store.standing(meta);
+                    // A reopened thread is the latest worked on.
+                    if dragged.from == ThreadSection::Settled {
+                        standing.last_activity_at = Some(u64::MAX);
+                    }
+                    let rank = (active_rank(meta, standing), &meta.id);
+                    sections
+                        .active
+                        .iter()
+                        .filter(|(other, inside)| *inside && other.id != meta.id)
+                        .filter(|(other, _)| {
+                            (active_rank(other, store.standing(other)), &other.id) < rank
+                        })
+                        .count()
+                });
             this.drag = Some(ThreadDrag {
                 thread: thread.clone(),
                 arranges: dragged.arranges,
                 from: dragged.from,
                 scope: dragged.scope.clone(),
                 gap,
+                active_slot,
                 others: ThreadSections {
                     pinned: others(ThreadSection::Pinned),
                     active: others(ThreadSection::Active),
@@ -614,7 +654,7 @@ impl SessionsSidebar {
                     ..
                 } => over = Some(ThreadSection::Settled),
                 DropZone::Start(section) => {
-                    gap = Some((*section, 0));
+                    gap = Some(drag.gap_at(*section, 0));
                     over = Some(*section);
                 }
                 DropZone::Row { thread, .. } if *thread == drag.thread => {
@@ -631,7 +671,7 @@ impl SessionsSidebar {
                             .map(|index| index + usize::from(lower)),
                     };
                     if let Some(index) = index {
-                        gap = Some((*section, index));
+                        gap = Some(drag.gap_at(*section, index));
                         over = Some(*section);
                     }
                 }
@@ -733,11 +773,11 @@ impl SessionsSidebar {
         });
     }
 
-    /// Put a thread at `index` among the other rows of `to` that `scope`
-    /// shows, pinning, unpinning or un-settling it on the way. Only the moved
-    /// thread's key is written unless its neighbours need fresh keys; rows
-    /// outside `scope` keep theirs. Returns whether it asked the host to
-    /// move the thread.
+    /// Move a thread to `to`, pinning, unpinning or un-settling it on the
+    /// way: to `index` among the other rows of Pinned that `scope` shows, or
+    /// into Active, where its rank places it. Only the moved thread's key is
+    /// written unless its neighbours need fresh keys; rows outside `scope`
+    /// keep theirs. Returns whether it asked the host to move the thread.
     fn place_thread(
         &mut self,
         thread: &ThreadKey,
@@ -755,12 +795,29 @@ impl SessionsSidebar {
             return false;
         };
         let from = thread_section(&meta);
-        let key = |meta: &SessionMeta| match to {
-            ThreadSection::Pinned => meta.pin_order.clone(),
-            _ => meta.active_order.clone(),
-        };
+        let session_id = id.to_owned();
+        if to != ThreadSection::Pinned {
+            let (command, undo) = match from {
+                ThreadSection::Pinned => (
+                    Command::UnpinSession {
+                        session_id: session_id.clone(),
+                    },
+                    Some((
+                        UndoKind::Unpin,
+                        vec![Command::PinSession {
+                            session_id,
+                            order_key: meta.pin_order.clone(),
+                        }],
+                    )),
+                ),
+                ThreadSection::Settled => (Command::UnsettleSession { session_id }, None),
+                ThreadSection::Active => return false,
+            };
+            self.perform_lifecycle(&thread.host, vec![command], undo, window, cx);
+            return true;
+        }
         let sections = self.scoped_sections(&thread.host, scope, cx);
-        let rows = sections.section(to);
+        let rows = &sections.pinned;
         if from == to
             && rows
                 .iter()
@@ -771,90 +828,50 @@ impl SessionsSidebar {
             return false;
         }
         let others: Vec<_> = rows.iter().filter(|(meta, _)| meta.id != id).collect();
-        let mut ordered: Vec<(String, Option<String>)> = others
+        let mut ordered: Vec<(&str, Option<&str>)> = others
             .iter()
             .filter(|(_, inside)| *inside)
-            .map(|(meta, _)| (meta.id.clone(), key(meta)))
+            .map(|(meta, _)| (meta.id.as_str(), meta.pin_order.as_deref()))
             .collect();
-        ordered.insert(index.min(ordered.len()), (id.to_owned(), key(&meta)));
-        let hidden: Vec<String> = others
+        ordered.insert(index.min(ordered.len()), (id, meta.pin_order.as_deref()));
+        let hidden: Vec<&str> = others
             .iter()
             .filter(|(_, inside)| !*inside)
-            .filter_map(|(meta, _)| key(meta))
+            .filter_map(|(meta, _)| meta.pin_order.as_deref())
             .collect();
-        let ordered: Vec<_> = ordered
-            .iter()
-            .map(|(id, key)| (id.as_str(), key.as_deref()))
-            .collect();
-        let hidden: Vec<_> = hidden.iter().map(String::as_str).collect();
-        let reorder = |session_id: String, order_key: String| match to {
-            ThreadSection::Pinned => Command::ReorderPinned {
-                session_id,
-                order_key,
-            },
-            _ => Command::ReorderActive {
-                session_id,
-                order_key,
-            },
-        };
         let mut moved_key = None;
-        let mut neighbours = vec![];
+        let mut commands = vec![];
         for (session_id, order_key) in plan_reorder(&ordered, &hidden, id) {
             if session_id == id {
                 moved_key = Some(order_key);
             } else {
-                neighbours.push(reorder(session_id, order_key));
+                commands.push(Command::ReorderPinned {
+                    session_id,
+                    order_key,
+                });
             }
         }
-        let session_id = id.to_owned();
-        let (mut commands, undo) = match (from, to) {
-            (ThreadSection::Pinned, ThreadSection::Pinned)
-            | (ThreadSection::Active, ThreadSection::Active) => (
-                moved_key
-                    .map(|key| reorder(session_id.clone(), key))
-                    .into_iter()
-                    .collect(),
-                None,
-            ),
-            (_, ThreadSection::Pinned) => (
-                vec![Command::PinSession {
+        if from == ThreadSection::Pinned {
+            commands.splice(
+                0..0,
+                moved_key.map(|order_key| Command::ReorderPinned {
+                    session_id,
+                    order_key,
+                }),
+            );
+        } else {
+            commands.insert(
+                0,
+                Command::PinSession {
                     session_id,
                     order_key: moved_key,
-                }],
-                None,
-            ),
-            (from, _) => {
-                let first = if from == ThreadSection::Pinned {
-                    Command::UnpinSession {
-                        session_id: session_id.clone(),
-                    }
-                } else {
-                    Command::UnsettleSession {
-                        session_id: session_id.clone(),
-                    }
-                };
-                let undo = (from == ThreadSection::Pinned).then(|| {
-                    (
-                        UndoKind::Unpin,
-                        vec![Command::PinSession {
-                            session_id: session_id.clone(),
-                            order_key: meta.pin_order.clone(),
-                        }],
-                    )
-                });
-                (
-                    std::iter::once(first)
-                        .chain(moved_key.map(|key| reorder(session_id, key)))
-                        .collect(),
-                    undo,
-                )
-            }
-        };
-        commands.extend(neighbours);
+                },
+            );
+        }
         if commands.is_empty() {
             return false;
         }
-        self.perform_lifecycle(&thread.host, commands, undo, window, cx);
+        self.perform_lifecycle(&thread.host, commands, None, window, cx);
         true
     }
 
@@ -863,12 +880,12 @@ impl SessionsSidebar {
         store.read(cx).thread_meta(&thread.session_id).cloned()
     }
 
-    /// Whether a thread can move up and down within its section, or `None`
-    /// for a settled thread and in the project view.
+    /// Whether a pinned thread can move up and down among the pinned ones,
+    /// or `None` for any other thread and in the project view.
     pub(super) fn move_bounds(&self, thread: &ThreadKey, cx: &App) -> Option<(bool, bool)> {
         let meta = self.thread_meta(thread, cx)?;
         let section = thread_section(&meta);
-        if section == ThreadSection::Settled || self.in_project_view(cx) {
+        if section != ThreadSection::Pinned || self.in_project_view(cx) {
             return None;
         }
         let scope = self.list_scope(cx);
@@ -895,7 +912,7 @@ impl SessionsSidebar {
             return;
         };
         let section = thread_section(&meta);
-        if section == ThreadSection::Settled {
+        if section != ThreadSection::Pinned {
             return;
         }
         let scope = self.list_scope(cx);
@@ -1147,6 +1164,7 @@ impl SessionsSidebar {
                     Some(tagged_sections(&lists.host, host))
                 })
                 .collect(),
+            &lists,
         );
         let tag = |rows: Vec<Listed>| -> Vec<ListedThread> {
             rows.into_iter().map(|row| self.listed(row)).collect()

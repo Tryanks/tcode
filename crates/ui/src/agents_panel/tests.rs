@@ -107,6 +107,7 @@ fn a_child_awaiting_approval_says_so_first(cx: &mut TestAppContext) {
             settle_blocked: false,
             failed: false,
             unread: false,
+            last_activity_at: None,
             fork: tcode_protocol::ForkAvailability::Available,
             latest_activity: None,
         },
@@ -184,6 +185,7 @@ fn a_running_agents_activity_gives_way_to_its_result(cx: &mut TestAppContext) {
             settle_blocked: false,
             failed: false,
             unread: false,
+            last_activity_at: None,
             fork: tcode_protocol::ForkAvailability::Available,
             latest_activity,
         };
@@ -419,6 +421,7 @@ fn settle_all_button_sends_the_lead_command(cx: &mut TestAppContext) {
             settle_blocked: false,
             failed: false,
             unread: false,
+            last_activity_at: None,
             fork: tcode_protocol::ForkAvailability::Available,
             latest_activity: None,
         },

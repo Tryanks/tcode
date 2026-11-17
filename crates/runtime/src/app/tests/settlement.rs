@@ -98,7 +98,6 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
             && meta.is_settled()
         {
             assert_eq!(meta.settled_at, Some(stamp / 1000));
-            assert!(meta.updated_at > stamp / 1000);
             break;
         }
     }
@@ -1207,18 +1206,6 @@ fn pinning_promotes_and_exempts_until_a_settle_unpins() {
         command(
             &state,
             cx,
-            3,
-            Command::ReorderActive {
-                session_id: "idle".into(),
-                order_key: "m".into(),
-            },
-        ),
-        Err("not_active".into())
-    );
-    assert_eq!(
-        command(
-            &state,
-            cx,
             4,
             Command::ReorderPinned {
                 session_id: "arranged".into(),
@@ -1230,16 +1217,6 @@ fn pinning_promotes_and_exempts_until_a_settle_unpins() {
     command(
         &state,
         cx,
-        5,
-        Command::ReorderActive {
-            session_id: "arranged".into(),
-            order_key: "m".into(),
-        },
-    )
-    .unwrap();
-    command(
-        &state,
-        cx,
         9,
         Command::ReorderPinned {
             session_id: "idle".into(),
@@ -1248,10 +1225,8 @@ fn pinning_promotes_and_exempts_until_a_settle_unpins() {
     )
     .unwrap();
     state.read(|state| {
-        for id in ["idle", "arranged"] {
-            let meta = state.find_meta(id).unwrap();
-            assert_eq!(meta.updated_at, stamp / 1000, "arranging is not activity");
-        }
+        let idle = state.find_meta("idle").unwrap();
+        assert_eq!(idle.updated_at, stamp / 1000, "arranging is not activity");
     });
 
     state.dispatch_command(
@@ -1267,11 +1242,6 @@ fn pinning_promotes_and_exempts_until_a_settle_unpins() {
             .is_some_and(|meta| meta.is_settled())
     });
     state.read(|state| {
-        let arranged = state.find_meta("arranged").unwrap();
-        assert_eq!(
-            arranged.active_order, None,
-            "settling clears the arrangement"
-        );
         let idle = state.find_meta("idle").unwrap();
         assert!(!idle.is_settled(), "a pinned thread is exempt");
     });

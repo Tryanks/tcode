@@ -364,7 +364,9 @@ pub use wire::{
 // request_retry, and RuntimeNotice gains usage_limit_reached.
 // SettingsPatch's title_generation_provider, title_generation_model and
 // title_generation_profile_id become one title_generation, and Settings'
-// title_generation is absent while no title model is chosen.
+// title_generation is absent while no title model is chosen. Active threads
+// are no longer arranged by hand: the ReorderActive command and thread
+// metadata's active_order go, and SessionActivity gains last_activity_at.
 pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]

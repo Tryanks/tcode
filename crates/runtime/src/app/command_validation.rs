@@ -233,7 +233,6 @@ impl AppState {
                 | Command::PinSession { .. }
                 | Command::UnpinSession { .. }
                 | Command::ReorderPinned { .. }
-                | Command::ReorderActive { .. }
         ) && self
             .find_meta(session_id)
             .is_some_and(|meta| meta.archived_at.is_some())
@@ -247,29 +246,19 @@ impl AppState {
             order_key: Some(order_key),
             ..
         }
-        | Command::ReorderPinned { order_key, .. }
-        | Command::ReorderActive { order_key, .. } = command
+        | Command::ReorderPinned { order_key, .. } = command
             && order_key.is_empty()
         {
             return Err(error("invalid_order_key", "An order key cannot be empty."));
         }
-        // Only a thread in the section has a place in its order, so a reorder
-        // raced by an unpin or a settle never pins or reopens the thread again.
-        let section = self
-            .find_meta(session_id)
-            .map(|meta| tcode_core::thread_sort::thread_section(&meta));
-        match command {
-            Command::ReorderPinned { .. }
-                if section.is_some_and(|section| section != ThreadSection::Pinned) =>
-            {
-                return Err(error("not_pinned", "This thread is not pinned."));
-            }
-            Command::ReorderActive { .. }
-                if section.is_some_and(|section| section != ThreadSection::Active) =>
-            {
-                return Err(error("not_active", "This thread is not in Active."));
-            }
-            _ => {}
+        // Only a pinned thread has a place in the pinned order, so a reorder
+        // raced by an unpin or a settle never pins the thread again.
+        if matches!(command, Command::ReorderPinned { .. })
+            && self.find_meta(session_id).is_some_and(|meta| {
+                tcode_core::thread_sort::thread_section(&meta) != ThreadSection::Pinned
+            })
+        {
+            return Err(error("not_pinned", "This thread is not pinned."));
         }
         if matches!(command, Command::SettleSession { .. }) && self.settle_thread_busy(session_id) {
             return Err(error(
@@ -294,7 +283,6 @@ impl AppState {
                 | Command::PinSession { .. }
                 | Command::UnpinSession { .. }
                 | Command::ReorderPinned { .. }
-                | Command::ReorderActive { .. }
                 | Command::ArchiveSession { .. }
                 | Command::UnarchiveSession { .. }
                 | Command::RenameSession { .. }

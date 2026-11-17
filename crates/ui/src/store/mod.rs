@@ -1910,8 +1910,32 @@ impl WorkspaceStore {
             .filter(|meta| tcode_core::thread_sort::in_roster(meta))
             .cloned()
             .collect();
-        tcode_core::thread_sort::sort_threads(&mut visible);
+        tcode_core::thread_sort::sort_threads(&mut visible, |meta| self.standing(meta));
         visible
+    }
+
+    /// What orders and dates `meta` in the threads view besides the meta
+    /// itself: a thread that waits on the user leads the unread ones, those
+    /// lead the working ones, and the idle ones follow. A working thread is
+    /// not unread yet, as its row shows.
+    pub fn standing(&self, meta: &SessionMeta) -> tcode_core::thread_sort::Standing {
+        use tcode_core::thread_sort::Attention;
+        let id = meta.id.as_str();
+        let attention = if self.pending_approval_for(id) || self.pending_user_input_for(id) {
+            Attention::Waiting
+        } else if self.turn_running_for(id) {
+            Attention::Working
+        } else if self.session_unread(id) {
+            Attention::Unread
+        } else {
+            Attention::Idle
+        };
+        tcode_core::thread_sort::Standing {
+            attention,
+            last_activity_at: self
+                .activity(id)
+                .and_then(|activity| activity.last_activity_at),
+        }
     }
 
     pub(crate) fn project(&self, id: &str) -> Option<&Project> {
