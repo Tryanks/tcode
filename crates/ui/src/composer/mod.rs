@@ -1657,9 +1657,89 @@ impl Composer {
         let subagent = composer_state.conversation_read_only;
         self.sync_keyboard(subagent, window, cx);
         let turn_running = composer_state.turn_running;
-        let approval = composer_state.pending_approval.clone();
-        let approval_count = composer_state.pending_approval_count;
+        let control_row = self.render_control_row(subagent, turn_running, window, cx);
 
+        let desired_placeholder = if !self.interactive(cx) {
+            crate::tr!("mobile.offline_message")
+        } else if composer_state.pending_plan.is_some() {
+            crate::tr!("composer.plan_feedback_placeholder")
+        } else {
+            draft_placeholder(self.compact)
+        };
+
+        let card = self.render_card(subagent, desired_placeholder, control_row, window, cx);
+        let panels = self.render_panels(&composer_state, window, cx);
+        let checkout = self.render_checkout_foot(&composer_state, subagent, window, cx);
+        let drawer = self.render_settings_drawer(subagent, window, cx);
+
+        // Mirror the chat timeline's centered content column (same page
+        // padding, same max width) so the composer lines up with the messages
+        // above it instead of stretching edge to edge on wide windows.
+        let inset = px(if self.compact {
+            crate::material::COMPACT_PAGE_INSET
+        } else {
+            crate::chat::CONTENT_MIN_PADDING
+        });
+        // Where the card ends, measured from the composer's bottom once both
+        // are laid out: the line under the card, then the composer's whole
+        // extent, which comes after it.
+        let card_bottom = Rc::new(Cell::new(px(0.)));
+        let under_card = gpui::canvas(
+            {
+                let card_bottom = card_bottom.clone();
+                move |bounds, _, _| card_bottom.set(bounds.top())
+            },
+            |_, _, _, _| {},
+        )
+        .w_full()
+        .h_0();
+        let extent = gpui::canvas(
+            {
+                let below_card = self.below_card.clone();
+                move |bounds, _, _| below_card.set(bounds.bottom() - card_bottom.get())
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0();
+        v_flex()
+            .id(self.scene.id("composer"))
+            .relative()
+            .flex_shrink_0()
+            .w_full()
+            .items_center()
+            .px(inset)
+            .pr(inset + self.column_shift)
+            .pb_2()
+            .key_context(CONTEXT)
+            .on_action(cx.listener(Self::on_menu))
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(px(crate::chat::CONTENT_MAX_WIDTH))
+                    .children(panels)
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .child(card)
+                            .child(under_card)
+                            .children(drawer),
+                    )
+                    .children(checkout),
+            )
+            .child(extent)
+            .into_any_element()
+    }
+
+    /// The row of controls under the field: attach, model, traits, context
+    /// meter, permission, mic and send or stop.
+    fn render_control_row(
+        &mut self,
+        subagent: bool,
+        turn_running: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let border = cx.theme().border;
         let divider = move || div().w_px().h(px(16.)).bg(border);
 
@@ -1946,21 +2026,22 @@ impl Composer {
                 window.on_next_frame(move |_, cx| cx.notify(composer));
             }
         });
-        let control_row = match reflow_scope {
+        match reflow_scope {
             Some(reflow) => reflow.render(control_row),
             None => control_row.into_any_element(),
-        };
+        }
+    }
 
-        let desired_placeholder = if !self.interactive(cx) {
-            crate::tr!("mobile.offline_message")
-        } else if composer_state.pending_plan.is_some() {
-            crate::tr!("composer.plan_feedback_placeholder")
-        } else {
-            draft_placeholder(self.compact)
-        };
-
-        let user_input = self.pending_user_input(cx);
-
+    /// The card: the draft over `control_row`, inside the frame that takes
+    /// paste, drop and the trigger menu's keys.
+    fn render_card(
+        &self,
+        subagent: bool,
+        desired_placeholder: Cow<'static, str>,
+        control_row: AnyElement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let composer = cx.entity();
         let chip_rows = self.render_chip_rows(window, cx);
         let input = self.input.clone();
@@ -2016,7 +2097,7 @@ impl Composer {
                         .child(self.render_image_strip(window, cx)),
                 )
             });
-        let card = v_flex()
+        v_flex()
             .debug_selector(move || {
                 if subagent {
                     "composer-subagent".into()
@@ -2110,10 +2191,20 @@ impl Composer {
                 },
             )
             .children(draft)
-            .child(div().w_full().child(control_row));
+            .child(div().w_full().child(control_row))
+    }
 
-        // The panels above the card, each folding in as it comes and away,
-        // drawn as it was, as it goes.
+    /// The panels above the card, each folding in as it comes and away,
+    /// drawn as it was, as it goes.
+    fn render_panels(
+        &mut self,
+        composer_state: &ComposerState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let approval = composer_state.pending_approval.clone();
+        let approval_count = composer_state.pending_approval_count;
+        let user_input = self.pending_user_input(cx);
         let mut panels = Vec::new();
         if let Some(shown) = self.motion.shown(
             self.motion_key("approval"),
@@ -2167,11 +2258,20 @@ impl Composer {
         }
         panels.extend(self.render_force_terminate(window, cx));
         panels.extend(self.render_queue_strip(window, cx));
-        // The checkout row under the card carries the space above it. A
-        // compact window keeps that height for the thread: its Panels page
-        // has the row instead.
-        let checkout = self
-            .motion
+        panels
+    }
+
+    /// The checkout row under the card carries the space above it. A
+    /// compact window keeps that height for the thread: its Panels page
+    /// has the row instead.
+    fn render_checkout_foot(
+        &self,
+        composer_state: &ComposerState,
+        subagent: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        self.motion
             .shown(
                 self.motion_key("checkout"),
                 composer_state
@@ -2199,11 +2299,18 @@ impl Composer {
                         .px_2()
                         .child(row),
                 )
-            });
-        // The phone's permission and context meter under the card; a
-        // subagent's row carries them itself.
-        let drawer = self
-            .motion
+            })
+    }
+
+    /// The phone's permission and context meter under the card; a
+    /// subagent's row carries them itself.
+    fn render_settings_drawer(
+        &self,
+        subagent: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        self.motion
             .shown(
                 self.motion_key("settings-drawer"),
                 (self.compact && !subagent).then_some(()),
@@ -2229,65 +2336,7 @@ impl Composer {
                         .child(div().flex_1())
                         .child(self.render_context_meter(cx)),
                 )
-            });
-
-        // Mirror the chat timeline's centered content column (same page
-        // padding, same max width) so the composer lines up with the messages
-        // above it instead of stretching edge to edge on wide windows.
-        let inset = px(if self.compact {
-            crate::material::COMPACT_PAGE_INSET
-        } else {
-            crate::chat::CONTENT_MIN_PADDING
-        });
-        // Where the card ends, measured from the composer's bottom once both
-        // are laid out: the line under the card, then the composer's whole
-        // extent, which comes after it.
-        let card_bottom = Rc::new(Cell::new(px(0.)));
-        let under_card = gpui::canvas(
-            {
-                let card_bottom = card_bottom.clone();
-                move |bounds, _, _| card_bottom.set(bounds.top())
-            },
-            |_, _, _, _| {},
-        )
-        .w_full()
-        .h_0();
-        let extent = gpui::canvas(
-            {
-                let below_card = self.below_card.clone();
-                move |bounds, _, _| below_card.set(bounds.bottom() - card_bottom.get())
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .inset_0();
-        v_flex()
-            .id(self.scene.id("composer"))
-            .relative()
-            .flex_shrink_0()
-            .w_full()
-            .items_center()
-            .px(inset)
-            .pr(inset + self.column_shift)
-            .pb_2()
-            .key_context(CONTEXT)
-            .on_action(cx.listener(Self::on_menu))
-            .child(
-                v_flex()
-                    .w_full()
-                    .max_w(px(crate::chat::CONTENT_MAX_WIDTH))
-                    .children(panels)
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .child(card)
-                            .child(under_card)
-                            .children(drawer),
-                    )
-                    .children(checkout),
-            )
-            .child(extent)
-            .into_any_element()
+            })
     }
 }
 
