@@ -182,25 +182,12 @@ final class GPUIHostView: UIView {
         return recognizer
     }()
 
-    override class var layerClass: AnyClass {
-        CAMetalLayer.self
-    }
-
-    private var metalLayer: CAMetalLayer {
-        layer as! CAMetalLayer
-    }
-
     override init(frame: CGRect) {
         super.init(frame: frame)
         isOpaque = true
         backgroundColor = UIColor(named: "LaunchBackground", in: nil, compatibleWith: traitCollection)
         isMultipleTouchEnabled = true
         contentScaleFactor = traitCollection.displayScale
-
-        metalLayer.pixelFormat = .bgra8Unorm
-        metalLayer.framebufferOnly = true
-        metalLayer.contentsScale = contentScaleFactor
-        metalLayer.presentsWithTransaction = false
 
         keyboardProxy.keyEventTarget = self
         keyboardProxy.backgroundColor = .clear
@@ -253,7 +240,6 @@ final class GPUIHostView: UIView {
         GPUIHostBridge.controller?.updateScreen()
         guard let screen = window?.windowScene?.screen else { return }
         contentScaleFactor = screen.scale
-        metalLayer.contentsScale = screen.scale
         if attached {
             gpui_ios_scale_factor_changed(Float(screen.scale))
         }
@@ -282,11 +268,6 @@ final class GPUIHostView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         keyboardProxy.frame = bounds
-        metalLayer.contentsScale = contentScaleFactor
-        metalLayer.drawableSize = CGSize(
-            width: bounds.width * contentScaleFactor,
-            height: bounds.height * contentScaleFactor
-        )
         if attached {
             sendSafeArea()
             sendKeyboardCover()

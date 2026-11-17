@@ -4,7 +4,6 @@ mod dispatcher;
 mod display;
 pub mod ffi;
 mod platform;
-mod raw_handles;
 mod text_system;
 mod window;
 
