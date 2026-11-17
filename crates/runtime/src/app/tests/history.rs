@@ -408,7 +408,7 @@ fn a_cursor_is_answered_in_one_reply_that_reaches_the_end_of_the_log() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("history-cursor-reply");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
-    // Each of the three long warnings takes most of half a reply.
+    // Each of the three long records takes most of half a reply.
     let long = |index: usize| format!("{index}{}", "x".repeat(200 * 1024));
     let messages: Vec<String> = ["first".to_owned()]
         .into_iter()
@@ -422,8 +422,8 @@ fn a_cursor_is_answered_in_one_reply_that_reaches_the_end_of_the_log() {
             origin: None,
             author: None,
             ts: Some(ts as u64),
-            event: AgentEvent::Warning {
-                message: message.clone(),
+            event: AgentEvent::SessionModel {
+                model: message.clone(),
             },
             elided: None,
         });
@@ -441,9 +441,9 @@ fn a_cursor_is_answered_in_one_reply_that_reaches_the_end_of_the_log() {
             .expect("a snapshot answers the subscription");
         serde_json::from_str(&tcode_protocol::encode_line(event).unwrap()).unwrap()
     };
-    let warning = |ts: usize| serde_json::json!({"ts": ts, "event": {"type": "warning", "message": messages[ts]}});
+    let record = |ts: usize| serde_json::json!({"ts": ts, "event": {"type": "session_model", "model": messages[ts]}});
 
-    // The client held the first row; the three long warnings and the last
+    // The client held the first row; the three long records and the last
     // one do not fit a reply.
     let behind = reply(
         &through_pipe(&state, cx, 1, subscribe_events("away", Some(1))),
@@ -456,13 +456,13 @@ fn a_cursor_is_answered_in_one_reply_that_reaches_the_end_of_the_log() {
             "topic": {"type": "session_events", "content": {"session_id": "away"}},
             "event": {"type": "session_snapshot", "content": {
                 "from": 2, "end": 5,
-                "records": [warning(2), warning(3), warning(4)],
+                "records": [record(2), record(3), record(4)],
                 "total": 5, "total_turns": 0, "truncated": true,
             }},
         }}),
     );
 
-    // Held through the second long warning, the rest fits.
+    // Held through the second long record, the rest fits.
     let near = reply(
         &through_pipe(&state, cx, 2, subscribe_events("away", Some(3))),
         2,
@@ -474,7 +474,7 @@ fn a_cursor_is_answered_in_one_reply_that_reaches_the_end_of_the_log() {
             "topic": {"type": "session_events", "content": {"session_id": "away"}},
             "event": {"type": "session_snapshot", "content": {
                 "from": 3, "end": 5,
-                "records": [warning(3), warning(4)],
+                "records": [record(3), record(4)],
                 "total": 5, "total_turns": 0, "truncated": false,
             }},
         }}),
@@ -492,8 +492,8 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
                 origin: None,
                 author: None,
                 ts: Some(index),
-                event: AgentEvent::Warning {
-                    message: format!("event {index}"),
+                event: AgentEvent::SessionModel {
+                    model: format!("event {index}"),
                 },
                 elided: None,
             })

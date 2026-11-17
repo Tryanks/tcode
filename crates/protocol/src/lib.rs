@@ -358,6 +358,9 @@ pub use wire::{
 // SpaceInfo carries hidden_from_threads, set by SpaceAction
 // set_hidden_from_threads. The protocol adds the StopWatchingThreads command,
 // and ThreadWakes' notify counts the threads watched rather than the watches.
+//
+// Unreleased: the timeline gains the warning entry, and RuntimeNotice loses
+// provider_message.
 pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]

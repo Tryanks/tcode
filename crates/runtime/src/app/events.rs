@@ -395,12 +395,6 @@ impl AppState {
                     self.refresh_git_status(session_id, cx);
                 }
             }
-            AgentEvent::Error { message, .. } => {
-                emit_runtime(
-                    cx,
-                    RuntimeEvent::Error(RuntimeError::ProviderMessage(message.clone())),
-                );
-            }
             AgentEvent::UsageLimitReached { resets_at } => {
                 if self.settings.resume_on_limit_reset {
                     let not_before = UNIX_EPOCH + Duration::from_secs(*resets_at);
@@ -486,15 +480,9 @@ impl AppState {
             }
             AgentEvent::Warning { message } => {
                 log::warn!("provider warning in {session_id}: {message}");
-                // Provider warnings (config problems, deprecations, failed
-                // mode switches) explain later misbehavior: a log line alone
-                // hides them from the person who needs to act on them.
-                emit_runtime(
-                    cx,
-                    RuntimeEvent::Notice(RuntimeNotice::ProviderMessage(message.clone())),
-                );
             }
-            AgentEvent::ProviderRelay { .. }
+            AgentEvent::Error { .. }
+            | AgentEvent::ProviderRelay { .. }
             | AgentEvent::RelayUndone { .. }
             | AgentEvent::ServedModel { .. }
             | AgentEvent::TurnChangesUpdated { .. }

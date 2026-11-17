@@ -477,7 +477,8 @@ impl Activity {
             EntryContent::ProviderStartError { error } => {
                 self.errors.push(head(error, HEAD_CHARS));
             }
-            EntryContent::ProviderRelay { .. }
+            EntryContent::Warning { .. }
+            | EntryContent::ProviderRelay { .. }
             | EntryContent::ModelChanged { .. }
             | EntryContent::ContextCompacted(_)
             | EntryContent::ControlAction(_)
@@ -1273,6 +1274,7 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
         EntryContent::Feedback { text } => ("feedback", text.clone()),
         EntryContent::Error { message, .. } => ("error", message.clone()),
         EntryContent::ProviderStartError { error } => ("provider_start_error", error.clone()),
+        EntryContent::Warning { message } => ("warning", message.clone()),
         EntryContent::ProviderRelay {
             from_provider,
             to_provider,

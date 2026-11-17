@@ -45,6 +45,8 @@ pub(crate) enum Segment<'a> {
     Assistant(&'a TimelineEntry),
     Plan(&'a TimelineEntry),
     Error(&'a TimelineEntry),
+    /// Consecutive warnings of the harness.
+    Warnings(Vec<&'a TimelineEntry>),
     /// Consecutive rows of the log this build cannot read.
     Unreadable(Vec<&'a TimelineEntry>),
     /// A record too large to send here, kept on the host.
@@ -282,6 +284,22 @@ pub(crate) fn segment_entries<'a>(
             }
             EntryContent::Withheld { .. } => {
                 single(&mut segments, &mut ranges, Segment::Withheld(entry));
+            }
+            EntryContent::Warning { .. } => {
+                flush_activities(
+                    &mut segments,
+                    &mut ranges,
+                    &mut activities,
+                    &mut run_start,
+                    index,
+                );
+                if let Some(Segment::Warnings(warnings)) = segments.last_mut() {
+                    warnings.push(entry);
+                    ranges.last_mut().expect("a run of rows has a range").end = index + 1;
+                } else {
+                    segments.push(Segment::Warnings(vec![entry]));
+                    ranges.push(index..index + 1);
+                }
             }
             EntryContent::Unreadable { .. } => {
                 flush_activities(

@@ -47,6 +47,7 @@ chat:
   settings_kept: "这一条仍用旧设置，后台任务结束后换用新设置"
   unreadable_record_one: "1 条此版本 Tcode 不再认识的记录"
   unreadable_records: "%{count} 条此版本 Tcode 不再认识的记录"
+  warnings: "%{count} 条警告"
   record_withheld: "一条 %{size} 的记录太大，无法随对话发送到此设备"
   load_record: "载入"
   record_loading: "正在载入一条 %{size} 的记录…"

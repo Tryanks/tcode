@@ -324,6 +324,26 @@ impl TimelineView {
                         cx,
                     ));
                 }
+                Segment::Warnings(warnings) => {
+                    let messages = warnings
+                        .iter()
+                        .filter_map(|entry| match &entry.content {
+                            EntryContent::Warning { message } => Some(message.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    let label = match messages.as_slice() {
+                        [message] => message.lines().next().unwrap_or_default().to_owned(),
+                        _ => crate::tr!("chat.warnings", count = messages.len()).into_owned(),
+                    };
+                    column = column.child(self.compose_disclosure(
+                        index,
+                        format!("warnings-{}", warnings[0].id),
+                        label.into(),
+                        &messages.join("\n"),
+                        cx,
+                    ));
+                }
                 Segment::Error(entry) => {
                     let harness = self
                         .workspace_store

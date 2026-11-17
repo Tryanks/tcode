@@ -1310,6 +1310,25 @@ fn provider_start_failure_folds_semantically() {
     ));
 }
 
+/// A harness's warning is shown nowhere but in its thread.
+#[test]
+fn a_warning_before_any_turn_is_an_entry_of_the_thread() {
+    let mut timeline = Timeline::default();
+    timeline.apply_at(
+        Some(1_234),
+        &AgentEvent::Warning {
+            message: "config is deprecated".into(),
+        },
+    );
+
+    let warning = &timeline.entries[0];
+    assert!(timeline.turns.get(warning.turn).is_some());
+    assert!(matches!(
+        &warning.content,
+        EntryContent::Warning { message } if message == "config is deprecated"
+    ));
+}
+
 #[test]
 fn usage_limit_reset_is_folded_into_the_latest_error() {
     let mut timeline = Timeline::default();

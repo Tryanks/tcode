@@ -355,6 +355,7 @@ impl TurnBoundaries {
             | AgentEvent::TurnCheckpoint { .. }
             | AgentEvent::ProviderStartFailed { .. }
             | AgentEvent::Error { .. }
+            | AgentEvent::Warning { .. }
             | AgentEvent::SessionClosed { reason: Some(_) }
             | AgentEvent::Delta { .. }
             | AgentEvent::ContextWindowChanged { .. }
@@ -395,7 +396,6 @@ impl TurnBoundaries {
             | AgentEvent::WorktreeRequested { .. }
             | AgentEvent::UserInputRequested { .. }
             | AgentEvent::UserInputResolved { .. }
-            | AgentEvent::Warning { .. }
             | AgentEvent::PlanUpdated { .. }
             | AgentEvent::GoalUpdated { .. }
             | AgentEvent::UsageLimitReached { .. }
