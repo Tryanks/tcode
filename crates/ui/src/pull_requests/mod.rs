@@ -1135,93 +1135,15 @@ impl PullRequestsPanel {
             detail.extend(layer.clone());
             detail.extend(stat.as_ref().map(|stat| format!("{} {}", stat.0, stat.1)));
             detail.retain(|part| !part.is_empty());
-            // Spacing is each part's leading margin, so a part that gives way takes its
-            // separator and its spacing with it.
-            let sep = || div().flex_none().ml_1().child("·");
-            let mono = cx.theme().mono_font_family.clone();
-            let typography = &cx.theme().tokens.typography;
-            let line_height = if compact {
-                typography.sm.line_height
-            } else {
-                typography.xs.line_height
-            };
-            h_flex()
-                .items_center()
-                .min_w_0()
-                .overflow_hidden()
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .child(crate::widgets::fade_text(source.clone())),
-                )
-                // The author gives way first, whole: a line too narrow for it wraps it onto
-                // a second line this one-line box clips. The box is exactly one line of
-                // line 2's text tall; stretching
-                // it to the row would not do, as a stretched box takes its wrapped content's
-                // two lines. gpui has no setter for a shrink value, hence the reach into the
-                // style.
-                .when_some(author, |line, author| {
-                    line.child(
-                        h_flex()
-                            .flex_wrap()
-                            .h(line_height)
-                            .min_w_0()
-                            .overflow_hidden()
-                            .map(|mut group| {
-                                group.style().flex_shrink = Some(10000.);
-                                group
-                            })
-                            // An empty first item, so the author wraps rather than overflows.
-                            .child(div().h_full())
-                            .child(
-                                h_flex()
-                                    .flex_none()
-                                    .child(sep())
-                                    .child(div().ml_1().child(crate::widgets::fade_text(author))),
-                            ),
-                    )
-                })
-                // gpui-base has no middle truncation; the row tooltip holds the full pair.
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .map(|mut branches| {
-                            branches.style().flex_shrink = Some(100.);
-                            branches
-                        })
-                        .font_family(mono.clone())
-                        .child(crate::widgets::fade_text(format!(" · {branches}"))),
-                )
-                .when_some(layer.clone(), |line, layer| {
-                    line.child(sep()).child(
-                        div()
-                            .flex_none()
-                            .ml_1()
-                            .child(crate::widgets::fade_text(layer)),
-                    )
-                })
-                .when_some(stat, |line, (additions, deletions)| {
-                    line.child(sep())
-                        .child(
-                            div()
-                                .flex_none()
-                                .ml_1()
-                                .font_family(mono.clone())
-                                .text_color(cx.theme().success)
-                                .child(additions),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .ml_1()
-                                .font_family(mono)
-                                .text_color(cx.theme().danger)
-                                .child(crate::widgets::fade_text(deletions)),
-                        )
-                })
-                .into_any_element()
+            synced_line(
+                source.clone(),
+                author,
+                branches,
+                layer.clone(),
+                stat,
+                compact,
+                cx,
+            )
         } else {
             let layer = if let Some(link) = link.filter(|_| visible) {
                 detail.insert(
@@ -1328,169 +1250,9 @@ impl PullRequestsPanel {
             cx,
         );
         if let Some(eye) = eye {
-            let store = self.store.read(cx);
-            let paused = self
-                .session_id
-                .as_deref()
-                .and_then(|id| store.thread_meta(id))
-                .is_some_and(|meta| meta.pull_request_watches_paused);
-            let tooltip = crate::tr!(if paused {
-                "pull_requests.watching_paused_tooltip"
-            } else {
-                "pull_requests.watching_tooltip"
-            })
-            .into_owned();
-            let eye_color = gpui_base::motion::transition(
-                (row_key.clone(), "eye-color"),
-                if self.eye_hovered.as_ref() == Some(&key) {
-                    cx.theme().foreground
-                } else {
-                    cx.theme().muted_foreground
-                },
-                gpui_base::motion::Transition::new(GLIDE),
-                window,
-                cx,
-            );
-            signals = signals.child(eye.fold_across(div().pl_1().child(if compact {
-                // A glyph is below touch size: the more menu stops the watch on a phone.
-                Icon::new(IconName::Eye)
-                    .text_color(cx.theme().muted_foreground)
-                    .into_any_element()
-            } else {
-                let hovered = self.eye_hovered.as_ref() == Some(&key);
-                let hover_key = key.clone();
-                let stop = ChangeWatch {
-                    key: key.clone(),
-                    watching: false,
-                };
-                Button::new(SharedString::from(format!(
-                    "pr-eye-{}-{}-{}",
-                    key.host, key.repository, key.number
-                )))
-                .ghost()
-                .xsmall()
-                .icon(
-                    Icon::new(if hovered {
-                        IconName::EyeOff
-                    } else {
-                        IconName::Eye
-                    })
-                    .text_color(eye_color),
-                )
-                .aria_label(
-                    crate::tr!(
-                        "pull_requests.stop_watching_number",
-                        number = key.number.to_string()
-                    )
-                    .into_owned(),
-                )
-                .tooltip(tooltip)
-                .on_hover(crate::motion::pointer_hover(cx.listener(
-                    move |this, hovered: &bool, _, cx| {
-                        let key = hovered.then(|| hover_key.clone());
-                        if this.eye_hovered != key {
-                            this.eye_hovered = key;
-                            cx.notify();
-                        }
-                    },
-                )))
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    window.dispatch_action(Box::new(stop.clone()), cx);
-                })
-                .into_any_element()
-            })));
+            signals = signals.child(self.eye_signal(&eye, &key, &row_key, compact, window, cx));
         }
-        let open_snapshot = snapshot.filter(|s| s.state == PullRequestState::Open);
-        if let Some(check) = crate::motion::shown(
-            (row_key.clone(), "checks"),
-            open_snapshot.and_then(|s| s.checks_state),
-            SHOW,
-            window,
-            cx,
-        ) {
-            let (icon, color, label) = checks_appearance(check.value, cx);
-            signals = signals.child(
-                check.fold_across(
-                    div().pl_1().child(
-                        div()
-                            .id("pr-signal-checks")
-                            .child(crate::motion::status_icon(
-                                (row_key.clone(), "checks-icon"),
-                                icon,
-                                color,
-                                CHANGE,
-                                window,
-                                cx,
-                            ))
-                            .with_tooltip(move |_, _| {
-                                crate::widgets::tooltip::Tooltip::new(
-                                    crate::tr!(label).into_owned(),
-                                )
-                            }),
-                    ),
-                ),
-            );
-        }
-        if let Some(review) = crate::motion::shown(
-            (row_key.clone(), "review"),
-            open_snapshot.and_then(|s| s.review_decision),
-            SHOW,
-            window,
-            cx,
-        ) {
-            let (icon, color, label) = review_appearance(review.value, cx);
-            signals = signals.child(
-                review.fold_across(
-                    div().pl_1().child(
-                        div()
-                            .id("pr-signal-review")
-                            .child(crate::motion::status_icon(
-                                (row_key.clone(), "review-icon"),
-                                icon,
-                                color,
-                                CHANGE,
-                                window,
-                                cx,
-                            ))
-                            .with_tooltip(move |_, _| {
-                                crate::widgets::tooltip::Tooltip::new(
-                                    crate::tr!(label).into_owned(),
-                                )
-                            }),
-                    ),
-                ),
-            );
-        }
-        if let Some(conflict) = crate::motion::shown(
-            (row_key.clone(), "conflict"),
-            open_snapshot
-                .filter(|s| s.mergeability == Mergeability::Conflicting)
-                .map(|s| s.base_branch.clone()),
-            SHOW,
-            window,
-            cx,
-        ) {
-            let base = conflict.value.clone();
-            signals = signals.child(
-                conflict.fold_across(
-                    div().pl_1().child(
-                        div()
-                            .id("pr-conflict")
-                            .child(
-                                Icon::new(IconName::GitMergeConflict)
-                                    .text_color(cx.theme().warning),
-                            )
-                            .with_tooltip(move |_, _| {
-                                crate::widgets::tooltip::Tooltip::new(
-                                    crate::tr!("pull_requests.conflict", base = base.clone())
-                                        .into_owned(),
-                                )
-                            }),
-                    ),
-                ),
-            );
-        }
+        signals = snapshot_signals(signals, &row_key, snapshot, window, cx);
         // The stack's view of the row: a layer below that blocks merging it, and the stack's
         // write running over it.
         let (blocker, running) = {
@@ -1733,6 +1495,280 @@ impl PullRequestsPanel {
             .touch(compact)
             .into_any_element()
     }
+    /// The eye of a watched row, which stops the watch where a pointer can reach it.
+    fn eye_signal(
+        &self,
+        eye: &crate::motion::Shown<()>,
+        key: &PullRequestKey,
+        row_key: &gpui::ElementId,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let store = self.store.read(cx);
+        let paused = self
+            .session_id
+            .as_deref()
+            .and_then(|id| store.thread_meta(id))
+            .is_some_and(|meta| meta.pull_request_watches_paused);
+        let tooltip = crate::tr!(if paused {
+            "pull_requests.watching_paused_tooltip"
+        } else {
+            "pull_requests.watching_tooltip"
+        })
+        .into_owned();
+        let eye_color = gpui_base::motion::transition(
+            (row_key.clone(), "eye-color"),
+            if self.eye_hovered.as_ref() == Some(key) {
+                cx.theme().foreground
+            } else {
+                cx.theme().muted_foreground
+            },
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
+        eye.fold_across(div().pl_1().child(if compact {
+            // A glyph is below touch size: the more menu stops the watch on a phone.
+            Icon::new(IconName::Eye)
+                .text_color(cx.theme().muted_foreground)
+                .into_any_element()
+        } else {
+            let hovered = self.eye_hovered.as_ref() == Some(key);
+            let hover_key = key.clone();
+            let stop = ChangeWatch {
+                key: key.clone(),
+                watching: false,
+            };
+            Button::new(SharedString::from(format!(
+                "pr-eye-{}-{}-{}",
+                key.host, key.repository, key.number
+            )))
+            .ghost()
+            .xsmall()
+            .icon(
+                Icon::new(if hovered {
+                    IconName::EyeOff
+                } else {
+                    IconName::Eye
+                })
+                .text_color(eye_color),
+            )
+            .aria_label(
+                crate::tr!(
+                    "pull_requests.stop_watching_number",
+                    number = key.number.to_string()
+                )
+                .into_owned(),
+            )
+            .tooltip(tooltip)
+            .on_hover(crate::motion::pointer_hover(cx.listener(
+                move |this, hovered: &bool, _, cx| {
+                    let key = hovered.then(|| hover_key.clone());
+                    if this.eye_hovered != key {
+                        this.eye_hovered = key;
+                        cx.notify();
+                    }
+                },
+            )))
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                window.dispatch_action(Box::new(stop.clone()), cx);
+            })
+            .into_any_element()
+        }))
+    }
+}
+/// The second line of a row whose pull request has synced.
+fn synced_line(
+    source: String,
+    author: Option<String>,
+    branches: String,
+    layer: Option<String>,
+    stat: Option<(String, String)>,
+    compact: bool,
+    cx: &App,
+) -> AnyElement {
+    // Spacing is each part's leading margin, so a part that gives way takes its
+    // separator and its spacing with it.
+    let sep = || div().flex_none().ml_1().child("·");
+    let mono = cx.theme().mono_font_family.clone();
+    let typography = &cx.theme().tokens.typography;
+    let line_height = if compact {
+        typography.sm.line_height
+    } else {
+        typography.xs.line_height
+    };
+    h_flex()
+        .items_center()
+        .min_w_0()
+        .overflow_hidden()
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .child(crate::widgets::fade_text(source)),
+        )
+        // The author gives way first, whole: a line too narrow for it wraps it onto
+        // a second line this one-line box clips. The box is exactly one line of
+        // line 2's text tall; stretching
+        // it to the row would not do, as a stretched box takes its wrapped content's
+        // two lines. gpui has no setter for a shrink value, hence the reach into the
+        // style.
+        .when_some(author, |line, author| {
+            line.child(
+                h_flex()
+                    .flex_wrap()
+                    .h(line_height)
+                    .min_w_0()
+                    .overflow_hidden()
+                    .map(|mut group| {
+                        group.style().flex_shrink = Some(10000.);
+                        group
+                    })
+                    // An empty first item, so the author wraps rather than overflows.
+                    .child(div().h_full())
+                    .child(
+                        h_flex()
+                            .flex_none()
+                            .child(sep())
+                            .child(div().ml_1().child(crate::widgets::fade_text(author))),
+                    ),
+            )
+        })
+        // gpui-base has no middle truncation; the row tooltip holds the full pair.
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .map(|mut branches| {
+                    branches.style().flex_shrink = Some(100.);
+                    branches
+                })
+                .font_family(mono.clone())
+                .child(crate::widgets::fade_text(format!(" · {branches}"))),
+        )
+        .when_some(layer, |line, layer| {
+            line.child(sep()).child(
+                div()
+                    .flex_none()
+                    .ml_1()
+                    .child(crate::widgets::fade_text(layer)),
+            )
+        })
+        .when_some(stat, |line, (additions, deletions)| {
+            line.child(sep())
+                .child(
+                    div()
+                        .flex_none()
+                        .ml_1()
+                        .font_family(mono.clone())
+                        .text_color(cx.theme().success)
+                        .child(additions),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .ml_1()
+                        .font_family(mono)
+                        .text_color(cx.theme().danger)
+                        .child(crate::widgets::fade_text(deletions)),
+                )
+        })
+        .into_any_element()
+}
+/// The checks, review and conflict signals of an open pull request.
+fn snapshot_signals(
+    mut signals: gpui::Div,
+    row_key: &gpui::ElementId,
+    snapshot: Option<&PullRequestSnapshot>,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::Div {
+    let open_snapshot = snapshot.filter(|s| s.state == PullRequestState::Open);
+    if let Some(check) = crate::motion::shown(
+        (row_key.clone(), "checks"),
+        open_snapshot.and_then(|s| s.checks_state),
+        SHOW,
+        window,
+        cx,
+    ) {
+        let (icon, color, label) = checks_appearance(check.value, cx);
+        signals = signals.child(
+            check.fold_across(
+                div().pl_1().child(
+                    div()
+                        .id("pr-signal-checks")
+                        .child(crate::motion::status_icon(
+                            (row_key.clone(), "checks-icon"),
+                            icon,
+                            color,
+                            CHANGE,
+                            window,
+                            cx,
+                        ))
+                        .with_tooltip(move |_, _| {
+                            crate::widgets::tooltip::Tooltip::new(crate::tr!(label).into_owned())
+                        }),
+                ),
+            ),
+        );
+    }
+    if let Some(review) = crate::motion::shown(
+        (row_key.clone(), "review"),
+        open_snapshot.and_then(|s| s.review_decision),
+        SHOW,
+        window,
+        cx,
+    ) {
+        let (icon, color, label) = review_appearance(review.value, cx);
+        signals = signals.child(
+            review.fold_across(
+                div().pl_1().child(
+                    div()
+                        .id("pr-signal-review")
+                        .child(crate::motion::status_icon(
+                            (row_key.clone(), "review-icon"),
+                            icon,
+                            color,
+                            CHANGE,
+                            window,
+                            cx,
+                        ))
+                        .with_tooltip(move |_, _| {
+                            crate::widgets::tooltip::Tooltip::new(crate::tr!(label).into_owned())
+                        }),
+                ),
+            ),
+        );
+    }
+    if let Some(conflict) = crate::motion::shown(
+        (row_key.clone(), "conflict"),
+        open_snapshot
+            .filter(|s| s.mergeability == Mergeability::Conflicting)
+            .map(|s| s.base_branch.clone()),
+        SHOW,
+        window,
+        cx,
+    ) {
+        let base = conflict.value.clone();
+        signals = signals.child(
+            conflict.fold_across(
+                div().pl_1().child(
+                    div()
+                        .id("pr-conflict")
+                        .child(Icon::new(IconName::GitMergeConflict).text_color(cx.theme().warning))
+                        .with_tooltip(move |_, _| {
+                            crate::widgets::tooltip::Tooltip::new(
+                                crate::tr!("pull_requests.conflict", base = base.clone())
+                                    .into_owned(),
+                            )
+                        }),
+                ),
+            ),
+        );
+    }
+    signals
 }
 /// Every tool and text Tcode injects into a thread's provider, grouped by the
 /// server that offers it.
@@ -2114,112 +2150,7 @@ impl PullRequestsPanel {
             .session_status_for(session.as_deref(), cx)
             .and_then(|status| status.injected_tools.clone());
         let compact = self.window_state.read(cx).compact;
-        let mut entries: Vec<(SharedString, ListEntry)> = Vec::new();
-        // One notice per host whose pull requests cannot sync, in the order the links name them.
-        let mut hosts = Vec::new();
-        for link in &links {
-            if !hosts.contains(&link.key.host) {
-                hosts.push(link.key.host.clone());
-            }
-        }
-        for host in hosts {
-            let notice = links
-                .iter()
-                .filter(|link| link.visible() && link.snapshot.is_none() && link.key.host == host)
-                .find_map(|link| {
-                    let credential = matches!(
-                        link.sync_error,
-                        Some(
-                            PullRequestSyncError::NoCredential | PullRequestSyncError::HostDisabled
-                        )
-                    );
-                    let rate_limited = matches!(
-                        link.sync_error,
-                        Some(PullRequestSyncError::RateLimited { .. })
-                    );
-                    (credential || rate_limited).then(|| {
-                        (
-                            sync_error(
-                                link,
-                                &host_name(self.store.read(cx), &host),
-                                self.store.read(cx).host_now_secs(cx),
-                            ),
-                            credential,
-                        )
-                    })
-                });
-            if let Some((text, credential)) = notice {
-                entries.push((
-                    SharedString::from(format!("notice-{host}")),
-                    ListEntry::Notice {
-                        host,
-                        text,
-                        credential,
-                    },
-                ));
-            }
-        }
-        let shared: std::rc::Rc<[ThreadPullRequestLink]> = links.clone().into();
-        let row_key = |key: &PullRequestKey| {
-            SharedString::from(format!(
-                "row-{}/{}#{}",
-                key.host, key.repository, key.number
-            ))
-        };
-        for group in pull_request::groups(&links) {
-            if let Some(stack) = group.stack {
-                let anchor = group.links[0];
-                let operation =
-                    tcode_core::pull_request::stack_operation(&operations, &links, &anchor.key)
-                        .cloned();
-                entries.push((
-                    SharedString::from(format!(
-                        "stack-{}/{}#{}",
-                        anchor.key.host, anchor.key.repository, anchor.key.number
-                    )),
-                    ListEntry::Caption {
-                        stack: stack.clone(),
-                        operation,
-                        links: shared.clone(),
-                    },
-                ));
-                for (index, layer) in stack.layers.iter().enumerate() {
-                    let key =
-                        PullRequestKey::new(&anchor.key.host, &anchor.key.repository, layer.number);
-                    let link = links
-                        .iter()
-                        .find(|link| link.key == key)
-                        .map(|link| Box::new(link.clone()));
-                    entries.push((
-                        row_key(&key),
-                        ListEntry::Row {
-                            key,
-                            url: layer.url.clone(),
-                            link,
-                            branch: Some(layer.head_branch.clone()),
-                            state: Some(layer.state),
-                            position: Some((index + 1, stack.layers.len())),
-                            depth: index,
-                        },
-                    ));
-                }
-            } else {
-                for (index, link) in group.links.iter().enumerate() {
-                    entries.push((
-                        row_key(&link.key),
-                        ListEntry::Row {
-                            key: link.key.clone(),
-                            url: link.url.clone(),
-                            link: Some(Box::new((*link).clone())),
-                            branch: None,
-                            state: None,
-                            position: None,
-                            depth: index,
-                        },
-                    ));
-                }
-            }
-        }
+        let entries = list_entries(&links, &operations, store, cx);
         // A row, caption or notice that comes or goes folds in or away carrying the gap above
         // it, and one whose place changes (a reorder, a pull request joining a stack) glides
         // there; the list starts a gap early so the first one sits at its top.
@@ -2388,36 +2319,7 @@ impl PullRequestsPanel {
                 .children(agent_tools)
                 .into_any_element();
         }
-        let open = links
-            .iter()
-            .filter(|link| {
-                link.visible()
-                    && link
-                        .snapshot
-                        .as_ref()
-                        .is_some_and(|s| s.state == PullRequestState::Open)
-            })
-            .count();
-        let mut summary = format!(
-            "{} · {}",
-            crate::tr!("pull_requests.summary_open", count = open.to_string()),
-            crate::tr!("pull_requests.summary_linked", count = count.to_string())
-        );
-        if let Some(synced) = links
-            .iter()
-            .filter_map(|link| link.snapshot.as_ref().map(|snapshot| snapshot.synced_at))
-            .max()
-        {
-            summary.push_str(&format!(
-                " · {}",
-                crate::tr!(
-                    "pull_requests.summary_synced",
-                    ago = crate::time::humanize_ago(
-                        self.store.read(cx).host_now_secs(cx).saturating_sub(synced)
-                    )
-                )
-            ));
-        }
+        let summary = self.summary(&links, count, cx);
         let summary = div().flex_1().text_secondary(compact, cx).child(summary);
         if compact {
             // The bottom sheet scrolls its own content, so the list keeps its natural height.
@@ -2479,6 +2381,148 @@ impl PullRequestsPanel {
             )
             .into_any_element()
     }
+    /// How many pull requests are open and linked, and how long ago the newest sync was.
+    fn summary(&self, links: &[ThreadPullRequestLink], count: usize, cx: &App) -> String {
+        let open = links
+            .iter()
+            .filter(|link| {
+                link.visible()
+                    && link
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|s| s.state == PullRequestState::Open)
+            })
+            .count();
+        let mut summary = format!(
+            "{} · {}",
+            crate::tr!("pull_requests.summary_open", count = open.to_string()),
+            crate::tr!("pull_requests.summary_linked", count = count.to_string())
+        );
+        if let Some(synced) = links
+            .iter()
+            .filter_map(|link| link.snapshot.as_ref().map(|snapshot| snapshot.synced_at))
+            .max()
+        {
+            summary.push_str(&format!(
+                " · {}",
+                crate::tr!(
+                    "pull_requests.summary_synced",
+                    ago = crate::time::humanize_ago(
+                        self.store.read(cx).host_now_secs(cx).saturating_sub(synced)
+                    )
+                )
+            ));
+        }
+        summary
+    }
+}
+/// The notices, captions and rows the list shows, in order, each under its key.
+fn list_entries(
+    links: &[ThreadPullRequestLink],
+    operations: &[pull_request::PullRequestStackOperation],
+    store: &WorkspaceStore,
+    cx: &App,
+) -> Vec<(SharedString, ListEntry)> {
+    let mut entries: Vec<(SharedString, ListEntry)> = Vec::new();
+    // One notice per host whose pull requests cannot sync, in the order the links name them.
+    let mut hosts = Vec::new();
+    for link in links {
+        if !hosts.contains(&link.key.host) {
+            hosts.push(link.key.host.clone());
+        }
+    }
+    for host in hosts {
+        let notice = links
+            .iter()
+            .filter(|link| link.visible() && link.snapshot.is_none() && link.key.host == host)
+            .find_map(|link| {
+                let credential = matches!(
+                    link.sync_error,
+                    Some(PullRequestSyncError::NoCredential | PullRequestSyncError::HostDisabled)
+                );
+                let rate_limited = matches!(
+                    link.sync_error,
+                    Some(PullRequestSyncError::RateLimited { .. })
+                );
+                (credential || rate_limited).then(|| {
+                    (
+                        sync_error(link, &host_name(store, &host), store.host_now_secs(cx)),
+                        credential,
+                    )
+                })
+            });
+        if let Some((text, credential)) = notice {
+            entries.push((
+                SharedString::from(format!("notice-{host}")),
+                ListEntry::Notice {
+                    host,
+                    text,
+                    credential,
+                },
+            ));
+        }
+    }
+    let shared: std::rc::Rc<[ThreadPullRequestLink]> = links.into();
+    let row_key = |key: &PullRequestKey| {
+        SharedString::from(format!(
+            "row-{}/{}#{}",
+            key.host, key.repository, key.number
+        ))
+    };
+    for group in pull_request::groups(links) {
+        if let Some(stack) = group.stack {
+            let anchor = group.links[0];
+            let operation =
+                tcode_core::pull_request::stack_operation(operations, links, &anchor.key).cloned();
+            entries.push((
+                SharedString::from(format!(
+                    "stack-{}/{}#{}",
+                    anchor.key.host, anchor.key.repository, anchor.key.number
+                )),
+                ListEntry::Caption {
+                    stack: stack.clone(),
+                    operation,
+                    links: shared.clone(),
+                },
+            ));
+            for (index, layer) in stack.layers.iter().enumerate() {
+                let key =
+                    PullRequestKey::new(&anchor.key.host, &anchor.key.repository, layer.number);
+                let link = links
+                    .iter()
+                    .find(|link| link.key == key)
+                    .map(|link| Box::new(link.clone()));
+                entries.push((
+                    row_key(&key),
+                    ListEntry::Row {
+                        key,
+                        url: layer.url.clone(),
+                        link,
+                        branch: Some(layer.head_branch.clone()),
+                        state: Some(layer.state),
+                        position: Some((index + 1, stack.layers.len())),
+                        depth: index,
+                    },
+                ));
+            }
+        } else {
+            for (index, link) in group.links.iter().enumerate() {
+                entries.push((
+                    row_key(&link.key),
+                    ListEntry::Row {
+                        key: link.key.clone(),
+                        url: link.url.clone(),
+                        link: Some(Box::new((*link).clone())),
+                        branch: None,
+                        state: None,
+                        position: None,
+                        depth: index,
+                    },
+                ));
+            }
+        }
+    }
+    entries
 }
 
 struct LinkDialog {
