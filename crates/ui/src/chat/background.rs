@@ -204,7 +204,7 @@ pub(in crate::chat) fn stop_all(
     let (store, session_id) = (store.clone(), session_id.map(str::to_owned));
     let stop = Button::new("background-stop-all")
         .debug_selector(|| "background-stop-all".into())
-        .ghost()
+        .outline()
         .xsmall()
         .touch(touch)
         .text_secondary(touch, cx)
