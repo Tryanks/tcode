@@ -90,7 +90,7 @@ use crate::composer_trigger::{
     ComposerTrigger, TriggerKind, detect_composer_trigger, serialize_composer_file_link,
 };
 use crate::context_meter;
-use crate::palette::fuzzy_score;
+use crate::fuzzy::fuzzy_score;
 use crate::provider_card::profile_glyph;
 use crate::settings::provider_label;
 use crate::shortcut::format_secondary_shortcut;

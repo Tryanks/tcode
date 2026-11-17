@@ -1323,7 +1323,7 @@ impl AppShell {
         }
         if DevicePreferences::adopt(&store.settings(), cx) {
             crate::settings::apply_locale(DevicePreferences::language(cx).as_deref());
-            crate::settings_page::apply_theme(DevicePreferences::theme(cx), window, cx);
+            crate::theme::apply_theme(DevicePreferences::theme(cx), window, cx);
         }
     }
 }

@@ -1,6 +1,6 @@
-
 use super::*;
 use gpui::{AppContext as _, Render, TestAppContext};
+use tcode_client::host::FileFailure;
 
 #[cfg(feature = "remote-hosting")]
 struct PairingProbe(Entity<RemotePanel>);

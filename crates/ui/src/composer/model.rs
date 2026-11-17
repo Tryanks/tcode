@@ -5,7 +5,7 @@ use agent::{
 use chrono::{DateTime, Local, LocalResult, NaiveTime, TimeZone as _};
 use tcode_core::ui::ConversationDestination;
 
-use crate::palette::fuzzy_score;
+use crate::fuzzy::fuzzy_score;
 
 pub(super) enum SlashIntent {
     Model,

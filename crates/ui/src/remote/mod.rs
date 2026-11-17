@@ -18,13 +18,13 @@
 use std::rc::Rc;
 
 use gpui::{
-    Action, AnyElement, App, Context, Entity, Global, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    Action, AnyElement, App, Context, Entity, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement as _, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{InteractiveElementExt as _, h_flex, v_flex};
 use serde::Deserialize;
-use tcode_client::host::{ClientHost, FileFailure};
+use tcode_client::host::ClientHost;
 use tcode_client::pairing::PairedHost;
 
 use crate::icon::{Icon, IconName};
@@ -74,35 +74,7 @@ pub(crate) use spaces::SpacesSection;
 #[cfg(feature = "remote-hosting")]
 pub use traverse::TraversePanel;
 
-/// Where this window's workspace comes from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AttachmentTarget {
-    Local,
-    Remote(Box<PairedHost>),
-}
-
-impl AttachmentTarget {
-    pub fn key(&self) -> HostKey {
-        match self {
-            Self::Local => HostKey::Local,
-            Self::Remote(host) => HostKey::Remote(host.host_id.clone()),
-        }
-    }
-}
-
-/// What the window is asked to do with a host.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HostRequest {
-    /// Show `target` in the workspace beside the hosts already there; a
-    /// host that is reached only alone replaces them.
-    Open(AttachmentTarget),
-    /// Take the host out of the workspace, keeping its saved record.
-    Leave(HostKey),
-    /// Move the host one place earlier, or later, among the workspace's.
-    Move { host: HostKey, earlier: bool },
-}
-
-pub type RequestHost = Rc<dyn Fn(HostRequest, &mut Window, &mut App)>;
+pub use crate::attachment::{AttachmentTarget, ClientAttachment, HostRequest, RequestHost};
 
 /// Leave the workspace of the host this row names, keeping the saved record.
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
@@ -124,56 +96,6 @@ struct MoveHost {
 #[action(namespace = tcode_hosts, no_json)]
 struct ForgetHost(String);
 
-/// The client's own identity and the way to ask this window for a host.
-///
-/// It is deliberately separate from hosting: a client that can never host still
-/// needs saved hosts, a device name and a way to open one.
-pub struct ClientAttachment {
-    host: Rc<dyn ClientHost>,
-    local: bool,
-    request: RequestHost,
-}
-
-impl Global for ClientAttachment {}
-
-impl ClientAttachment {
-    /// `local` is whether bootstrap gave this window a host inside its own
-    /// process. A phone or browser has none, so "back to local" is not a thing
-    /// it can be offered.
-    pub fn new(
-        host: Rc<dyn ClientHost>,
-        local: bool,
-        request: impl Fn(HostRequest, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        Self {
-            host,
-            local,
-            request: Rc::new(request),
-        }
-    }
-
-    /// Whether [`AttachmentTarget::Local`] is reachable from this window.
-    pub fn can_attach_local(&self) -> bool {
-        self.local
-    }
-
-    pub fn host(&self) -> Rc<dyn ClientHost> {
-        self.host.clone()
-    }
-
-    pub fn requester(&self) -> RequestHost {
-        self.request.clone()
-    }
-
-    pub fn save_host(&self, host: PairedHost) -> Result<(), FileFailure> {
-        self.host.remember_host(host)
-    }
-
-    pub fn remove_host(&self, host_id: &str) -> Result<(), FileFailure> {
-        self.host.remove_host(host_id)
-    }
-}
-
 /// The name of the machine this process hosts, where it hosts one.
 pub(crate) fn local_machine_name(cx: &App) -> Option<String> {
     #[cfg(feature = "remote-hosting")]
@@ -191,7 +113,7 @@ pub(crate) fn local_machine_name(cx: &App) -> Option<String> {
 /// Open a *client-local* path in the user's editor through whatever integration
 /// this client was given. `None` when it has none.
 pub(crate) fn open_in_editor(path: &std::path::Path, cx: &App) -> Option<Result<(), String>> {
-    cx.global::<ClientAttachment>().host.open_in_editor(path)
+    cx.global::<ClientAttachment>().host().open_in_editor(path)
 }
 
 /// The Open in Zed entry a host's paths get.
@@ -212,7 +134,7 @@ impl ZedEntry {
             "chat.open_zed"
         } else if cx
             .global::<ClientAttachment>()
-            .host
+            .host()
             .machine_editor()
             .is_some()
         {
@@ -276,7 +198,7 @@ pub(crate) fn open_host_path_in_zed(
         crate::widgets::menu::open_in_zed(path, window, cx);
         return;
     }
-    let Some(editor) = cx.global::<ClientAttachment>().host.machine_editor() else {
+    let Some(editor) = cx.global::<ClientAttachment>().host().machine_editor() else {
         return;
     };
     let Some((machine, tunnels)) = store.read(cx).machine_tunnels() else {
@@ -645,7 +567,7 @@ impl RemotePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let fixed_machine = cx.global::<ClientAttachment>().host.fixed_machine();
+        let fixed_machine = cx.global::<ClientAttachment>().host().fixed_machine();
         let form = PairForm::new(window, cx);
         // A link that parses is the whole request, so it is sent as soon as
         // it lands in the field; Enter and the button only cover a retry.

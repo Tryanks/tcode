@@ -62,6 +62,7 @@ use tcode_protocol::PreviewResponse;
 
 use crate::icon::IconName;
 use crate::material;
+use crate::preview_backend;
 use crate::store::{PreviewPlace, PreviewReleased, WorkspaceStore};
 use crate::theme::ActiveTheme as _;
 use crate::widgets::input::{Input, InputEvent, InputState};
@@ -71,17 +72,6 @@ use crate::window_state::{Route, WindowState};
 
 /// How long a part drawn here takes to cross-fade to another of its states.
 const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
-
-/// Whether this client can embed a browser. Views ask before offering an action
-/// that needs one, so nothing renders an enabled control that cannot work.
-///
-/// A build with a backend offers the Preview wherever it runs; what the
-/// machine lacks for it (WebKitGTK, which `gtk_dlopen` loads when the first
-/// page is built, or a runtime directory for the Wayland nest's socket) is
-/// said in the panel when no page opens.
-pub(crate) fn preview_backend() -> bool {
-    cfg!(preview_backend)
-}
 
 #[cfg(preview_backend)]
 mod capture;

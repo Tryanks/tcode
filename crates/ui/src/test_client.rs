@@ -58,7 +58,7 @@ pub(crate) fn dictate_with(recognizer: Rc<dyn SpeechRecognizer>, cx: &mut App) {
 /// This client is `host`, with or without a host in its own process, and
 /// asks the window's shell for a host as the running app does.
 pub(crate) fn attach(host: Rc<dyn ClientHost>, local: bool, cx: &mut App) {
-    cx.set_global(crate::remote::ClientAttachment::new(
+    cx.set_global(crate::attachment::ClientAttachment::new(
         host,
         local,
         crate::shell::request_host,

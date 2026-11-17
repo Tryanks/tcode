@@ -871,7 +871,7 @@ impl AppShell {
             crate::settings::apply_locale(DevicePreferences::language(cx).as_deref());
         }
         if let Some(mode) = DevicePreferences::appearance(cx) {
-            crate::settings_page::apply_theme(mode, window, cx);
+            crate::theme::apply_theme(mode, window, cx);
         }
         let mut restored = match setup.reopen.take() {
             Some(place) => {

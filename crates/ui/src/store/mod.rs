@@ -717,7 +717,7 @@ impl WorkspaceStore {
     /// embed a browser. A browser tab already reaches the machine by address,
     /// so a dev server listening on the LAN opens in a new tab there instead.
     pub(crate) fn offers_preview(&self) -> bool {
-        self.scope.is_full() && crate::preview_panel::preview_backend()
+        self.scope.is_full() && crate::preview_backend()
     }
 
     fn index_topic(&self) -> Topic {
@@ -843,7 +843,7 @@ impl WorkspaceStore {
                 }
                 // Only a client that can render pages offers to: the host
                 // hands an agent's requests to a client that renders them.
-                if crate::preview_panel::preview_backend() {
+                if crate::preview_backend() {
                     self.offer_preview();
                 }
                 for session_id in self.open_threads() {

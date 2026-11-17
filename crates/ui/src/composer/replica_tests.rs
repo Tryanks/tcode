@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::test_frames::draw_settled;
 use gpui::{Modifiers, TestAppContext};

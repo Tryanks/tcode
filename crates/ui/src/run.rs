@@ -177,7 +177,7 @@ pub fn open_client_window<V: Render>(
             window
                 .observe_window_appearance(|window, cx| {
                     if crate::device::DevicePreferences::theme(cx) == ThemeMode::System {
-                        crate::settings_page::apply_theme(ThemeMode::System, window, cx);
+                        crate::theme::apply_theme(ThemeMode::System, window, cx);
                     }
                 })
                 .detach();

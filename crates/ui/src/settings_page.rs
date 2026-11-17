@@ -37,7 +37,7 @@ use crate::settings::{
     ImageMode, LANGUAGE_ENGLISH, LANGUAGE_JAPANESE, LANGUAGE_SIMPLIFIED_CHINESE, ThemeMode,
 };
 use crate::store::{StoreChange, TopicKind, WorkspaceStore};
-use crate::theme::{self, ActiveTheme as _, ThemeMode as UiThemeMode};
+use crate::theme::ActiveTheme as _;
 use crate::time::humanize_ago;
 use crate::typography::TextRole as _;
 use crate::window_caption;
@@ -278,7 +278,7 @@ impl SettingsCapabilities {
         #[cfg(not(feature = "remote-hosting"))]
         let hosting = cfg!(target_family = "wasm");
         Self {
-            preview_backend: crate::preview_panel::preview_backend(),
+            preview_backend: crate::preview_backend(),
             hosting,
             local_permissions: cfg!(all(feature = "local-permissions", target_os = "macos")),
             remote_attachment: store.is_remote(),
@@ -499,17 +499,6 @@ impl SettingsInput {
         self.state
             .update(cx, |input, cx| input.set_value(value, window, cx));
     }
-}
-
-/// Apply a settings theme mode to the live window (shared with the palette's
-/// "Toggle theme" action), its colours gliding to the new palette.
-pub(crate) fn apply_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
-    let mode = match mode {
-        ThemeMode::Light => UiThemeMode::Light,
-        ThemeMode::Dark => UiThemeMode::Dark,
-        ThemeMode::System => window.appearance().into(),
-    };
-    theme::glide_mode(mode, window, cx);
 }
 
 pub struct SettingsPage {

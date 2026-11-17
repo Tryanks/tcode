@@ -19,6 +19,7 @@ use std::time::Duration;
 /// How long a result takes to come into the list as the query changes.
 const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
 
+use crate::fuzzy::fuzzy_score;
 use crate::icon::{Icon, IconName};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -48,33 +49,6 @@ const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
 /// How far below the window's top the desktop palette hangs. See the host's
 /// note in [`CommandPalette`]'s render on why it does not use `overlay::Dialog`.
 const DESKTOP_TOP_OFFSET: f32 = 96.;
-
-/// Score `text` against a fuzzy `query` (case-insensitive subsequence match).
-/// Returns `None` when `query` is not a subsequence of `text`; a higher score
-/// is a better match (consecutive and earlier hits score more). An empty query
-/// matches everything with score 0.
-pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
-    if query.is_empty() {
-        return Some(0);
-    }
-    let q: Vec<char> = query.to_lowercase().chars().collect();
-    let t: Vec<char> = text.to_lowercase().chars().collect();
-    let mut qi = 0usize;
-    let mut score = 0i32;
-    let mut last: Option<usize> = None;
-    for (ti, tc) in t.iter().enumerate() {
-        if qi < q.len() && *tc == q[qi] {
-            match last {
-                Some(prev) if ti == prev + 1 => score += 10, // consecutive
-                Some(_) => score += 1,
-                None => score += 5 - (ti.min(5) as i32), // earlier first hit
-            }
-            last = Some(ti);
-            qi += 1;
-        }
-    }
-    (qi == q.len()).then_some(score)
-}
 
 /// A concrete action a palette row triggers.
 #[derive(Clone)]
@@ -1725,31 +1699,6 @@ mod tests {
                 palette.on_key_down(&event, window, cx);
             });
         });
-    }
-
-    #[test]
-    fn fuzzy_search_matches_subsequences_and_prefers_early_contiguous_hits() {
-        for (query, text, matches) in [
-            ("", "", true),
-            ("", "anything", true),
-            ("x", "", false),
-            ("xyz", "New thread", false),
-            ("ttt", "cat", false),
-            ("nt", "New thread", true),
-            ("NEW", "new thread", true),
-            ("é文", "Éditer 文档", true),
-            ("文é", "Éditer 文档", false),
-        ] {
-            assert_eq!(
-                fuzzy_score(query, text).is_some(),
-                matches,
-                "{query:?} in {text:?}"
-            );
-        }
-        let contiguous = fuzzy_score("set", "settings").unwrap();
-        let scattered = fuzzy_score("set", "some effort table").unwrap();
-        assert!(contiguous > scattered, "{contiguous} !> {scattered}");
-        assert!(contiguous > fuzzy_score("set", "reset").unwrap());
     }
 
     /// The project picker is one list over the host's projects and its
