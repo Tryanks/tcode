@@ -575,7 +575,8 @@ fn native_retry_keeps_queue_waiting_and_cancellation_releases_it() {
 }
 
 /// A usage limit the harness reports queues the resume prompt for when the
-/// limit resets, unless the user turned that off.
+/// limit resets, unless the user turned that off, and is told to the window
+/// once for the account.
 #[test]
 fn usage_limit_event_schedules_resume_when_enabled_only() {
     let cx = &mut TestAppContext::default();
@@ -609,6 +610,23 @@ fn usage_limit_event_schedules_resume_when_enabled_only() {
         provider.play([AgentEvent::UsageLimitReached { resets_at }]);
         provider.fence(cx, id);
     }
+    // Both threads run on one account, whose window is told once.
+    let told = cx
+        .drain_outgoing()
+        .into_iter()
+        .filter(|message| {
+            matches!(
+                message,
+                HostMessage::Event(EventEnvelope {
+                    event: ServerEvent::Runtime(tcode_protocol::RuntimeNotification::Notice(
+                        RuntimeNotice::UsageLimitReached { .. }
+                    )),
+                    ..
+                })
+            )
+        })
+        .count();
+    assert_eq!(told, 1);
     let queued = &cx.seen().status("resume-enabled").queued_messages;
     assert_eq!(queued.len(), 1);
     assert_eq!(queued[0].text, tcode_core::session::RESUME_PROMPT);
