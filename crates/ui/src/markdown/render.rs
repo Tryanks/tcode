@@ -1311,6 +1311,8 @@ fn cached_highlights(code: &CodeBlock, theme: &HighlightTheme) -> SharedHighligh
     runs
 }
 
+/// The lines `span` of `code` as it was written: a line longer than the
+/// block is not broken, and the block scrolls sideways to it.
 fn render_code_lines(
     code: &CodeBlock,
     span: Range<usize>,
@@ -1318,6 +1320,8 @@ fn render_code_lines(
     view: &Entity<MarkdownState>,
     cx: &mut App,
 ) -> AnyElement {
+    let scroll = view.read(cx).code_scroll(path);
+    let viewport_id = SharedString::from(format!("{path}-lines@{}", span.start));
     let path = super::selection::render_path(path);
     let prepared = code.prepared();
     let highlighted = cached_highlights(code, &cx.theme().highlight_theme);
@@ -1330,7 +1334,7 @@ fn render_code_lines(
         let line = div()
             .id(("code-line", ix))
             .min_h(px(18.))
-            .whitespace_normal()
+            .whitespace_nowrap()
             .font_family(mono_font_family.clone())
             .text_size(cx.theme().tokens.typography.mono_md.size)
             .child(
@@ -1340,9 +1344,25 @@ fn render_code_lines(
             .debug_selector(move || format!("markdown-code-line-{ix}"));
         rendered_lines.push(line);
     }
-    v_flex()
+    let lines = v_flex()
+        .flex_none()
+        .min_w(scroll.width.get())
+        .children(rendered_lines);
+    let (width, entity) = (scroll.width.clone(), view.entity_id());
+    div()
         .w_full()
-        .children(rendered_lines)
+        .flex()
+        .on_children_prepainted(move |bounds, _, cx| {
+            let laid_out = bounds.first().map_or(px(0.), |lines| lines.size.width);
+            if laid_out > width.get() {
+                width.set(laid_out);
+                cx.notify(entity);
+            }
+        })
+        .id(viewport_id)
+        .overflow_x_scroll_area()
+        .track_scroll(&scroll.handle)
+        .child(lines)
         .into_any_element()
 }
 
@@ -1449,7 +1469,7 @@ fn code_lines(
     match &options.measurement {
         Some(measurement) => div()
             .w_full()
-            .whitespace_normal()
+            .whitespace_nowrap()
             .font_family(cx.theme().mono_font_family.clone())
             .text_size(cx.theme().tokens.typography.mono_md.size)
             .child(CodeSliceMeasure {
