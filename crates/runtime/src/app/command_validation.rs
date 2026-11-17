@@ -36,13 +36,15 @@ impl AppState {
             message: message.into(),
         };
         self.validate_plugin_command(command)?;
-        if matches!(command, Command::RegenerateSessionTitle { .. }) {
-            let title = &self.settings.title_generation;
+        if let Command::RegenerateSessionTitle { session_id } = command
+            && let Some(thread) = self.sessions.iter().find(|meta| &meta.id == session_id)
+        {
+            let title = self.title_session_meta(thread, None);
             provider_execution::resolve_selection(
                 &self.settings,
                 title.provider,
                 title.profile_id.as_deref(),
-                None,
+                title.acp_agent_id.as_deref(),
             )?;
         }
 

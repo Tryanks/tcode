@@ -553,45 +553,19 @@ impl FavoriteModel {
     }
 }
 
-/// Provider and model used for the isolated, background request that names a
-/// thread, initially or on request. Reasoning effort is intentionally fixed to
-/// `low` by the runtime: title generation is a small, latency-sensitive task.
+/// The account and model the user chose for the isolated, background request
+/// that names a thread, initially or on request. Unset, the host names each
+/// thread on that thread's own account. Reasoning effort is intentionally
+/// fixed to `low` by the runtime: title generation is a small,
+/// latency-sensitive task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TitleGenerationSettings {
-    #[serde(default = "default_title_provider")]
     pub provider: ProviderKind,
-    #[serde(default = "default_title_model")]
     pub model: String,
     /// Which provider profile (endpoint config) the dispatch launches against;
     /// `None` = the kind's built-in profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
-}
-
-pub const DEFAULT_TITLE_MODEL: &str = "gpt-5.6-luna";
-
-fn default_title_provider() -> ProviderKind {
-    ProviderKind::Codex
-}
-
-fn default_title_model() -> String {
-    DEFAULT_TITLE_MODEL.to_string()
-}
-
-impl Default for TitleGenerationSettings {
-    fn default() -> Self {
-        Self {
-            provider: default_title_provider(),
-            model: default_title_model(),
-            profile_id: None,
-        }
-    }
-}
-
-impl TitleGenerationSettings {
-    fn is_default(&self) -> bool {
-        self == &Self::default()
-    }
 }
 
 /// When a computer-use observation carries a screenshot alongside the folded
@@ -711,9 +685,7 @@ pub enum SettingsPatch {
         value: Option<crate::control::ControlGrant>,
     },
     SettlementAutomation(crate::control::SettlementAutomation),
-    TitleGenerationProvider(ProviderKind),
-    TitleGenerationModel(String),
-    TitleGenerationProfileId(Option<String>),
+    TitleGeneration(Option<TitleGenerationSettings>),
     SidebarLayout(SidebarLayout),
     RemoteHostingEnabled(bool),
     Traverse(TraverseSetting),
@@ -1011,8 +983,8 @@ pub struct Settings {
     )]
     pub settlement_automation: crate::control::SettlementAutomation,
     /// Provider/model used to generate a concise title for new threads.
-    #[serde(default, skip_serializing_if = "TitleGenerationSettings::is_default")]
-    pub title_generation: TitleGenerationSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_generation: Option<TitleGenerationSettings>,
     /// Ids of project groups the user has collapsed in the sidebar.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collapsed_projects: Vec<String>,
@@ -1148,7 +1120,7 @@ impl Default for Settings {
             browser: BrowserSettings::default(),
             control: crate::control::ControlSettings::default(),
             settlement_automation: crate::control::SettlementAutomation::default(),
-            title_generation: TitleGenerationSettings::default(),
+            title_generation: None,
             collapsed_projects: Vec::new(),
             favorite_models: Vec::new(),
             project_sort: ProjectSort::default(),
@@ -1291,13 +1263,7 @@ impl Settings {
                 }
             },
             SettingsPatch::SettlementAutomation(value) => self.settlement_automation = value,
-            SettingsPatch::TitleGenerationProvider(value) => {
-                self.title_generation.provider = value;
-            }
-            SettingsPatch::TitleGenerationModel(value) => self.title_generation.model = value,
-            SettingsPatch::TitleGenerationProfileId(value) => {
-                self.title_generation.profile_id = value;
-            }
+            SettingsPatch::TitleGeneration(value) => self.title_generation = value,
             SettingsPatch::SidebarLayout(value) => self.sidebar_layout = value,
             SettingsPatch::RemoteHostingEnabled(value) => self.remote_hosting_enabled = value,
             SettingsPatch::Traverse(value) => self.traverse = TraverseSetting::new(value.sources),
@@ -1686,7 +1652,7 @@ mod tests {
         assert!(!legacy.remote_hosting_enabled);
         assert_eq!(legacy.remote_host_name, None);
         assert!(legacy.profiles.is_empty());
-        assert_eq!(legacy.title_generation.profile_id, None);
+        assert_eq!(legacy.title_generation, None);
         assert!(!legacy.computer_use.enabled);
         assert!(legacy.browser.enabled);
         assert!(legacy.browser.allow_evaluate);
@@ -1709,7 +1675,7 @@ mod tests {
         assert!(!partial.browser.enabled);
         assert!(partial.browser.allow_evaluate);
         assert!(!partial.subagents.child_worktrees);
-        assert_eq!(partial.title_generation.profile_id, None);
+        assert_eq!(partial.title_generation.unwrap().profile_id, None);
     }
 
     #[test]

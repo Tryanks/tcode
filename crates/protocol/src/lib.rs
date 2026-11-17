@@ -362,6 +362,9 @@ pub use wire::{
 // Unreleased: the timeline gains the warning entry, and RuntimeNotice loses
 // provider_message. The agent event stream and the timeline gain
 // request_retry, and RuntimeNotice gains usage_limit_reached.
+// SettingsPatch's title_generation_provider, title_generation_model and
+// title_generation_profile_id become one title_generation, and Settings'
+// title_generation is absent while no title model is chosen.
 pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]

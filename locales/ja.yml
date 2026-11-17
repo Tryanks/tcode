@@ -627,8 +627,9 @@ settings:
     description: "使用量の上限に達して Claude Code がターンを停止した場合、上限がリセットされると Tcode がターンを再開します。オフの場合は、エラーカードのボタンから手動で再開を予約できます。"
   title_generation:
     title: "スレッドタイトルのモデル"
-    description: "スレッドタイトルの生成と再生成に使用します。推論レベルは常に「低」です。"
+    description: "スレッドタイトルの生成と再生成に使用します。推論レベルは常に「低」です。自動では、各スレッドをそのスレッド自身のアカウントで命名し、アカウントに小型モデルがあればそれを使います。"
 model_picker:
+  automatic: "自動"
   no_models: "利用できるモデルがありません。"
   models_unlisted: "モデルの一覧を取得できませんでした: %{error}"
 computer_use:

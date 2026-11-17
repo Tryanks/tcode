@@ -55,39 +55,42 @@ pub(crate) struct ProviderModelPicker {
 impl EventEmitter<ModelSelected> for ProviderModelPicker {}
 
 impl ProviderModelPicker {
+    /// A picker showing `selected`, a provider, model and profile, or
+    /// "Automatic" while nothing is chosen.
     pub fn selection(
         store: Entity<WorkspaceStore>,
         popover_id: &'static str,
         trigger_id: &'static str,
-        provider: ProviderKind,
-        model: impl Into<String>,
-        profile_id: Option<String>,
+        selected: Option<(ProviderKind, String, Option<String>)>,
         cx: &mut Context<Self>,
     ) -> Self {
         let store_subscription =
             observe_store_topics(&store, &[TopicKind::Settings, TopicKind::Providers], cx);
-        let model = model.into();
         Self {
             store,
             popover_id,
             trigger_id,
-            selected_profile: selection_profile_id(provider, profile_id.as_deref()),
-            selected: Some((provider, model, profile_id)),
+            selected_profile: selected
+                .as_ref()
+                .map(|(provider, _, profile_id)| {
+                    selection_profile_id(*provider, profile_id.as_deref())
+                })
+                .unwrap_or_default(),
+            selected,
             _store_subscription: store_subscription,
         }
     }
 
     pub fn set_selected(
         &mut self,
-        provider: ProviderKind,
-        model: impl Into<String>,
-        profile_id: Option<String>,
+        selected: Option<(ProviderKind, String, Option<String>)>,
         cx: &mut Context<Self>,
     ) {
-        let selected = (provider, model.into(), profile_id);
-        if self.selected.as_ref() != Some(&selected) {
-            self.selected_profile = selection_profile_id(provider, selected.2.as_deref());
-            self.selected = Some(selected);
+        if self.selected != selected {
+            if let Some((provider, _, profile_id)) = &selected {
+                self.selected_profile = selection_profile_id(*provider, profile_id.as_deref());
+            }
+            self.selected = selected;
             cx.notify();
         }
     }
@@ -146,13 +149,7 @@ impl ProviderModelPicker {
                     profile_id.as_deref(),
                 )),
             ),
-            None => (
-                String::new(),
-                self.store
-                    .read(cx)
-                    .provider_profile_kind(&self.selected_profile)
-                    .map(|kind| profile_glyph(self.store.read(cx), kind, None)),
-            ),
+            None => (crate::tr!("model_picker.automatic").into_owned(), None),
         };
         Button::new(self.trigger_id)
             .ghost()
