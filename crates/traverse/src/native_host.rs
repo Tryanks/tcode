@@ -273,6 +273,7 @@ impl ClientHost for NativeClientHost {
             prefs["right_panel_width"] = serde_json::json!(preferences.right_panel_width);
             prefs["sidebar_collapsed"] = serde_json::json!(preferences.sidebar_collapsed);
             prefs["sidebar_layout"] = serde_json::json!(preferences.sidebar_layout);
+            prefs["window_size"] = serde_json::json!(preferences.window_size);
             prefs["workspace"] = serde_json::json!(preferences.workspace);
         })
     }
@@ -886,6 +887,7 @@ mod tests {
             right_panel_width: Some(480),
             sidebar_collapsed: Some(true),
             sidebar_layout: Some(SidebarLayout::Grouped),
+            window_size: Some((1280, 900)),
             workspace: Some(tcode_client::host::WorkspacePreference {
                 hosts: vec![
                     tcode_client::host::WorkspaceHost {
@@ -921,6 +923,11 @@ mod tests {
         assert_eq!(
             host.load_preferences().unwrap().right_panel_width,
             Some(480)
+        );
+        assert_eq!(saved["window_size"], serde_json::json!([1280, 900]));
+        assert_eq!(
+            host.load_preferences().unwrap().window_size,
+            Some((1280, 900))
         );
         assert_eq!(saved["sidebar_collapsed"], true);
         assert_eq!(saved["sidebar_layout"], "grouped");

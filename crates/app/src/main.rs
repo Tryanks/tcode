@@ -5,9 +5,9 @@
 use std::{borrow::Cow, cell::RefCell, rc::Rc, time::Duration};
 
 use gpui::{
-    AnyWindowHandle, App, BorrowAppContext as _, Entity, ParentElement as _, Styled as _,
-    TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions,
-    point, px, size,
+    AnyWindowHandle, App, BorrowAppContext as _, Entity, ParentElement as _, Pixels, Size,
+    Styled as _, TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
+    WindowOptions, point, px, size,
 };
 use tcode_client::{HostLink, host::ClientHost as _, host::Transport};
 use tcode_protocol::{Command, CommandResponse};
@@ -263,16 +263,16 @@ fn exit_with_startup_failure(error: std::io::Error) -> ! {
     std::process::exit(1)
 }
 
-/// Every desktop window: the main one and the startup migration's.
-fn window_options(cx: &App, throttle_inactive: bool) -> WindowOptions {
+const MIN_WINDOW_WIDTH: f32 = 360.;
+const MIN_WINDOW_HEIGHT: f32 = 480.;
+
+/// Every desktop window: the main one and the startup migration's. A window
+/// is centered on the primary display and never larger than its visible area.
+fn window_options(cx: &App, throttle_inactive: bool, window_size: Size<Pixels>) -> WindowOptions {
     let mut options = WindowOptions {
-        window_bounds: Some(WindowBounds::centered(
-            None,
-            size(px(tcode_ui::DEFAULT_WINDOW_WIDTH), px(800.)),
-            cx,
-        )),
+        window_bounds: Some(WindowBounds::centered(None, window_size, cx)),
         app_id: Some(APP_ID.to_owned()),
-        window_min_size: Some(size(px(360.), px(480.))),
+        window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
         // macOS: seamless titlebar — transparent, with the traffic lights
         // nudged down to sit vertically centered in the 52px top strip.
         //
@@ -313,6 +313,27 @@ fn window_options(cx: &App, throttle_inactive: bool) -> WindowOptions {
         options.inactive_frame_interval = None;
     }
     options
+}
+
+fn default_window_size() -> Size<Pixels> {
+    size(px(tcode_ui::DEFAULT_WINDOW_WIDTH), px(800.))
+}
+
+/// The size the main window opens at: the one it last closed at, no smaller
+/// than a window may be dragged, or the default before it ever closed. The
+/// record is a file anyone may have edited, and the display it was saved on
+/// may be gone; `window_options` keeps the result within the display.
+fn saved_window_size(client: &NativeClientHost) -> Size<Pixels> {
+    client
+        .load_preferences()
+        .ok()
+        .and_then(|preferences| preferences.window_size)
+        .map_or_else(default_window_size, |(width, height)| {
+            size(
+                px((width as f32).max(MIN_WINDOW_WIDTH)),
+                px((height as f32).max(MIN_WINDOW_HEIGHT)),
+            )
+        })
 }
 
 /// The local host, once this process owns the data dir.
@@ -473,6 +494,12 @@ impl LocalKernel {
 
 gpui::actions!(tcode, [ShowMainWindow]);
 
+/// Keep the size `window` has outside fullscreen and maximized for the next
+/// launch.
+fn remember_size(window: &gpui::Window, cx: &mut App) {
+    tcode_ui::remember_window_size(window.window_bounds().get_bounds().size, cx);
+}
+
 /// The desktop's one window. Closing it ends the process except on macOS,
 /// where the process and the local kernel it owns keep running and the window
 /// opens again, where it was, when the app is reopened.
@@ -526,6 +553,17 @@ impl MainWindow {
             }
         })
         .detach();
+        // Quit takes the window with it without asking it to close.
+        cx.on_app_quit({
+            let this = this.clone();
+            move |cx| {
+                if let Some(window) = this.window() {
+                    let _ = window.update(cx, |_, window, cx| remember_size(window, cx));
+                }
+                async {}
+            }
+        })
+        .detach();
         cx.set_global(this.clone());
         this
     }
@@ -537,7 +575,11 @@ impl MainWindow {
         cx: &mut App,
     ) -> Entity<AppShell> {
         let state = &self.0;
-        let mut options = window_options(cx, state.throttle_inactive);
+        let mut options = window_options(
+            cx,
+            state.throttle_inactive,
+            saved_window_size(&state.native_client),
+        );
         if bounds.is_some() {
             options.window_bounds = bounds;
         }
@@ -561,6 +603,7 @@ impl MainWindow {
         let _ = window.update(cx, |_, window, cx| {
             window.on_window_should_close(cx, move |window, cx| {
                 if cfg!(target_os = "macos") {
+                    remember_size(window, cx);
                     this.0.closed_bounds.set(Some(window.window_bounds()));
                     true
                 } else {
@@ -892,7 +935,7 @@ fn main() {
         match started {
             Ok(LocalStart::Started(kernel)) => launch(cx, Ok(kernel)),
             Ok(LocalStart::Migrate(store)) => {
-                let options = window_options(cx, true);
+                let options = window_options(cx, true, default_window_size());
                 let kernel_store = store.clone();
                 migration::run(cx, store, options, appearance, move |cx| {
                     launch(

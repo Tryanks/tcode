@@ -107,6 +107,13 @@ pub use thread_export::format_size;
 pub use window_seam::force_mobile_layout;
 pub use window_state::WindowState;
 
+/// Keep the size the desktop window closed at for the next time it opens;
+/// [`tcode_client::host::ClientPreferences::window_size`] is where it is read.
+pub fn remember_window_size(size: gpui::Size<gpui::Pixels>, cx: &mut gpui::App) {
+    let points = |length: gpui::Pixels| length.as_f32().round() as u32;
+    device::DevicePreferences::set_window_size((points(size.width), points(size.height)), cx);
+}
+
 /// Where this client may keep its own files (the WebView2 profile is the only
 /// current user). Bootstrap owns the location; the UI never resolves it, so a
 /// remote attachment cannot be tricked into reading the host's data directory.
