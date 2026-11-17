@@ -241,7 +241,7 @@ background:
   running: "%{harness} · %{count} running"
   stop: "Stop"
   stop_task: "Stop this task"
-  stop_all: "Stop all background tasks"
+  stop_all: "Stop background"
   stop_confirm_title: "Stop these %{count}?"
   stop_confirm_title_one: "Stop this background task?"
   stop_confirm_description: "This stops:\n%{names}"
