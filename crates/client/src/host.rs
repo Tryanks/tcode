@@ -177,6 +177,13 @@ pub struct ClientPreferences {
     pub right_panel_width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_collapsed: Option<bool>,
+    /// The width and height, in points, the desktop window last closed at,
+    /// or would have returned to had it closed maximized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_size: Option<(u32, u32)>,
+    /// Whether the desktop window last closed maximized.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub window_maximized: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_layout: Option<tcode_core::settings::SidebarLayout>,
     /// `None` until this device first arranges its workspace.
