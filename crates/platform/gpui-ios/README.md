@@ -18,15 +18,13 @@ panics with a platform-specific diagnostic.
 
 ## Architecture
 
-The Swift host creates a `GPUIHostView` whose backing layer is
-`CAMetalLayer`, then passes the unretained `UIView` pointer and its logical
-geometry through `gpui_ios_attach_view`. `IosWindow` wraps that pointer in
-`raw-window-handle`'s UIKit handle, creates a Metal-only `wgpu::Instance`, and
-hands its context to gpui-fast's `gpui_wgpu::WgpuRenderer`. Logical
-resizes are converted to device pixels before `update_drawable_size`. The
-UIKit content scale is also applied to the renderer at creation, on every
-scale change, and immediately after a detached surface is replaced so glass
-blur, thickness, refraction, and edge widths remain point-correct. The window
+The Swift host creates a `GPUIHostView` and passes the unretained `UIView`
+pointer and its logical geometry through `gpui_ios_attach_view`. `IosWindow`
+draws with gpui-fast's `gpui_apple::MetalRenderer`, the renderer the macOS
+backend uses, and inserts the renderer's `CAMetalLayer` beneath the view's
+subviews; `host_layer` in [window.rs](src/ios/window.rs) says why the
+renderer owns the layer. Each resize or scale change sets the layer's frame,
+content scale and drawable size from the logical bounds. The window
 reports `WindowVisibility::Hidden` while the view is detached or the scene is
 in the background (`sceneDidEnterBackground` until `sceneWillEnterForeground`,
 when the host also pauses its display link).
