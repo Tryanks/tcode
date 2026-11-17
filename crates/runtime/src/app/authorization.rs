@@ -428,6 +428,7 @@ impl AppState {
                 | Command::CheckoutBranch { session_id, .. }
                 | Command::MergeWorktree { session_id }
                 | Command::SetDraftWorkspace { session_id, .. }
+                | Command::SetDraftText { session_id, .. }
                 | Command::WriteRelaunchMarker {
                     session_id: Some(session_id),
                     ..
@@ -457,6 +458,7 @@ impl AppState {
                 // Read marks are the host owner's, kept in their settings like the sidebar
                 // and favourite marks below.
                 Command::DeleteSession { .. }
+                | Command::RestoreDraft { .. }
                 | Command::MarkSessionRead { .. }
                 | Command::MarkSessionUnread { .. }
                 | Command::DeleteProject { .. }

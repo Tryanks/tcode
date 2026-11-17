@@ -538,11 +538,10 @@ impl AppState {
     /// extend its process's life.
     pub(super) fn mark_resident_idle(&mut self, session_id: &str, cx: &mut HostCx) {
         let rewind_pending = self.rewind_requests.contains_key(session_id);
-        let Some(session) = self
-            .residents
-            .resident_mut(session_id)
-            .filter(|session| !rewind_pending && session.fully_idle())
-        else {
+        // A draft holding text exists nowhere but here, so it never idles out.
+        let Some(session) = self.residents.resident_mut(session_id).filter(|session| {
+            !rewind_pending && session.fully_idle() && !session.holds_draft_text()
+        }) else {
             return;
         };
         let armed = session

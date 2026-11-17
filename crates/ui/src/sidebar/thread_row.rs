@@ -364,7 +364,15 @@ impl SessionsSidebar {
         working: bool,
         cx: &Context<Self>,
     ) -> Option<(gpui::Hsla, std::borrow::Cow<'static, str>, bool)> {
-        if state.waiting_for_approval {
+        if state.draft {
+            state.draft_kept.then(|| {
+                (
+                    cx.theme().muted_foreground,
+                    crate::tr!("sidebar.draft"),
+                    false,
+                )
+            })
+        } else if state.waiting_for_approval {
             Some((
                 cx.theme().warning,
                 crate::tr!("sidebar.waiting_approval"),
@@ -500,9 +508,29 @@ impl SessionsSidebar {
         let hover = self.hover.clone();
         let row_key = state.row_key.clone();
         let grant = crate::control::thread_grant_line(&store.read(cx).settings().control, meta);
+        let draft = state.draft;
         let menu = row
             .context_menu(move |menu, window, cx| {
                 let id = thread.clone();
+                if draft {
+                    let open_beside = crate::shell::pane_controls(window, cx)
+                        .map(|panes| panes.split_right || crate::shell::shown_in_pane(&id, cx));
+                    return menu
+                        .when_some(open_beside, |menu, enabled| {
+                            menu.menu_with_enable(
+                                crate::tr!("panes.open_beside").into_owned(),
+                                Box::new(crate::panes::OpenInNewPane(id.clone())),
+                                enabled,
+                            )
+                        })
+                        .when(scope.is_full(), |menu| {
+                            menu.menu_element(Box::new(ThreadDelete(id.clone())), |_, cx| {
+                                div().text_color(cx.theme().danger).child(
+                                    crate::widgets::fade_text(crate::tr!("sidebar.ctx_delete")),
+                                )
+                            })
+                        });
+                }
                 // Move up / Move down stay within the section the list shows.
                 let moves = sidebar
                     .upgrade()
@@ -808,8 +836,8 @@ impl SessionsSidebar {
     }
 
     /// `timestamp` is the time the row shows: the one its list sorts it by.
-    /// A settled row offers to make it active under the pointer, and an
-    /// active one to settle it while it `offers_settle`.
+    /// A settled row offers to make it active under the pointer, an active
+    /// one to settle it while it `offers_settle`, and a draft to delete it.
     pub(super) fn render_flat_thread_right_slot(
         &self,
         meta: &SessionMeta,
@@ -825,8 +853,11 @@ impl SessionsSidebar {
         let ago = self
             .store_of(&state.thread.host)
             .map(|store| humanize_ago(store.read(cx).host_now_secs(cx).saturating_sub(timestamp)));
-        let action_on_hover = settled || offers_settle;
-        let label = if settled {
+        let discards = state.draft_kept;
+        let action_on_hover = discards || (!state.draft && (settled || offers_settle));
+        let label = if discards {
+            crate::tr!("sidebar.delete_draft_tooltip")
+        } else if settled {
             crate::tr!("sidebar.unsettle_tooltip")
         } else {
             crate::tr!("sidebar.settle_tooltip")
@@ -863,7 +894,9 @@ impl SessionsSidebar {
                         .ghost()
                         .xsmall()
                         .icon(
-                            Icon::new(if settled {
+                            Icon::new(if discards {
+                                IconName::Trash
+                            } else if settled {
                                 IconName::Undo2
                             } else {
                                 IconName::CircleCheck
@@ -884,7 +917,9 @@ impl SessionsSidebar {
                         .opacity(hover)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
-                            if settled {
+                            if discards {
+                                this.discard_draft(&action_id, window, cx);
+                            } else if settled {
                                 this.on_make_active(
                                     &ThreadMakeActive(action_id.clone()),
                                     window,

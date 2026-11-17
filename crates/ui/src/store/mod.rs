@@ -1367,18 +1367,24 @@ impl WorkspaceStore {
         }
     }
 
-    /// Whether a thread is gone from the visible index. A draft has no index
-    /// entry of its own and stays until the user navigates away, unless its
-    /// project leaves the index.
+    /// Whether a thread is gone from the visible index. A draft stays until
+    /// the user navigates away, unless it is deleted or its project leaves
+    /// the index: the host lists it for being on screen, which its status
+    /// may tell this client of first.
     fn left_index(&self, status: &SessionStatus) -> bool {
         if status.draft {
-            return status.project_id.as_ref().is_some_and(|project_id| {
-                !self
-                    .index_replica
-                    .1
-                    .iter()
-                    .any(|project| project.id == *project_id)
-            });
+            let deleted = self
+                .removed_session
+                .as_ref()
+                .is_some_and(|removed| removed.id == status.session_id);
+            return deleted
+                || status.project_id.as_ref().is_some_and(|project_id| {
+                    !self
+                        .index_replica
+                        .1
+                        .iter()
+                        .any(|project| project.id == *project_id)
+                });
         }
         !self.session_visible(&status.session_id)
     }
@@ -2027,6 +2033,7 @@ impl WorkspaceStore {
         if !self.scope.is_full() {
             return self.thread_meta(session_id).is_some_and(|meta| {
                 !meta.is_settled()
+                    && meta.draft_text.is_none()
                     && self
                         .settings_replica
                         .last_visited

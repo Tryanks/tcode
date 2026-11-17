@@ -450,7 +450,9 @@ fn can_swipe(row: &CompactThreadRow, renaming: Option<&ThreadKey>) -> bool {
 
 /// What the swipe does: settle unless the host refuses to now.
 fn action(row: &CompactThreadRow) -> Option<DragAction> {
-    if row.meta.is_settled() {
+    if row.state.draft {
+        None
+    } else if row.meta.is_settled() {
         Some(DragAction::Unsettle)
     } else if row.state.settle_blocked {
         None

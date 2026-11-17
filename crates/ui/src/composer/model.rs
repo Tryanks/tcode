@@ -3,7 +3,6 @@ use agent::{
     UserInputQuestion,
 };
 use chrono::{DateTime, Local, LocalResult, NaiveTime, TimeZone as _};
-use tcode_core::ui::ConversationDestination;
 
 use crate::fuzzy::fuzzy_score;
 
@@ -189,22 +188,9 @@ pub(super) fn slash_command(
     }
 }
 
-/// The stable destination for unsent composer text. Draft session ids are
-/// deliberately excluded: opening a project's New thread page allocates a new
-/// transient session id each time.
-pub(crate) type ComposerDestination = ConversationDestination;
-
-pub(crate) fn composer_destination(
-    is_draft: bool,
-    session_id: &str,
-    project_id: Option<&str>,
-) -> Option<ComposerDestination> {
-    if is_draft {
-        project_id.map(|id| ComposerDestination::ProjectDraft(id.to_string()))
-    } else {
-        Some(ComposerDestination::Thread(session_id.to_string()))
-    }
-}
+/// Whose unsent text a composer holds: a thread's, or a draft's, of which a
+/// project may have several.
+pub(crate) type ComposerDestination = String;
 
 #[derive(Clone, Copy, PartialEq)]
 /// Which glyph a trigger-menu row shows.

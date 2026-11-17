@@ -243,6 +243,7 @@ impl WorkspaceStore {
                     reach = Reach::Thread(session_id.clone(), &[Part::Outputs]);
                 }
                 (Topic::Index, ServerEvent::IndexUpsertSession(meta)) => {
+                    title_draft(meta);
                     if let Some(archived) = &mut self.archived_replica {
                         archived.sessions.retain(|archived| archived.id != meta.id);
                     }
@@ -332,6 +333,7 @@ impl WorkspaceStore {
                             );
                         }
                     }
+                    snapshot.sessions.iter_mut().for_each(title_draft);
                     self.index_replica = (
                         std::mem::take(&mut snapshot.sessions),
                         std::mem::take(&mut snapshot.projects),
@@ -552,12 +554,13 @@ impl WorkspaceStore {
             self.reconcile_destination(cx);
             self.removed_session = None;
             // A thread kept on screen (its failed send still offers Retry)
-            // keeps its replicas until the user leaves it.
+            // keeps its replicas until the user leaves it. So does a draft:
+            // one holding nothing leaves the index as it leaves the screen,
+            // and is still the page its project's next new thread opens on.
             if let Some(session_id) = index_removal
-                && !self
-                    .threads
-                    .get(&session_id)
-                    .is_some_and(|thread| thread.open)
+                && !self.threads.get(&session_id).is_some_and(|thread| {
+                    thread.open || thread.status.as_ref().is_some_and(|status| status.draft)
+                })
             {
                 self.threads.remove(&session_id);
             }
@@ -675,5 +678,17 @@ impl WorkspaceStore {
             .expect("held above")
             .extend(vec![record], after);
         Some(items)
+    }
+}
+
+/// A draft has no title of its own: the lists name it by the first line of
+/// what its composer holds, or as the new thread it is while that is nothing.
+fn title_draft(meta: &mut SessionMeta) {
+    const SHOWN: usize = 120;
+    if let Some(text) = &meta.draft_text {
+        meta.title = match text.lines().map(str::trim).find(|line| !line.is_empty()) {
+            Some(line) => line.chars().take(SHOWN).collect(),
+            None => crate::tr!("chat.new_thread").into_owned(),
+        };
     }
 }

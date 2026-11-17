@@ -143,6 +143,9 @@ fn auto_grow_rows(compact: bool) -> (usize, usize) {
     if compact { (2, 5) } else { (1, 8) }
 }
 
+/// How long the typing pauses before the host is told a draft's text.
+const DRAFT_SAVE_PAUSE: std::time::Duration = std::time::Duration::from_millis(400);
+
 fn draft_placeholder(compact: bool) -> Cow<'static, str> {
     if compact {
         crate::tr!("mobile.message")
@@ -181,6 +184,9 @@ pub struct Composer {
     /// Unsent text is isolated by persisted thread or project New thread page.
     input_destination: Option<ComposerDestination>,
     input_cache: std::collections::HashMap<ComposerDestination, Entity<TextareaState>>,
+    /// The draft's text changed and the host has yet to be told: it is, once
+    /// the typing pauses or the composer turns to another thread.
+    draft_save: Option<Task<()>>,
     input_subscription: Subscription,
     input_observation: Subscription,
     model_search: Entity<InputState>,
@@ -490,6 +496,7 @@ impl Composer {
             user_input_custom,
             input_destination: None,
             input_cache: Default::default(),
+            draft_save: None,
             input_subscription,
             input_observation,
             model_search,
@@ -551,10 +558,43 @@ impl Composer {
             InputEvent::Change => {
                 self.queued_refill = None;
                 self.recompute_trigger(cx);
+                self.draft_text_changed(cx);
                 cx.notify();
             }
             _ => {}
         }
+    }
+
+    /// A draft's text is the host's to keep. Gaining its first character or
+    /// losing its last decides whether the draft stays listed, so the host
+    /// hears of that at once; of the rest, when the typing pauses.
+    fn draft_text_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(held) = self
+            .workspace_store
+            .read(cx)
+            .draft_text_for(self.session_id.as_deref(), cx)
+        else {
+            self.draft_save = None;
+            return;
+        };
+        if held.is_empty() == self.input.read(cx).value().trim().is_empty() {
+            self.draft_save = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(DRAFT_SAVE_PAUSE).await;
+                let _ = this.update(cx, |this, cx| this.save_draft_text(cx));
+            }));
+        } else {
+            self.save_draft_text(cx);
+        }
+    }
+
+    fn save_draft_text(&mut self, cx: &mut Context<Self>) {
+        self.draft_save = None;
+        let Some(session_id) = self.input_destination.clone() else {
+            return;
+        };
+        let text = self.input.read(cx).value().to_string();
+        self.workspace_store
+            .update(cx, |store, _| store.set_draft_text(session_id, text));
     }
 
     /// The draft gaining its first character or losing its last, which
@@ -572,10 +612,13 @@ impl Composer {
         let destination = self
             .workspace_store
             .read(cx)
-            .with_composer_destination_for(self.session_id.as_deref(), composer_destination, cx)
-            .flatten();
+            .session_status_for(self.session_id.as_deref(), cx)
+            .map(|status| status.session_id.clone());
         if self.input_destination == destination {
             return;
+        }
+        if self.draft_save.is_some() {
+            self.save_draft_text(cx);
         }
         #[cfg(feature = "voice")]
         self.abort_dictation(cx);
@@ -599,6 +642,21 @@ impl Composer {
                         .submit_on_enter(true)
                 })
             });
+        // A draft this composer has not held yet starts from what the host
+        // keeps of it: typed on another client, or before a restart.
+        let held = self
+            .workspace_store
+            .read(cx)
+            .draft_text_for(self.session_id.as_deref(), cx)
+            .filter(|held| !held.is_empty() && self.input.read(cx).value().is_empty())
+            .map(str::to_owned);
+        if let Some(held) = held {
+            let end = held.len();
+            self.input.update(cx, |input, cx| {
+                input.replace_all(held, window, cx);
+                input.set_selected_range(end..end, cx);
+            });
+        }
         self.input_destination = destination;
         self.input_subscription = cx.subscribe_in(&self.input, window, Self::on_input_event);
         self.input_observation = cx.observe(&self.input, Self::on_input_notified);
