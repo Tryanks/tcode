@@ -382,7 +382,7 @@ fn force_terminate_kills_a_harness_that_does_not_answer_a_stop() {
 #[test]
 fn a_stop_while_the_provider_starts_hands_the_message_back_and_force_quit_ends_the_start() {
     const ROLE: &str = "TCODE_TEST_SILENT_AGENT";
-    const NAME: &str = "app::tests::a_stop_while_the_provider_starts_hands_the_message_back_and_force_quit_ends_the_start";
+    const NAME: &str = "app::tests::background::a_stop_while_the_provider_starts_hands_the_message_back_and_force_quit_ends_the_start";
     if std::env::var_os(ROLE).is_some() {
         let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
         return;
