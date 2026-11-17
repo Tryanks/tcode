@@ -1973,6 +1973,7 @@ fn session_status(session: &str, cwd: &std::path::Path) -> tcode_protocol::Sessi
             settle_blocked: false,
             failed: false,
             unread: false,
+            last_activity_at: None,
             fork: tcode_protocol::ForkAvailability::Available,
             agent: None,
             latest_activity: None,

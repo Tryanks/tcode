@@ -4,7 +4,6 @@ use std::sync::{Arc, OnceLock};
 
 use tcode_client::HostLink;
 use tcode_client::attachment::{AttachmentMessage, AttachmentPolicy, AttachmentSender};
-use tcode_core::thread_sort::ThreadSection;
 use tcode_protocol::{
     ClientMessage, ClientPayload, Command, CommandResponse, HostMessage, Principal, ProtocolError,
     Query, QueryResponse, decode_client_line,
@@ -1039,11 +1038,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::ReorderPinned {
             session_id,
             order_key,
-        } => app.reorder_session(&session_id, ThreadSection::Pinned, order_key, cx),
-        Command::ReorderActive {
-            session_id,
-            order_key,
-        } => app.reorder_session(&session_id, ThreadSection::Active, order_key, cx),
+        } => app.reorder_pinned(&session_id, order_key, cx),
         Command::ArchiveSession { session_id } => app.archive_session(&session_id, cx),
         Command::UnarchiveSession { session_id } => app.unarchive_session(&session_id, cx),
         Command::RenameSession { session_id, title } => app.rename_session(&session_id, &title, cx),

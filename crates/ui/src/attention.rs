@@ -114,6 +114,7 @@ mod tests {
                             settle_blocked: false,
                             failed: false,
                             unread: false,
+                            last_activity_at: None,
                             fork: ForkAvailability::Available,
                             agent: None,
                             latest_activity: None,

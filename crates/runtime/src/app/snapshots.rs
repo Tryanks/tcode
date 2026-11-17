@@ -699,6 +699,11 @@ impl<'a> ActivityProjection<'a> {
                 .get(&meta.id)
                 .is_some_and(|activity| activity.failed),
             unread: self.state.session_unread(meta),
+            last_activity_at: self
+                .state
+                .thread_activity
+                .get(&meta.id)
+                .and_then(|activity| activity.last_activity_at()),
             fork: AppState::session_fork_availability(meta, resident),
             agent: self.agent_status(meta),
             // A log left with its turn open by a host that died folds to a

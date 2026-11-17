@@ -361,7 +361,9 @@ pub use wire::{
 //
 // Unreleased: the timeline gains the warning entry, and RuntimeNotice loses
 // provider_message. The agent event stream and the timeline gain
-// request_retry, and RuntimeNotice gains usage_limit_reached.
+// request_retry, and RuntimeNotice gains usage_limit_reached. Active threads
+// are no longer arranged by hand: the ReorderActive command and thread
+// metadata's active_order go, and SessionActivity gains last_activity_at.
 pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]

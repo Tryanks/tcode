@@ -1,6 +1,5 @@
 //! Thread sections and static lifecycle ordering, independent of client layout.
 use crate::project::SessionMeta;
-use std::cmp::Ordering;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -26,57 +25,94 @@ pub fn thread_section(meta: &SessionMeta) -> ThreadSection {
     }
 }
 
+/// How much an active thread wants its user, the most first: what the
+/// Active section orders by before time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Attention {
+    /// It waits on an approval or an answer.
+    Waiting,
+    /// It changed since it was last looked at.
+    Unread,
+    /// A turn of it runs.
+    Working,
+    #[default]
+    Idle,
+}
+
+/// What orders and dates a thread besides its meta, as its host reports it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Standing {
+    pub attention: Attention,
+    /// Its last message or run, in Unix milliseconds
+    /// ([`crate::settlement::ThreadActivity::last_activity_at`]).
+    pub last_activity_at: Option<u64>,
+}
+
 /// When a settled thread settled, in Unix seconds; the time it shows and sorts by.
 fn settled_timestamp(meta: &SessionMeta) -> u64 {
     meta.settled_at.unwrap_or(meta.updated_at)
 }
 
-/// When an active thread was last worked on, in Unix seconds: the host moves
-/// `updated_at` on a user message, a finished turn and a rename, and a
-/// reopen stamps `unsettled_at`.
-fn last_activity(meta: &SessionMeta) -> u64 {
-    meta.updated_at.max(meta.unsettled_at.unwrap_or(0))
+/// When a thread was last worked on, in Unix milliseconds: its last message
+/// or run, or a later reopen. A thread whose host reports no activity dates
+/// by its `updated_at`.
+fn last_activity(meta: &SessionMeta, standing: Standing) -> u64 {
+    standing
+        .last_activity_at
+        .unwrap_or(meta.updated_at.saturating_mul(1000))
+        .max(meta.unsettled_at.unwrap_or(0).saturating_mul(1000))
 }
 
-/// The time a threads-view row shows: when a settled thread settled, else
-/// its last activity, which is what an unarranged active row sorts by.
-pub fn shown_timestamp(meta: &SessionMeta) -> u64 {
+/// The time a threads-view row shows, in Unix seconds: when a settled thread
+/// settled, else its last activity, which is what an active row sorts by
+/// within its [`Attention`].
+pub fn shown_timestamp(meta: &SessionMeta, standing: Standing) -> u64 {
     if meta.is_settled() {
         settled_timestamp(meta)
     } else {
-        last_activity(meta)
+        last_activity(meta, standing) / 1000
     }
 }
 
-/// Pinned threads by key, then keyless ones newest created first. Active
-/// threads nobody arranged by hand by their last activity, newest first, so
-/// a message or a finished turn moves one to the top; then the arranged ones
-/// by the key the user gave them, which activity does not change. Settled
-/// threads newest settled first.
-pub fn compare_threads(a: &SessionMeta, b: &SessionMeta) -> Ordering {
-    let section = thread_section(a);
-    section
-        .cmp(&thread_section(b))
-        .then_with(|| match section {
-            ThreadSection::Settled => settled_timestamp(b).cmp(&settled_timestamp(a)),
-            ThreadSection::Pinned => match (&a.pin_order, &b.pin_order) {
-                (Some(a), Some(b)) => a.cmp(b),
-                (Some(_), None) => Ordering::Less,
-                (None, Some(_)) => Ordering::Greater,
-                (None, None) => b.created_at.cmp(&a.created_at),
-            },
-            ThreadSection::Active => match (&a.active_order, &b.active_order) {
-                (Some(a), Some(b)) => a.cmp(b),
-                (Some(_), None) => Ordering::Greater,
-                (None, Some(_)) => Ordering::Less,
-                (None, None) => last_activity(b).cmp(&last_activity(a)),
-            },
-        })
-        .then_with(|| a.id.cmp(&b.id))
+/// A thread's place among one host's threads, the least first. Pinned
+/// threads by the key the user gave them, then keyless ones newest created
+/// first. Active threads by [`Attention`], then by their last activity,
+/// newest first: nothing arranges them by hand. Settled threads newest
+/// settled first.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ThreadRank {
+    Pinned {
+        keyless: bool,
+        key: Option<String>,
+        created: std::cmp::Reverse<u64>,
+    },
+    Active(Attention, std::cmp::Reverse<u64>),
+    Settled(std::cmp::Reverse<u64>),
 }
 
-pub fn sort_threads(sessions: &mut [SessionMeta]) {
-    sessions.sort_by(compare_threads);
+/// The rank `meta` has in Active, or would have once it is there.
+pub fn active_rank(meta: &SessionMeta, standing: Standing) -> ThreadRank {
+    ThreadRank::Active(
+        standing.attention,
+        std::cmp::Reverse(last_activity(meta, standing)),
+    )
+}
+
+pub fn thread_rank(meta: &SessionMeta, standing: Standing) -> ThreadRank {
+    match thread_section(meta) {
+        ThreadSection::Settled => ThreadRank::Settled(std::cmp::Reverse(settled_timestamp(meta))),
+        ThreadSection::Pinned => ThreadRank::Pinned {
+            keyless: meta.pin_order.is_none(),
+            key: meta.pin_order.clone(),
+            created: std::cmp::Reverse(meta.created_at),
+        },
+        ThreadSection::Active => active_rank(meta, standing),
+    }
+}
+
+/// `sessions` by [`ThreadRank`], then by id.
+pub fn sort_threads(sessions: &mut [SessionMeta], standing: impl Fn(&SessionMeta) -> Standing) {
+    sessions.sort_by_cached_key(|meta| (thread_rank(meta, standing(meta)), meta.id.clone()));
 }
 
 /// Threads split by section, each keeping the order it was given in.
@@ -124,12 +160,12 @@ pub fn partition_threads<'a>(
 }
 
 /// Several hosts' rows of one section as one list, each sequence already in
-/// its host's order: the head shown latest goes next, earlier sequences first
-/// on a tie. Hosts are never sorted against each other, so the order each
-/// host's user arranged by hand survives the merge.
-pub fn merge_by_shown_time<T>(
+/// its host's order: the head with the least `key` goes next, earlier
+/// sequences first on a tie. Hosts are never sorted against each other, so
+/// the order each host's user arranged by hand survives the merge.
+pub fn merge_hosts<T, K: Ord>(
     sequences: impl IntoIterator<Item = Vec<T>>,
-    meta: impl Fn(&T) -> &SessionMeta,
+    key: impl Fn(&T) -> K,
 ) -> Vec<T> {
     let mut heads: Vec<_> = sequences
         .into_iter()
@@ -137,12 +173,12 @@ pub fn merge_by_shown_time<T>(
         .collect();
     let mut merged = Vec::new();
     loop {
-        let mut next: Option<(usize, u64)> = None;
+        let mut next: Option<(usize, K)> = None;
         for (index, rows) in heads.iter_mut().enumerate() {
             if let Some(row) = rows.peek() {
-                let shown = shown_timestamp(meta(row));
-                if next.is_none_or(|(_, latest)| shown > latest) {
-                    next = Some((index, shown));
+                let key = key(row);
+                if next.as_ref().is_none_or(|(_, least)| key < *least) {
+                    next = Some((index, key));
                 }
             }
         }
@@ -279,114 +315,104 @@ pub fn plan_reorder(
 mod tests {
     use super::*;
 
-    /// Activity lifts an active thread nobody arranged above the others; a
-    /// thread the user arranged keeps its key, and a pin given a key before
-    /// the first pinned one leads Pinned.
+    fn thread(id: &str, created: u64, updated: u64) -> SessionMeta {
+        let mut meta = SessionMeta::new(agent::ProviderKind::Codex, "/sample".into(), None);
+        meta.id = id.into();
+        meta.created_at = created;
+        meta.updated_at = updated;
+        meta
+    }
+
+    fn ids<'a>(sessions: impl IntoIterator<Item = &'a SessionMeta>) -> Vec<&'a str> {
+        sessions.into_iter().map(|meta| meta.id.as_str()).collect()
+    }
+
+    /// Active threads order by what they want of the user and then by their
+    /// last message or run, which a later change to the meta alone does not
+    /// move; a reopen counts as activity, and a pin given a key before the
+    /// first pinned one leads Pinned.
     #[test]
-    fn activity_orders_unarranged_threads_and_keys_hold_the_rest() {
-        let thread = |id: &str, created: u64, updated: u64| {
-            let mut meta = SessionMeta::new(agent::ProviderKind::Codex, "/sample".into(), None);
-            meta.id = id.into();
-            meta.created_at = created;
-            meta.updated_at = updated;
-            meta
-        };
-        let order = |sessions: &mut Vec<SessionMeta>| {
-            sort_threads(sessions);
-            sessions
-                .iter()
-                .map(|meta| meta.id.clone())
-                .collect::<Vec<_>>()
+    fn active_threads_order_by_attention_then_activity() {
+        let standing = |meta: &SessionMeta| {
+            let (attention, last_activity_at) = match meta.id.as_str() {
+                "waiting" => (Attention::Waiting, 1_000),
+                "unread" => (Attention::Unread, 90_000),
+                "working" => (Attention::Working, 2_000),
+                "renamed" => (Attention::Idle, 30_000),
+                "recent" => (Attention::Idle, 50_000),
+                _ => return Standing::default(),
+            };
+            Standing {
+                attention,
+                last_activity_at: Some(last_activity_at),
+            }
         };
         let mut reopened = thread("reopened", 10, 10);
         reopened.unsettled_at = Some(60);
-        let mut arranged = thread("arranged", 5, 5);
-        arranged.active_order = Some("m".into());
         let mut pinned = thread("pinned", 1, 1);
         pinned.pinned_at = Some(1);
         pinned.pin_order = Some("h".into());
         let mut sessions = vec![
-            thread("new", 50, 50),
-            thread("old", 20, 20),
+            thread("recent", 50, 50),
+            thread("renamed", 30, 500),
+            thread("working", 2, 2),
+            thread("unread", 90, 90),
+            thread("waiting", 1, 1),
             reopened,
-            arranged,
             pinned,
         ];
+        sort_threads(&mut sessions, standing);
         assert_eq!(
-            order(&mut sessions),
-            ["pinned", "reopened", "new", "old", "arranged"]
+            ids(&sessions),
+            [
+                "pinned", "waiting", "unread", "working", "reopened", "recent", "renamed"
+            ]
         );
         let reopened = sessions.iter().find(|meta| meta.id == "reopened").unwrap();
         assert_eq!(
-            shown_timestamp(reopened),
+            shown_timestamp(reopened, standing(reopened)),
             60,
             "a row shows the time it sorts by"
         );
 
-        for meta in &mut sessions {
-            match meta.id.as_str() {
-                "old" => meta.updated_at = 100,
-                "arranged" => meta.updated_at = 200,
-                _ => {}
-            }
-        }
-        assert_eq!(
-            order(&mut sessions),
-            ["pinned", "old", "reopened", "new", "arranged"],
-            "a message or a finished turn lifts the unarranged thread only"
-        );
-
         let first = sessions[0].pin_order.clone();
-        let fresh = sessions.iter_mut().find(|meta| meta.id == "new").unwrap();
+        let fresh = sessions
+            .iter_mut()
+            .find(|meta| meta.id == "recent")
+            .unwrap();
         fresh.pinned_at = Some(300);
         fresh.pin_order = order_key_between(None, first.as_deref());
-        assert_eq!(
-            order(&mut sessions),
-            ["new", "pinned", "old", "reopened", "arranged"]
-        );
+        sort_threads(&mut sessions, standing);
+        assert_eq!(ids(&sessions)[..2], ["recent", "pinned"]);
     }
 
-    /// Two hosts' Active threads, each sorted as its host lists them, merge
-    /// by the time each row shows; the rows host A's user arranged keep
-    /// their order and their place after its unarranged ones, though one of
-    /// them was active most recently; on a tie the first host's row leads.
+    /// Two hosts' Active threads, each in its host's order, merge by the
+    /// same rank; on a tie the first host's row leads.
     #[test]
-    fn several_hosts_merge_by_time_and_keep_each_hosts_arranged_order() {
-        let thread = |id: &str, updated: u64, key: Option<&str>| {
-            let mut meta = SessionMeta::new(agent::ProviderKind::Codex, "/sample".into(), None);
-            meta.id = id.into();
-            meta.created_at = 1;
-            meta.updated_at = updated;
-            meta.active_order = key.map(str::to_owned);
-            meta
+    fn several_hosts_active_threads_merge_by_rank() {
+        let standing = |meta: &SessionMeta| Standing {
+            attention: if meta.id == "b-waiting" {
+                Attention::Waiting
+            } else {
+                Attention::Idle
+            },
+            last_activity_at: None,
         };
-        let mut a = vec![
-            thread("a-arranged-late", 5, Some("m")),
-            thread("a-old", 10, None),
-            thread("a-arranged-first", 100, Some("b")),
-            thread("a-new", 50, None),
-            thread("a-arranged-last", 20, Some("t")),
+        let mut a = vec![thread("a-old", 1, 10), thread("a-new", 1, 50)];
+        let mut b = vec![
+            thread("b-tie", 1, 10),
+            thread("b-newer", 1, 40),
+            thread("b-waiting", 1, 5),
         ];
-        let mut b = vec![thread("b-tie", 20, None), thread("b-newer", 40, None)];
-        sort_threads(&mut a);
-        sort_threads(&mut b);
-        let merged = merge_by_shown_time([a.iter().collect(), b.iter().collect()], |meta| meta);
-        let ids: Vec<_> = merged.iter().map(|meta| meta.id.as_str()).collect();
+        sort_threads(&mut a, standing);
+        sort_threads(&mut b, standing);
+        let merged = merge_hosts([a.iter().collect(), b.iter().collect()], |meta| {
+            thread_rank(meta, standing(meta))
+        });
         assert_eq!(
-            ids,
-            [
-                "a-new",
-                "b-newer",
-                "b-tie",
-                "a-old",
-                "a-arranged-first",
-                "a-arranged-late",
-                "a-arranged-last"
-            ]
+            ids(merged),
+            ["b-waiting", "a-new", "b-newer", "a-old", "b-tie"]
         );
-        let (earlier, later) = ([thread("earlier", 20, None)], [thread("later", 20, None)]);
-        let merged = merge_by_shown_time([later.iter().collect(), earlier.iter().collect()], |m| m);
-        assert_eq!(merged[0].id, "later", "a tie goes to the host listed first");
     }
 
     #[test]

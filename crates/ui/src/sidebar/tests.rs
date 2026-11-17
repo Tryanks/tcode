@@ -102,6 +102,7 @@ fn a_phone_row_says_whether_its_thread_works_runs_background_work_or_waits(
                 settle_blocked: false,
                 failed: false,
                 unread: false,
+                last_activity_at: None,
                 fork: tcode_protocol::ForkAvailability::Available,
                 agent: None,
                 latest_activity: None,
@@ -725,7 +726,7 @@ fn compact_list_has_project_headers(
         assert!(
             cx.debug_bounds("compact-row-thread-1").unwrap().top()
                 < cx.debug_bounds("compact-row-thread-0").unwrap().top(),
-            "creation orders unarranged threads across projects"
+            "the later thread leads across projects"
         );
     }
     let toggle = cx.debug_bounds("compact-layout-toggle").unwrap();
@@ -1626,8 +1627,6 @@ fn the_project_view_keeps_a_settled_shelf_per_project(cx: &mut TestAppContext) {
     pinned.pin_order = Some("n".into());
     let mut agent = thread("lead-agent", "lead", 900);
     agent.parent_session_id = Some("lead-settled-0".into());
-    let mut arranged = thread("mixed-b", "mixed", 100);
-    arranged.active_order = Some("b".into());
     let mut sessions = vec![
         settled("lead-settled-0", "lead", 60, 60),
         pinned,
@@ -1636,7 +1635,7 @@ fn the_project_view_keeps_a_settled_shelf_per_project(cx: &mut TestAppContext) {
         agent,
         thread("mixed-a", "mixed", 300),
         settled("mixed-old", "mixed", 200, 200),
-        arranged,
+        thread("mixed-b", "mixed", 100),
     ];
     sessions.extend((0..8).map(|index| thread(&format!("many-{index}"), "many", 10 + index)));
     // Newer than every active row in their project, so a limit that
@@ -2075,10 +2074,10 @@ fn a_thread_pinned_from_a_scrolled_list_leads_pinned_on_screen(cx: &mut TestAppC
     });
 }
 
-/// Pinned rows lead in key order with keyless pins after them, Active
-/// rows nobody arranged follow by their last activity, newest first, and
-/// arranged rows keep their keys after them. Dragging an
-/// active row between two pins pins it with a key between theirs; Escape
+/// Pinned rows lead in key order with keyless pins after them, and Active
+/// rows follow by their last activity, newest first. Dragging an active
+/// row over another active one moves nothing: its rank places it. Dragging
+/// it between two pins pins it with a key between theirs; Escape
 /// cancels a drag; Move down writes only the moved key; unpinning or
 /// settling a pinned thread undoes with its old key.
 #[gpui::test]
@@ -2112,13 +2111,11 @@ fn pinned_rows_lead_and_a_drag_or_undo_writes_their_keys(cx: &mut TestAppContext
     reopened.unsettled_at = Some(99);
     let mut busy = thread("busy", 50);
     busy.updated_at = 1_000;
-    let mut arranged = thread("arranged", 100);
-    arranged.active_order = Some("m".into());
     let mut settled = thread("settled", 60);
     settled.settled_at = Some(70);
     let sessions = vec![
         settled,
-        arranged,
+        thread("shown", 100),
         busy,
         reopened,
         thread("fresh", 95),
@@ -2165,7 +2162,7 @@ fn pinned_rows_lead_and_a_drag_or_undo_writes_their_keys(cx: &mut TestAppContext
         )
     });
     crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-    store.update(cx, |store, cx| store.show_alone("arranged".into(), cx));
+    store.update(cx, |store, cx| store.show_alone("shown".into(), cx));
     let mut driver = crate::store::tests::LocalHostDriver::from_link(link);
     // The host records commands on its own thread; the driver routes replies
     // while the UI awaits each acknowledgement, as in the running app.
@@ -2191,7 +2188,6 @@ fn pinned_rows_lead_and_a_drag_or_undo_writes_their_keys(cx: &mut TestAppContext
                     Command::PinSession { .. }
                         | Command::UnpinSession { .. }
                         | Command::ReorderPinned { .. }
-                        | Command::ReorderActive { .. }
                         | Command::SettleSession { .. }
                         | Command::UnsettleSession { .. }
                 ) {
@@ -2242,7 +2238,7 @@ fn pinned_rows_lead_and_a_drag_or_undo_writes_their_keys(cx: &mut TestAppContext
     sent(cx, &mut driver, 0);
     draw(cx);
     let order = [
-        "pin-a", "pin-b", "pin-c", "pin-new", "pin-old", "busy", "reopened", "fresh", "arranged",
+        "pin-a", "pin-b", "pin-c", "pin-new", "pin-old", "busy", "shown", "reopened", "fresh",
     ];
     for compact in [false, true] {
         window_state.update(cx, |state, cx| {
@@ -2277,6 +2273,22 @@ fn pinned_rows_lead_and_a_drag_or_undo_writes_their_keys(cx: &mut TestAppContext
         cx.debug_bounds(format!("sidebar-thread-{id}").leak())
             .unwrap()
     };
+    let start = row(cx, "fresh").center();
+    cx.simulate_mouse_down(start, left, none);
+    cx.simulate_mouse_move(start + gpui::point(px(0.), px(8.)), left, none);
+    draw(cx);
+    let target = row(cx, "busy");
+    let over = gpui::point(target.center().x, target.top() + px(4.));
+    cx.simulate_mouse_move(over, left, none);
+    draw(cx);
+    cx.simulate_mouse_up(over, left, none);
+    draw(cx);
+    assert_eq!(
+        sent(cx, &mut driver, 0),
+        vec![],
+        "Active is not arranged by hand"
+    );
+
     let start = row(cx, "fresh").center();
     cx.simulate_mouse_down(start, left, none);
     cx.simulate_mouse_move(start + gpui::point(px(0.), px(8.)), left, none);
@@ -2477,9 +2489,10 @@ fn two_hosts_list_their_projects_and_threads_under_their_headings(cx: &mut TestA
 }
 
 /// Over two machines the threads view lists their threads by time, each
-/// row naming its host. A thread carried over another host's row lands
-/// among its own host's rows, after those above that row; only its host
-/// is asked to move it, and the list keeps each host's order after.
+/// row naming its host. A pinned thread carried over another host's pinned
+/// row lands among its own host's rows, after those above that row; only
+/// its host is asked to move it, and the list keeps each host's order
+/// after.
 #[gpui::test]
 fn a_thread_carried_over_another_hosts_row_lands_among_its_own(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -2524,6 +2537,41 @@ fn a_thread_carried_over_another_hosts_row_lands_among_its_own(cx: &mut TestAppC
         "a row names its host"
     );
 
+    // Pinned is the section arranged by hand: each host pins its threads
+    // in the order it lists them.
+    for (host, ids) in [(&mut a, &["a1", "a2", "a3"][..]), (&mut b, &["b1", "b2"])] {
+        for (id, key) in ids.iter().zip(["f", "n", "t"]) {
+            host.driver.command(
+                cx,
+                Command::PinSession {
+                    session_id: (*id).into(),
+                    order_key: Some(key.into()),
+                },
+            );
+        }
+        let store = host.store.clone();
+        host.driver.wait_until(cx, "the pins", |cx| {
+            store.read_with(cx, |store, _| {
+                store
+                    .flat_sessions()
+                    .iter()
+                    .all(|meta| meta.pinned_at.is_some())
+            })
+        });
+    }
+    crate::test_frames::draw_settled(cx);
+    assert_eq!(
+        drawn(cx),
+        [
+            "host-a/a1",
+            "host-b/b1",
+            "host-a/a2",
+            "host-b/b2",
+            "host-a/a3"
+        ],
+        "the pinned rows of two hosts merge by time"
+    );
+
     let (left, none) = (gpui::MouseButton::Left, gpui::Modifiers::default());
     let frame = |cx: &mut VisualTestContext| {
         cx.executor()
@@ -2558,7 +2606,8 @@ fn a_thread_carried_over_another_hosts_row_lands_among_its_own(cx: &mut TestAppC
         b.store.read_with(cx, |store, _| store
             .flat_sessions()
             .iter()
-            .all(|meta| meta.active_order.is_none() && meta.pinned_at.is_none())),
+            .map(|meta| meta.pin_order.as_deref())
+            .eq([Some("f"), Some("n")])),
         "the other host is not asked to move anything"
     );
     crate::test_frames::draw_settled(cx);

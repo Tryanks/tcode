@@ -417,7 +417,6 @@ impl AppState {
                 | Command::PinSession { session_id, .. }
                 | Command::UnpinSession { session_id }
                 | Command::ReorderPinned { session_id, .. }
-                | Command::ReorderActive { session_id, .. }
                 | Command::RewindTurn { session_id, .. }
                 | Command::PreviewRewind { session_id, .. }
                 | Command::UndoRewind { session_id, .. }
