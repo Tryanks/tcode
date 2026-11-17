@@ -463,7 +463,7 @@ fn composer_history_survives_submission_and_destination_switches(cx: &mut TestAp
         let session_id = Some(status.session_id.clone());
         status.draft = is_draft;
         status.project_id = Some("project-a".into());
-        let mut restored_status = status.clone();
+        let restored_status = status.clone();
         replace(
             &incoming,
             Topic::SessionStatus {
@@ -523,9 +523,6 @@ fn composer_history_survives_submission_and_destination_switches(cx: &mut TestAp
             });
             window.draw(cx).clear(cx);
         });
-        if is_draft {
-            restored_status.session_id = "reopened-project-draft".into();
-        }
         store.update(cx, |store, cx| {
             store.show_alone(restored_status.session_id.clone(), cx)
         });
@@ -545,7 +542,7 @@ fn composer_history_survives_submission_and_destination_switches(cx: &mut TestAp
             window.draw(cx).clear(cx);
             composer.update(cx, |composer, cx| composer.focus(window, cx));
         });
-        // The first thread's draft came back with its project's.
+        // What the first thread or draft held came back with it.
         cx.simulate_keystrokes("enter");
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert_eq!(sent_texts(&outgoing), ["Keep this prompt"]);

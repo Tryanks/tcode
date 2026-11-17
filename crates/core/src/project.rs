@@ -176,6 +176,11 @@ pub struct SessionMeta {
     /// pinned row without one sorts by its creation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin_order: Option<String>,
+    /// What the composer of a thread never sent to holds: a draft, which
+    /// outlives its page while this is not empty. Absent on a thread that
+    /// was sent to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_text: Option<String>,
     /// Dedicated-worktree mode metadata, when the session runs in its own git
     /// worktree instead of the project checkout. Absent = local checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -452,6 +457,7 @@ impl SessionMeta {
             auto_settle_disabled_at: None,
             pinned_at: None,
             pin_order: None,
+            draft_text: None,
             worktree: None,
             other_worktrees: Vec::new(),
             resume_cursor: None,

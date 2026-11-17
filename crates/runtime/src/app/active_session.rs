@@ -957,6 +957,16 @@ impl ActiveSession {
         Some(message)
     }
 
+    /// A draft whose composer holds text, which outlives its page.
+    pub(super) fn holds_draft_text(&self) -> bool {
+        self.draft
+            && self
+                .meta
+                .draft_text
+                .as_ref()
+                .is_some_and(|text| !text.is_empty())
+    }
+
     pub(super) fn is_starting_generation(&self, generation: u64) -> bool {
         matches!(
             self.runtime,

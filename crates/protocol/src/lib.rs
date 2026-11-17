@@ -367,7 +367,9 @@ pub use wire::{
 // title_generation is absent while no title model is chosen. Active threads
 // are no longer arranged by hand: the ReorderActive command and thread
 // metadata's active_order go, and SessionActivity gains last_activity_at.
-// The protocol adds the ThreadTurnMarks query.
+// The protocol adds the ThreadTurnMarks query. It adds the SetDraftText and
+// RestoreDraft commands, thread metadata gains draft_text, and the index
+// lists the drafts on a client's screen and those that hold text.
 pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]

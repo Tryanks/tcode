@@ -506,6 +506,9 @@ pub struct AppState {
     storage_migration: Option<tcode_protocol::StorageMigration>,
     /// The last disk-usage measurement, and whether one runs.
     disk_usage: tcode_protocol::DiskUsageState,
+    /// The drafts deleted last, oldest first, for a client to take the
+    /// deletion back ([`Self::restore_draft`]).
+    deleted_drafts: Vec<SessionMeta>,
     /// Composer-draft review notes, keyed by session id (in-memory only).
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
     /// A restart-continuity marker taken at launch (see `tcode_services::relaunch`).
@@ -582,7 +585,10 @@ impl AppState {
     ) -> std::io::Result<Self> {
         store.open()?;
         let file = store.read_file()?;
-        let mut sessions = file.sessions;
+        let (drafts, mut sessions): (Vec<_>, Vec<_>) = file
+            .sessions
+            .into_iter()
+            .partition(|meta| meta.draft_text.is_some());
         sessions.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         let mut projects = file.projects;
         let scratch_root = user_directories.scratch_root().ok();
@@ -646,7 +652,7 @@ impl AppState {
         let (store_writes, store_write_receiver) = smol::channel::unbounded();
         let (store_write_failures, store_write_failure_receiver) = smol::channel::unbounded();
         let session_search = Arc::new(SessionSearch::new(store.clone()));
-        Ok(Self {
+        let mut state = Self {
             store,
             user_directories,
             settings_store,
@@ -733,12 +739,23 @@ impl AppState {
             storage_pass: None,
             storage_migration: None,
             disk_usage: Default::default(),
+            deleted_drafts: Vec::new(),
             review_comment_drafts: HashMap::new(),
             pending_relaunch,
             external_imports: HashMap::new(),
             next_import_run_id: 1,
             session_search,
-        })
+        };
+        for meta in drafts {
+            state
+                .thread_activity
+                .insert(meta.id.clone(), Default::default());
+            let commands = state.cached_provider_commands_for(&meta);
+            state
+                .residents
+                .park(ActiveSession::new(meta, true, commands));
+        }
+        Ok(state)
     }
 
     pub(crate) fn set_provider_launcher(&mut self, launcher: ProviderLauncher) {

@@ -98,19 +98,20 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn with_composer_destination_for<R>(
-        &self,
-        session_id: Option<&str>,
-        read: impl FnOnce(bool, &str, Option<&str>) -> R,
-        cx: &App,
-    ) -> Option<R> {
-        self.thread_status(session_id, cx).map(|status| {
-            read(
-                status.draft,
-                &status.session_id,
-                status.project_id.as_deref(),
-            )
-        })
+    /// What the host holds as the text of `session_id`'s composer while the
+    /// thread is a draft: nothing for one it does not list yet.
+    pub fn draft_text_for(&self, session_id: Option<&str>, cx: &App) -> Option<&str> {
+        let status = self
+            .thread_status(session_id, cx)
+            .filter(|status| status.draft)?;
+        Some(
+            self.index_replica
+                .0
+                .iter()
+                .find(|meta| meta.id == status.session_id)
+                .and_then(|meta| meta.draft_text.as_deref())
+                .unwrap_or_default(),
+        )
     }
 
     pub(crate) fn native_subagent_readonly_for(&self, session_id: Option<&str>, cx: &App) -> bool {

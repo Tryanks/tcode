@@ -209,7 +209,7 @@ impl Composer {
         let mut scored: Vec<_> = store
             .flat_sessions()
             .into_iter()
-            .filter(|meta| meta.id != session_id)
+            .filter(|meta| meta.id != session_id && meta.draft_text.is_none())
             .filter(|meta| {
                 !control
                     .references

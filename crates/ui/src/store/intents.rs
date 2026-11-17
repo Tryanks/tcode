@@ -1010,13 +1010,13 @@ impl WorkspaceStore {
         self.create_and_show(Command::StartDraft { project_id, cwd }, false, None, cx);
     }
     /// Start a draft in the project `session_id` belongs to, or a scratch
-    /// draft when it belongs to none. Beside a draft nothing starts: the host
-    /// answers a project's or a quick chat's draft request with its standing
-    /// draft, which would be that same draft.
+    /// draft when it belongs to none. Beside a draft holding no text nothing
+    /// starts: the host answers a project's or a quick chat's draft request
+    /// with its standing draft, which would be that same draft.
     pub(crate) fn start_draft_beside(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
         if self
-            .session_status_for(session_id, cx)
-            .is_some_and(|status| status.draft)
+            .draft_text_for(session_id, cx)
+            .is_some_and(|text| text.is_empty())
         {
             return;
         }
@@ -1088,6 +1088,10 @@ impl WorkspaceStore {
             });
         })
         .detach();
+    }
+    /// Tell the host what the draft's composer holds.
+    pub fn set_draft_text(&mut self, session_id: String, text: String) {
+        self.dispatch(Command::SetDraftText { session_id, text });
     }
     pub fn set_draft_workspace_for(&mut self, session_id: String, mode: WorkspaceMode) {
         self.dispatch(Command::SetDraftWorkspace { session_id, mode });

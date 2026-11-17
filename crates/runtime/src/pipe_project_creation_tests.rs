@@ -317,3 +317,148 @@ fn uploads_land_in_the_scratch_directory_and_leave_with_their_thread() {
     host.shutdown_blocking().unwrap();
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// A project's new thread page is one draft while nothing is typed in it.
+/// Text makes it a draft of its own: the index lists it with that text off
+/// screen, the next new thread is another, and a restarted host still has
+/// it. Emptied, it is the new thread page again. Deleted, it comes back as
+/// it was when the deletion is taken back.
+#[test]
+fn a_draft_holding_text_is_kept_and_the_next_new_thread_is_another() {
+    let root = std::env::temp_dir().join(format!("tcode-drafts-{}", uuid::Uuid::new_v4()));
+    let project_root = root.join("project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let spawn = || {
+        spawn_host(
+            SessionStore::open_at(root.join("data")).unwrap(),
+            HostServices {
+                clock: clock(),
+                ..HostServices::default()
+            },
+        )
+        .unwrap()
+    };
+    let host = spawn();
+    let link = host.link();
+    let CommandResponse::ProjectId(Some(project_id)) = link
+        .command_blocking(Command::CreateProject {
+            root: project_root.clone(),
+        })
+        .unwrap()
+    else {
+        panic!("expected project id");
+    };
+    let start = |link: &HostLink| {
+        let CommandResponse::SessionId(Some(id)) = link
+            .command_blocking(Command::StartDraft {
+                project_id: project_id.clone(),
+                cwd: project_root.clone(),
+            })
+            .unwrap()
+        else {
+            panic!("expected session id");
+        };
+        id
+    };
+    let type_text = |link: &HostLink, id: &str, text: &str| {
+        link.command_blocking(Command::SetDraftText {
+            session_id: id.into(),
+            text: text.into(),
+        })
+        .unwrap();
+    };
+    let status = |id: &str| Subscription {
+        known_index: None,
+        topic: Topic::SessionStatus {
+            session_id: id.into(),
+        },
+        after: None,
+    };
+    let listed = |link: &HostLink, events: &async_channel::Receiver<EventEnvelope>| {
+        let index = Subscription {
+            known_index: None,
+            topic: Topic::Index,
+            after: None,
+        };
+        link.subscribe(index.clone()).unwrap();
+        let snapshot = super::tests::next_event(events, |event| {
+            matches!(&event.event, ServerEvent::IndexSnapshot(_))
+        });
+        link.unsubscribe(index).unwrap();
+        let ServerEvent::IndexSnapshot(snapshot) = snapshot.event else {
+            unreachable!()
+        };
+        let mut drafts: Vec<_> = snapshot
+            .sessions
+            .into_iter()
+            .map(|meta| (meta.id, meta.draft_text))
+            .collect();
+        drafts.sort();
+        drafts
+    };
+
+    let first = start(&link);
+    assert_eq!(start(&link), first, "nothing typed: the same page");
+    link.subscribe(status(&first)).unwrap();
+    let index = Subscription {
+        known_index: None,
+        topic: Topic::Index,
+        after: None,
+    };
+    let events = super::p4b_tests::observed_events(&link);
+    link.subscribe(index.clone()).unwrap();
+    type_text(&link, &first, "half a thought");
+    super::tests::next_event(&events, |event| {
+        matches!(
+            &event.event,
+            ServerEvent::IndexUpsertSession(meta)
+                if meta.id == first && meta.draft_text.as_deref() == Some("half a thought")
+        )
+    });
+    link.unsubscribe(index).unwrap();
+    let second = start(&link);
+    assert_ne!(second, first);
+    link.subscribe(status(&second)).unwrap();
+    type_text(&link, &second, "another");
+    type_text(&link, &second, "  ");
+    assert_eq!(start(&link), second, "emptied: the new thread page again");
+    link.unsubscribe(status(&first)).unwrap();
+    link.unsubscribe(status(&second)).unwrap();
+    // The command after the unsubscriptions orders the read behind them.
+    type_text(&link, &second, "");
+    assert_eq!(
+        listed(&link, &events),
+        [(first.clone(), Some("half a thought".to_string()))]
+    );
+    host.shutdown_blocking().unwrap();
+
+    let host = spawn();
+    let link = host.link();
+    let events = super::p4b_tests::observed_events(&link);
+    assert_eq!(
+        listed(&link, &events),
+        [(first.clone(), Some("half a thought".to_string()))]
+    );
+    let delete = || {
+        link.command_blocking(Command::DeleteSession {
+            session_id: first.clone(),
+            remove_worktree: false,
+        })
+        .unwrap();
+    };
+    delete();
+    assert_eq!(listed(&link, &events), []);
+    // A deletion is taken back whole.
+    link.command_blocking(Command::RestoreDraft {
+        session_id: first.clone(),
+    })
+    .unwrap();
+    assert_eq!(
+        listed(&link, &events),
+        [(first.clone(), Some("half a thought".to_string()))]
+    );
+    delete();
+    assert_eq!(listed(&link, &events), []);
+    host.shutdown_blocking().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}

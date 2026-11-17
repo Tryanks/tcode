@@ -469,6 +469,10 @@ struct ThreadRowState {
     renaming: Option<Entity<InputState>>,
     menu_can_fork: bool,
     title_generating: bool,
+    /// Never sent to: none of what is done to a thread applies but deleting it.
+    draft: bool,
+    /// A draft holding text, which stays listed off screen.
+    draft_kept: bool,
 }
 
 impl ThreadRowState {
@@ -625,6 +629,7 @@ struct ThreadArrange(ThreadKey);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UndoKind {
+    DiscardDraft,
     Settle,
     Unpin,
     Archive,

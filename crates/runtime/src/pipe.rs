@@ -1105,6 +1105,8 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             app.fit_draft_to_space(&id, cx);
             response = CommandResponse::SessionId(Some(id));
         }
+        Command::RestoreDraft { session_id } => app.restore_draft(&session_id, cx),
+        Command::SetDraftText { session_id, text } => app.set_draft_text(&session_id, text, cx),
         Command::SetDraftWorkspace { session_id, mode } => {
             app.set_draft_workspace(&session_id, mode, cx)
         }
