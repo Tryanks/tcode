@@ -2,8 +2,6 @@ use super::*;
 use crate::markdown::SelectionGesture;
 use gpui::WeakEntity;
 
-#[cfg(test)]
-mod catch_up;
 mod expansion;
 mod glide;
 mod list;
