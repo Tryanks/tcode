@@ -107,11 +107,18 @@ pub use thread_export::format_size;
 pub use window_seam::force_mobile_layout;
 pub use window_state::WindowState;
 
-/// Keep the size the desktop window closed at for the next time it opens;
-/// [`tcode_client::host::ClientPreferences::window_size`] is where it is read.
-pub fn remember_window_size(size: gpui::Size<gpui::Pixels>, cx: &mut gpui::App) {
+/// Keep how the desktop window closed for the next time it opens: whether it
+/// was maximized, and the size it has, or returns to, when it is not. With no
+/// `size` the one already kept stays. Both are read back from
+/// [`tcode_client::host::ClientPreferences`].
+pub fn remember_window(
+    size: Option<gpui::Size<gpui::Pixels>>,
+    maximized: bool,
+    cx: &mut gpui::App,
+) {
     let points = |length: gpui::Pixels| length.as_f32().round() as u32;
-    device::DevicePreferences::set_window_size((points(size.width), points(size.height)), cx);
+    let size = size.map(|size| (points(size.width), points(size.height)));
+    device::DevicePreferences::set_window(size, maximized, cx);
 }
 
 /// Where this client may keep its own files (the WebView2 profile is the only
