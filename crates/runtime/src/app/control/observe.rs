@@ -1405,7 +1405,11 @@ impl AppState {
                 collapsed.push(collapse("just_active"));
                 continue;
             }
-            let activity_known = self.thread_activity.contains_key(&meta.id);
+            // A thread the host has read and found nothing in has an entry too.
+            let activity_known = self
+                .thread_activity
+                .get(&meta.id)
+                .is_some_and(|activity| activity.last_activity_at().is_some());
             if !activity_known {
                 without_enough_data += 1;
             }
