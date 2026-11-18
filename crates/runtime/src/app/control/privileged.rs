@@ -7,7 +7,7 @@ use control_mcp::{
 };
 use tcode_core::settings::ChildApprovalMode;
 use tcode_core::settings::SettingsPatch;
-use tcode_protocol::{Command, Principal};
+use tcode_protocol::Command;
 
 /// The settings an agent may change, as display preferences only. Everything else touches
 /// authority (approvals, computer use, browser evaluation, plugins, child approval, whether
@@ -56,16 +56,6 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::ProjectStart(_)
         | SettingsPatch::ProjectStartCustom(_) => true,
     }
-}
-
-/// The context every privileged write runs in: the host's full authority, authored by the
-/// agent, never the user.
-fn agent_cx(cx: &HostCx) -> HostCx {
-    let mut cx = cx.clone();
-    cx.principal = Principal::Full;
-    cx.origin = Some(MessageOrigin::Agent);
-    cx.author = None;
-    cx
 }
 
 fn refusal(error: tcode_protocol::ProtocolError) -> String {
@@ -130,21 +120,20 @@ impl AppState {
         if !missing.is_empty() {
             return Err(format!("missing answers for question ids {missing:?}"));
         }
-        let mut cx = agent_cx(cx);
         let command = Command::RespondUserInput {
             session_id: target.clone(),
             request_id: request_id.clone(),
             answers: params.answers.clone(),
         };
         self.validate_command_target(&command).map_err(refusal)?;
-        self.respond_user_input(&target, request_id.clone(), params.answers.clone(), &mut cx)
+        self.respond_user_input(&target, request_id.clone(), params.answers.clone(), cx)
             .map_err(refusal)?;
         self.audit(
             caller,
             &target,
             action::RESPOND_INPUT,
             Some(request_id.clone()),
-            &mut cx,
+            cx,
         );
         Ok(serde_json::json!({ "thread_id": target, "request_id": request_id, "answered": true }))
     }
@@ -195,13 +184,12 @@ impl AppState {
         let decision =
             resolve_approval_decision(params.option.as_deref(), params.cancel, &request)?;
         self.respond_session_approval(&target, request.id.clone(), decision)?;
-        let mut cx = agent_cx(cx);
         self.audit(
             caller,
             &target,
             action::RESPOND_APPROVAL,
             Some(request.id.clone()),
-            &mut cx,
+            cx,
         );
         Ok(serde_json::json!({ "thread_id": target, "approval_id": request.id, "answered": true }))
     }
@@ -227,7 +215,6 @@ impl AppState {
         cx: &mut HostCx,
     ) -> Result<serde_json::Value, String> {
         let target = params.thread_id;
-        let mut cx = agent_cx(cx);
         let answer = match params.op {
             TerminalOp::Open => {
                 if self.resident(&target).is_none() {
@@ -235,14 +222,14 @@ impl AppState {
                         .find_meta(&target)
                         .filter(|meta| meta.archived_at.is_none())
                         .ok_or_else(|| format!("refused: thread {target} is archived"))?;
-                    self.load_background_session(meta, &mut cx);
+                    self.load_background_session(meta, cx);
                 }
                 self.validate_command_target(&Command::NewTerminal {
                     session_id: target.clone(),
                 })
                 .map_err(refusal)?;
-                self.new_terminal(&target, &mut cx);
-                self.audit(caller, &target, action::TERMINAL_OPEN, None, &mut cx);
+                self.new_terminal(&target, cx);
+                self.audit(caller, &target, action::TERMINAL_OPEN, None, cx);
                 TerminalAnswer {
                     thread_id: target,
                     terminal_id: None,
@@ -259,13 +246,13 @@ impl AppState {
                     bytes: text.clone().into_bytes(),
                 })
                 .map_err(refusal)?;
-                self.write_terminal_input(terminal_id, text.into_bytes(), &mut cx);
+                self.write_terminal_input(terminal_id, text.into_bytes(), cx);
                 self.audit(
                     caller,
                     &target,
                     action::TERMINAL_INPUT,
                     Some(terminal_id.to_string()),
-                    &mut cx,
+                    cx,
                 );
                 TerminalAnswer {
                     thread_id: target,
@@ -281,13 +268,13 @@ impl AppState {
                     terminal_id,
                 })
                 .map_err(refusal)?;
-                self.close_terminal(&target, terminal_id, &mut cx);
+                self.close_terminal(&target, terminal_id, cx);
                 self.audit(
                     caller,
                     &target,
                     action::TERMINAL_CLOSE,
                     Some(terminal_id.to_string()),
-                    &mut cx,
+                    cx,
                 );
                 TerminalAnswer {
                     thread_id: target,
@@ -320,7 +307,6 @@ impl AppState {
     ) -> Answer {
         let remove_worktree = params.remove_worktree.unwrap_or(false);
         let dry_run = params.dry_run.unwrap_or(false);
-        let mut agent_cx = agent_cx(cx);
         let mut results = Vec::with_capacity(params.thread_ids.len());
         let mut removals = Vec::new();
         for target in params.thread_ids {
@@ -375,14 +361,14 @@ impl AppState {
             }
             removals.push((
                 results.len(),
-                self.delete_session(&target, remove_worktree, &mut agent_cx),
+                self.delete_session(&target, remove_worktree, cx),
             ));
             self.audit(
                 caller,
                 &caller.thread_id,
                 action::DELETE_THREADS,
                 Some(meta.title.clone()),
-                &mut agent_cx,
+                cx,
             );
             results.push(BatchResult {
                 target,
@@ -444,13 +430,12 @@ impl AppState {
         if let Some(blocked) = status.blocked {
             return Answer::Now(Err(format!("refused: {blocked:?}")));
         }
-        let mut agent_cx = agent_cx(cx);
         let at = super::super::rewind::RewindAt {
             turn: params.turn,
             steer: None,
             checkpoint: None,
         };
-        let Some(answer) = self.rewind_turn(&target, at, mode, None, &mut agent_cx) else {
+        let Some(answer) = self.rewind_turn(&target, at, mode, None, cx) else {
             return Answer::Now(Err(format!(
                 "refused: turn {} of thread {target} cannot be restored as {:?}",
                 params.turn, params.mode
@@ -461,7 +446,7 @@ impl AppState {
             &target,
             action::REWIND,
             Some(params.turn.to_string()),
-            &mut agent_cx,
+            cx,
         );
         let turn = params.turn;
         Answer::Later(cx.spawn_background(async move {
@@ -532,14 +517,13 @@ impl AppState {
             patch: patch.clone(),
         })
         .map_err(refusal)?;
-        let mut cx = agent_cx(cx);
-        self.patch_settings(patch, &mut cx);
+        self.patch_settings(patch, cx);
         self.audit(
             caller,
             &caller.thread_id,
             action::PATCH_SETTINGS,
             Some(name.clone()),
-            &mut cx,
+            cx,
         );
         Ok(serde_json::json!({ "applied": name }))
     }

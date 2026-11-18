@@ -89,11 +89,10 @@ impl AppState {
         cx: &mut HostCx,
     ) -> Result<serde_json::Value, String> {
         let dry_run = params.dry_run.unwrap_or(false);
-        let mut cx = agent_cx(cx);
         let results = params
             .changes
             .into_iter()
-            .map(|change| self.update_thread(caller, change, dry_run, log_ends, &mut cx))
+            .map(|change| self.update_thread(caller, change, dry_run, log_ends, cx))
             .collect();
         serde_json::to_value(UpdateThreadsAnswer { dry_run, results })
             .map_err(|error| error.to_string())
@@ -369,14 +368,13 @@ impl AppState {
                 coverage: record.coverage.clone(),
             }),
         );
-        let mut cx = agent_cx(cx);
         let detail = record.items.len().to_string();
         self.audit(
             caller,
             &caller.thread_id,
             action::RECORD_REVIEW,
             Some(detail),
-            &mut cx,
+            cx,
         );
         Ok(answer(&record))
     }
@@ -413,16 +411,13 @@ impl AppState {
         };
         let when = describe_when(&grant.when);
         let detail = grant.consent_quote.clone();
-        let mut cx = agent_cx(cx);
-        self.change_meta(&caller.thread_id, &mut cx, |meta| {
-            meta.self_settle = Some(grant)
-        });
+        self.change_meta(&caller.thread_id, cx, |meta| meta.self_settle = Some(grant));
         self.audit(
             caller,
             &caller.thread_id,
             action::SETTLE_SELF,
             Some(detail),
-            &mut cx,
+            cx,
         );
         Ok(serde_json::json!({
             "status": "armed",
@@ -571,7 +566,8 @@ impl AppState {
     }
 }
 
-/// The context a `tcode_control` write runs under: full authority, agent-authored.
+/// The context the host settles a thread in under its own grant: the host's authority and
+/// the agent's authorship, whichever request or event brought the moment.
 fn agent_cx(cx: &HostCx) -> HostCx {
     let mut cx = cx.clone();
     cx.principal = Principal::Full;
