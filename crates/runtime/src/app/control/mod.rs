@@ -28,8 +28,6 @@ const RESPONSE_CAP: usize = 64 * 1024;
 
 pub(super) struct ControlState {
     activity: VecDeque<ControlActivityEntry>,
-    review_records: Vec<tcode_core::control::ReviewRecord>,
-    reviews_unreadable: Option<UnreadableFile>,
     activity_unreadable: Option<UnreadableFile>,
     /// Answers to recent calls that carried a `request_id`, so a retry does not act twice.
     answered: VecDeque<(String, serde_json::Value)>,
@@ -37,16 +35,12 @@ pub(super) struct ControlState {
 
 impl ControlState {
     pub(super) fn new(
-        review_records: Vec<tcode_core::control::ReviewRecord>,
-        reviews_unreadable: Option<UnreadableFile>,
         mut activity: Vec<ControlActivityEntry>,
         activity_unreadable: Option<UnreadableFile>,
     ) -> Self {
         activity.truncate(CONTROL_ACTIVITY_LIMIT);
         Self {
             activity: activity.into(),
-            review_records,
-            reviews_unreadable,
             activity_unreadable,
             answered: VecDeque::new(),
         }
@@ -414,7 +408,6 @@ impl AppState {
             ControlOp::ListProviders(p) => self.op_list_providers(caller, p, cx),
             ControlOp::GetSettings(p) => self.op_get_settings(caller, p, cx),
             ControlOp::ReadTerminal(p) => self.op_read_terminal(caller, p, cx),
-            ControlOp::RecordReview(p) => self.op_record_review(caller, p, cx),
             ControlOp::SettleSelf(p) => self.op_settle_self(caller, p, cx),
             ControlOp::StartThread(p) => return self.op_start_thread(caller, p, cx),
             ControlOp::SendMessage(p) => self.op_send_message(caller, p, cx),
@@ -519,16 +512,6 @@ impl AppState {
             threads,
             actions,
         }
-    }
-
-    pub(crate) fn review_records(&self, limit: usize) -> Vec<tcode_core::control::ReviewRecord> {
-        self.control
-            .review_records
-            .iter()
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect()
     }
 
     /// Write a changed meta through to the resident copy, the index and the store.

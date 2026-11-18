@@ -1487,7 +1487,6 @@ notice:
   worktree_merge_git_error: "ワークツリーのブランチをマージできませんでした：%{error}"
   dirty_tree: "未コミットの変更があります"
   tcode_update_available: "Tcode %{version} が利用可能です"
-  review_recorded: "レビューを記録しました：%{items} 項目、カバレッジ %{coverage}"
   usage_limit_reached: "%{harness} が使用量の上限に達しました"
 attach:
   unsupported_type: "「%{name}」を画像として読み込めませんでした。"
@@ -2854,7 +2853,6 @@ control:
     keep: "保持"
     keep_off: "保持を解除"
     settle_self: "後で自ら完了にする"
-    record_review: "レビューを記録"
     notify_when: "スレッドを監視"
     cancel_notify: "監視を停止"
     respond_input: "入力要求に応答"

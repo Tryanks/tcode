@@ -1340,9 +1340,9 @@ pub enum RuntimeError {
     SettingsUnreadable {
         error: String,
     },
-    /// Another file of the host's own (reviews.json, control_activity.json)
-    /// could not be read at start, so the host runs without what it holds and
-    /// writes nothing over it. `error` names the file.
+    /// Another file of the host's own (control_activity.json) could not be read
+    /// at start, so the host runs without what it holds and writes nothing
+    /// over it. `error` names the file.
     FileUnreadable {
         error: String,
     },
@@ -1458,11 +1458,6 @@ pub enum RuntimeNotice {
         reason: MergeWorktreeFailure,
         detail: Option<String>,
     },
-    /// A thread's model recorded a conversation review.
-    ReviewRecorded {
-        items: usize,
-        coverage: String,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1481,8 +1476,7 @@ impl RuntimeNotice {
             | Self::SwitchedBranch { .. }
             | Self::WorktreeSeeded { .. }
             | Self::WorktreeMergedFastForward
-            | Self::WorktreeMergedCommit
-            | Self::ReviewRecorded { .. } => NoticeSeverity::Success,
+            | Self::WorktreeMergedCommit => NoticeSeverity::Success,
         }
     }
 }

@@ -1,27 +1,14 @@
 use super::*;
 use crate::app::sessions::SettleEffects;
 use control_mcp::{
-    BatchResult, DeleteThreadsParams, Expect, Outcome, RecordReviewParams, SettleSelfParams,
-    ThreadChange, ThreadOp, UpdateThreadsParams,
+    BatchResult, DeleteThreadsParams, Expect, Outcome, SettleSelfParams, ThreadChange, ThreadOp,
+    UpdateThreadsParams,
 };
-use tcode_core::control::{
-    FollowUp, ReviewItem, ReviewRecord, SelfSettleGrant, SelfSettleWhen, action,
-};
+use tcode_core::control::{FollowUp, SelfSettleGrant, SelfSettleWhen, action};
 use tcode_core::project::SettledOverride;
 use tcode_core::pull_request::PullRequestState;
 use tcode_protocol::{Command, Principal};
 
-/// How many reviews are kept; the oldest goes first.
-const REVIEW_RECORD_LIMIT: usize = 50;
-const REVIEW_GROUPS: [&str; 6] = [
-    "continue",
-    "needs_decision",
-    "waiting_on_others",
-    "can_settle",
-    "parked_or_superseded",
-    "unsure",
-];
-const REVIEW_CONFIDENCE: [&str; 3] = ["clear_evidence", "inference", "unsure"];
 const UNSETTLE_NOTE: &str = "override becomes active; nothing is restored";
 
 #[derive(Serialize)]
@@ -379,104 +366,6 @@ impl AppState {
             }
             Ok(serde_json::json!({ "results": results }))
         }))
-    }
-
-    pub(super) fn op_record_review(
-        &mut self,
-        caller: &Caller,
-        params: RecordReviewParams,
-        cx: &mut HostCx,
-    ) -> Result<serde_json::Value, String> {
-        let answer = |record: &ReviewRecord| {
-            serde_json::json!({
-                "status": "recorded",
-                "id": record.id,
-                "items": record.items.len(),
-                "coverage": record.coverage,
-            })
-        };
-        if let Some(existing) = params.request_id.as_ref().and_then(|id| {
-            self.control
-                .review_records
-                .iter()
-                .find(|record| &record.id == id && record.thread_id == caller.thread_id)
-        }) {
-            return Ok(answer(existing));
-        }
-        if params.coverage.trim().is_empty() {
-            return Err("coverage is required: say what the review looked at".into());
-        }
-        let mut items = Vec::with_capacity(params.items.len());
-        for (index, item) in params.items.into_iter().enumerate() {
-            if !self
-                .find_meta(&item.thread_id)
-                .is_some_and(|meta| self.open_to(caller, &meta))
-            {
-                return Err(format!(
-                    "item {index}: thread {} is unknown or closed to this thread",
-                    item.thread_id
-                ));
-            }
-            if !REVIEW_GROUPS.contains(&item.group.as_str()) {
-                return Err(format!(
-                    "item {index}: group must be one of {}",
-                    REVIEW_GROUPS.join(", ")
-                ));
-            }
-            if !REVIEW_CONFIDENCE.contains(&item.confidence.as_str()) {
-                return Err(format!(
-                    "item {index}: confidence must be one of {}",
-                    REVIEW_CONFIDENCE.join(", ")
-                ));
-            }
-            items.push(ReviewItem {
-                thread_id: item.thread_id,
-                group: item.group,
-                confidence: item.confidence,
-                evidence: item.evidence,
-                suggestion: item.suggestion,
-            });
-        }
-        let record = ReviewRecord {
-            id: params
-                .request_id
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-            thread_id: caller.thread_id.clone(),
-            recorded_at: cx.clock().unix_secs(),
-            coverage: params.coverage,
-            items,
-        };
-        let records = &mut self.control.review_records;
-        records.push(record.clone());
-        let excess = records.len().saturating_sub(REVIEW_RECORD_LIMIT);
-        records.drain(..excess);
-        match &mut self.control.reviews_unreadable {
-            Some(unreadable) => {
-                if let Some(error) = unreadable.first_refusal() {
-                    self.report_error(RuntimeError::FileUnreadable { error }, cx);
-                }
-            }
-            None => {
-                let records = self.control.review_records.clone();
-                self.enqueue_store_write(StoreWrite::WriteReviewRecords(records), cx);
-            }
-        }
-        emit_runtime(
-            cx,
-            RuntimeEvent::Notice(RuntimeNotice::ReviewRecorded {
-                items: record.items.len(),
-                coverage: record.coverage.clone(),
-            }),
-        );
-        let detail = record.items.len().to_string();
-        self.audit(
-            caller,
-            &caller.thread_id,
-            action::RECORD_REVIEW,
-            Some(detail),
-            cx,
-        );
-        Ok(answer(&record))
     }
 
     pub(super) fn op_settle_self(
