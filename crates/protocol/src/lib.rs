@@ -378,6 +378,8 @@ pub use wire::{
 // ControlStatus loses grant, source and pending_requests, Settings' control
 // keeps only enabled, and the SetControlGrant and RespondControlGrant
 // commands and the ControlDefaultGrant and ControlProjectGrant patches go.
+// tcode_control records no reviews: the ReviewRecords query and
+// RuntimeNotice's review_recorded go.
 pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]

@@ -10,12 +10,11 @@ use serde::{Serialize, de::DeserializeOwned};
 #[cfg(test)]
 use tcode_core::settings::{EnvVar, ThemeMode};
 use tcode_core::{
-    control::{ControlActivityEntry, ReviewRecord},
+    control::ControlActivityEntry,
     pull_request::HostKind,
     settings::{Settings, provider_key},
 };
 
-const REVIEWS_FILE: &str = "reviews.json";
 const CONTROL_ACTIVITY_FILE: &str = "control_activity.json";
 
 type Secrets = BTreeMap<String, BTreeMap<String, String>>;
@@ -405,15 +404,6 @@ impl SettingsStore {
         restrict_permissions(&self.secrets_path)
     }
 
-    /// The recorded conversation reviews, oldest first.
-    pub fn load_review_records(&self) -> std::io::Result<Vec<ReviewRecord>> {
-        self.load_list(REVIEWS_FILE)
-    }
-
-    pub fn save_review_records(&self, records: &[ReviewRecord]) -> std::io::Result<()> {
-        self.save_list(REVIEWS_FILE, records)
-    }
-
     /// The recent `tcode_control` writes, newest first.
     pub fn load_control_activity(&self) -> std::io::Result<Vec<ControlActivityEntry>> {
         self.load_list(CONTROL_ACTIVITY_FILE)
@@ -540,15 +530,13 @@ mod tests {
             std::env::temp_dir().join(format!("tcode-settings-own-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let store = SettingsStore::new(root.clone());
-        assert!(store.load_review_records().unwrap().is_empty());
         assert!(store.load_control_activity().unwrap().is_empty());
         assert!(store.profile_secrets("claude").unwrap().is_empty());
         assert_eq!(store.token(HostKind::Github, "github.com").unwrap(), None);
 
-        for name in [REVIEWS_FILE, CONTROL_ACTIVITY_FILE, "secrets.json"] {
+        for name in [CONTROL_ACTIVITY_FILE, "secrets.json"] {
             fs::write(store.data_file(name), b"{torn").unwrap();
         }
-        assert!(store.load_review_records().is_err());
         assert!(store.load_control_activity().is_err());
         assert!(store.profile_secrets("claude").is_err());
         assert!(store.token(HostKind::Github, "github.com").is_err());

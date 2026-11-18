@@ -100,8 +100,23 @@ fn uuid_len(text: &str) -> Option<usize> {
     ok.then_some(36)
 }
 
-/// The anchors in `text`, in order.
-fn anchors_in(text: &str, found: &mut Vec<Anchor>) {
+/// The fields in which a call or its answer names a thread by its id alone.
+/// An id anywhere else is a project's, a request's or a watch's.
+const THREAD_FIELDS: &[&str] = &[
+    "thread_id",
+    "thread_ids",
+    "target",
+    "new_thread_id",
+    "parent_session_id",
+    "parent",
+    "children",
+    "forked_from",
+    "started_by",
+];
+
+/// The anchors in `text`, in order: each entry, written `<thread>#<position>`,
+/// and each bare thread id where `threads` says the text holds them.
+fn anchors_in(text: &str, threads: bool, found: &mut Vec<Anchor>) {
     let mut index = 0;
     while index < text.len() {
         let rest = &text[index..];
@@ -122,7 +137,7 @@ fn anchors_in(text: &str, found: &mut Vec<Anchor>) {
                 thread_id,
                 position,
             };
-            if !found.contains(&anchor) {
+            if (threads || anchor.position.is_some()) && !found.contains(&anchor) {
                 found.push(anchor);
             }
             index += len + if digits > 0 { digits + 1 } else { 0 };
@@ -132,11 +147,18 @@ fn anchors_in(text: &str, found: &mut Vec<Anchor>) {
     }
 }
 
-fn walk_strings<'v>(value: &'v Value, visit: &mut impl FnMut(&'v str)) {
+/// The threads and entries `value` names: an entry wherever its anchor is
+/// written, a thread in a field that holds thread ids or in a row that
+/// carries its title beside its id.
+fn named_in(value: &Value, threads: bool, found: &mut Vec<Anchor>) {
     match value {
-        Value::String(text) => visit(text),
-        Value::Array(items) => items.iter().for_each(|item| walk_strings(item, visit)),
-        Value::Object(map) => map.values().for_each(|item| walk_strings(item, visit)),
+        Value::String(text) => anchors_in(text, threads, found),
+        Value::Array(items) => items.iter().for_each(|item| named_in(item, threads, found)),
+        Value::Object(map) => map.iter().for_each(|(key, item)| {
+            let threads =
+                THREAD_FIELDS.contains(&key.as_str()) || key == "id" && map.contains_key("title");
+            named_in(item, threads, found);
+        }),
         _ => {}
     }
 }
@@ -179,11 +201,11 @@ impl Named {
         let output = call
             .output
             .and_then(|output| serde_json::from_str::<Value>(output.trim()).ok());
-        walk_strings(call.input, &mut |text| anchors_in(text, &mut anchors));
+        named_in(call.input, false, &mut anchors);
         let mut titles_found = HashMap::new();
         titles(call.input, &mut titles_found);
         if let Some(output) = &output {
-            walk_strings(output, &mut |text| anchors_in(text, &mut anchors));
+            named_in(output, false, &mut anchors);
             titles(output, &mut titles_found);
         }
         // An entry's thread is named by the entry; the bare thread adds
@@ -201,8 +223,12 @@ impl Named {
     }
 
     /// How a thread reads: its title when the call gave it one, else the
-    /// head of its id.
+    /// head of its id. A call names its own thread as `self` (`tcode_control`'s
+    /// word, which the server replaces with the id only on its way to the host).
     fn thread(&self, thread_id: &str) -> String {
+        if thread_id == "self" {
+            return crate::tr!("tools.this_thread").into_owned();
+        }
         self.titles
             .get(thread_id)
             .cloned()
@@ -252,15 +278,19 @@ fn targets(input: &Value) -> Vec<&str> {
     ids
 }
 
-/// The text a call carried to a thread: the message, the report, the reason.
-fn carried(input: &Value) -> Option<(&'static str, &str)> {
-    [
-        ("text", "tools.message"),
-        ("message", "tools.message"),
-        ("reason", "tools.reason"),
-    ]
-    .into_iter()
-    .find_map(|(key, label)| string(input, key).map(|text| (label, text)))
+/// The text a call carried to a thread: the message or the report.
+fn carried(input: &Value) -> Option<&str> {
+    string(input, "text").or_else(|| string(input, "message"))
+}
+
+/// The variant an input names under `key`: the word itself, or the one key
+/// of the object that carries the variant's fields.
+fn variant<'v>(value: &'v Value, key: &str) -> Option<&'v str> {
+    match value.get(key)? {
+        Value::String(name) => Some(name),
+        Value::Object(fields) => fields.keys().next().map(String::as_str),
+        _ => None,
+    }
 }
 
 impl Threads {
@@ -293,21 +323,29 @@ impl Threads {
         match self.kind {
             Kind::Outline | Kind::GetThread | Kind::Message => Argument::plain(threads()),
             Kind::Read => {
-                let from = string(input, "from").or_else(|| string(input, "anchor"));
-                let to = string(input, "to");
-                let mut found = Vec::new();
-                from.into_iter()
-                    .chain(to)
-                    .for_each(|text| anchors_in(text, &mut found));
-                let text = match found.as_slice() {
-                    [from, to] if from.thread_id == to.thread_id => format!(
-                        "{} #{}–#{}",
-                        named.thread(&from.thread_id),
-                        from.position.unwrap_or_default(),
-                        to.position.unwrap_or_default()
-                    ),
-                    [first, ..] => named.label(first),
-                    [] => threads(),
+                let mut range = Vec::new();
+                [string(input, "from"), string(input, "to")]
+                    .into_iter()
+                    .flatten()
+                    .for_each(|text| anchors_in(text, false, &mut range));
+                let text = match range.as_slice() {
+                    [
+                        Anchor {
+                            thread_id,
+                            position: Some(from),
+                        },
+                        Anchor {
+                            thread_id: to_thread,
+                            position: Some(to),
+                        },
+                    ] if thread_id == to_thread => {
+                        format!("{} #{from}–#{to}", named.thread(thread_id))
+                    }
+                    [from, ..] => named.label(from),
+                    // By `anchors` or a `cursor`: the first entry it names.
+                    [] => entry()
+                        .map(|anchor| named.label(anchor))
+                        .unwrap_or_default(),
                 };
                 Argument::plain(text)
             }
@@ -324,7 +362,6 @@ impl Threads {
             }
             Kind::ListThreads => Argument::plain(
                 string(input, "title_query")
-                    .or_else(|| string(input, "query"))
                     .or_else(|| string(input, "scope"))
                     .map(one_line)
                     .unwrap_or_default(),
@@ -346,7 +383,7 @@ impl Threads {
                         changes
                             .iter()
                             .map(|change| {
-                                let op = string(change, "op").unwrap_or_default();
+                                let op = variant(change, "op").unwrap_or_default();
                                 let thread = string(change, "thread_id")
                                     .map(|id| named.thread(id))
                                     .unwrap_or_default();
@@ -361,7 +398,7 @@ impl Threads {
             // The events it watches for stay in the body: beside the threads
             // they would crowd them out of a narrow header.
             Kind::NotifyWhen => Argument::plain(threads()),
-            Kind::SettleSelf => Argument::plain(string(input, "when").unwrap_or_default()),
+            Kind::SettleSelf => Argument::plain(variant(input, "when").unwrap_or_default()),
             Kind::Approve => Argument::plain(
                 string(input, "option")
                     .or_else(|| {
@@ -425,9 +462,9 @@ impl ToolView for Threads {
             )
             .into_any_element()
         });
-        let carried = carried(call.input).map(|(label, text)| {
+        let carried = carried(call.input).map(|text| {
             let text = bounded_text(call.entry, "carried", text, false, Bound::HEAD, ctx);
-            section(&crate::tr!(label), text, ctx.app()).into_any_element()
+            section(&crate::tr!("tools.message"), text, ctx.app()).into_any_element()
         });
         let output = (call.status != ItemStatus::InProgress)
             .then(|| output_section(call, Bound::HEAD, ctx))
@@ -437,7 +474,7 @@ impl ToolView for Threads {
 
     fn copy_items(&self, call: &Call<'_>) -> Vec<(String, String)> {
         let mut items = Vec::new();
-        if let Some((_, text)) = carried(call.input) {
+        if let Some(text) = carried(call.input) {
             copy(&mut items, "chat.copy_text", text);
         }
         copy(

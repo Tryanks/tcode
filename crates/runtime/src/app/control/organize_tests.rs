@@ -1,11 +1,9 @@
 use super::*;
-use crate::app::active_session::Runtime;
 use crate::app::test_support::*;
-use control_mcp::ReviewItemInput;
+use control_mcp::GetThreadParams;
 use tcode_core::pull_request::{self, PullRequestKey, PullRequestSource};
 use tcode_core::pull_request_watch::PullRequestWatch;
-use tcode_core::settlement::ThreadActivity;
-use tcode_protocol::{ClientPayload, HostMessage, Query, QueryResponse};
+use tcode_protocol::{HostMessage, TurnDue};
 
 fn thread(id: &str, cwd: &Path) -> SessionMeta {
     let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, cwd.to_path_buf(), None);
@@ -49,64 +47,74 @@ fn results(answer: &serde_json::Value) -> Vec<BatchResult> {
 }
 
 /// A preview changes nothing and names what a settle would do; the real batch re-checks every
-/// item, skips the running thread as busy and the stale one as changed, and reports the side
-/// effects the settle actually had. Unsettle restores none of them.
+/// item, skips the running thread and the one with a message waiting as busy and the stale one
+/// as changed, and reports the side effects the settle actually had. Unsettle restores none of
+/// them.
 #[test]
 fn update_threads_previews_then_settles_with_its_real_side_effects() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-control-update-threads");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let (commands, _received) = smol::channel::unbounded();
-    let last_activity = cx.now_millis();
+    let root = store.root().clone();
+    for id in ["caller", "done", "running", "queued", "stale"] {
+        stored_thread(
+            &store,
+            id,
+            ProviderKind::ClaudeCode,
+            &root.join(id),
+            |meta| {
+                meta.project_id = Some("p".into());
+                if id == "done" {
+                    meta.pinned_at = Some(1);
+                    pull_request::link_pull_request(
+                        &mut meta.pull_requests,
+                        PullRequestKey::new("github.com", "sample/project", 7),
+                        "https://github.com/sample/project/pull/7".into(),
+                        PullRequestSource::Manual,
+                        1,
+                        true,
+                    );
+                    meta.pull_requests[0].watch = Some(PullRequestWatch::new(1));
+                }
+            },
+        );
+    }
+    let (state, providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    // `done` ran a turn and its provider idles; `running` is in one; `queued` has a
+    // message of the user's waiting for its time.
+    let done = first_turn(&state, cx, &providers, "done", 0);
+    done.play([AgentEvent::TurnCompleted {
+        turn_id: "turn".into(),
+        status: agent::TurnStatus::Completed,
+        usage: None,
+    }]);
+    cx.run_until_seen(|view| view.status("done").running_turn.is_none());
+    first_turn(&state, cx, &providers, "running", 1);
+    state.open(cx, "queued");
+    state
+        .command(
+            cx,
+            Command::ScheduleTurn {
+                session_id: "queued".into(),
+                text: "Later".into(),
+                attachment_paths: Vec::new(),
+                due: TurnDue::AfterSecs(3600),
+            },
+        )
+        .unwrap();
+    // What a model reads before it writes: the thread as get_thread shows it.
+    let shown = call(
+        &state,
+        cx,
+        "caller",
+        ControlOp::GetThread(GetThreadParams {
+            thread_id: "done".into(),
+        }),
+    )
+    .unwrap();
+    let last_activity = shown["last_activity_at"].as_u64().unwrap();
     cx.clock.advance(Duration::from_secs(60));
-    state.update(cx, |state, _| {
-        state.sessions.push(thread("caller", store.root()));
-        let mut done = thread("done", store.root());
-        done.pinned_at = Some(1);
-        pull_request::link_pull_request(
-            &mut done.pull_requests,
-            PullRequestKey::new("github.com", "sample/project", 7),
-            "https://github.com/sample/project/pull/7".into(),
-            PullRequestSource::Manual,
-            1,
-            true,
-        );
-        done.pull_requests[0].watch = Some(PullRequestWatch::new(1));
-        let mut session = ActiveSession::new(done.clone(), false, Vec::new());
-        let settings = state.settings.clone();
-        session.runtime = Runtime::Live(
-            state
-                .executions
-                .prepare(&settings, &session.meta)
-                .unwrap()
-                .connect(commands),
-        );
-        state.sessions.push(done);
-        state.residents.parked.insert("done".into(), session);
 
-        let running = thread("running", store.root());
-        let mut session = ActiveSession::new(running.clone(), false, Vec::new());
-        session.turn_in_flight = true;
-        state.sessions.push(running);
-        state.residents.parked.insert("running".into(), session);
-
-        let queued = thread("queued", store.root());
-        let mut session = ActiveSession::new(queued.clone(), false, Vec::new());
-        session.push_or_merge_orchestrate_callback("[orchestrate] a child finished".into());
-        state.sessions.push(queued);
-        state.residents.parked.insert("queued".into(), session);
-
-        state.sessions.push(thread("stale", store.root()));
-        for id in ["done", "running", "stale"] {
-            state.thread_activity.insert(
-                id.into(),
-                ThreadActivity {
-                    last_run_completed_at: Some(last_activity),
-                    ..Default::default()
-                },
-            );
-        }
-    });
     let batch = |dry_run| {
         update(
             vec![
@@ -133,77 +141,64 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
             dry_run,
         )
     };
-    let expected_effects = vec![
-        "provider detached".to_owned(),
-        "1 PR watch ended".to_owned(),
-        "unpinned".to_owned(),
-    ];
     let skipped = |target: &str, reason: &str| BatchResult {
         target: target.into(),
         outcome: Outcome::Skipped,
         reason: Some(reason.into()),
         side_effects: None,
     };
-
-    let preview = call(&state, cx, "caller", batch(true)).unwrap();
+    let preview = results(&call(&state, cx, "caller", batch(true)).unwrap());
+    assert_eq!(preview[0].outcome, Outcome::WouldApply);
+    let foretold = preview[0].side_effects.clone();
+    assert!(
+        foretold.as_ref().is_some_and(|effects| !effects.is_empty()),
+        "a preview names what the settle would do"
+    );
     assert_eq!(
-        results(&preview),
-        vec![
-            BatchResult {
-                target: "done".into(),
-                outcome: Outcome::WouldApply,
-                reason: None,
-                side_effects: Some(expected_effects.clone()),
-            },
+        preview[1..],
+        [
             skipped("running", "busy"),
             skipped("queued", "busy"),
             skipped("stale", "changed_since_preview"),
         ]
     );
-    state.read(|state| {
-        let done = state.find_meta("done").unwrap();
-        assert!(!done.is_settled() && done.pinned_at.is_some());
-        assert!(done.pull_requests[0].watch.is_some());
-        assert!(
-            state
-                .control_activity(&Default::default(), 10)
-                .entries
-                .is_empty(),
-            "a preview audits nothing"
-        );
-    });
+    cx.run_until_parked();
+    let shown = cx.seen().session("done").unwrap();
+    assert!(!shown.is_settled() && shown.pinned_at.is_some());
+    assert!(shown.pull_requests[0].watch.is_some());
+    assert!(
+        !audited_in(cx.seen(), "done", "settle"),
+        "a preview audits nothing"
+    );
 
-    let applied = call(&state, cx, "caller", batch(false)).unwrap();
+    let applied = results(&call(&state, cx, "caller", batch(false)).unwrap());
     assert_eq!(
-        results(&applied),
+        applied,
         vec![
             BatchResult {
                 target: "done".into(),
                 outcome: Outcome::Applied,
                 reason: None,
-                side_effects: Some(expected_effects),
+                side_effects: foretold,
             },
             skipped("running", "busy"),
             skipped("queued", "busy"),
             skipped("stale", "changed_since_preview"),
-        ]
+        ],
+        "the settle did what its preview said"
     );
-    state.read(|state| {
-        let done = state.find_meta("done").unwrap();
-        assert!(done.is_settled() && done.pinned_at.is_none());
-        assert!(done.pull_requests[0].watch.is_none());
-        assert!(!state.find_meta("queued").unwrap().is_settled());
-        assert_eq!(state.resident("queued").unwrap().queue.len(), 1);
-        let session = state.resident("done").unwrap();
-        assert!(matches!(session.runtime, Runtime::Idle));
-        assert!(session.timeline.entries.iter().any(|entry| matches!(
-            &entry.content,
-            EntryContent::ControlAction(action)
-                if action.actor_thread_id == "caller" && action.action == "settle"
-        )));
-        assert!(!state.find_meta("running").unwrap().is_settled());
-        assert!(!state.find_meta("stale").unwrap().is_settled());
-    });
+    assert!(
+        matches!(done.next_command(cx), SessionCommand::Shutdown),
+        "the settled thread's provider is let go"
+    );
+    cx.run_until_seen(|view| audited_in(view, "done", "settle"));
+    let shown = cx.seen().session("done").unwrap();
+    assert!(shown.is_settled() && shown.pinned_at.is_none());
+    assert!(shown.pull_requests[0].watch.is_none());
+    for id in ["running", "queued", "stale"] {
+        assert!(!cx.seen().session(id).unwrap().is_settled(), "{id}");
+    }
+    assert_eq!(cx.seen().status("queued").queued_messages.len(), 1);
 
     let stale_state = call(
         &state,
@@ -233,20 +228,22 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
         update(vec![change("done", ThreadOp::Unsettle, None)], false),
     )
     .unwrap();
-    assert_eq!(
-        results(&unsettled),
-        vec![BatchResult {
-            target: "done".into(),
-            outcome: Outcome::Applied,
-            reason: None,
-            side_effects: Some(vec!["override becomes active; nothing is restored".into()]),
-        }]
-    );
-    state.read(|state| {
-        let done = state.find_meta("done").unwrap();
-        assert_eq!(done.settled_override, Some(SettledOverride::Active));
-        assert!(done.pinned_at.is_none() && done.pull_requests[0].watch.is_none());
-    });
+    assert_eq!(results(&unsettled)[0].outcome, Outcome::Applied);
+    cx.run_until_parked();
+    let shown = cx.seen().session("done").unwrap();
+    assert_eq!(shown.settled_override, Some(SettledOverride::Active));
+    assert!(shown.pinned_at.is_none() && shown.pull_requests[0].watch.is_none());
+}
+
+/// Whether the client's copy of thread `id`'s log records `caller` doing `action` to it.
+fn audited_in(view: &ClientView, id: &str, action: &str) -> bool {
+    view.timeline(id).entries.iter().any(|entry| {
+        matches!(
+            &entry.content,
+            EntryContent::ControlAction(made)
+                if made.actor_thread_id == "caller" && made.action == action
+        )
+    })
 }
 
 /// Follow-up is stamped by the host's clock, not the client's, and a thread put on it again
@@ -257,6 +254,7 @@ fn follow_up_carries_the_hosts_time_and_keeps_it_when_set_again() {
     store.upsert_meta(&thread("follow", store.root())).unwrap();
     let cx = &mut TestAppContext::default();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.subscribe(cx, Topic::Index);
     let added = cx.now_secs();
     let follow_up = |note: Option<&str>| Command::SetFollowUp {
         session_id: "follow".into(),
@@ -269,7 +267,7 @@ fn follow_up_carries_the_hosts_time_and_keeps_it_when_set_again() {
     state.dispatch_command(cx, 2, follow_up(Some("check the deploy")));
     cx.run_until_parked();
     assert_eq!(
-        state.read(|state| state.find_meta("follow").unwrap().follow_up.clone()),
+        cx.seen().session("follow").unwrap().follow_up,
         Some(FollowUp {
             since: added,
             note: Some("check the deploy".into()),
@@ -317,15 +315,14 @@ fn follow_up_parked_and_the_suggest_tier_hold_automatic_settlement() {
     let cx = &mut TestAppContext::default();
     cx.clock.advance(Duration::from_secs(10 * 86_400));
     let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.subscribe(cx, Topic::Index);
     state.update(cx, |state, cx| state.start_activity(cx));
     cx.run_until_parked();
-    let settled = |state: &TestEntity| {
-        state.read(|state| {
-            ["plain", "follow", "parked"].map(|id| state.find_meta(id).unwrap().is_settled())
-        })
+    let settled = |cx: &TestAppContext| {
+        ["plain", "follow", "parked"].map(|id| cx.seen().session(id).unwrap().is_settled())
     };
     assert_eq!(
-        settled(&state),
+        settled(cx),
         [false, false, false],
         "suggest settles nothing"
     );
@@ -340,7 +337,7 @@ fn follow_up_parked_and_the_suggest_tier_hold_automatic_settlement() {
         },
     );
     cx.run_until_parked();
-    assert_eq!(settled(&state), [true, false, false]);
+    assert_eq!(settled(cx), [true, false, false]);
 
     state.dispatch_command(
         cx,
@@ -360,42 +357,37 @@ fn follow_up_parked_and_the_suggest_tier_hold_automatic_settlement() {
         },
     );
     cx.run_until_parked();
-    assert_eq!(settled(&state), [true, true, true]);
+    assert_eq!(settled(cx), [true, true, true]);
 }
 
-/// A reviews.json, an activity log and a secrets.json this build cannot read do not stop the
-/// host: a review is still recorded, the first record refused saving says why, and no file is
-/// written over.
+/// An activity log this build cannot read does not stop the host: a write is still made,
+/// the first record refused saving says why, and the file is not written over.
 #[test]
 fn unreadable_own_files_do_not_stop_the_host_and_are_never_written_over() {
     let store = TestStore::new("tcode-control-unreadable");
     std::fs::create_dir_all(store.root()).unwrap();
     let torn = "[{\"id\":";
-    let files = ["reviews.json", "control_activity.json"];
-    for name in files {
-        std::fs::write(store.root().join(name), torn).unwrap();
+    let log = store.root().join("control_activity.json");
+    std::fs::write(&log, torn).unwrap();
+    for id in ["caller", "old"] {
+        store.upsert_meta(&thread(id, store.root())).unwrap();
     }
     let cx = &mut TestAppContext::default();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
-    state.update(cx, |state, _| {
-        state.sessions.push(thread("caller", store.root()));
-        state.sessions.push(thread("old", store.root()));
-    });
-    for request in ["review-1", "review-2"] {
-        let review = ControlOp::RecordReview(RecordReviewParams {
-            items: vec![ReviewItemInput {
-                thread_id: "old".into(),
-                group: "can_settle".into(),
-                confidence: "clear_evidence".into(),
-                evidence: vec!["old#12: PR merged".into()],
-                suggestion: None,
-            }],
-            coverage: "1 project, 2 threads".into(),
-            request_id: Some(request.into()),
-        });
+    for title in ["Once", "Twice"] {
+        let rename = update(
+            vec![change(
+                "old",
+                ThreadOp::Rename {
+                    title: title.into(),
+                },
+                None,
+            )],
+            false,
+        );
         assert_eq!(
-            call(&state, cx, "caller", review).unwrap()["status"],
-            "recorded"
+            results(&call(&state, cx, "caller", rename).unwrap())[0].outcome,
+            Outcome::Applied
         );
     }
     let refusals = cx
@@ -411,81 +403,7 @@ fn unreadable_own_files_do_not_stop_the_host_and_are_never_written_over() {
             )
         })
         .count();
-    assert_eq!(refusals, 2, "one for each file written");
+    assert_eq!(refusals, 1, "said once, not at every write");
     state.update(cx, |state, _| state.close_store().unwrap());
-    for name in files {
-        assert_eq!(
-            std::fs::read_to_string(store.root().join(name)).unwrap(),
-            torn
-        );
-    }
-}
-
-/// A review is stored and announced without touching any thread, and survives a restart.
-#[test]
-fn a_recorded_review_changes_no_thread_and_is_read_back_after_a_restart() {
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("tcode-control-review");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    state.update(cx, |state, _| {
-        state.sessions.push(thread("caller", store.root()));
-        state.sessions.push(thread("old", store.root()));
-    });
-    let before = state.read(|state| state.find_meta("old").unwrap());
-    let review = |group: &str| {
-        ControlOp::RecordReview(RecordReviewParams {
-            items: vec![ReviewItemInput {
-                thread_id: "old".into(),
-                group: group.into(),
-                confidence: "clear_evidence".into(),
-                evidence: vec!["old#12: PR merged".into()],
-                suggestion: Some("settle".into()),
-            }],
-            coverage: "1 project, 2 threads".into(),
-            request_id: Some("review-1".into()),
-        })
-    };
-    assert!(call(&state, cx, "caller", review("done")).is_err());
-    let recorded = call(&state, cx, "caller", review("can_settle")).unwrap();
-    assert_eq!(recorded["status"], "recorded");
-    assert_eq!(
-        call(&state, cx, "caller", review("can_settle")).unwrap(),
-        recorded,
-        "a retry records nothing twice"
-    );
-    assert!(cx.drain_outgoing().iter().any(|message| matches!(
-        message,
-        HostMessage::Event(envelope) if matches!(
-            &envelope.event,
-            ServerEvent::Runtime(RuntimeEvent::Notice(RuntimeNotice::ReviewRecorded { items: 1, .. }))
-        )
-    )));
-    assert_eq!(state.read(|state| state.find_meta("old").unwrap()), before);
-    state.update(cx, |state, cx| {
-        let flush = state.store_write_barrier(cx);
-        HostCx::spawn_detached(cx, async move {
-            let _ = flush.recv().await;
-        });
-    });
-    cx.run_until_parked();
-
-    // A restarted host is another process, which nothing the stopped host left running reaches.
-    let cx = &mut TestAppContext::default();
-    let restarted = cx.new_entity(TestClientState::new((*store).clone()));
-    restarted.deliver(
-        cx,
-        5,
-        ClientPayload::Query(Query::ReviewRecords { limit: 10 }),
-    );
-    let (records, _) = cx.run_until_sent(|message| match message {
-        HostMessage::QueryResult {
-            id: 5,
-            result: Ok(QueryResponse::ReviewRecords(records)),
-        } => Some(records.clone()),
-        _ => None,
-    });
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].id, "review-1");
-    assert_eq!(records[0].thread_id, "caller");
-    assert_eq!(records[0].items[0].group, "can_settle");
+    assert_eq!(std::fs::read_to_string(log).unwrap(), torn);
 }

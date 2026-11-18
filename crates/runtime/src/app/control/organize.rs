@@ -1,27 +1,14 @@
 use super::*;
 use crate::app::sessions::SettleEffects;
 use control_mcp::{
-    BatchResult, Expect, Outcome, RecordReviewParams, SettleSelfParams, ThreadChange, ThreadOp,
+    BatchResult, DeleteThreadsParams, Expect, Outcome, SettleSelfParams, ThreadChange, ThreadOp,
     UpdateThreadsParams,
 };
-use tcode_core::control::{
-    FollowUp, ReviewItem, ReviewRecord, SelfSettleGrant, SelfSettleWhen, action,
-};
+use tcode_core::control::{FollowUp, SelfSettleGrant, SelfSettleWhen, action};
 use tcode_core::project::SettledOverride;
 use tcode_core::pull_request::PullRequestState;
 use tcode_protocol::{Command, Principal};
 
-/// How many reviews are kept; the oldest goes first.
-const REVIEW_RECORD_LIMIT: usize = 50;
-const REVIEW_GROUPS: [&str; 6] = [
-    "continue",
-    "needs_decision",
-    "waiting_on_others",
-    "can_settle",
-    "parked_or_superseded",
-    "unsure",
-];
-const REVIEW_CONFIDENCE: [&str; 3] = ["clear_evidence", "inference", "unsure"];
 const UNSETTLE_NOTE: &str = "override becomes active; nothing is restored";
 
 #[derive(Serialize)]
@@ -89,11 +76,10 @@ impl AppState {
         cx: &mut HostCx,
     ) -> Result<serde_json::Value, String> {
         let dry_run = params.dry_run.unwrap_or(false);
-        let mut cx = agent_cx(cx);
         let results = params
             .changes
             .into_iter()
-            .map(|change| self.update_thread(caller, change, dry_run, log_ends, &mut cx))
+            .map(|change| self.update_thread(caller, change, dry_run, log_ends, cx))
             .collect();
         serde_json::to_value(UpdateThreadsAnswer { dry_run, results })
             .map_err(|error| error.to_string())
@@ -127,6 +113,13 @@ impl AppState {
             Ok(command) => command,
             Err(reason) => return skipped(reason),
         };
+        // An archive takes the thread's descendants with it, and stops their providers: the
+        // one making this call among them.
+        if matches!(change.op, ThreadOp::Archive)
+            && descendant_session_ids(&self.sessions, &target).contains(&caller.thread_id)
+        {
+            return skipped("would archive the calling thread itself".into());
+        }
         if let Err(error) = self.validate_command_target(&command) {
             return skipped(if error.code == "thread_busy" {
                 "busy".into()
@@ -282,103 +275,97 @@ impl AppState {
         Vec::new()
     }
 
-    pub(super) fn op_record_review(
+    pub(super) fn op_delete_threads(
         &mut self,
         caller: &Caller,
-        params: RecordReviewParams,
+        params: DeleteThreadsParams,
         cx: &mut HostCx,
-    ) -> Result<serde_json::Value, String> {
-        let answer = |record: &ReviewRecord| {
-            serde_json::json!({
-                "status": "recorded",
-                "id": record.id,
-                "items": record.items.len(),
-                "coverage": record.coverage,
-            })
-        };
-        if let Some(existing) = params.request_id.as_ref().and_then(|id| {
-            self.control
-                .review_records
-                .iter()
-                .find(|record| &record.id == id && record.thread_id == caller.thread_id)
-        }) {
-            return Ok(answer(existing));
-        }
-        if params.coverage.trim().is_empty() {
-            return Err("coverage is required: say what the review looked at".into());
-        }
-        let mut items = Vec::with_capacity(params.items.len());
-        for (index, item) in params.items.into_iter().enumerate() {
-            if !self
-                .find_meta(&item.thread_id)
-                .is_some_and(|meta| self.open_to(caller, &meta))
-            {
-                return Err(format!(
-                    "item {index}: thread {} is unknown or closed to this thread",
-                    item.thread_id
-                ));
+    ) -> Answer {
+        let remove_worktree = params.remove_worktree.unwrap_or(false);
+        let dry_run = params.dry_run.unwrap_or(false);
+        let mut results = Vec::with_capacity(params.thread_ids.len());
+        let mut removals = Vec::new();
+        for target in params.thread_ids {
+            let skipped = |reason: String| BatchResult {
+                target: target.clone(),
+                outcome: Outcome::Skipped,
+                reason: Some(reason),
+                side_effects: None,
+            };
+            let meta = match self.batch_target(caller, &target) {
+                Ok(meta) => meta,
+                Err(reason) => {
+                    results.push(skipped(reason));
+                    continue;
+                }
+            };
+            let ids = descendant_session_ids(&self.sessions, &target);
+            if target == caller.thread_id || ids.contains(&caller.thread_id) {
+                results.push(skipped("would delete the calling thread itself".into()));
+                continue;
             }
-            if !REVIEW_GROUPS.contains(&item.group.as_str()) {
-                return Err(format!(
-                    "item {index}: group must be one of {}",
-                    REVIEW_GROUPS.join(", ")
-                ));
+            if let Err(error) = self.validate_command_target(&Command::DeleteSession {
+                session_id: target.clone(),
+                remove_worktree,
+            }) {
+                results.push(skipped(error.message));
+                continue;
             }
-            if !REVIEW_CONFIDENCE.contains(&item.confidence.as_str()) {
-                return Err(format!(
-                    "item {index}: confidence must be one of {}",
-                    REVIEW_CONFIDENCE.join(", ")
-                ));
+            let descendants = ids.iter().filter(|id| **id != target).count();
+            let mut side_effects = vec![format!(
+                "deletes \"{}\" and {descendants} thread(s) under it, permanently",
+                meta.title
+            )];
+            if meta.worktree.is_some() {
+                side_effects.push(if remove_worktree {
+                    format!(
+                        "removes its worktree {} unless another thread shares it",
+                        meta.cwd.display()
+                    )
+                } else {
+                    format!("keeps its worktree {}", meta.cwd.display())
+                });
             }
-            items.push(ReviewItem {
-                thread_id: item.thread_id,
-                group: item.group,
-                confidence: item.confidence,
-                evidence: item.evidence,
-                suggestion: item.suggestion,
+            if dry_run {
+                results.push(BatchResult {
+                    target,
+                    outcome: Outcome::WouldApply,
+                    reason: None,
+                    side_effects: Some(side_effects),
+                });
+                continue;
+            }
+            removals.push((
+                results.len(),
+                self.delete_session(&target, remove_worktree, cx),
+            ));
+            self.audit(
+                caller,
+                &caller.thread_id,
+                action::DELETE_THREADS,
+                Some(meta.title.clone()),
+                cx,
+            );
+            results.push(BatchResult {
+                target,
+                outcome: Outcome::Applied,
+                reason: None,
+                side_effects: Some(side_effects),
             });
         }
-        let record = ReviewRecord {
-            id: params
-                .request_id
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-            thread_id: caller.thread_id.clone(),
-            recorded_at: cx.clock().unix_secs(),
-            coverage: params.coverage,
-            items,
-        };
-        let records = &mut self.control.review_records;
-        records.push(record.clone());
-        let excess = records.len().saturating_sub(REVIEW_RECORD_LIMIT);
-        records.drain(..excess);
-        match &mut self.control.reviews_unreadable {
-            Some(unreadable) => {
-                if let Some(error) = unreadable.first_refusal() {
-                    self.report_error(RuntimeError::FileUnreadable { error }, cx);
+        if removals.is_empty() {
+            return Answer::Now(Ok(serde_json::json!({ "results": results })));
+        }
+        Answer::Later(cx.spawn_background(async move {
+            for (index, removal) in removals {
+                if let Err(error) = removal.await {
+                    let result = &mut results[index];
+                    result.outcome = Outcome::Failed;
+                    result.reason = Some(error.message);
                 }
             }
-            None => {
-                let records = self.control.review_records.clone();
-                self.enqueue_store_write(StoreWrite::WriteReviewRecords(records), cx);
-            }
-        }
-        emit_runtime(
-            cx,
-            RuntimeEvent::Notice(RuntimeNotice::ReviewRecorded {
-                items: record.items.len(),
-                coverage: record.coverage.clone(),
-            }),
-        );
-        let mut cx = agent_cx(cx);
-        let detail = record.items.len().to_string();
-        self.audit(
-            caller,
-            &caller.thread_id,
-            action::RECORD_REVIEW,
-            Some(detail),
-            &mut cx,
-        );
-        Ok(answer(&record))
+            Ok(serde_json::json!({ "results": results }))
+        }))
     }
 
     pub(super) fn op_settle_self(
@@ -396,9 +383,6 @@ impl AppState {
             );
         }
         let meta = self.find_meta(&caller.thread_id).ok_or("unknown thread")?;
-        if !self.user_said(&meta, consent_quote) {
-            return Err("consent_required: the quote is not something the user said here".into());
-        }
         if let SelfSettleWhen::PrMerged { url } | SelfSettleWhen::PrClosed { url } = &params.when
             && pull_request_state(&meta, url).is_none()
         {
@@ -413,16 +397,13 @@ impl AppState {
         };
         let when = describe_when(&grant.when);
         let detail = grant.consent_quote.clone();
-        let mut cx = agent_cx(cx);
-        self.change_meta(&caller.thread_id, &mut cx, |meta| {
-            meta.self_settle = Some(grant)
-        });
+        self.change_meta(&caller.thread_id, cx, |meta| meta.self_settle = Some(grant));
         self.audit(
             caller,
             &caller.thread_id,
             action::SETTLE_SELF,
             Some(detail),
-            &mut cx,
+            cx,
         );
         Ok(serde_json::json!({
             "status": "armed",
@@ -430,33 +411,6 @@ impl AppState {
             "note": "The host settles this thread only after its current turn has ended. A new \
                      message from the user withdraws the grant, and the user can revoke it.",
         }))
-    }
-
-    /// Whether `quote` appears, ignoring case and runs of whitespace, in a message the user
-    /// sent in `meta`'s own thread; agent and host messages do not count.
-    fn user_said(&self, meta: &SessionMeta, quote: &str) -> bool {
-        let collapse = |text: &str| {
-            text.split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .to_lowercase()
-        };
-        let quote = collapse(quote);
-        let unmarked = MessageOrigin::legacy(meta.parent_session_id.is_some());
-        self.event_records.get(&meta.id).is_some_and(|log| {
-            log.records().iter().any(|record| {
-                let text = match &record.event {
-                    AgentEvent::ItemCompleted(agent::ThreadItem {
-                        content: agent::ItemContent::UserMessage { text, .. },
-                        ..
-                    })
-                    | AgentEvent::SteerRequested { text, .. } => text,
-                    _ => return false,
-                };
-                record.origin.unwrap_or(unmarked) == MessageOrigin::Human
-                    && collapse(text).contains(&quote)
-            })
-        })
     }
 
     /// Settle a thread whose self-settle grant is met: `end_of_turn` once `turn_ended`, a pull
@@ -571,7 +525,8 @@ impl AppState {
     }
 }
 
-/// The context a `tcode_control` write runs under: full authority, agent-authored.
+/// The context the host settles a thread in under its own grant: the host's authority and
+/// the agent's authorship, whichever request or event brought the moment.
 fn agent_cx(cx: &HostCx) -> HostCx {
     let mut cx = cx.clone();
     cx.principal = Principal::Full;

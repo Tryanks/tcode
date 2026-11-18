@@ -8,8 +8,9 @@ use crate::app::sessions::{directory_within, fork_refusal, read_attachments};
 use control_mcp::{
     ActionResponse, BatchResponse, BatchResult, ControlThreadParams, ControlThreadResponse,
     CreateProjectParams, CreateProjectResponse, GitOp, GitParams, MoveThreadParams,
-    MoveThreadResponse, Outcome, PullRequestOp, PullRequestParams, RunChange, RunOp, RunResult,
-    SendMessageParams, SendMode, StartThreadParams, StartThreadResponse, Workspace,
+    MoveThreadResponse, Outcome, PatchSettingsParams, PullRequestOp, PullRequestParams,
+    RewindParams, RewindScope, RunChange, RunOp, RunResult, SendMessageParams, SendMode,
+    StartThreadParams, StartThreadResponse, TerminalOp, TerminalParams, Workspace,
 };
 use tcode_core::control::{StartedBy, action};
 use tcode_core::project::ChildExpectation;
@@ -102,6 +103,65 @@ fn approval_option_refusal(provider: ProviderKind, id: &str) -> Option<String> {
     })
 }
 
+/// The settings an agent may change, as display preferences only. Everything else touches
+/// authority (approvals, computer use, browser evaluation, plugins, child approval, whether
+/// threads are given `tcode_control`, hosting, credentials), automation (settlement rules and tiers, resuming, the title model)
+/// or UI state (sidebar, last project), and stays the user's. The match is exhaustive so a
+/// new setting is decided here, not allowed by default.
+pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
+    match patch {
+        SettingsPatch::Language(_)
+        | SettingsPatch::ThemeMode(_)
+        | SettingsPatch::WordWrapDiffs(_)
+        | SettingsPatch::LiveCommandPanelDisabled(_)
+        | SettingsPatch::SidebarProviderMarks(_)
+        | SettingsPatch::InactiveFrameThrottleDisabled(_)
+        | SettingsPatch::ScrollToLatestOnSend(_)
+        | SettingsPatch::ShortenLongCommands(_) => false,
+        SettingsPatch::SourceControlHost { .. }
+        | SettingsPatch::RemoveSourceControlHost { .. }
+        | SettingsPatch::SkipDeleteConfirmation(_)
+        | SettingsPatch::ProviderUpdateChecksDisabled(_)
+        | SettingsPatch::ResumeOnLimitReset(_)
+        | SettingsPatch::BackgroundCommandsOnSteer(_)
+        | SettingsPatch::AutoSettleAfterDays(_)
+        | SettingsPatch::AutoSettleOnMerge(_)
+        | SettingsPatch::ProjectSettlement { .. }
+        | SettingsPatch::ProjectMergeMethod { .. }
+        | SettingsPatch::RemoveAgentCreditsOnMerge(_)
+        | SettingsPatch::OrchestrateChildApproval(_)
+        | SettingsPatch::OrchestrateChildWorktrees(_)
+        | SettingsPatch::ComputerUseEnabled(_)
+        | SettingsPatch::ComputerUseImageMode(_)
+        | SettingsPatch::ComputerUseAllowInput(_)
+        | SettingsPatch::ComputerUseShowAgentCursor(_)
+        | SettingsPatch::BrowserEnabled(_)
+        | SettingsPatch::BrowserHomeUrl(_)
+        | SettingsPatch::BrowserAllowEvaluate(_)
+        | SettingsPatch::ControlEnabled(_)
+        | SettingsPatch::SettlementAutomation(_)
+        | SettingsPatch::TitleGeneration(_)
+        | SettingsPatch::SidebarLayout(_)
+        | SettingsPatch::RemoteHostingEnabled(_)
+        | SettingsPatch::Traverse(_)
+        | SettingsPatch::RemoteHostName(_)
+        | SettingsPatch::LastProject(_)
+        | SettingsPatch::NewProjectDir(_)
+        | SettingsPatch::ProjectStart(_)
+        | SettingsPatch::ProjectStartCustom(_) => true,
+    }
+}
+
+#[derive(Serialize)]
+struct TerminalAnswer {
+    thread_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_id: Option<u64>,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<&'static str>,
+}
+
 /// `cwd`, relative to `root`, as a directory inside it; absolute paths, `..` and links that
 /// lead out are refused.
 fn cwd_inside(root: &Path, cwd: &str) -> Result<PathBuf, String> {
@@ -164,7 +224,8 @@ impl AppState {
     }
 
     /// Why an agent may not write to `target`, if it may not: archived threads, read-only
-    /// subagent mirrors and unsent drafts, which belong to their composer.
+    /// subagent mirrors and unsent drafts. A draft is what the user has not sent yet: a
+    /// message into one would start their thread for them.
     fn agent_write_refusal(&self, target: &str) -> Option<String> {
         let Some(meta) = self.find_meta(target) else {
             return Some("unknown thread".into());
@@ -365,7 +426,7 @@ impl AppState {
         }
         if let Some(space) = &caller.space {
             self.fit_to_policy(&space.policy, &mut meta)
-                .map_err(|error| format!("refused: {}", error.message))?;
+                .map_err(refusal)?;
         }
         meta.started_by = Some(StartedBy {
             thread_id: caller.thread_id.clone(),
@@ -516,11 +577,7 @@ impl AppState {
             && let Some(space) = &caller.space
             && let Err(error) = self.session_setup_allowed(&space.policy, target)
         {
-            return batch(
-                target,
-                Outcome::Skipped,
-                format!("refused: {}", error.message),
-            );
+            return batch(target, Outcome::Skipped, refusal(error));
         }
         let mut side_effects = Vec::new();
         if self.find_meta(target).is_some_and(|meta| meta.is_settled()) {
@@ -1069,16 +1126,12 @@ impl AppState {
         )
     }
 
-    /// Checkout and commit refuse while a turn runs in the target thread, so they never act on
-    /// work half made; checkout also refuses uncommitted changes. A thread may commit its own.
     pub(super) fn op_git(&mut self, caller: &Caller, params: GitParams, cx: &mut HostCx) -> Answer {
         let thread = params.thread_id;
         if let Some(reason) = self.agent_write_refusal(&thread) {
             return action_now(&thread, Outcome::Skipped, reason);
         }
         self.ensure_resident(&thread, cx);
-        let busy = thread != caller.thread_id
-            && self.resident(&thread).is_some_and(Self::checkout_blocked);
         let (action, message, included) = match params.op {
             GitOp::CheckoutBranch { branch } => {
                 let command = Command::CheckoutBranch {
@@ -1142,14 +1195,6 @@ impl AppState {
             GitOp::Pull => (GitAction::Pull, None, None),
             GitOp::PublishBranch => (GitAction::PublishBranch, None, None),
         };
-        if busy && matches!(action, GitAction::Commit | GitAction::CommitPush) {
-            return action_now(
-                &thread,
-                Outcome::Skipped,
-                "busy: a turn is running in this thread; committing now could take half-made \
-                 changes",
-            );
-        }
         let command = Command::RunGitAction {
             session_id: thread.clone(),
             action,
@@ -1248,7 +1293,7 @@ impl AppState {
             .map(|meta| (meta.project_id, meta.cwd));
         let by_own_turn = params.thread_id == caller.thread_id;
         self.move_session_by(&params.thread_id, &project.id, cwd, by_own_turn, cx)
-            .map_err(|error| format!("refused: {}", error.message))?;
+            .map_err(refusal)?;
         let meta = self
             .find_meta(&params.thread_id)
             .ok_or("the thread disappeared")?;
@@ -1271,6 +1316,233 @@ impl AppState {
             self.remember_answer(key, answer.clone());
         }
         Ok(answer)
+    }
+
+    pub(super) fn op_terminal(
+        &mut self,
+        caller: &Caller,
+        params: TerminalParams,
+        cx: &mut HostCx,
+    ) -> Result<serde_json::Value, String> {
+        let target = params.thread_id;
+        let answer = match params.op {
+            TerminalOp::Open => {
+                if self.resident(&target).is_none() {
+                    let meta = self
+                        .find_meta(&target)
+                        .filter(|meta| meta.archived_at.is_none())
+                        .ok_or_else(|| format!("refused: thread {target} is archived"))?;
+                    self.load_background_session(meta, cx);
+                }
+                self.validate_command_target(&Command::NewTerminal {
+                    session_id: target.clone(),
+                })
+                .map_err(refusal)?;
+                self.new_terminal(&target, cx);
+                self.audit(caller, &target, action::TERMINAL_OPEN, None, cx);
+                TerminalAnswer {
+                    thread_id: target,
+                    terminal_id: None,
+                    status: "opening",
+                    note: Some(
+                        "the shell starts in the background; get_thread lists its terminal id",
+                    ),
+                }
+            }
+            TerminalOp::Input { terminal_id, text } => {
+                self.terminal_in_thread(terminal_id, &target)?;
+                self.validate_command_target(&Command::TerminalInput {
+                    terminal_id,
+                    bytes: text.clone().into_bytes(),
+                })
+                .map_err(refusal)?;
+                self.write_terminal_input(terminal_id, text.into_bytes(), cx);
+                self.audit(
+                    caller,
+                    &target,
+                    action::TERMINAL_INPUT,
+                    Some(terminal_id.to_string()),
+                    cx,
+                );
+                TerminalAnswer {
+                    thread_id: target,
+                    terminal_id: Some(terminal_id),
+                    status: "written",
+                    note: None,
+                }
+            }
+            TerminalOp::Close { terminal_id } => {
+                self.terminal_in_thread(terminal_id, &target)?;
+                self.validate_command_target(&Command::CloseTerminal {
+                    session_id: target.clone(),
+                    terminal_id,
+                })
+                .map_err(refusal)?;
+                self.close_terminal(&target, terminal_id, cx);
+                self.audit(
+                    caller,
+                    &target,
+                    action::TERMINAL_CLOSE,
+                    Some(terminal_id.to_string()),
+                    cx,
+                );
+                TerminalAnswer {
+                    thread_id: target,
+                    terminal_id: Some(terminal_id),
+                    status: "closed",
+                    note: None,
+                }
+            }
+        };
+        Ok(serde_json::json!(answer))
+    }
+
+    /// The call may name `thread_id`; a terminal id is only as reachable as the thread
+    /// whose panel holds it.
+    fn terminal_in_thread(&self, terminal_id: u64, thread_id: &str) -> Result<(), String> {
+        if self.terminal_owner(terminal_id) == Some(thread_id) {
+            Ok(())
+        } else {
+            Err(format!(
+                "refused: terminal {terminal_id} is not one of thread {thread_id}'s terminals"
+            ))
+        }
+    }
+
+    /// Rewind a thread through its harness and answer with what the harness
+    /// did, once it has.
+    pub(super) fn op_rewind(
+        &mut self,
+        caller: &Caller,
+        params: RewindParams,
+        cx: &mut HostCx,
+    ) -> Answer {
+        let target = params.thread_id;
+        if self
+            .find_meta(&target)
+            .is_some_and(|meta| meta.provider.caps().rewind.is_none())
+            && !self
+                .resident(&target)
+                .is_some_and(|active| active.timeline.has_relays())
+        {
+            return Answer::Now(Err(format!(
+                "refused: thread {target}'s provider has no native rewind"
+            )));
+        }
+        let Some(active) = self.resident(&target) else {
+            return Answer::Now(Err(format!(
+                "refused: thread {target}'s history is not loaded on the host; send it a message or open it first"
+            )));
+        };
+        let mode = match params.mode {
+            RewindScope::Files => RewindMode::Files,
+            RewindScope::Conversation => RewindMode::Conversation,
+            RewindScope::FilesAndConversation => RewindMode::FilesAndConversation,
+        };
+        let Some(status) = self.rewind_status(active) else {
+            return Answer::Now(Err(format!(
+                "refused: thread {target}'s session cannot be rewound"
+            )));
+        };
+        if let Some(blocked) = status.blocked {
+            return Answer::Now(Err(format!("refused: {blocked:?}")));
+        }
+        let at = super::super::rewind::RewindAt {
+            turn: params.turn,
+            steer: None,
+            checkpoint: None,
+        };
+        let Some(answer) = self.rewind_turn(&target, at, mode, None, cx) else {
+            return Answer::Now(Err(format!(
+                "refused: turn {} of thread {target} cannot be restored as {:?}",
+                params.turn, params.mode
+            )));
+        };
+        self.audit(
+            caller,
+            &target,
+            action::REWIND,
+            Some(params.turn.to_string()),
+            cx,
+        );
+        let turn = params.turn;
+        Answer::Later(cx.spawn_background(async move {
+            let outcome = answer
+                .recv()
+                .await
+                .map_err(|_| "the rewind was abandoned before the harness answered".to_owned())?;
+            Ok(match outcome {
+                AgentEvent::RewindCompleted {
+                    mode,
+                    prefill,
+                    later_history,
+                    files,
+                    incomplete,
+                    undo_token,
+                    ..
+                } => serde_json::json!({
+                    "thread_id": target,
+                    "turn": turn,
+                    "status": if incomplete.is_some() { "partial" } else { "completed" },
+                    "restored": mode,
+                    "later_history": later_history,
+                    "files": files,
+                    "incomplete": incomplete,
+                    "undoable": undo_token.is_some(),
+                    "restored_prompt": prefill,
+                }),
+                AgentEvent::RewindFailed { failure, .. } => serde_json::json!({
+                    "thread_id": target,
+                    "turn": turn,
+                    "status": "failed",
+                    "reason": failure.reason,
+                    "detail": failure.detail,
+                }),
+                AgentEvent::RelayUndone { .. } => serde_json::json!({
+                    "thread_id": target,
+                    "turn": turn,
+                    "status": "completed",
+                    "restored": tcode_core::session::RewindReturn::MODE,
+                    "later_history": agent::LaterHistory::Truncated,
+                    "undoable": false,
+                }),
+                other => serde_json::json!({
+                    "thread_id": target,
+                    "turn": turn,
+                    "status": "unexpected",
+                    "event": other,
+                }),
+            })
+        }))
+    }
+
+    pub(super) fn op_patch_settings(
+        &mut self,
+        caller: &Caller,
+        params: PatchSettingsParams,
+        cx: &mut HostCx,
+    ) -> Result<serde_json::Value, String> {
+        let name = params
+            .patch
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let patch: SettingsPatch = serde_json::from_value(params.patch)
+            .map_err(|error| format!("invalid settings patch: {error}"))?;
+        self.validate_command_target(&Command::PatchSettings {
+            patch: patch.clone(),
+        })
+        .map_err(refusal)?;
+        self.patch_settings(patch, cx);
+        self.audit(
+            caller,
+            &caller.thread_id,
+            action::PATCH_SETTINGS,
+            Some(name.clone()),
+            cx,
+        );
+        Ok(serde_json::json!({ "applied": name }))
     }
 }
 

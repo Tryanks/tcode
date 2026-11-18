@@ -161,8 +161,6 @@ pub mod action {
     pub const KEEP_OFF: &str = "keep_off";
     /// Detail: the consent quote.
     pub const SETTLE_SELF: &str = "settle_self";
-    /// Detail: the number of items.
-    pub const RECORD_REVIEW: &str = "record_review";
     /// Detail: the watch id.
     pub const NOTIFY_WHEN: &str = "notify_when";
     /// Detail: the removed watch ids.
@@ -233,28 +231,4 @@ pub struct ControlActivityEntry {
     /// Unix milliseconds.
     pub at: u64,
     pub action: ControlAction,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewItem {
-    pub thread_id: String,
-    pub group: String,
-    /// In words: clear evidence, inference, or unsure.
-    pub confidence: String,
-    /// Anchors and quoted facts the group rests on.
-    pub evidence: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub suggestion: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewRecord {
-    pub id: String,
-    /// The thread whose model recorded it.
-    pub thread_id: String,
-    /// Unix seconds.
-    pub recorded_at: u64,
-    /// What the review looked at, in its own words.
-    pub coverage: String,
-    pub items: Vec<ReviewItem>,
 }

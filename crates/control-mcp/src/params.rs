@@ -211,7 +211,7 @@ pub struct SearchInItemParams {
     #[schemars(description = "Substring to find in the output.")]
     pub query: String,
     #[serde(default)]
-    #[schemars(description = "Lines of context around each match; default 2.")]
+    #[schemars(description = "Lines of context around each match; default 2, at most 10.")]
     pub context_lines: Option<u32>,
 }
 
@@ -275,7 +275,9 @@ pub struct ReviewCandidatesParams {
     #[schemars(description = SCOPE)]
     pub scope: Option<ControlScope>,
     #[serde(default)]
-    #[schemars(description = "Only threads active at or after this unix time in ms.")]
+    #[schemars(
+        description = "Settled threads are included only when active at or after this unix time in ms; omit for the last seven days."
+    )]
     pub since: Option<u64>,
 }
 
@@ -318,38 +320,6 @@ pub struct UpdateThreadsParams {
     #[serde(default)]
     #[schemars(description = "Report would_apply and the side effects without changing anything.")]
     pub dry_run: Option<bool>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ReviewItemInput {
-    #[schemars(description = "The thread the item is about.")]
-    pub thread_id: String,
-    #[schemars(
-        description = "continue, needs_decision, waiting_on_others, can_settle, parked_or_superseded or unsure."
-    )]
-    pub group: String,
-    #[schemars(
-        description = "In words: clear evidence, inference, or unsure. Never a percentage."
-    )]
-    pub confidence: String,
-    #[schemars(description = "Anchors and quoted facts the grouping rests on.")]
-    pub evidence: Vec<String>,
-    #[serde(default)]
-    #[schemars(description = "The suggested action, if any.")]
-    pub suggestion: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct RecordReviewParams {
-    #[schemars(description = "The reviewed items with their evidence.")]
-    pub items: Vec<ReviewItemInput>,
-    #[schemars(
-        description = "What the review covered, for example \"3 projects, 41 threads, 4 without enough data\"."
-    )]
-    pub coverage: String,
-    #[serde(default)]
-    #[schemars(description = "Idempotency key: a retry with the same key does not record twice.")]
-    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

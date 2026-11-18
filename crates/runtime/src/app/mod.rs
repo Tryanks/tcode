@@ -597,8 +597,6 @@ impl AppState {
         }
         let settings_store = SettingsStore::new(store.root().clone());
         let (settings, settings_unreadable) = UnreadableFile::read(settings_store.try_load());
-        let (review_records, reviews_unreadable) =
-            UnreadableFile::read(settings_store.load_review_records());
         let (control_activity, activity_unreadable) =
             UnreadableFile::read(settings_store.load_control_activity());
         let forge = tcode_services::forge::connect(settings_store.clone(), std::env::vars());
@@ -718,12 +716,7 @@ impl AppState {
             plugin_catalogs: HashMap::new().into(),
             mcp: McpWiring::default(),
             usage_limits_told: HashMap::new(),
-            control: control::ControlState::new(
-                review_records,
-                reviews_unreadable,
-                control_activity,
-                activity_unreadable,
-            ),
+            control: control::ControlState::new(control_activity, activity_unreadable),
             callback_approval_requests: HashSet::new(),
             callback_user_input_requests: HashSet::new(),
             approvals: Default::default(),

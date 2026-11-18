@@ -1,14 +1,17 @@
-//! The thread's spine: a column of short marks left of the content column,
-//! one for each message the user sent, by which the reader finds a turn and
-//! goes to it.
+//! The thread's spine: a column of short marks at the left edge of the
+//! conversation, one for each turn the user opened, by which the reader
+//! finds a turn and goes to it.
 //!
-//! A mark's length says how long its turn worked. Under the pointer the
-//! marks near it unfold into the first line of their messages, the nearest
-//! with what its turn came to, and a press goes to that turn.
+//! A mark's length says how long its turn worked, and the marks from the
+//! turn the reader is at down to the last stand out. Under the pointer the messages unfold beside
+//! the column, each with what its turn came to, the one the pointer's mark
+//! stands for level with that mark and after a stroke like it; they slide
+//! against the pointer as it goes from mark to mark, and a press goes to the
+//! message it is on.
 //!
-//! Gap: gpui-base has no layout that opens a list's items by their distance
-//! from the pointer, so the spine places its rows itself; how far the whole
-//! is open still glides on the view's [`Owned`], and the running turn's mark
+//! Gap: gpui-base has no list that keeps the item a pointer stands for level
+//! with it, so the spine places its messages itself; how far they are out
+//! still glides on the view's [`Owned`], and the running turn's mark
 //! breathes on gpui-base's keyframes.
 
 use std::cell::Cell;
@@ -18,15 +21,15 @@ use std::time::Duration;
 
 use agent::TurnStatus;
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, InteractiveElement as _, IntoElement, MouseMoveEvent,
-    ParentElement as _, Pixels, Render, ScrollEvent, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Task, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, Bounds, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement,
+    MouseMoveEvent, ParentElement as _, Pixels, Render, ScrollEvent, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Task, Window, div, prelude::FluentBuilder as _,
+    px,
 };
-use gpui_base::ElementExt as _;
 use gpui_base::motion::{Easing, IterationCount, Keyframe, Keyframes, Timing, animate_keyframes};
+use gpui_base::{ElementExt as _, h_flex};
 use tcode_core::turn_marks::{TurnMark, turn_marks};
 
-use super::TimelineView;
 use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -34,45 +37,42 @@ use crate::typography::TextRole as _;
 /// How long the spine takes to unfold under the pointer and to fold back.
 const UNFOLD: Duration = Duration::from_millis(180);
 
-/// How long the mark the pointer comes onto takes to become the one it is on.
-const ON: Duration = Duration::from_millis(120);
+/// How long the messages take to slide to the mark the pointer comes onto.
+const SLIDE: Duration = Duration::from_millis(140);
 
-/// The width the marks are centred in, and its gap to the content column.
-pub(super) const SLOT: f32 = 20.;
-pub(super) const SLOT_GAP: f32 = 2.;
+/// How long the pointer rests on the column before the spine unfolds: one
+/// crossing it on its way elsewhere opens nothing.
+const REST: Duration = Duration::from_millis(120);
 
-/// A mark's height at rest and unfolded, and its second line's.
+/// The width of the column of marks, and the inset of a mark from its left.
+pub(super) const SLOT: f32 = 28.;
+const INSET: f32 = 6.;
+
+/// The height a mark takes in the column, and a message beside it.
 const PITCH: f32 = 10.;
-const OPEN: f32 = 24.;
-const SECOND: f32 = 17.;
+const LINE: f32 = 26.;
 
-/// How many marks away from the pointer a mark still opens.
-const REACH: f32 = 2.6;
+/// How many messages show above and below the one level with the pointer.
+const AROUND: f32 = 4.;
 
-/// How far open a mark shows its message from: one less open has no room
-/// for a line of text.
-const LABELLED: f32 = 0.35;
-
-/// A mark's length by how long its turn worked, a steer's, and the length
-/// of the one the pointer is on.
+/// A mark's length by how long its turn worked, and the length of the one
+/// the pointer is on.
 const LENGTHS: [f32; 3] = [6., 10., 14.];
-const STEER_LENGTH: f32 = 4.;
-const SELECTED_LENGTH: f32 = 18.;
+const POINTED_LENGTH: f32 = 18.;
 
 /// How long a turn worked to earn each longer mark, in milliseconds.
 const LONGER: [u64; 2] = [30_000, 300_000];
 
-/// The width of the unfolded messages, and the room the unfolded spine
-/// keeps above and below itself.
-const LABEL: f32 = 300.;
+/// The width of the messages beside the column and the inset of their
+/// edges, and the room the column keeps above and below itself.
+const LABEL: f32 = 380.;
+const EDGE: f32 = 4.;
 const MARGIN: f32 = 56.;
 
-/// One mark: the message that opened a turn, or one put into it.
+/// One mark: the message that opened a turn.
 struct Row {
     /// The turn among every turn of the thread.
     turn: usize,
-    /// The entry of a message put into the running turn.
-    steer: Option<String>,
     text: SharedString,
     length: f32,
     status: Option<TurnStatus>,
@@ -82,7 +82,6 @@ struct Row {
 
 pub(in crate::chat) struct SpineView {
     workspace_store: Entity<WorkspaceStore>,
-    timeline: WeakEntity<TimelineView>,
     session_id: Option<String>,
     motion: crate::motion::owned::Owned,
     /// The marks known of the thread, by turn among all its turns: those of
@@ -94,10 +93,15 @@ pub(in crate::chat) struct SpineView {
     asked: bool,
     asking: Option<Task<()>>,
     bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// See [`Self::set_reading`].
+    reading: Option<usize>,
     /// The pointer's height within the spine while it is over it, and the
     /// last it had, which the spine folds back around.
     pointer: Option<f32>,
     last_pointer: f32,
+    /// Whether the pointer has rested on the column, and the wait for it.
+    rested: bool,
+    resting: Option<Task<()>>,
     /// The first mark shown of a thread with more than fit, and what a
     /// wheel has turned of the next step.
     first: usize,
@@ -107,13 +111,11 @@ pub(in crate::chat) struct SpineView {
 impl SpineView {
     pub(super) fn new(
         workspace_store: Entity<WorkspaceStore>,
-        timeline: WeakEntity<TimelineView>,
         session_id: Option<String>,
         scene: &crate::motion::Epoch,
     ) -> Self {
         Self {
             workspace_store,
-            timeline,
             session_id,
             motion: crate::motion::owned::Owned::in_scene(scene),
             held: BTreeMap::new(),
@@ -121,8 +123,11 @@ impl SpineView {
             asked: false,
             asking: None,
             bounds: Rc::default(),
+            reading: None,
             pointer: None,
             last_pointer: 0.,
+            rested: false,
+            resting: None,
             first: 0,
             wheel: 0.,
         }
@@ -134,7 +139,8 @@ impl SpineView {
         self.revision = None;
         self.asked = false;
         self.asking = None;
-        self.pointer = None;
+        self.reading = None;
+        self.leave();
         self.first = 0;
         cx.notify();
     }
@@ -215,14 +221,10 @@ impl SpineView {
     }
 
     fn rows(&self) -> Vec<Row> {
-        let mut rows = Vec::new();
-        for mark in self.held.values() {
-            let length = match mark.elapsed_ms() {
-                Some(elapsed) if elapsed >= LONGER[1] => LENGTHS[2],
-                Some(elapsed) if elapsed >= LONGER[0] => LENGTHS[1],
-                _ => LENGTHS[0],
-            };
-            if let Some(message) = &mark.message {
+        self.held
+            .values()
+            .map(|mark| {
+                let elapsed = mark.elapsed_ms();
                 let mut clauses = Vec::new();
                 match mark.work {
                     0 => {}
@@ -231,7 +233,7 @@ impl SpineView {
                         clauses.push(crate::tr!("chat.work_log_tools", count = work).into_owned())
                     }
                 }
-                if let Some(elapsed) = mark.elapsed_ms() {
+                if let Some(elapsed) = elapsed {
                     clauses.push(crate::chat::model::format_elapsed_seconds(elapsed));
                 }
                 match mark.status {
@@ -243,72 +245,66 @@ impl SpineView {
                     }
                     Some(TurnStatus::Completed) | None => {}
                 }
-                rows.push(Row {
+                Row {
                     turn: mark.turn,
-                    steer: None,
-                    text: message.clone().into(),
-                    length,
+                    text: mark.message.clone().into(),
+                    length: match elapsed {
+                        Some(elapsed) if elapsed >= LONGER[1] => LENGTHS[2],
+                        Some(elapsed) if elapsed >= LONGER[0] => LENGTHS[1],
+                        _ => LENGTHS[0],
+                    },
                     status: mark.status,
                     running: mark.running,
                     summary: clauses.join(" · ").into(),
-                });
-            }
-            for steer in &mark.steers {
-                rows.push(Row {
-                    turn: mark.turn,
-                    steer: Some(steer.entry_id.clone()),
-                    text: steer.text.clone().into(),
-                    length: STEER_LENGTH,
-                    status: None,
-                    running: false,
-                    summary: SharedString::default(),
-                });
-            }
+                }
+            })
+            .collect()
+    }
+
+    /// The turn the reader is at, among those the client holds, as each
+    /// frame of the timeline says it.
+    pub(super) fn set_reading(&mut self, turn: usize, cx: &mut Context<Self>) {
+        if self.reading != Some(turn) {
+            self.reading = Some(turn);
+            cx.notify();
         }
-        rows
     }
 
-    /// The turns, among all the thread's, the timeline last painted rows of.
-    fn turns_in_view(&self, cx: &App) -> Option<(usize, usize)> {
-        let timeline = self.timeline.upgrade()?;
-        let timeline = timeline.read(cx);
-        let (start, end) = timeline.painted_rows.get()?;
-        let first = timeline.rows.get(start)?.turn;
-        let last = timeline.rows.get(end.saturating_sub(1).max(start))?.turn;
-        let offset = self
-            .workspace_store
-            .read(cx)
-            .absolute_turn_for(self.session_id.as_deref(), 0);
-        Some((first + offset, last + offset))
-    }
-
-    /// Goes to the mark `nearest` of those shown from `self.first`.
-    fn go(&mut self, nearest: usize, cx: &mut Context<Self>) {
-        let Some(row) = self.rows().into_iter().nth(self.first + nearest) else {
-            return;
-        };
+    /// Goes to the turn `turn`, among all the thread's.
+    fn go(&mut self, turn: usize, cx: &mut Context<Self>) {
         let Some(session_id) = self.session_id.clone() else {
             return;
         };
-        let offset = self
-            .workspace_store
-            .read(cx)
-            .absolute_turn_for(Some(&session_id), 0);
-        // A message put into a turn the client holds has a row to go to;
-        // above the held window only its turn can be asked for.
-        if let (Some(entry), Some(turn), Some(timeline)) = (
-            &row.steer,
-            row.turn.checked_sub(offset),
-            self.timeline.upgrade(),
-        ) {
-            timeline.update(cx, |timeline, cx| {
-                timeline.scroll_to_activity(turn, entry, cx)
-            });
+        self.workspace_store.update(cx, |store, cx| {
+            store.show_thread_at_turn(session_id, turn, cx);
+        });
+    }
+
+    /// The pointer is over the spine at `y` within it.
+    fn point(&mut self, y: f32, cx: &mut Context<Self>) {
+        if self.pointer == Some(y) {
             return;
         }
-        self.workspace_store.update(cx, |store, cx| {
-            store.show_thread_at_turn(session_id, row.turn, cx);
-        });
+        self.pointer = Some(y);
+        self.last_pointer = y;
+        if !self.rested && self.resting.is_none() {
+            self.resting = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(REST).await;
+                _ = this.update(cx, |this, cx| {
+                    this.resting = None;
+                    this.rested = this.pointer.is_some();
+                    cx.notify();
+                });
+            }));
+        }
+        cx.notify();
+    }
+
+    /// The pointer has left the spine.
+    fn leave(&mut self) {
+        self.pointer = None;
+        self.rested = false;
+        self.resting = None;
     }
 }
 
@@ -317,48 +313,16 @@ fn smooth(t: f32) -> f32 {
     t * t * (3. - 2. * t)
 }
 
-/// Where among `count` marks at rest in a spine `height` tall a pointer at
+/// The top of `count` marks in a spine `height` tall.
+fn column_top(count: usize, height: f32) -> f32 {
+    ((height - count as f32 * PITCH) / 2.).max(0.)
+}
+
+/// Where among `count` marks in a spine `height` tall a pointer at
 /// `pointer` is, in marks from the first, and the mark it is on.
-fn focus(count: usize, height: f32, pointer: f32) -> (f32, usize) {
-    let rest_top = ((height - count as f32 * PITCH) / 2.).max(0.);
-    let focus = ((pointer - rest_top) / PITCH).clamp(0., count as f32);
-    (focus, (focus as usize).min(count.saturating_sub(1)))
-}
-
-/// Where the marks stand: each one's height and how far it is open, and
-/// the top of the first.
-struct Placed {
-    top: f32,
-    heights: Vec<f32>,
-    open: Vec<f32>,
-}
-
-/// The marks of a spine `height` tall, `presence` of the way unfolded
-/// around a pointer `focus` marks from the first; `second` is how far each
-/// mark's second line is in. The point under the pointer stays under it as
-/// the marks open, so the mark the pointer is on is the one it was on at
-/// rest.
-fn place(height: f32, focus: f32, presence: f32, second: &[f32]) -> Placed {
-    let count = second.len();
-    let rest_top = ((height - count as f32 * PITCH) / 2.).max(0.);
-    let nearest = (focus as usize).min(count.saturating_sub(1));
-    let open: Vec<f32> = (0..count)
-        .map(|index| {
-            let away = (index as f32 + 0.5 - focus) / REACH;
-            presence * (-away * away).exp()
-        })
-        .collect();
-    let heights: Vec<f32> = (0..count)
-        .map(|index| PITCH + open[index] * (OPEN - PITCH) + second[index] * SECOND)
-        .collect();
-    let before: f32 = heights[..nearest].iter().sum();
-    let within = (focus - nearest as f32).clamp(0., 1.);
-    let grown = before + within * heights.get(nearest).copied().unwrap_or(0.);
-    Placed {
-        top: rest_top + focus * PITCH - grown,
-        heights,
-        open,
-    }
+fn pointed(count: usize, height: f32, pointer: f32) -> (f32, usize) {
+    let at = ((pointer - column_top(count, height)) / PITCH).clamp(0., count as f32);
+    (at, (at as usize).min(count.saturating_sub(1)))
 }
 
 impl Render for SpineView {
@@ -376,54 +340,48 @@ impl Render for SpineView {
         if rows.len() < 2 {
             return root;
         }
-        let in_view = self.turns_in_view(cx);
+        let offset = self
+            .workspace_store
+            .read(cx)
+            .absolute_turn_for(self.session_id.as_deref(), 0);
+        // The turn the reader is at, among all the thread's: its marks
+        // and those of every turn after it stand out.
+        let reading = self.reading.map(|turn| turn + offset);
         let height = f32::from(self.bounds.get().size.height);
-        let room = (((height - 2. * MARGIN) / PITCH).max(1.) as usize).min(rows.len());
-        let last_first = rows.len() - room;
+        let fit = (((height - 2. * MARGIN) / PITCH).max(1.) as usize).min(rows.len());
+        let last_first = rows.len() - fit;
         if self.pointer.is_none() {
             // A thread with more marks than fit shows those around the
             // reader; under the pointer they hold still.
-            let read = in_view.map_or(rows.len(), |(_, last)| {
-                rows.partition_point(|row| row.turn <= last)
+            let read = reading.map_or(rows.len(), |turn| {
+                rows.partition_point(|row| row.turn <= turn)
             });
-            self.first = read.saturating_sub(room.div_ceil(2)).min(last_first);
+            self.first = read.saturating_sub(fit.div_ceil(2));
         }
         self.first = self.first.min(last_first);
-        let rows = &rows[self.first..self.first + room];
+        let rows = &rows[self.first..self.first + fit];
         let count = rows.len();
 
+        let unfolded = self.rested && self.pointer.is_some();
         let presence = self.motion.transition(
             "unfold",
-            if self.pointer.is_some() { 1f32 } else { 0. },
+            if unfolded { 1f32 } else { 0. },
             UNFOLD,
             window,
             cx,
         );
         let pointer = self.pointer.unwrap_or(self.last_pointer);
-        let (focus, nearest) = focus(count, height, pointer);
-        // One mark is the one the pointer is on, and the next takes over
-        // from it in time, not by how far the pointer has come: between two
-        // marks neither would have room for its second line.
-        let on: Vec<f32> = rows
-            .iter()
-            .enumerate()
-            .map(|(index, row)| {
-                presence
-                    * self.motion.transition(
-                        format!("on-{}-{}", row.turn, row.steer.as_deref().unwrap_or("")),
-                        if index == nearest { 1f32 } else { 0. },
-                        ON,
-                        window,
-                        cx,
-                    )
-            })
-            .collect();
-        let second: Vec<f32> = rows
-            .iter()
-            .zip(&on)
-            .map(|(row, on)| if row.summary.is_empty() { 0. } else { *on })
-            .collect();
-        let placed = place(height, focus, presence, &second);
+        let (_, mark) = pointed(count, height, pointer);
+        // The middle of the mark the pointer is on, in marks from the
+        // first, gliding from the one it was on: the messages go by it, so
+        // the one the mark stands for comes to rest level with its mark.
+        let at = self
+            .motion
+            .transition("at", mark as f32 + 0.5, SLIDE, window, cx);
+        // How far each mark is from that one, in marks, and how far it is
+        // the one the pointer is on.
+        let away = |index: usize| index as f32 + 0.5 - at;
+        let on = |index: usize| presence * smooth(1. - away(index).abs());
         let breath = rows.iter().any(|row| row.running).then(|| {
             animate_keyframes(
                 "spine-breath",
@@ -441,141 +399,164 @@ impl Render for SpineView {
         });
 
         let theme = cx.theme();
-        let (border, muted, foreground, danger, warning, popover) = (
+        let (border, muted, foreground, danger, warning, popover, list_hover) = (
             theme.border,
             theme.muted_foreground,
             theme.foreground,
             theme.danger,
             theme.warning,
             theme.popover,
+            theme.list_hover,
         );
         let quiet = crate::motion::blend(border, muted, 0.6);
-        let mut marks: Vec<AnyElement> = Vec::with_capacity(count);
-        let mut span: Option<(f32, f32)> = None;
-        let mut y = placed.top;
-        for (index, row) in rows.iter().enumerate() {
-            let (open, on, row_height) = (placed.open[index], on[index], placed.heights[index]);
-            let viewed = in_view.is_some_and(|(first, last)| (first..=last).contains(&row.turn));
-            let colour = match row.status {
-                Some(TurnStatus::Failed) => danger,
-                Some(TurnStatus::Interrupted) => warning,
-                _ => crate::motion::blend(if viewed { foreground } else { quiet }, foreground, on),
-            };
-            let first_line = PITCH + open * (OPEN - PITCH);
-            if open > LABELLED {
-                span = Some(span.map_or((y, y + row_height), |(start, _)| (start, y + row_height)));
-            }
-            let line = div()
+        let column_top = column_top(count, height);
+
+        // A mark's stroke, in the column and before its message alike.
+        let stroke = |row: &Row, on: f32| {
+            let viewed = reading.is_some_and(|turn| row.turn >= turn);
+            div()
                 .flex_none()
-                .w(px(row.length + on * (SELECTED_LENGTH - row.length)))
-                .h(px(if viewed || on > 0.5 { 2. } else { 1. }))
+                .w(px(row.length + on * (POINTED_LENGTH - row.length)))
+                .h(px(if viewed { 2. } else { 1. + on }))
                 .rounded_full()
-                .bg(colour)
-                .when_some(breath.filter(|_| row.running), |line, breath| {
-                    line.opacity(breath)
-                });
-            let label = (open > LABELLED).then(|| {
-                div()
-                    .flex_none()
-                    .ml_2()
-                    .w(px(LABEL))
-                    .opacity(smooth((open - LABELLED) / (0.8 - LABELLED)))
-                    .child(
-                        div().h(px(first_line)).flex().items_center().child(
-                            div()
-                                .w_full()
-                                .truncate()
-                                .text_secondary(false, cx)
-                                .text_color(crate::motion::blend(muted, foreground, on))
-                                .child(row.text.clone()),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .h(px(row_height - first_line))
-                            .overflow_hidden()
-                            .truncate()
-                            .text_caption(cx)
-                            .text_color(muted)
-                            .child(row.summary.clone()),
-                    )
-            });
+                .bg(match row.status {
+                    Some(TurnStatus::Failed) => danger,
+                    Some(TurnStatus::Interrupted) => warning,
+                    _ => crate::motion::blend(
+                        if viewed { foreground } else { quiet },
+                        foreground,
+                        on,
+                    ),
+                })
+                .when_some(breath.filter(|_| row.running), |stroke, breath| {
+                    stroke.opacity(breath)
+                })
+        };
+
+        // The marks keep their places in the column.
+        let mut marks: Vec<AnyElement> = Vec::with_capacity(count);
+        for (index, row) in rows.iter().enumerate() {
+            let selector = format!("chat-spine-mark-{}", row.turn);
             marks.push(
                 div()
+                    .debug_selector(move || selector.clone())
                     .absolute()
                     .left_0()
-                    .top(px(y))
-                    .h(px(row_height))
+                    .top(px(column_top + index as f32 * PITCH))
+                    .w(px(SLOT))
+                    .h(px(PITCH))
+                    .pl(px(INSET))
                     .flex()
-                    .items_start()
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(SLOT))
-                            .h(px(first_line))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(line),
-                    )
-                    .children(label)
+                    .items_center()
+                    .child(stroke(row, on(index)))
                     .into_any_element(),
             );
-            y += row_height;
         }
 
-        let panel = px(SLOT + 8. + LABEL + 12.);
-        let backing = span.filter(|_| presence > 0.).map(|(start, end)| {
-            div()
+        // The messages unfold beside the column, each after its mark's
+        // stroke, the one the pointer's mark stands for level with that
+        // mark, so the two strokes read as one. A message is taller than a
+        // mark, so they slide against the pointer as it goes from mark to
+        // mark, and hold still while it stays on one.
+        let level = column_top + at * PITCH;
+        let (above, below) = (at.min(AROUND), (count as f32 - at).min(AROUND));
+        let (top, bottom) = (level - above * LINE, level + below * LINE);
+        let panel = (presence > 0.).then(|| {
+            let mut panel = div()
                 .absolute()
-                .left(px(-4.))
-                .top(px(start - 6.))
-                .h(px(end - start + 12.))
-                .w(panel)
+                .left(px(SLOT - (1. - presence) * 6.))
+                .top(px(top - EDGE))
+                .h(px(bottom - top + 2. * EDGE))
+                .w(px(LABEL))
                 .opacity(presence)
+                .overflow_hidden()
                 .rounded(crate::material::radius_chip(cx))
                 .bg(popover)
                 .border_1()
                 .border_color(border)
-                .shadow_md()
+                .shadow_md();
+            for (index, row) in rows.iter().enumerate() {
+                let away = away(index);
+                // A message fades as it nears the edge it slides out by.
+                let shown = smooth(AROUND + 0.5 - away.abs());
+                if shown <= 0. {
+                    continue;
+                }
+                let on = smooth(1. - away.abs());
+                panel = panel.child(
+                    h_flex()
+                        .absolute()
+                        .left(px(EDGE))
+                        .right(px(EDGE))
+                        .top(px(EDGE + (above + away - 0.5) * LINE))
+                        .h(px(LINE))
+                        .pr_2()
+                        .gap_2()
+                        .opacity(shown)
+                        .rounded(crate::material::radius_chip(cx))
+                        .bg(list_hover.opacity(list_hover.a * on))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(POINTED_LENGTH))
+                                .child(stroke(row, on)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_secondary(false, cx)
+                                .text_color(crate::motion::blend(muted, foreground, on))
+                                .child(row.text.clone()),
+                        )
+                        .when(!row.summary.is_empty(), |line| {
+                            line.child(
+                                div()
+                                    .flex_none()
+                                    .text_caption(cx)
+                                    .text_color(muted)
+                                    .child(row.summary.clone()),
+                            )
+                        }),
+                );
+            }
+            panel
         });
 
-        let rest_top = ((height - count as f32 * PITCH) / 2.).max(0.);
-        let more = last_first > 0;
+        // The strip takes the pointer over the column, and over the
+        // messages once they are out, so going onto one does not fold them.
+        let column_bottom = column_top + count as f32 * PITCH;
+        let (strip_top, strip_bottom) = if unfolded {
+            (top.min(column_top), bottom.max(column_bottom))
+        } else {
+            (column_top, column_bottom)
+        };
         let strip = div()
             .id("chat-spine")
-            .debug_selector(|| "chat-spine".into())
             .absolute()
-            .left(px(-4.))
-            .top(px(rest_top - 12.))
-            .h(px(count as f32 * PITCH + 24.))
-            .w(if self.pointer.is_some() {
-                panel
-            } else {
-                px(SLOT + 4.)
-            })
+            .left_0()
+            .top(px(strip_top - 12.))
+            .h(px(strip_bottom - strip_top + 24.))
+            .w(px(if unfolded { SLOT + LABEL } else { SLOT }))
             .cursor_pointer()
             .block_mouse_except_scroll()
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 // A touch has no pointer to rest over the spine.
-                if window.last_input_was_touch() {
-                    return;
-                }
-                let y = f32::from(event.position.y - this.bounds.get().origin.y);
-                if this.pointer != Some(y) {
-                    this.pointer = Some(y);
-                    this.last_pointer = y;
-                    cx.notify();
+                if !window.last_input_was_touch() {
+                    let y = f32::from(event.position.y - this.bounds.get().origin.y);
+                    this.point(y, cx);
                 }
             }))
             .on_hover(crate::motion::pointer_hover(cx.listener(
                 |this, hovered: &bool, _, cx| {
-                    if !hovered && this.pointer.take().is_some() {
+                    if !hovered {
+                        this.leave();
                         cx.notify();
                     }
                 },
             )))
-            .when(more, |strip| {
+            .when(last_first > 0, |strip| {
                 strip.on_scroll(cx.listener(move |this, event: &ScrollEvent, window, cx| {
                     let turned = f32::from(event.delta.pixel_delta(window.line_height()).y);
                     this.wheel -= turned / PITCH;
@@ -587,9 +568,17 @@ impl Render for SpineView {
                     cx.notify();
                 }))
             })
-            .on_click(cx.listener(move |this, _, _, cx| this.go(nearest, cx)));
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                // The message level with the press.
+                let spine = this.bounds.get();
+                let y = f32::from(event.position().y - spine.origin.y);
+                let (_, mark) = pointed(count, f32::from(spine.size.height), y);
+                if let Some(row) = this.rows().get(this.first + mark) {
+                    this.go(row.turn, cx);
+                }
+            }));
 
-        root.children(backing).children(marks).child(strip)
+        root.children(marks).children(panel).child(strip)
     }
 }
 
@@ -597,9 +586,8 @@ impl Render for SpineView {
 mod tests {
     use std::time::Duration;
 
-    use gpui::{Modifiers, TestAppContext, VisualTestContext, point, px};
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
 
-    use super::PITCH;
     use crate::chat::tests::{ScriptedThread, THREAD, answer_event, user_event};
     use crate::test_frames::{draw, draw_settled};
 
@@ -651,14 +639,10 @@ mod tests {
             "the window holds the whole thread"
         );
 
-        let spine = cx
-            .debug_bounds("chat-spine")
-            .expect("a thread of several messages shows its spine");
-        // The strip reaches 12px above its first mark.
-        let first = point(spine.center().x, spine.top() + px(12. + PITCH / 2.));
-        cx.simulate_mouse_move(first, None, Modifiers::default());
-        draw_settled(cx);
-        cx.simulate_click(first, Modifiers::default());
+        let first = cx
+            .debug_bounds("chat-spine-mark-0")
+            .expect("the first turn, above the held window, has its mark");
+        cx.simulate_click(first.center(), Modifiers::default());
         settle(&mut thread, cx);
         draw_settled(cx);
 

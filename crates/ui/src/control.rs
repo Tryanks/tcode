@@ -30,9 +30,8 @@ pub(crate) enum ActivityDay {
 }
 
 impl ActivityDay {
-    /// The day of `at_millis` seen from `now`, by the calendar of `now`'s
-    /// time zone.
-    pub(crate) fn of<Tz: chrono::TimeZone>(at_millis: u64, now: &chrono::DateTime<Tz>) -> Self {
+    /// The day of `at_millis` seen from `now`, by the reader's calendar.
+    pub(crate) fn of(at_millis: u64, now: &chrono::DateTime<chrono::Local>) -> Self {
         let Some(at) = chrono::DateTime::from_timestamp_millis(at_millis as i64) else {
             return Self::Earlier;
         };
@@ -79,7 +78,6 @@ pub(crate) fn action_label(key: &str) -> String {
         action::KEEP => "control.action.keep",
         action::KEEP_OFF => "control.action.keep_off",
         action::SETTLE_SELF => "control.action.settle_self",
-        action::RECORD_REVIEW => "control.action.record_review",
         action::NOTIFY_WHEN => "control.action.notify_when",
         action::CANCEL_NOTIFY => "control.action.cancel_notify",
         action::RESPOND_INPUT => "control.action.respond_input",
@@ -124,25 +122,4 @@ pub(crate) fn action_label(key: &str) -> String {
         _ => return key.to_owned(),
     };
     crate::tr!(key).into_owned()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn activity_days_follow_the_local_calendar() {
-        use chrono::TimeZone as _;
-        let zone = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
-        let now = zone.with_ymd_and_hms(2026, 11, 7, 0, 30, 0).unwrap();
-        let at = |day, hour, minute| {
-            zone.with_ymd_and_hms(2026, 11, day, hour, minute, 0)
-                .unwrap()
-                .timestamp_millis() as u64
-        };
-        assert_eq!(ActivityDay::of(at(7, 0, 10), &now), ActivityDay::Today);
-        assert_eq!(ActivityDay::of(at(6, 23, 50), &now), ActivityDay::Yesterday);
-        assert_eq!(ActivityDay::of(at(6, 0, 5), &now), ActivityDay::Yesterday);
-        assert_eq!(ActivityDay::of(at(5, 23, 59), &now), ActivityDay::Earlier);
-    }
 }

@@ -1633,7 +1633,6 @@ fn an_at_thread_is_written_into_the_message_as_a_link(cx: &mut TestAppContext) {
         ServerEvent::SessionStatusReplaced(Box::new(status)),
     );
     cx.run_until_parked();
-    cx.run_until_parked();
     let (composer, cx) = cx
         .add_window_view(|window, cx| Composer::new(store.clone(), session_id.clone(), window, cx));
     cx.update(|window, cx| {
@@ -1642,14 +1641,12 @@ fn an_at_thread_is_written_into_the_message_as_a_link(cx: &mut TestAppContext) {
     });
     cx.simulate_input("@release");
     // The menu has folded open by the time it is clicked.
-    crate::test_frames::draw_settled(cx);
+    draw_settled(cx);
     let row = cx.debug_bounds("menu-row-0").expect("thread row");
     cx.simulate_click(row.center(), Modifiers::default());
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    cx.run_until_parked();
     cx.simulate_input("go");
     cx.simulate_keystrokes("enter");
-    draw_settled(cx);
+    cx.run_until_parked();
     assert_eq!(
         sent_texts(&outgoing),
         ["[@Release notes](tcode-thread://release-thread) go"]
