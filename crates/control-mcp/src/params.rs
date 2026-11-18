@@ -328,9 +328,7 @@ pub struct ReviewItemInput {
         description = "continue, needs_decision, waiting_on_others, can_settle, parked_or_superseded or unsure."
     )]
     pub group: String,
-    #[schemars(
-        description = "In words: clear evidence, inference, or unsure. Never a percentage."
-    )]
+    #[schemars(description = "clear_evidence, inference or unsure. Never a percentage.")]
     pub confidence: String,
     #[schemars(description = "Anchors and quoted facts the grouping rests on.")]
     pub evidence: Vec<String>,

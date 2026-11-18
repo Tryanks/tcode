@@ -239,7 +239,7 @@ pub struct ControlActivityEntry {
 pub struct ReviewItem {
     pub thread_id: String,
     pub group: String,
-    /// In words: clear evidence, inference, or unsure.
+    /// `clear_evidence`, `inference` or `unsure`.
     pub confidence: String,
     /// Anchors and quoted facts the group rests on.
     pub evidence: Vec<String>,
