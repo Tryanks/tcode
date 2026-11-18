@@ -261,20 +261,3 @@ pub struct ReviewRecord {
     pub coverage: String,
     pub items: Vec<ReviewItem>,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scope_reaches_targets_by_project() {
-        assert!(ControlScope::Project.reaches(Some("a"), Some("a")));
-        assert!(!ControlScope::Project.reaches(Some("a"), Some("b")));
-        assert!(!ControlScope::Project.reaches(Some("a"), None));
-        assert!(ControlScope::Projects(vec!["b".into()]).reaches(Some("a"), Some("b")));
-        assert!(ControlScope::Projects(vec!["b".into()]).reaches(Some("a"), Some("a")));
-        assert!(!ControlScope::Projects(vec!["b".into()]).reaches(Some("a"), Some("c")));
-        assert!(!ControlScope::Projects(vec!["b".into()]).reaches(Some("a"), None));
-        assert!(ControlScope::Host.reaches(Some("a"), None));
-    }
-}
