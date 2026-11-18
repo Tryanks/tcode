@@ -483,7 +483,7 @@ pub struct RunChange {
     #[schemars(description = "The thread id.")]
     pub thread_id: String,
     #[schemars(
-        description = "One of interrupt, {\"retry\": {\"turn\"}}, compact, {\"set_model\": {\"model\"}} (a model of the thread's own provider and profile), {\"set_option\": {\"id\", \"value\"}}, fork, {\"fork_at\": {\"turn\"}} (a new thread holding everything through that finished turn, answer included, as outline numbers them, where the provider of the thread forks at a turn), {\"steer_queued\": {\"id\"}}, {\"drop_queued\": {\"id\"}}, or cancel (your own subagent only: stop it and drop its queue without delivering its result). Dropping a queued human message needs history_edit."
+        description = "One of interrupt, {\"retry\": {\"turn\"}}, compact, {\"set_model\": {\"model\"}} (a model of the thread's own provider and profile), {\"set_option\": {\"id\", \"value\"}}, fork, {\"fork_at\": {\"turn\"}} (a new thread holding everything through that finished turn, answer included, as outline numbers them, where the provider of the thread forks at a turn), {\"steer_queued\": {\"id\"}}, {\"drop_queued\": {\"id\"}}, or cancel (your own subagent only: stop it and drop its queue without delivering its result)."
     )]
     pub op: RunOp,
 }
@@ -530,7 +530,7 @@ pub struct PullRequestParams {
     )]
     pub reference: Option<String>,
     #[schemars(
-        description = "link, unlink, watch, unwatch, refresh, or a write: {\"comment\": {\"body\"}}, {\"reply\": {\"review_thread_id\", \"body\"}} (a reply in a review comment thread), {\"resolve\": {\"review_thread_id\"}}. Writes need pr_write."
+        description = "link, unlink, watch, unwatch, refresh, or a write: {\"comment\": {\"body\"}}, {\"reply\": {\"review_thread_id\", \"body\"}} (a reply in a review comment thread), {\"resolve\": {\"review_thread_id\"}}."
     )]
     pub op: PullRequestOp,
 }
@@ -560,7 +560,7 @@ pub struct GitParams {
     #[schemars(description = "The thread whose checkout to act in.")]
     pub thread_id: String,
     #[schemars(
-        description = "{\"checkout_branch\": {\"branch\"}}, {\"commit\": {\"message\", \"included\"?}}, or with git_remote: push, pull, {\"commit_push\": {\"message\", \"included\"?}}, publish_branch, merge_worktree."
+        description = "{\"checkout_branch\": {\"branch\"}}, {\"commit\": {\"message\", \"included\"?}}, push, pull, {\"commit_push\": {\"message\", \"included\"?}}, publish_branch or merge_worktree."
     )]
     pub op: GitOp,
 }
