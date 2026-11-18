@@ -1261,26 +1261,3 @@ pub(crate) fn next_command_blocking(
 fn answer_usage_read(reply: smol::channel::Sender<Result<serde_json::Value, String>>) {
     let _ = reply.try_send(Err("the scripted provider has no account".into()));
 }
-
-impl AppState {
-    /// Deliver an event as a session's provider would.
-    pub(crate) fn provider_event_for_test(
-        &mut self,
-        session_id: &str,
-        event: AgentEvent,
-        cx: &mut HostCx,
-    ) {
-        if let Some(meta) = self
-            .resident(session_id)
-            .filter(|session| matches!(session.runtime, Runtime::Idle))
-            .map(|session| session.meta.clone())
-        {
-            let execution = self.executions.prepare(&self.settings, &meta).unwrap();
-            let (commands, receiver) = smol::channel::unbounded();
-            smol::spawn(async move { while receiver.recv().await.is_ok() {} }).detach();
-            self.resident_mut(session_id).unwrap().runtime =
-                Runtime::Live(execution.connect(commands));
-        }
-        self.on_event(session_id, event, cx);
-    }
-}
