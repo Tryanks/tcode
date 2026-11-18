@@ -311,6 +311,36 @@ From the round over the Wayland preview (the nested compositor):
   linked, the unoptimized one did not. A change to how a binary links is
   built both ways before it merges.
 
+From the round over `tcode_control` (the host's tools, the MCP surface and
+the windows that draw its calls):
+
+- **A description that says what the host does not do**: `record_review`'s
+  confidence given in words the host refuses, a `since` said to apply to
+  every thread when it applies to settled ones, a limit of ten the
+  description never named, "the user acts on it in Tcode" over a store no
+  client reads. Text written for the model drifts like a comment and costs
+  more: a call written from it is refused. Each sentence is read against the
+  code that answers it.
+- **A window that reads fields no tool takes**: the thread tool window read
+  `anchor`, `query` and a word-form `op`, where the tools take `anchors`,
+  `title_query` and an object. It showed a rename, a fork or a model change
+  as a thread with nothing done to it.
+- **Every id taken for the one kind**: each UUID in a call drawn as a thread
+  link, so a project's id opened nothing.
+- **A context built again where it was handed**: nine tools rebuilt the
+  author and origin their caller had already set, identically.
+- **A count that leaned on a private table's shape**: "activity is known"
+  read as "the host has an entry", true only of the entries a test wrote by
+  hand. Found when the test was run over threads a host had loaded.
+- **A scene pushed into the host's fields**: 123 writes and 57 reads of host
+  state in five test files. Stored before the host starts and read back from
+  what a client is sent, the same tests found the defect above.
+- **A rule whose only stated reason is its own sentence**: "a child may
+  neither read nor act on its parent", from a pull request body, with no
+  incident. Left in place because it also stops a thread archiving its own
+  lead and so itself; what a rule incidentally holds up is found before it
+  goes.
+
 ## What the audit did wrong
 
 - **It added tests by symptom before finding the contract's owner** (#1096).
@@ -615,3 +645,9 @@ Not defences; fixed or reported as their own entries.
   by the user.
 - The runtime test driver `run_until_parked` does not process an input the
   way `pipe.rs::host_loop` does. Open.
+- The part of a `tcode_control` call that finishes on the host after work off
+  it ran in the host loop's own context, which carries no space: a subagent a
+  member's turn started in a worktree was not held to the member's space.
+  Fixed; established by reading, not reproduced.
+- `review_candidates` counted a thread with an empty log neither as active
+  nor as lacking data. Fixed.
