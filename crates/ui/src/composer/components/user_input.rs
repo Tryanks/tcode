@@ -299,36 +299,44 @@ impl Composer {
                 self.render_user_input_question(&questions, &question, &request_id, window, cx)
             },
         );
-        let multi_done = multi && user_input_all_answered(&questions, &self.ui_selections);
-        let done = self
+        // Whether confirming this question completes the set and sends it,
+        // or moves on to a question still unanswered.
+        let confirm = (multi && user_input_answered(&question, &self.ui_selections))
+            .then(|| user_input_all_answered(&questions, &self.ui_selections));
+        let confirm = self
             .motion
             .shown(
-                self.motion_key(format_args!("ui-done-{request_id}")),
-                multi_done.then_some(()),
+                self.motion_key(format_args!("ui-confirm-{request_id}")),
+                confirm,
                 SHOW,
                 window,
                 cx,
             )
             .map(|shown| {
-                let questions_submit = questions.clone();
+                let questions_confirm = questions.clone();
                 let request_id = request_id.clone();
                 shown.fold_across(
                     div().pl_2().child(
-                        Button::new("ui-done")
+                        Button::new("ui-confirm")
                             .motion(&self.button_motion())
+                            .debug_selector(|| "ui-confirm".into())
                             .primary()
                             .chip()
                             .touch(self.compact)
-                            .label(crate::tr!("userinput.done"))
+                            .label(if shown.value {
+                                crate::tr!("userinput.done")
+                            } else {
+                                crate::tr!("userinput.next_question")
+                            })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 // What is typed in the field and not yet
-                                // added is part of the answer Done sends.
+                                // added is part of the answer confirmed.
                                 let text =
                                     this.user_input_custom.read(cx).value().trim().to_string();
                                 if !text.is_empty() {
-                                    this.record_custom_answer(&questions_submit, text);
+                                    this.record_custom_answer(&questions_confirm, text);
                                 }
-                                this.ui_submit(&questions_submit, request_id.clone(), window, cx);
+                                this.ui_move_on(&questions_confirm, request_id.clone(), window, cx);
                             })),
                     ),
                 )
@@ -371,9 +379,9 @@ impl Composer {
                     })),
             );
 
-        // Answers submit themselves: a single-select click that completes the
-        // set submits it, so the only finishing affordance is Done on a
-        // multi-select question, where clicks cannot signal "I'm finished".
+        // A single-select click is its question's answer and moves on by
+        // itself. A multi-select click cannot say "I'm finished", so that
+        // question carries the button that does.
         let hint = if multi {
             Some(crate::tr!("userinput.multi_hint"))
         } else if !blocking {
@@ -391,7 +399,7 @@ impl Composer {
                     .text_secondary(self.compact, cx)
                     .children(hint),
             )
-            .children(done);
+            .children(confirm);
 
         // The card's gap is carried above each part of the answer area, so
         // it folds with it.
@@ -497,6 +505,7 @@ impl Composer {
                     cx,
                 )
                 .id(("ui-opt", opt_index))
+                .debug_selector(move || format!("ui-opt-{opt_index}"))
                 .role(Role::ListBoxOption)
                 .aria_label(option.label.clone())
                 .aria_selected(is_selected)
@@ -744,18 +753,30 @@ impl Composer {
                 {
                     return;
                 }
-                if user_input_all_answered(&questions, &this.ui_selections) {
-                    this.ui_submit(&questions, request_id, window, cx);
-                } else if let Some(next) =
-                    next_unanswered_question(&questions, &this.ui_selections, at)
-                {
-                    this.ui_question_index = next;
-                    this.seed_user_input_prefill(&questions, window, cx);
-                    cx.notify();
-                }
+                this.ui_move_on(&questions, request_id, window, cx);
             });
         })
         .detach();
+    }
+
+    /// Leave the current question: send the answer set once it is complete,
+    /// or go to the next question still unanswered.
+    fn ui_move_on(
+        &mut self,
+        questions: &[UserInputQuestion],
+        request_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if user_input_all_answered(questions, &self.ui_selections) {
+            self.ui_submit(questions, request_id, window, cx);
+        } else if let Some(next) =
+            next_unanswered_question(questions, &self.ui_selections, self.ui_question_index)
+        {
+            self.ui_question_index = next;
+            self.seed_user_input_prefill(questions, window, cx);
+            cx.notify();
+        }
     }
 
     pub(in super::super) fn ui_submit(
@@ -801,11 +822,12 @@ mod tests {
         }
     }
 
-    /// A composer over a session whose agent asked `first` and `second` with
+    /// A composer over a session whose agent asked `questions` with
     /// `delivery`, plus a click driver returning the card state afterwards:
     /// (expanded, question index, toggle present, dismiss present).
     fn question_card(
         cx: &mut TestAppContext,
+        questions: Vec<UserInputQuestion>,
         delivery: agent::UserInputDelivery,
     ) -> impl FnMut(&'static str) -> ((bool, usize), bool, bool) {
         let crate::chat::tests::RunningThread {
@@ -821,7 +843,7 @@ mod tests {
                 },
                 agent::AgentEvent::UserInputRequested {
                     request_id: "ask".into(),
-                    questions: vec![question("first"), question("second")],
+                    questions,
                     delivery,
                 },
             ],
@@ -862,7 +884,11 @@ mod tests {
     /// question arrives closed and can be hidden, with a way back.
     #[gpui::test]
     fn async_question_strip_controls(cx: &mut TestAppContext) {
-        let mut click = question_card(cx, agent::UserInputDelivery::Async);
+        let mut click = question_card(
+            cx,
+            vec![question("first"), question("second")],
+            agent::UserInputDelivery::Async,
+        );
         assert_eq!(click(""), ((false, 0), true, true));
         assert_eq!(click("ui-toggle"), ((true, 0), true, true));
         assert_eq!(click("ui-next"), ((true, 1), true, true));
@@ -877,9 +903,33 @@ mod tests {
     /// be read while deciding, and cannot be hidden while the agent waits.
     #[gpui::test]
     fn blocking_question_collapses_but_stays(cx: &mut TestAppContext) {
-        let mut click = question_card(cx, agent::UserInputDelivery::Blocking);
+        let mut click = question_card(
+            cx,
+            vec![question("first"), question("second")],
+            agent::UserInputDelivery::Blocking,
+        );
         assert_eq!(click(""), ((true, 0), true, false));
         assert_eq!(click("ui-toggle"), ((false, 0), true, false));
         assert_eq!(click("ui-next"), ((true, 1), true, false));
+    }
+
+    /// Choosing options of a multi-select question never says the answer is
+    /// finished, so the question carries the button that does: among several
+    /// questions it leads to the next one still unanswered.
+    #[gpui::test]
+    fn multi_select_question_is_confirmed_onward(cx: &mut TestAppContext) {
+        let mut click = question_card(
+            cx,
+            vec![
+                UserInputQuestion {
+                    multi_select: true,
+                    ..question("first")
+                },
+                question("second"),
+            ],
+            agent::UserInputDelivery::Blocking,
+        );
+        assert_eq!(click("ui-opt-0"), ((true, 0), true, false));
+        assert_eq!(click("ui-confirm"), ((true, 1), true, false));
     }
 }
