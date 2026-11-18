@@ -9,7 +9,7 @@ use tcode_core::control::{
 use tcode_core::settings::SettingsPatch;
 use tcode_protocol::{
     ControlActivityEntry, ControlActivityFilter, ControlActivityPage, ControlActivityThread,
-    ControlStatus, ThreadReferenceStatus,
+    ControlStatus,
 };
 
 mod content;
@@ -18,7 +18,6 @@ mod observe;
 mod operate;
 mod organize;
 mod privileged;
-mod references;
 #[cfg(test)]
 mod tests;
 mod watches;
@@ -246,25 +245,10 @@ impl AppState {
             return None;
         }
         let (grant, source) = self.caller_grant(meta);
-        let references = meta
-            .references
-            .iter()
-            .map(|reference| {
-                let target = self.find_meta(&reference.thread_id);
-                ThreadReferenceStatus {
-                    thread_id: reference.thread_id.clone(),
-                    title: target.as_ref().map(|m| m.title.clone()).unwrap_or_default(),
-                    deleted: target.is_none(),
-                    by: reference.by,
-                    boundary_notice: reference.boundary_notice,
-                }
-            })
-            .collect();
         Some(ControlStatus {
             grant,
             source,
             pending_requests: meta.control_grant_requests.clone(),
-            references,
             self_settle: meta.self_settle.clone(),
             tools_offered: self.control_offered(meta),
         })
@@ -297,10 +281,11 @@ impl AppState {
         }
     }
 
-    /// Whether a call may reach `target`: inside `scope` (the grant's, or the narrower one the
-    /// call asked for), or, for a read of its content, the caller itself, one of its
-    /// Orchestrate children or a thread it references; never the caller's own Orchestrate
-    /// parent or its ancestors.
+    /// Whether a call may reach `target`. A read of the content of a thread the call names
+    /// reaches every thread on the host: the user points a thread at another by linking it
+    /// in a message, and nothing is asked or recorded for that. Anything else stays inside
+    /// `scope` (the grant's, or the narrower one the call asked for). Never the caller's own
+    /// Orchestrate parent or its ancestors, nor a project outside the caller's space.
     pub(super) fn target_reachable(
         &self,
         caller: &Caller,
@@ -316,26 +301,7 @@ impl AppState {
         {
             return false;
         }
-        if scope.reaches(caller.project_id.as_deref(), target.project_id.as_deref()) {
-            return true;
-        }
-        let caller_meta = || {
-            self.sessions
-                .iter()
-                .find(|meta| meta.id == caller.thread_id)
-                .or_else(|| {
-                    self.resident(&caller.thread_id)
-                        .map(|session| &session.meta)
-                })
-        };
-        reads_content
-            && (target.id == caller.thread_id
-                || target.parent_session_id.as_deref() == Some(caller.thread_id.as_str())
-                || caller_meta().is_some_and(|meta| {
-                    meta.references
-                        .iter()
-                        .any(|reference| reference.thread_id == target.id)
-                }))
+        reads_content || scope.reaches(caller.project_id.as_deref(), target.project_id.as_deref())
     }
 
     /// Resolve one `tcode_control` call on the host thread.
@@ -485,16 +451,7 @@ impl AppState {
         reads_content: bool,
     ) -> Result<SessionMeta, TargetRefusal> {
         let Some(meta) = self.find_meta(target) else {
-            let referenced = self.find_meta(&caller.thread_id).is_some_and(|meta| {
-                meta.references
-                    .iter()
-                    .any(|reference| reference.thread_id == target)
-            });
-            return Err(if referenced {
-                TargetRefusal::DeletedReference
-            } else {
-                TargetRefusal::Unknown
-            });
+            return Err(TargetRefusal::Unknown);
         };
         if caller.ancestors.iter().any(|ancestor| ancestor == target) {
             return Err(TargetRefusal::Ancestor);
@@ -514,7 +471,7 @@ impl AppState {
         reads_content: bool,
     ) -> Result<SessionMeta, String> {
         self.check_target(caller, &caller.grant.scope, target, reads_content)
-            .map_err(|refusal| refusal.per_item(target, &caller.grant.scope))
+            .map_err(|refusal| refusal.per_item(&caller.grant.scope))
     }
 
     fn dispatch_control_op(&mut self, caller: &Caller, op: ControlOp, cx: &mut HostCx) -> Answer {
@@ -545,7 +502,6 @@ impl AppState {
             ControlOp::MoveThread(p) => self.op_move_thread(caller, p, cx),
             ControlOp::NotifyWhen(p) => self.op_notify_when(caller, p, cx),
             ControlOp::CancelNotify(p) => self.op_cancel_notify(caller, p, cx),
-            ControlOp::Reference(p) => self.op_reference(caller, p, cx),
             ControlOp::RespondInput(p) => self.op_respond_input(caller, p, cx),
             ControlOp::RespondApproval(p) => self.op_respond_approval(caller, p, cx),
             ControlOp::ReportResult(p) => self.op_report_result(caller, p),
@@ -665,7 +621,6 @@ impl AppState {
 /// A target closed to the caller; worded for a whole-call refusal or a per-item skip.
 enum TargetRefusal {
     Unknown,
-    DeletedReference,
     Ancestor,
     OutsideScope,
 }
@@ -674,9 +629,6 @@ impl TargetRefusal {
     fn whole_call(&self, target: &str, scope: &ControlScope) -> String {
         match self {
             Self::Unknown => format!("unknown thread: {target}"),
-            Self::DeletedReference => format!(
-                "referenced thread {target} was deleted; what you already read cannot be recalled"
-            ),
             Self::Ancestor => format!(
                 "refused: thread {target} orchestrates this thread; a child may not read or act \
                  on its parent"
@@ -688,10 +640,9 @@ impl TargetRefusal {
         }
     }
 
-    fn per_item(&self, target: &str, scope: &ControlScope) -> String {
+    fn per_item(&self, scope: &ControlScope) -> String {
         match self {
             Self::Unknown => "unknown_thread".to_owned(),
-            Self::DeletedReference => format!("deleted: referenced thread {target} was deleted"),
             Self::Ancestor => "ancestor: a child may not read or act on its parent".to_owned(),
             Self::OutsideScope => {
                 format!("outside_scope: your grant's scope is {}", scope.describe())

@@ -933,18 +933,27 @@ impl AppState {
             .clone()
             .unwrap_or_else(|| caller.grant.scope.clone());
         let mut omitted = Vec::new();
+        // Threads the call names are read by id, wherever they are; left to itself the
+        // search covers the scope and the caller's own Orchestrate children.
+        let searched = |meta: &SessionMeta| match &params.thread_ids {
+            Some(ids) => {
+                ids.contains(&meta.id) && self.target_reachable(caller, &scope, meta, true)
+            }
+            None => {
+                let own_child =
+                    meta.parent_session_id.as_deref() == Some(caller.thread_id.as_str());
+                self.target_reachable(caller, &scope, meta, own_child)
+            }
+        };
         let mut readable: Vec<(u64, SessionMeta)> = self
             .sessions
             .iter()
-            .filter(|meta| self.target_reachable(caller, &scope, meta, true))
+            .filter(|meta| searched(meta))
             .map(|meta| (self.activity_at(meta), meta.clone()))
             .collect();
-        if let Some(ids) = &params.thread_ids {
-            readable.retain(|(_, meta)| ids.contains(&meta.id));
-            for id in ids {
-                if !readable.iter().any(|(_, meta)| &meta.id == id) {
-                    omitted.push(format!("thread {id} is outside the requested scope"));
-                }
+        for id in params.thread_ids.iter().flatten() {
+            if !readable.iter().any(|(_, meta)| &meta.id == id) {
+                omitted.push(format!("thread {id} is unknown or closed to this thread"));
             }
         }
         readable.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));

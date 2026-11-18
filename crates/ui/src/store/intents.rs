@@ -361,18 +361,6 @@ impl WorkspaceStore {
             approve,
         });
     }
-    pub fn add_thread_reference(&mut self, session_id: String, thread_id: String) {
-        self.dispatch(Command::AddThreadReference {
-            session_id,
-            thread_id,
-        });
-    }
-    pub fn remove_thread_reference(&mut self, session_id: String, thread_id: String) {
-        self.dispatch(Command::RemoveThreadReference {
-            session_id,
-            thread_id,
-        });
-    }
     pub fn set_follow_up(&mut self, session_id: String, on: bool) {
         self.dispatch(Command::SetFollowUp {
             session_id,

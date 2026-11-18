@@ -1489,7 +1489,6 @@ notice:
   tcode_update_available: "Tcode %{version} が利用可能です"
   review_recorded: "レビューを記録しました：%{items} 項目、カバレッジ %{coverage}"
   usage_limit_reached: "%{harness} が使用量の上限に達しました"
-  reference_boundary_crossed: "「%{thread}」のモデルが、別のプロジェクトまたはハーネスの「%{title}」を参照しました。そこで読み取った内容は、そのモデルの提供元に送信されます"
 attach:
   unsupported_type: "「%{name}」を画像として読み込めませんでした。"
   decode_failed: "「%{name}」を画像として読み込めませんでした: %{error}"
@@ -2838,7 +2837,7 @@ control:
     observe: "閲覧"
     organize: "整理"
     operate: "操作"
-    observe_description: "スレッドと履歴、検索、git のステータスと差分、プルリクエスト、ハーネス、設定、ターミナル出力。"
+    observe_description: "スレッドと履歴、検索、git のステータスと差分、プルリクエスト、ハーネス、設定、ターミナル出力。メッセージでリンクしたスレッドは、範囲にかかわらずどこにあっても読み取れます。"
     organize_description: "スレッドの完了、アーカイブ、ピン留め、名前の変更、マーク。フォローアップ、保留、保持。"
     operate_description: "スレッドの開始と委任、メッセージの送信と予約、中断、再試行、圧縮、フォーク、モデルの変更、プルリクエストの関連付け、ローカルの git。"
   category:
@@ -3029,16 +3028,6 @@ control:
     note: "ここでのみ回答できます。チャットのメッセージでは承認されません。"
   reference:
     group: "スレッド"
-    model: "モデル"
-    boundary: "共有"
-    boundary_tooltip: "その内容は、このスレッドのモデルプロバイダーに送信されます。"
-    deleted: "削除済み"
-    remove: "参照を削除"
-    chip_tooltip: "このスレッドのモデルは「%{title}」を必要に応じて読み取れます。すでに読み取った内容はモデルに残ります。"
-    notice_title: "別のモデルプロバイダーと共有されます"
-    notice_description: "「%{title}」は別のプロジェクトにあるか、別のハーネスを使用しています。このスレッドのモデルがそこから読み取った内容は、このスレッドのモデルプロバイダーに送信されます。"
-    notice_ok: "参照を残す"
-    notice_cancel: "参照を削除"
   follow_up:
     marker: "フォローアップ中"
     add: "フォローアップに追加"

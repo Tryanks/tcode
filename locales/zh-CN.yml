@@ -1482,7 +1482,6 @@ notice:
   tcode_update_available: "Tcode %{version} 可用"
   review_recorded: "已记录审查：%{items} 项，覆盖范围 %{coverage}"
   usage_limit_reached: "%{harness} 已达到用量上限"
-  reference_boundary_crossed: "“%{thread}”中的模型引用了来自其他项目或其他 Harness 的“%{title}”：它从中读取的内容会发送给该模型的提供方"
 attach:
   unsupported_type: "无法将“%{name}”读取为图片。"
   decode_failed: "无法将“%{name}”读取为图片：%{error}"
@@ -2831,7 +2830,7 @@ control:
     observe: "查看"
     organize: "整理"
     operate: "操作"
-    observe_description: "线程和历史、搜索、git 状态与 Diff、拉取请求、Harness、设置和终端输出。"
+    observe_description: "线程和历史、搜索、git 状态与 Diff、拉取请求、Harness、设置和终端输出。你在消息里链接的线程不受范围限制，在哪个项目都能读取。"
     organize_description: "收尾、归档、置顶、重命名、标记线程；待跟进、搁置、保留。"
     operate_description: "启动和委派线程、发送和定时发送消息、中断、重试、压缩、派生、改模型、关联拉取请求、本地 git。"
   category:
@@ -3022,16 +3021,6 @@ control:
     note: "只能在这里回答。聊天中的消息不会批准它。"
   reference:
     group: "线程"
-    model: "模型"
-    boundary: "跨边界"
-    boundary_tooltip: "其内容会发送给此线程的模型提供方。"
-    deleted: "已删除"
-    remove: "移除引用"
-    chip_tooltip: "%{title}：此线程的模型可以按需读取它。已读取的内容会留在模型中。"
-    notice_title: "将与其他模型提供方共享"
-    notice_description: "“%{title}”属于另一个项目或使用另一个 Harness：此线程的模型从中读取的内容会发送给此线程的模型提供方。"
-    notice_ok: "保留引用"
-    notice_cancel: "移除引用"
   follow_up:
     marker: "待跟进"
     add: "加入待跟进"

@@ -88,6 +88,7 @@ use gpui_base::{ElementExt as _, h_flex, v_flex};
 use crate::attachments::attach_error_message;
 use crate::composer_trigger::{
     ComposerTrigger, TriggerKind, detect_composer_trigger, serialize_composer_file_link,
+    serialize_composer_thread_link,
 };
 use crate::context_meter;
 use crate::fuzzy::fuzzy_score;
@@ -1469,7 +1470,6 @@ impl DesktopAction {
 enum ChipRow {
     Terminal(Vec<tcode_protocol::TerminalContextStatus>),
     Review(Vec<tcode_core::session::ReviewComment>),
-    References(String, Vec<tcode_protocol::ThreadReferenceStatus>),
 }
 
 impl Composer {
@@ -1488,11 +1488,11 @@ impl Composer {
         self.motion.scope(self.motion_key("buttons"))
     }
 
-    /// The chip rows above the field: terminal contexts, review comments and
-    /// thread references. A chip that goes narrows away and the ones after
-    /// it move over; a row folds in with its first chip and away with its
-    /// last. Each chip carries the gap after and under it, and each row the
-    /// space under it, so a gap goes with what it separates.
+    /// The chip rows above the field: terminal contexts and review comments.
+    /// A chip that goes narrows away and the ones after it move over; a row
+    /// folds in with its first chip and away with its last. Each chip carries
+    /// the gap after and under it, and each row the space under it, so a gap
+    /// goes with what it separates.
     fn render_chip_rows(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let store = self.workspace_store.read(cx);
         let composer_state = self.composer_state(cx);
@@ -1507,12 +1507,6 @@ impl Composer {
         }
         if !review.is_empty() {
             rows.push((gpui::SharedString::from("review"), ChipRow::Review(review)));
-        }
-        if let Some((session_id, references)) = self.thread_references(cx) {
-            rows.push((
-                gpui::SharedString::from("references"),
-                ChipRow::References(session_id, references),
-            ));
         }
         let chip = |button: AnyElement| div().pr_1().pb_1().child(button).into_any_element();
         crate::motion::keyed::keyed_owned(
@@ -1565,25 +1559,6 @@ impl Composer {
                             cx,
                             |key, (index, comment), _, cx| {
                                 chip(self.review_comment_chip(key, *index, comment, cx))
-                            },
-                        )
-                    }
-                    ChipRow::References(session_id, references) => {
-                        crate::motion::keyed::keyed_owned(
-                            &self.motion,
-                            id.clone(),
-                            crate::motion::keyed::Fold::Across(px(0.)),
-                            references.iter().map(|reference| {
-                                (reference.thread_id.clone().into(), reference.clone())
-                            }),
-                            ROWS,
-                            window,
-                            cx,
-                            |_, reference, _, cx| {
-                                chip(
-                                    self.reference_chip(session_id, reference, cx)
-                                        .into_any_element(),
-                                )
                             },
                         )
                     }

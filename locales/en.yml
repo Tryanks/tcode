@@ -1489,7 +1489,6 @@ notice:
   tcode_update_available: "Tcode %{version} available"
   review_recorded: "Review recorded: %{items} items, coverage %{coverage}"
   usage_limit_reached: "%{harness} has reached its usage limit"
-  reference_boundary_crossed: "The model in “%{thread}” referenced “%{title}” from another project or Harness: what it reads there goes to that model's provider"
 attach:
   unsupported_type: "'%{name}' could not be read as an image."
   decode_failed: "'%{name}' could not be read as an image: %{error}"
@@ -2838,7 +2837,7 @@ control:
     observe: "View"
     organize: "Organize"
     operate: "Operate"
-    observe_description: "Threads and their history, search, git status and diffs, pull requests, Harnesses, settings and terminal output."
+    observe_description: "Threads and their history, search, git status and diffs, pull requests, Harnesses, settings and terminal output. A thread you link in a message can be read wherever it is, whatever the scope."
     organize_description: "Settle, archive, pin, rename and mark threads; Follow-up, park and keep."
     operate_description: "Start and delegate threads, send and schedule messages, interrupt, retry, compact, fork, set models, link pull requests, local git."
   category:
@@ -3029,16 +3028,6 @@ control:
     note: "Answer here only. A message in the chat does not approve it."
   reference:
     group: "Threads"
-    model: "model"
-    boundary: "shared"
-    boundary_tooltip: "Its content goes to this thread's model provider."
-    deleted: "deleted"
-    remove: "Remove reference"
-    chip_tooltip: "%{title}: this thread's model may read it on demand. Content already read stays with the model."
-    notice_title: "Shared with another model provider"
-    notice_description: "“%{title}” is in another project or uses another Harness: what this thread's model reads from it goes to this thread's model provider."
-    notice_ok: "Keep the reference"
-    notice_cancel: "Remove it"
   follow_up:
     marker: "On Follow-up"
     add: "Add to Follow-up"

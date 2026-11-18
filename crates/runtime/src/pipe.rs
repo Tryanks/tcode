@@ -995,21 +995,6 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                     .map(|()| CommandResponse::Unit),
             );
         }
-        Command::AddThreadReference {
-            session_id,
-            thread_id,
-        } => {
-            return CommandOutcome::Immediate(
-                app.add_thread_reference(&session_id, &thread_id, cx)
-                    .map(|boundary_notice| CommandResponse::ThreadReferenceAdded {
-                        boundary_notice,
-                    }),
-            );
-        }
-        Command::RemoveThreadReference {
-            session_id,
-            thread_id,
-        } => app.remove_thread_reference(&session_id, &thread_id, cx),
         Command::SetFollowUp {
             session_id,
             on,

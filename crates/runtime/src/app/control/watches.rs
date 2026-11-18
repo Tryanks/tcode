@@ -224,7 +224,8 @@ impl AppState {
             let Some(mut meta) = self.find_meta(&watcher) else {
                 continue;
             };
-            // The watcher's grant may have narrowed since it asked.
+            // The target may have left the watcher's reach since it asked, as when its
+            // project left the space the watcher runs in.
             let caller = self.caller_of(&meta);
             if !self.target_reachable(&caller, &caller.grant.scope, &target, true) {
                 continue;

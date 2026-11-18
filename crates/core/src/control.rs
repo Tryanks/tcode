@@ -300,27 +300,6 @@ impl SettlementAutomation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReferenceOrigin {
-    User,
-    Model,
-}
-
-/// Another thread this one may read, named by a chip or the `reference` tool.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThreadReference {
-    pub thread_id: String,
-    pub by: ReferenceOrigin,
-    /// Unix seconds.
-    pub created_at: u64,
-    /// The reference crosses a project or provider boundary: the referenced thread's content
-    /// may reach another model vendor. The user is told once when the reference is made,
-    /// at the mention for a chip and by a runtime notice for the `reference` tool.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub boundary_notice: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FollowUp {
     /// Unix seconds.
@@ -478,7 +457,8 @@ pub mod action {
     pub const GIT_INITIALIZE: &str = "git_initialize";
     /// Detail: the project root.
     pub const CREATE_PROJECT: &str = "create_project";
-    /// Detail: the referenced thread's title.
+    /// Detail: the referenced thread's title. Nothing writes it now: the `reference` tool
+    /// of earlier releases did, and the activity they stored still reads with its label.
     pub const REFERENCE: &str = "reference";
 }
 

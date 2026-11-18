@@ -250,8 +250,6 @@ pub struct SessionMeta {
     /// Grants the model asked for that the user has not answered.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub control_grant_requests: Vec<crate::control::ControlGrantRequest>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub references: Vec<crate::control::ThreadReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up: Option<crate::control::FollowUp>,
     /// Parked (unix secs): set aside on purpose, exempt from automatic settlement.
@@ -474,7 +472,6 @@ impl SessionMeta {
             expectation: None,
             control_grant: None,
             control_grant_requests: Vec::new(),
-            references: Vec::new(),
             follow_up: None,
             parked_at: None,
             settle_suggestion_dismissed_at: None,

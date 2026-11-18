@@ -16,6 +16,19 @@ pub struct OpenThreadAnchor {
     pub position: Option<u64>,
 }
 
+/// The scheme of a link to a Tcode thread.
+const THREAD_SCHEME: &str = "tcode-thread://";
+
+impl OpenThreadAnchor {
+    /// The link that opens this anchor.
+    pub fn url(&self) -> String {
+        match self.position {
+            Some(position) => format!("{THREAD_SCHEME}{}#{position}", self.thread_id),
+            None => format!("{THREAD_SCHEME}{}", self.thread_id),
+        }
+    }
+}
+
 impl LinkTarget {
     pub(super) fn tooltip_text(&self) -> String {
         match self {
@@ -38,7 +51,7 @@ impl LinkTarget {
 }
 
 pub(super) fn resolve_link(url: &str, base_dir: Option<&Path>) -> LinkTarget {
-    if let Some(anchor) = url.strip_prefix("tcode-thread://") {
+    if let Some(anchor) = url.strip_prefix(THREAD_SCHEME) {
         let (thread_id, position) = match anchor.split_once('#') {
             Some((id, position)) => (id, position.parse().ok()),
             None => (anchor, None),

@@ -434,14 +434,6 @@ pub enum Command {
         request_id: String,
         approve: bool,
     },
-    AddThreadReference {
-        session_id: String,
-        thread_id: String,
-    },
-    RemoveThreadReference {
-        session_id: String,
-        thread_id: String,
-    },
     /// Put the thread on Follow-up or take it off. The host stamps when it
     /// went on, and a thread already on keeps that time.
     SetFollowUp {
@@ -756,11 +748,6 @@ pub enum CommandResponse {
     },
     ExternalImportStarted(bool),
     ChildrenSettled(SettleChildrenResult),
-    /// `AddThreadReference`: `boundary_notice` is true when this call made a reference that
-    /// crosses a project or provider boundary, which the client tells the user once.
-    ThreadReferenceAdded {
-        boundary_notice: bool,
-    },
     /// `VerifyHostToken`: what the host answered; the token was saved only when accepted.
     TokenCheck(tcode_core::settings::TokenCheck),
     RewindPreview(agent::RewindPreviewResult),
@@ -819,8 +806,6 @@ impl Command {
             | Self::SettleSession { session_id, .. }
             | Self::SetControlGrant { session_id, .. }
             | Self::RespondControlGrant { session_id, .. }
-            | Self::AddThreadReference { session_id, .. }
-            | Self::RemoveThreadReference { session_id, .. }
             | Self::SetFollowUp { session_id, .. }
             | Self::SetParked { session_id, .. }
             | Self::DismissSettleSuggestion { session_id }

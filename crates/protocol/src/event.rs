@@ -1065,20 +1065,9 @@ pub struct ControlStatus {
     pub grant: tcode_core::control::ControlGrant,
     pub source: tcode_core::control::ControlGrantSource,
     pub pending_requests: Vec<tcode_core::control::ControlGrantRequest>,
-    pub references: Vec<ThreadReferenceStatus>,
     pub self_settle: Option<tcode_core::control::SelfSettleGrant>,
     /// Whether the thread's provider is given the `tcode_control` server when it starts.
     pub tools_offered: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThreadReferenceStatus {
-    pub thread_id: String,
-    pub title: String,
-    /// The referenced thread no longer exists on the host.
-    pub deleted: bool,
-    pub by: tcode_core::control::ReferenceOrigin,
-    pub boundary_notice: bool,
 }
 
 pub use tcode_core::control::ControlActivityEntry;
@@ -1477,14 +1466,6 @@ pub enum RuntimeNotice {
         items: usize,
         coverage: String,
     },
-    /// A thread's model referenced a thread in another project or of another provider, so
-    /// that thread's content may now reach this thread's model vendor; the user is told once.
-    ReferenceBoundaryCrossed {
-        thread: String,
-        thread_title: String,
-        referenced: String,
-        title: String,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1496,9 +1477,9 @@ pub enum NoticeSeverity {
 impl RuntimeNotice {
     pub fn severity(&self) -> NoticeSeverity {
         match self {
-            Self::UsageLimitReached { .. }
-            | Self::WorktreeMergeFailed { .. }
-            | Self::ReferenceBoundaryCrossed { .. } => NoticeSeverity::Warning,
+            Self::UsageLimitReached { .. } | Self::WorktreeMergeFailed { .. } => {
+                NoticeSeverity::Warning
+            }
             Self::TcodeUpdateAvailable { .. }
             | Self::SwitchedBranch { .. }
             | Self::WorktreeSeeded { .. }

@@ -1,7 +1,7 @@
 //! Composer inline-trigger detection and mention serialization.
 //!
 //! Detects `@file`, `$skill` and `/command` at a UTF-8 cursor offset, and
-//! serializes selected paths as Markdown links.
+//! serializes selected paths and threads as Markdown links.
 
 use std::ops::Range;
 
@@ -140,6 +140,18 @@ pub fn serialize_composer_file_link(path: &str) -> String {
     let label = escape_markdown_link_label(basename(path));
     let dest = encode_markdown_link_destination(path);
     format!("[{label}]({dest})")
+}
+
+/// Serialize a selected thread as `[@title](tcode-thread://id)`. The link is all a mention
+/// is: it names the thread to the model, which reads it by that id through `tcode_control`.
+pub fn serialize_composer_thread_link(thread_id: &str, title: &str) -> String {
+    let label = escape_markdown_link_label(title);
+    let url = crate::markdown::OpenThreadAnchor {
+        thread_id: thread_id.to_owned(),
+        position: None,
+    }
+    .url();
+    format!("[@{label}]({url})")
 }
 
 #[cfg(test)]

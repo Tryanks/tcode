@@ -2,8 +2,8 @@ use super::*;
 use crate::app::active_session::Runtime;
 use crate::app::test_support::*;
 use control_mcp::{
-    CancelNotifyParams, DeleteThreadsParams, GetThreadParams, GitOp, GitParams, NotifyWhenParams,
-    OutlineParams, PatchSettingsParams, RequestGrantParams, TerminalOp, TerminalParams,
+    CancelNotifyParams, DeleteThreadsParams, GetGitParams, GetThreadParams, GitOp, GitParams,
+    GitWhat, NotifyWhenParams, PatchSettingsParams, RequestGrantParams, TerminalOp, TerminalParams,
     ThreadChange, ThreadOp, UpdateThreadsParams,
 };
 use tcode_core::control::{ControlCategory, ControlTier, WatchEvent};
@@ -193,12 +193,6 @@ fn control_calls_outside_the_grant_are_refused_with_the_reason() {
         state.sessions.push(thread("caller", "a"));
         state.sessions.push(thread("same", "a"));
         state.sessions.push(thread("other", "b"));
-        let mut referenced = thread("referenced", "b");
-        referenced.id = "referenced".into();
-        state.sessions.push(referenced);
-        let mut child = thread("child", "b");
-        child.parent_session_id = Some("caller".into());
-        state.sessions.push(child);
     });
 
     let observe = ControlGrant {
@@ -223,6 +217,13 @@ fn control_calls_outside_the_grant_are_refused_with_the_reason() {
             thread_id: id.into(),
         })
     };
+    let git = |id: &str| {
+        ControlOp::GetGit(GetGitParams {
+            thread_id: Some(id.into()),
+            project_id: None,
+            what: GitWhat::Status,
+        })
+    };
     state.read(|state| {
         assert_eq!(
             state.authorize_control(&caller("a", observe.clone()), &settle),
@@ -237,30 +238,42 @@ fn control_calls_outside_the_grant_are_refused_with_the_reason() {
             Ok(())
         );
         assert_eq!(
-            state.authorize_control(&caller("a", observe.clone()), &get("other")),
+            state.authorize_control(&caller("a", observe.clone()), &git("other")),
             Err("refused: thread other is outside your grant's scope (project)".into())
+        );
+        assert_eq!(
+            state.authorize_control(&caller("a", observe.clone()), &get("other")),
+            Ok(()),
+            "a thread the call names is read wherever it is"
+        );
+        let member = Caller {
+            space: Some(CallerSpace {
+                projects: ["a".to_owned()].into_iter().collect(),
+                policy: tcode_protocol::SpacePolicy::new_space(),
+            }),
+            ..caller("a", observe.clone())
+        };
+        assert_eq!(
+            state.authorize_control(&member, &get("other")),
+            Err("refused: thread other is outside your grant's scope (project)".into()),
+            "a space member's thread reads nothing outside its space"
         );
         assert_eq!(
             state.authorize_control(&caller("a", observe.clone()), &get("missing")),
             Err("unknown thread: missing".into())
         );
-        assert_eq!(
-            state.authorize_control(&caller("a", observe.clone()), &get("child")),
-            Ok(()),
-            "an orchestrated child is readable across projects"
-        );
-        // Every scope keeps the caller's own project: a grant for project b still reads a,
+        // Every scope keeps the caller's own project: a grant for project b still reaches a,
         // as a search narrowed to the caller's project would.
         let elsewhere = ControlGrant {
             scope: ControlScope::Projects(vec!["b".into()]),
             ..observe.clone()
         };
         assert_eq!(
-            state.authorize_control(&caller("a", elsewhere.clone()), &get("same")),
+            state.authorize_control(&caller("a", elsewhere.clone()), &git("same")),
             Ok(())
         );
         assert_eq!(
-            state.authorize_control(&caller("a", elsewhere), &get("other")),
+            state.authorize_control(&caller("a", elsewhere), &git("other")),
             Ok(())
         );
         let host = ControlGrant {
@@ -268,7 +281,7 @@ fn control_calls_outside_the_grant_are_refused_with_the_reason() {
             ..observe.clone()
         };
         assert_eq!(
-            state.authorize_control(&caller("a", host), &get("other")),
+            state.authorize_control(&caller("a", host), &git("other")),
             Ok(())
         );
         let push = ControlOp::Git(GitParams {
@@ -278,55 +291,6 @@ fn control_calls_outside_the_grant_are_refused_with_the_reason() {
         assert_eq!(
             state.authorize_control(&caller("a", ControlGrant::default_grant()), &push),
             Err("refused: `git` needs category git_remote; your grant: observe, organize, operate (project)".into())
-        );
-    });
-
-    // The user's reference across a project is answered with the notice to show, once.
-    for (id, notice) in [(5, true), (6, false)] {
-        state.dispatch_command(
-            cx,
-            id,
-            Command::AddThreadReference {
-                session_id: "caller".into(),
-                thread_id: "referenced".into(),
-            },
-        );
-        cx.run_until_parked();
-        assert!(
-            cx.drain_outgoing().iter().any(|message| matches!(
-                message,
-                HostMessage::Ack {
-                    id: acked,
-                    result: Ok(CommandResponse::ThreadReferenceAdded { boundary_notice }),
-                } if *acked == id && *boundary_notice == notice
-            )),
-            "reference {id}"
-        );
-    }
-    state.update(cx, |state, _| {
-        assert_eq!(
-            state.authorize_control(
-                &caller("a", observe.clone()),
-                &ControlOp::Outline(OutlineParams {
-                    thread_id: "referenced".into(),
-                    level: None,
-                    range: None,
-                })
-            ),
-            Ok(()),
-            "a referenced thread is readable across projects"
-        );
-        state.sessions.retain(|meta| meta.id != "referenced");
-        assert_eq!(
-            state.authorize_control(
-                &caller("a", observe.clone()),
-                &ControlOp::Outline(OutlineParams {
-                    thread_id: "referenced".into(),
-                    level: None,
-                    range: None,
-                })
-            ),
-            Err("referenced thread referenced was deleted; what you already read cannot be recalled".into())
         );
     });
 
@@ -640,7 +604,6 @@ fn a_watch_wakes_the_watcher_when_the_thread_asks_and_finishes() {
         let worker = thread("worker", "p");
         state.sessions.push(watcher.clone());
         state.sessions.push(worker.clone());
-        state.sessions.push(thread("far", "elsewhere"));
         park_waiting(state, watcher);
         let _commands = install_live(state, worker);
 
@@ -648,7 +611,7 @@ fn a_watch_wakes_the_watcher_when_the_thread_asks_and_finishes() {
             state,
             "caller",
             ControlOp::NotifyWhen(NotifyWhenParams {
-                thread_ids: vec!["worker".into(), "far".into()],
+                thread_ids: vec!["worker".into(), "gone".into()],
                 events: vec![WatchEvent::NeedsInput, WatchEvent::TurnCompleted],
                 request_id: None,
             }),
@@ -659,9 +622,9 @@ fn a_watch_wakes_the_watcher_when_the_thread_asks_and_finishes() {
         assert_eq!(
             watch["skipped"],
             serde_json::json!([{
-                "target": "far",
+                "target": "gone",
                 "outcome": "skipped",
-                "reason": "outside_scope: your grant's scope is project",
+                "reason": "unknown_thread",
             }])
         );
 
@@ -707,33 +670,6 @@ fn a_watch_wakes_the_watcher_when_the_thread_asks_and_finishes() {
             tcode_core::notice::host_notice(&queued[0].0),
             Some(tcode_core::notice::HostNotice::Control(messages)) if messages.len() == 1
         ));
-
-        // A watch fires only while its target stays within the watcher's grant.
-        state.residents.parked.get_mut("caller").unwrap().queue.clear();
-        let far = thread("far", "q");
-        state.sessions.push(far.clone());
-        let _far_commands = install_live(state, far);
-        let mut caller = state.find_meta("caller").unwrap();
-        caller.control_grant = Some(ControlGrant {
-            scope: ControlScope::Host,
-            ..ControlGrant::default_grant()
-        });
-        state.store_meta(caller.clone(), cx);
-        call(
-            state,
-            "caller",
-            ControlOp::NotifyWhen(NotifyWhenParams {
-                thread_ids: vec!["far".into()],
-                events: vec![WatchEvent::TurnCompleted],
-                request_id: None,
-            }),
-            cx,
-        )
-        .unwrap();
-        caller.control_grant = Some(ControlGrant::default_grant());
-        state.store_meta(caller, cx);
-        state.provider_event_for_test("far", turn_completed(), cx);
-        assert!(queued_texts(state, "caller").is_empty());
     });
 }
 

@@ -1,8 +1,8 @@
 use super::*;
 use crate::app::test_support::*;
 use crate::app::{ProviderLauncher, active_session::Runtime};
-use control_mcp::{ControlOp, MoveThreadParams, ReferenceParams, Workspace};
-use tcode_core::control::{ControlScope, ControlTier, ReferenceOrigin};
+use control_mcp::{ControlOp, MoveThreadParams, Workspace};
+use tcode_core::control::{ControlScope, ControlTier};
 
 /// Providers that never come up, so what a call queued stays observable.
 fn idle_launcher() -> ProviderLauncher {
@@ -535,12 +535,6 @@ fn control_thread_guards_human_queued_messages_and_forks() {
         park(state, queued);
         let mut source = thread("source", "p", ProviderKind::Codex);
         source.resume_cursor = Some(agent::ResumeCursor(serde_json::json!({"thread_id": "t"})));
-        source.references = vec![tcode_core::control::ThreadReference {
-            thread_id: "queued".into(),
-            by: ReferenceOrigin::User,
-            created_at: 1,
-            boundary_notice: false,
-        }];
         state.sessions.push(source);
         (human, agent)
     });
@@ -643,11 +637,6 @@ fn control_thread_guards_human_queued_messages_and_forks() {
     state.read(|state| {
         let fork = state.find_meta(fork).unwrap();
         assert_eq!(fork.title, "Thread source (fork)");
-        assert_eq!(
-            fork.references,
-            state.find_meta("source").unwrap().references,
-            "a fork inherits the threads its source may read"
-        );
     });
 
     let refused = state
@@ -720,109 +709,6 @@ fn control_thread_guards_human_queued_messages_and_forks() {
             Some(agent::ForkPoint::Before {
                 checkpoint_id: "t2".into()
             })
-        );
-    });
-}
-
-/// The model references only threads inside its grant's scope; a reference across a project
-/// carries the boundary notice and leaves the referenced thread as it was.
-#[test]
-fn reference_stays_within_the_grant_scope_and_marks_boundaries() {
-    let store = TestStore::new("tcode-control-reference");
-    let cx = &mut TestAppContext::default();
-    let state = host(&store, cx);
-    state.update(cx, |state, _| {
-        state
-            .sessions
-            .push(thread("caller", "a", ProviderKind::ClaudeCode));
-        state
-            .sessions
-            .push(thread("near", "a", ProviderKind::ClaudeCode));
-        state
-            .sessions
-            .push(thread("far", "b", ProviderKind::ClaudeCode));
-    });
-    let reference = |id: &str| {
-        ControlOp::Reference(ReferenceParams {
-            thread_id: id.into(),
-            reason: None,
-        })
-    };
-    let notices = |cx: &mut TestAppContext| -> Vec<RuntimeNotice> {
-        cx.drain_outgoing()
-            .into_iter()
-            .filter_map(|message| match message {
-                tcode_protocol::HostMessage::Event(envelope) => match envelope.event {
-                    ServerEvent::Runtime(RuntimeEvent::Notice(
-                        notice @ RuntimeNotice::ReferenceBoundaryCrossed { .. },
-                    )) => Some(notice),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .collect()
-    };
-    state.update(cx, |state, cx| {
-        assert_eq!(
-            call(state, cx, "caller", reference("far")),
-            Err("refused: thread far is outside your grant's scope (project)".into())
-        );
-        let near = call(state, cx, "caller", reference("near")).unwrap();
-        assert_eq!(near["boundary_notice"], false);
-    });
-    cx.run_until_parked();
-    assert!(notices(cx).is_empty(), "no boundary, no notice");
-
-    let far_before = state.update(cx, |state, cx| {
-        // Observe alone is enough: a reference only makes a thread in scope readable.
-        let mut caller = state.find_meta("caller").unwrap();
-        caller.control_grant = Some(ControlGrant {
-            scope: ControlScope::Host,
-            tiers: [ControlTier::Observe].into_iter().collect(),
-            ..ControlGrant::none()
-        });
-        state.store_meta(caller, cx);
-        let far_before = state.find_meta("far").unwrap();
-        let far = call(state, cx, "caller", reference("far")).unwrap();
-        assert_eq!(far["boundary_notice"], true);
-        far_before
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        notices(cx),
-        [RuntimeNotice::ReferenceBoundaryCrossed {
-            thread: "caller".into(),
-            thread_title: "Thread caller".into(),
-            referenced: "far".into(),
-            title: "Thread far".into(),
-        }],
-        "the user hears of the crossing once, when the model makes it"
-    );
-    state.update(cx, |state, cx| {
-        call(state, cx, "caller", reference("far")).unwrap();
-    });
-    cx.run_until_parked();
-    assert!(
-        notices(cx).is_empty(),
-        "an existing reference is not announced again"
-    );
-
-    state.read(|state| {
-        assert_eq!(state.find_meta("far").unwrap(), far_before);
-        let references = state.find_meta("caller").unwrap().references;
-        assert_eq!(
-            references
-                .iter()
-                .map(|reference| (
-                    reference.thread_id.as_str(),
-                    reference.by,
-                    reference.boundary_notice
-                ))
-                .collect::<Vec<_>>(),
-            [
-                ("near", ReferenceOrigin::Model, false),
-                ("far", ReferenceOrigin::Model, true)
-            ]
         );
     });
 }

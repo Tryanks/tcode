@@ -93,15 +93,6 @@ pub(in crate::chat) struct Anchor {
     pub(in crate::chat) position: Option<u64>,
 }
 
-impl Anchor {
-    fn url(&self) -> String {
-        match self.position {
-            Some(position) => format!("tcode-thread://{}#{position}", self.thread_id),
-            None => format!("tcode-thread://{}", self.thread_id),
-        }
-    }
-}
-
 /// Whether `text` starts with a thread id: a UUID.
 fn uuid_len(text: &str) -> Option<usize> {
     let bytes = text.as_bytes().get(..36)?;
@@ -483,11 +474,11 @@ fn thread_link(
 ) -> AnyElement {
     let theme = cx.theme();
     let selector = format!("tool-thread-{call_id}-{index}");
-    let url = anchor.url();
     let open = crate::markdown::OpenThreadAnchor {
         thread_id: anchor.thread_id,
         position: anchor.position,
     };
+    let url = open.url();
     let accent = theme.accent;
     div()
         .id(SharedString::from(selector.clone()))

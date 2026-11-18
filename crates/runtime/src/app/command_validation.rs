@@ -300,8 +300,6 @@ impl AppState {
                 | Command::EditPullRequestReviewDraft { .. }
                 | Command::SetControlGrant { .. }
                 | Command::RespondControlGrant { .. }
-                | Command::AddThreadReference { .. }
-                | Command::RemoveThreadReference { .. }
                 | Command::SetFollowUp { .. }
                 | Command::SetParked { .. }
                 | Command::DismissSettleSuggestion { .. }
