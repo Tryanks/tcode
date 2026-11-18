@@ -791,9 +791,6 @@ impl TestClientState {
     pub(super) fn selected_session(&self) -> Option<&ActiveSession> {
         self.host.residents.live.get(self.selected.as_deref()?)
     }
-    pub(super) fn active_session_id(&self) -> Option<&str> {
-        self.selected.as_deref()
-    }
     pub(super) fn install_selected(&mut self, session: ActiveSession) {
         let _ = self.take_selected();
         self.selected = Some(session.meta.id.clone());
@@ -818,12 +815,6 @@ impl TestClientState {
         self.host.select_session(id, cx);
         if self.host.resident(id).is_some() {
             self.selected = Some(id.to_string());
-        }
-    }
-    pub(super) fn fork_thread(&mut self, id: &str, cx: &mut HostCx) {
-        if let Ok(id) = self.host.fork_thread(id, cx) {
-            self.park_active(cx);
-            self.selected = Some(id);
         }
     }
     pub(super) fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut HostCx) {
