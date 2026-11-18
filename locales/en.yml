@@ -3263,7 +3263,6 @@ tools:
   threads: "%{count} threads"
   threads_caption: "Threads"
   message: "Message"
-  reason: "Reason"
   copy_link: "Copy link"
   tools_one: "1 tool"
   tools: "%{count} tools"
