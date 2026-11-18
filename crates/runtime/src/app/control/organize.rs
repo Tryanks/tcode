@@ -1,8 +1,8 @@
 use super::*;
 use crate::app::sessions::SettleEffects;
 use control_mcp::{
-    BatchResult, Expect, Outcome, RecordReviewParams, SettleSelfParams, ThreadChange, ThreadOp,
-    UpdateThreadsParams,
+    BatchResult, DeleteThreadsParams, Expect, Outcome, RecordReviewParams, SettleSelfParams,
+    ThreadChange, ThreadOp, UpdateThreadsParams,
 };
 use tcode_core::control::{
     FollowUp, ReviewItem, ReviewRecord, SelfSettleGrant, SelfSettleWhen, action,
@@ -279,6 +279,99 @@ impl AppState {
             ThreadOp::Keep { on } => self.set_auto_settle(id, !on, cx),
         }
         Vec::new()
+    }
+
+    pub(super) fn op_delete_threads(
+        &mut self,
+        caller: &Caller,
+        params: DeleteThreadsParams,
+        cx: &mut HostCx,
+    ) -> Answer {
+        let remove_worktree = params.remove_worktree.unwrap_or(false);
+        let dry_run = params.dry_run.unwrap_or(false);
+        let mut results = Vec::with_capacity(params.thread_ids.len());
+        let mut removals = Vec::new();
+        for target in params.thread_ids {
+            let skipped = |reason: String| BatchResult {
+                target: target.clone(),
+                outcome: Outcome::Skipped,
+                reason: Some(reason),
+                side_effects: None,
+            };
+            let meta = match self.batch_target(caller, &target) {
+                Ok(meta) => meta,
+                Err(reason) => {
+                    results.push(skipped(reason));
+                    continue;
+                }
+            };
+            let ids = descendant_session_ids(&self.sessions, &target);
+            if target == caller.thread_id || ids.contains(&caller.thread_id) {
+                results.push(skipped("would delete the calling thread itself".into()));
+                continue;
+            }
+            if let Err(error) = self.validate_command_target(&Command::DeleteSession {
+                session_id: target.clone(),
+                remove_worktree,
+            }) {
+                results.push(skipped(error.message));
+                continue;
+            }
+            let descendants = ids.iter().filter(|id| **id != target).count();
+            let mut side_effects = vec![format!(
+                "deletes \"{}\" and {descendants} thread(s) under it, permanently",
+                meta.title
+            )];
+            if meta.worktree.is_some() {
+                side_effects.push(if remove_worktree {
+                    format!(
+                        "removes its worktree {} unless another thread shares it",
+                        meta.cwd.display()
+                    )
+                } else {
+                    format!("keeps its worktree {}", meta.cwd.display())
+                });
+            }
+            if dry_run {
+                results.push(BatchResult {
+                    target,
+                    outcome: Outcome::WouldApply,
+                    reason: None,
+                    side_effects: Some(side_effects),
+                });
+                continue;
+            }
+            removals.push((
+                results.len(),
+                self.delete_session(&target, remove_worktree, cx),
+            ));
+            self.audit(
+                caller,
+                &caller.thread_id,
+                action::DELETE_THREADS,
+                Some(meta.title.clone()),
+                cx,
+            );
+            results.push(BatchResult {
+                target,
+                outcome: Outcome::Applied,
+                reason: None,
+                side_effects: Some(side_effects),
+            });
+        }
+        if removals.is_empty() {
+            return Answer::Now(Ok(serde_json::json!({ "results": results })));
+        }
+        Answer::Later(cx.spawn_background(async move {
+            for (index, removal) in removals {
+                if let Err(error) = removal.await {
+                    let result = &mut results[index];
+                    result.outcome = Outcome::Failed;
+                    result.reason = Some(error.message);
+                }
+            }
+            Ok(serde_json::json!({ "results": results }))
+        }))
     }
 
     pub(super) fn op_record_review(
