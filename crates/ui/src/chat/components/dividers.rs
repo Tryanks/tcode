@@ -1,9 +1,10 @@
+use crate::icon::{Icon, IconName};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use agent::ProviderKind;
 use gpui::{
     AnyElement, App, Div, Hsla, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, Styled as _, div, px,
+    SharedString, Styled, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::h_flex;
 
@@ -24,15 +25,24 @@ pub(crate) fn divider_stub(cx: &App) -> Div {
 /// `tint` colors the label alone — the rules stay border-quiet no matter what
 /// the event is, so no divider can shout louder than another.
 fn divider(id: SharedString, label: String, tint: Hsla, cx: &App) -> AnyElement {
-    divider_in(id, label, tint, None, cx)
+    divider_in(id, label, tint, false, None, cx)
+}
+
+/// A [`divider`] for what went wrong while the thread carries on: the warning
+/// tint, led by the mark a warning notification carries. What ended the run
+/// is an error card instead.
+fn alert_divider(id: SharedString, label: String, cx: &App) -> AnyElement {
+    divider_in(id, label, cx.theme().warning, true, None, cx)
 }
 
 /// [`divider`] whose label changes (compaction running, then done) and
 /// cross-fades as it does, on `motion`'s clock when the chat keeps it.
+/// `alert` leads the label with the warning mark.
 fn divider_in(
     id: SharedString,
     label: String,
     tint: Hsla,
+    alert: bool,
     motion: Option<&crate::motion::owned::Owned>,
     cx: &App,
 ) -> AnyElement {
@@ -60,13 +70,21 @@ fn divider_in(
         .gap_2()
         .child(stub())
         .child(
-            div()
+            h_flex()
                 .min_w_0()
                 .flex_shrink_1()
-                .text_center()
+                .items_center()
+                .gap_1()
                 .text_token(&cx.theme().tokens.typography.xs)
                 .text_color(tint)
-                .child(label),
+                .when(alert, |row| row.child(Icon::new(IconName::TriangleAlert)))
+                // A label that wraps beside the mark starts each line at it.
+                .child(
+                    div()
+                        .min_w_0()
+                        .when(!alert, Styled::text_center)
+                        .child(label),
+                ),
         )
         .child(stub())
         .into_any_element()
@@ -158,6 +176,7 @@ pub(crate) fn context_compacted_divider(
         SharedString::from(format!("context-compacted-{id}")),
         label,
         cx.theme().warning,
+        false,
         Some(motion),
         cx,
     )
@@ -199,10 +218,9 @@ pub(crate) fn context_window_changed_divider(id: &str, window: u64, cx: &App) ->
 }
 
 pub(crate) fn request_retry_divider(id: &str, message: &str, cx: &App) -> AnyElement {
-    divider(
+    alert_divider(
         SharedString::from(format!("request-retry-{id}")),
         message.to_owned(),
-        cx.theme().muted_foreground,
         cx,
     )
 }
@@ -320,7 +338,7 @@ pub(crate) fn worktree_divider(
     cx: &App,
 ) -> AnyElement {
     use agent::{WorktreeAnswer, WorktreeRequest};
-    let (label, tint) = match (request, answer) {
+    let (label, refused) = match (request, answer) {
         (WorktreeRequest::Create { name, .. }, WorktreeAnswer::Ready { path, reused }) => (
             if *reused {
                 crate::tr!(
@@ -335,11 +353,11 @@ pub(crate) fn worktree_divider(
                     path = path.to_string_lossy()
                 )
             },
-            cx.theme().muted_foreground,
+            false,
         ),
         (WorktreeRequest::Create { name, .. }, WorktreeAnswer::Refused { error }) => (
             crate::tr!("chat.worktree_create_refused", name = name, error = error),
-            cx.theme().warning,
+            true,
         ),
         (WorktreeRequest::Remove { path }, WorktreeAnswer::Refused { error }) => (
             crate::tr!(
@@ -347,23 +365,23 @@ pub(crate) fn worktree_divider(
                 path = path.to_string_lossy(),
                 error = error
             ),
-            cx.theme().warning,
+            true,
         ),
         (WorktreeRequest::Remove { path }, _) => (
             crate::tr!("chat.worktree_removed", path = path.to_string_lossy()),
-            cx.theme().muted_foreground,
+            false,
         ),
-        (WorktreeRequest::Create { name, .. }, WorktreeAnswer::Removed) => (
-            crate::tr!("chat.worktree_removed", path = name),
-            cx.theme().muted_foreground,
-        ),
+        (WorktreeRequest::Create { name, .. }, WorktreeAnswer::Removed) => {
+            (crate::tr!("chat.worktree_removed", path = name), false)
+        }
     };
-    divider(
-        SharedString::from(format!("worktree-{id}")),
-        label.into_owned(),
-        tint,
-        cx,
-    )
+    let id = SharedString::from(format!("worktree-{id}"));
+    let label = label.into_owned();
+    if refused {
+        alert_divider(id, label, cx)
+    } else {
+        divider(id, label, cx.theme().muted_foreground, cx)
+    }
 }
 
 /// Why a harness did not rewind, in the user's words, with the words it gave.
@@ -431,10 +449,9 @@ pub(crate) fn rewind_failed_divider(
         Some(_) => crate::tr!("rewind.failed", reason = reason),
         None => crate::tr!("rewind.undo_failed", reason = reason),
     };
-    divider(
+    alert_divider(
         SharedString::from(format!("rewind-{id}")),
         label.into_owned(),
-        cx.theme().warning,
         cx,
     )
 }

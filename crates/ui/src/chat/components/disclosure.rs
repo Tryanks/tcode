@@ -1,6 +1,7 @@
 use crate::scroll::ScrollableElement as _;
 use std::borrow::Cow;
 
+use crate::icon::{Icon, IconName};
 use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -88,6 +89,7 @@ pub(crate) fn callback_row(
         expanded,
         on_toggle,
         Some((on_open, hover)),
+        false,
         motion,
         cx,
     )
@@ -152,13 +154,40 @@ pub(crate) fn disclosure(
         expanded,
         on_toggle,
         None,
+        false,
+        motion,
+        cx,
+    )
+}
+
+/// A [`disclosure`] of what the harness warned of: the warning tint, led by
+/// the mark a warning notification carries.
+pub(crate) fn warning_disclosure(
+    key: &str,
+    label: SharedString,
+    full_text: &str,
+    expanded: bool,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    motion: &crate::motion::owned::Owned,
+    cx: &App,
+) -> AnyElement {
+    disclosure_with(
+        key,
+        label,
+        None,
+        full_text.to_string(),
+        expanded,
+        on_toggle,
+        None,
+        true,
         motion,
         cx,
     )
 }
 
 /// `open` is a callback's link to its child, `None` in it once the child
-/// has gone, and the hover it follows.
+/// has gone, and the hover it follows. `alert` gives the label the warning
+/// tint and mark.
 #[allow(clippy::too_many_arguments)]
 fn disclosure_with(
     key: &str,
@@ -171,10 +200,12 @@ fn disclosure_with(
         Option<super::changed_files::ClickHandler>,
         crate::motion::ListHover,
     )>,
+    alert: bool,
     motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
+    let tint = if alert { cx.theme().warning } else { muted };
     let key = key.to_owned();
     let motion = motion.clone();
     crate::motion::Sampled::new(move |window, cx| {
@@ -208,7 +239,8 @@ fn disclosure_with(
                 h_flex()
                     .min_w_0()
                     .gap_1()
-                    .text_color(muted)
+                    .text_color(tint)
+                    .when(alert, |row| row.child(Icon::new(IconName::TriangleAlert)))
                     .child(
                         div()
                             .min_w_0()
