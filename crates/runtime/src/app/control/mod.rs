@@ -90,9 +90,6 @@ fn refusal(error: tcode_protocol::ProtocolError) -> String {
 pub(super) struct Caller {
     pub(super) thread_id: String,
     pub(super) project_id: Option<String>,
-    /// The thread that started it as its subagent and that thread's ancestors, which it may
-    /// neither read nor act on.
-    pub(super) ancestors: Vec<String>,
     /// The space whose member's turn makes the call, which confines it to that space's
     /// projects and policy.
     pub(super) space: Option<CallerSpace>,
@@ -250,14 +247,6 @@ impl AppState {
 
     /// `meta`'s thread as a `tcode_control` caller.
     pub(super) fn caller_of(&self, meta: &SessionMeta) -> Caller {
-        let mut ancestors: Vec<String> = Vec::new();
-        let mut next = meta.parent_session_id.clone();
-        while let Some(id) = next.filter(|id| !ancestors.contains(id)) {
-            next = self
-                .find_meta(&id)
-                .and_then(|parent| parent.parent_session_id);
-            ancestors.push(id);
-        }
         let space = self.turn_space_of(&meta.id).map(|id| CallerSpace {
             projects: self.space_scopes.get(&id).cloned().unwrap_or_default(),
             policy: self
@@ -268,19 +257,17 @@ impl AppState {
         Caller {
             thread_id: meta.id.clone(),
             project_id: meta.project_id.clone(),
-            ancestors,
             space,
         }
     }
 
-    /// Whether a call may name `target`: any thread on the host but the caller's own
-    /// Orchestrate parent and its ancestors, and, in a member's turn, one outside the space.
+    /// Whether a call may name `target`: any thread on the host, or, in a member's turn,
+    /// one inside the space.
     pub(super) fn open_to(&self, caller: &Caller, target: &SessionMeta) -> bool {
-        !caller.ancestors.contains(&target.id)
-            && caller
-                .space
-                .as_ref()
-                .is_none_or(|space| space.holds(target.project_id.as_deref()))
+        caller
+            .space
+            .as_ref()
+            .is_none_or(|space| space.holds(target.project_id.as_deref()))
     }
 
     /// Whether a listing or search covering `scope` includes `target`.
@@ -393,9 +380,6 @@ impl AppState {
         let Some(meta) = self.find_meta(target) else {
             return Err(TargetRefusal::Unknown);
         };
-        if caller.ancestors.iter().any(|ancestor| ancestor == target) {
-            return Err(TargetRefusal::Ancestor);
-        }
         if !self.open_to(caller, &meta) {
             return Err(TargetRefusal::OutsideSpace);
         }
@@ -559,7 +543,6 @@ impl AppState {
 /// A target closed to the caller; worded for a whole-call refusal or a per-item skip.
 enum TargetRefusal {
     Unknown,
-    Ancestor,
     OutsideSpace,
 }
 
@@ -567,10 +550,6 @@ impl TargetRefusal {
     fn whole_call(&self, target: &str) -> String {
         match self {
             Self::Unknown => format!("unknown thread: {target}"),
-            Self::Ancestor => format!(
-                "refused: thread {target} orchestrates this thread; a child may not read or act \
-                 on its parent"
-            ),
             Self::OutsideSpace => {
                 format!("refused: thread {target} is outside the space this turn runs in")
             }
@@ -580,7 +559,6 @@ impl TargetRefusal {
     fn per_item(&self) -> String {
         match self {
             Self::Unknown => "unknown_thread".to_owned(),
-            Self::Ancestor => "ancestor: a child may not read or act on its parent".to_owned(),
             Self::OutsideSpace => "outside_space: this turn runs in a space".to_owned(),
         }
     }

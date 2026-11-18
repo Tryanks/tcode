@@ -126,6 +126,13 @@ impl AppState {
             Ok(command) => command,
             Err(reason) => return skipped(reason),
         };
+        // An archive takes the thread's descendants with it, and stops their providers: the
+        // one making this call among them.
+        if matches!(change.op, ThreadOp::Archive)
+            && descendant_session_ids(&self.sessions, &target).contains(&caller.thread_id)
+        {
+            return skipped("would archive the calling thread itself".into());
+        }
         if let Err(error) = self.validate_command_target(&command) {
             return skipped(if error.code == "thread_busy" {
                 "busy".into()

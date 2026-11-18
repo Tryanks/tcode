@@ -780,67 +780,44 @@ fn patch_settings_applies_allowed_patches_only() {
     });
 }
 
-/// An Orchestrate child may neither read nor act on its parent or the parent's ancestors;
-/// they are absent from its listings too.
+/// A thread reads its lead like any other thread, and does not archive it: an archive
+/// takes a thread's descendants with it, the one that asked among them.
 #[test]
-fn a_child_may_not_read_or_act_on_its_parent() {
+fn a_thread_reads_its_lead_and_does_not_archive_itself_through_it() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-control-parent");
-    stored(&store, &[("grand", "p"), ("sibling", "p")]);
-    for (id, parent) in [("parent", "grand"), ("caller", "parent")] {
-        let mut meta = thread(id, "p");
-        meta.parent_session_id = Some(parent.into());
-        store.upsert_meta(&meta).unwrap();
-    }
+    stored(&store, &[("lead", "p"), ("sibling", "p")]);
+    let mut caller = thread("caller", "p");
+    caller.parent_session_id = Some("lead".into());
+    store.upsert_meta(&caller).unwrap();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     state.subscribe(cx, Topic::Index);
-    let get = |id: &str| {
-        ControlOp::GetThread(GetThreadParams {
-            thread_id: id.into(),
-        })
-    };
-    let rename = |id: &str| {
+    let archive = |id: &str| {
         ControlOp::UpdateThreads(UpdateThreadsParams {
             changes: vec![ThreadChange {
                 thread_id: id.into(),
-                op: ThreadOp::Rename {
-                    title: "Renamed".into(),
-                },
+                op: ThreadOp::Archive,
                 expect: None,
             }],
             dry_run: None,
         })
     };
-    let listed = state.update(cx, |state, cx| {
-        for ancestor in ["parent", "grand"] {
-            assert!(call(state, "caller", get(ancestor), cx).is_err());
+    state.update(cx, |state, cx| {
+        let lead = ControlOp::GetThread(GetThreadParams {
+            thread_id: "lead".into(),
+        });
+        assert!(call(state, "caller", lead, cx).is_ok());
+        for (id, outcome) in [("lead", "skipped"), ("sibling", "applied")] {
+            let archived = call(state, "caller", archive(id), cx).unwrap();
+            assert_eq!(archived["results"][0]["outcome"], outcome, "{id}");
         }
-        assert!(call(state, "caller", get("sibling"), cx).is_ok());
-        for (id, outcome) in [("parent", "skipped"), ("sibling", "applied")] {
-            let renamed = call(state, "caller", rename(id), cx).unwrap();
-            assert_eq!(renamed["results"][0]["outcome"], outcome, "{id}");
-        }
-        call(
-            state,
-            "caller",
-            ControlOp::ListThreads(control_mcp::ListThreadsParams {
-                include_children: Some(true),
-                ..Default::default()
-            }),
-            cx,
-        )
-        .unwrap()
     });
-    let mut ids: Vec<&str> = listed["threads"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|row| row["id"].as_str().unwrap())
-        .collect();
-    ids.sort_unstable();
-    assert_eq!(ids, ["caller", "sibling"]);
     cx.run_until_parked();
-    let title = |id: &str| cx.seen().session(id).unwrap().title.clone();
-    assert_eq!(title("parent"), "Thread parent");
-    assert_eq!(title("sibling"), "Renamed");
+    let archived = |id: &str| {
+        cx.seen()
+            .session(id)
+            .is_none_or(|meta| meta.archived_at.is_some())
+    };
+    assert!(!archived("lead"));
+    assert!(archived("sibling"));
 }
