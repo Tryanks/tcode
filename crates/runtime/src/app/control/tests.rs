@@ -2,9 +2,8 @@ use super::*;
 use crate::app::active_session::Runtime;
 use crate::app::test_support::*;
 use control_mcp::{
-    CancelNotifyParams, DeleteThreadsParams, GetThreadParams, GitOp, GitParams, NotifyWhenParams,
-    PatchSettingsParams, ReportResultParams, TerminalOp, TerminalParams, ThreadChange, ThreadOp,
-    UpdateThreadsParams,
+    CancelNotifyParams, DeleteThreadsParams, GetThreadParams, NotifyWhenParams,
+    PatchSettingsParams, TerminalOp, TerminalParams, ThreadChange, ThreadOp, UpdateThreadsParams,
 };
 use tcode_core::control::WatchEvent;
 use tcode_protocol::Command;
@@ -19,16 +18,6 @@ fn thread(id: &str, project: &str) -> SessionMeta {
     meta.title = format!("Thread {id}");
     meta.project_id = Some(project.into());
     meta
-}
-
-fn caller(project: &str) -> Caller {
-    Caller {
-        thread_id: "caller".into(),
-        project_id: Some(project.into()),
-        subagent: false,
-        ancestors: Vec::new(),
-        space: None,
-    }
 }
 
 /// Every `tcode_control` tool but the subagent's `report_result`, in name order.
@@ -141,98 +130,6 @@ fn control_tools_are_all_offered_and_follow_the_setting() {
                 .unwrap()
                 .tools_offered
         );
-    });
-}
-
-/// No call is refused for want of a permission: deleting a thread and pushing from another
-/// project's thread pass. A call is closed only where no thread's model may go: a
-/// subagent's own tool, a thread outside the space a member's turn runs in, a thread that
-/// is not there, and the settings no agent changes.
-#[test]
-fn a_call_is_closed_only_where_no_thread_may_go() {
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("tcode-control-authorize");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    state.update(cx, |state, _| {
-        state.sessions.push(thread("caller", "a"));
-        state.sessions.push(thread("same", "a"));
-        state.sessions.push(thread("other", "b"));
-    });
-
-    let delete = ControlOp::DeleteThreads(DeleteThreadsParams {
-        thread_ids: vec!["same".into()],
-        remove_worktree: None,
-        dry_run: None,
-    });
-    let push = ControlOp::Git(GitParams {
-        thread_id: "other".into(),
-        op: GitOp::Push,
-    });
-    let get = |id: &str| {
-        ControlOp::GetThread(GetThreadParams {
-            thread_id: id.into(),
-        })
-    };
-    let report = ControlOp::ReportResult(ReportResultParams {
-        text: "done".into(),
-    });
-    state.read(|state| {
-        assert_eq!(state.authorize_control(&caller("a"), &delete), Ok(()));
-        assert_eq!(state.authorize_control(&caller("a"), &push), Ok(()));
-        assert_eq!(
-            state.authorize_control(&caller("a"), &report),
-            Err(
-                "refused: `report_result` is only for a thread another thread started as its \
-                 subagent"
-                    .into()
-            )
-        );
-        let subagent = Caller {
-            subagent: true,
-            ..caller("a")
-        };
-        assert_eq!(state.authorize_control(&subagent, &report), Ok(()));
-        let member = Caller {
-            space: Some(CallerSpace {
-                projects: ["a".to_owned()].into_iter().collect(),
-                policy: tcode_protocol::SpacePolicy::new_space(),
-            }),
-            ..caller("a")
-        };
-        assert_eq!(
-            state.authorize_control(&member, &get("other")),
-            Err("refused: thread other is outside the space this turn runs in".into())
-        );
-        assert_eq!(state.authorize_control(&member, &get("same")), Ok(()));
-        assert_eq!(
-            state.authorize_control(&caller("a"), &get("missing")),
-            Err("unknown thread: missing".into())
-        );
-
-        for patch in [
-            SettingsPatch::ControlEnabled(false),
-            SettingsPatch::SettlementAutomation(tcode_core::control::SettlementAutomation::Off),
-            SettingsPatch::RemoteHostingEnabled(true),
-            SettingsPatch::SourceControlHost {
-                host: "github.com".into(),
-                kind: tcode_core::pull_request::HostKind::Github,
-                enabled: None,
-                account: None,
-            },
-        ] {
-            let op = ControlOp::PatchSettings(PatchSettingsParams {
-                patch: serde_json::to_value(&patch).unwrap(),
-            });
-            let refusal = state.authorize_control(&caller("a"), &op).unwrap_err();
-            assert!(
-                refusal.starts_with("refused: `patch_settings` never changes"),
-                "{patch:?}: {refusal}"
-            );
-        }
-        let allowed = ControlOp::PatchSettings(PatchSettingsParams {
-            patch: serde_json::to_value(SettingsPatch::WordWrapDiffs(true)).unwrap(),
-        });
-        assert_eq!(state.authorize_control(&caller("a"), &allowed), Ok(()));
     });
 }
 

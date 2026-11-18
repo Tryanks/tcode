@@ -84,8 +84,6 @@ async fn finish_on_host(
 pub(super) struct Caller {
     pub(super) thread_id: String,
     pub(super) project_id: Option<String>,
-    /// Another thread started it as its subagent.
-    pub(super) subagent: bool,
     /// The thread that started it as its subagent and that thread's ancestors, which it may
     /// neither read nor act on.
     pub(super) ancestors: Vec<String>,
@@ -216,9 +214,9 @@ impl AppState {
         }
     }
 
-    /// Re-read every registered thread's access after the setting or a thread's standing
-    /// changed, so the next connection lists the right tools; with the feature off a
-    /// registered thread is offered none.
+    /// Re-read every registered thread's access after the setting changed, so the next
+    /// connection lists the right tools; with the feature off a registered thread is offered
+    /// none.
     pub(super) fn refresh_control_access(&mut self) {
         let registered: Vec<String> = self.mcp.control_registrations.keys().cloned().collect();
         let access: Vec<(String, ThreadAccess)> = registered
@@ -264,7 +262,6 @@ impl AppState {
         Caller {
             thread_id: meta.id.clone(),
             project_id: meta.project_id.clone(),
-            subagent: meta.is_dispatched(),
             ancestors,
             space,
         }
@@ -350,18 +347,11 @@ impl AppState {
         self.control.answered.truncate(CONTROL_ACTIVITY_LIMIT);
     }
 
-    /// What every call passes host-side, however the connection listed its tools. A call is
-    /// closed only where no thread's model may go: a tool that is a subagent's alone, what a
-    /// space withholds from its members' turns, the settings no agent changes, and a target
-    /// that is unknown, the caller's own Orchestrate ancestor or outside its space. Whether
-    /// a call that is open should be made is the harness's permission mode to settle.
+    /// What every call passes host-side. A call is closed only where no thread's model may
+    /// go: what a space withholds from its members' turns, the settings no agent changes, and
+    /// a target that is unknown, the caller's own Orchestrate ancestor or outside its space.
+    /// Whether a call that is open should be made is the harness's permission mode to settle.
     pub(super) fn authorize_control(&self, caller: &Caller, op: &ControlOp) -> Result<(), String> {
-        let name = op.tool_name();
-        if matches!(op, ControlOp::ReportResult(_)) && !caller.subagent {
-            return Err(format!(
-                "refused: `{name}` is only for a thread another thread started as its subagent"
-            ));
-        }
         if let Some(space) = &caller.space {
             self.authorize_space_control(space, op)?;
         }
