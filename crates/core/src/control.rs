@@ -16,17 +16,14 @@ pub enum ControlScope {
 }
 
 impl ControlScope {
-    /// Whether it covers `target_project` for a caller in `caller_project`. Every scope
-    /// includes the caller's own project; a thread without a project is covered only by the
-    /// whole host, or for a caller that also has none.
+    /// Whether it covers `target_project` for a caller in `caller_project`. A thread without
+    /// a project is covered only by the whole host, or by `Project` for a caller that also
+    /// has none.
     pub fn reaches(&self, caller_project: Option<&str>, target_project: Option<&str>) -> bool {
         match self {
             Self::Host => true,
             Self::Project => caller_project == target_project,
-            Self::Projects(ids) => {
-                caller_project == target_project
-                    || target_project.is_some_and(|id| ids.iter().any(|p| p == id))
-            }
+            Self::Projects(ids) => target_project.is_some_and(|id| ids.iter().any(|p| p == id)),
         }
     }
 }
