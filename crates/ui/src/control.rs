@@ -78,7 +78,6 @@ pub(crate) fn action_label(key: &str) -> String {
         action::KEEP => "control.action.keep",
         action::KEEP_OFF => "control.action.keep_off",
         action::SETTLE_SELF => "control.action.settle_self",
-        action::RECORD_REVIEW => "control.action.record_review",
         action::NOTIFY_WHEN => "control.action.notify_when",
         action::CANCEL_NOTIFY => "control.action.cancel_notify",
         action::RESPOND_INPUT => "control.action.respond_input",

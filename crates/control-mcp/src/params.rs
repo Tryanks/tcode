@@ -323,36 +323,6 @@ pub struct UpdateThreadsParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ReviewItemInput {
-    #[schemars(description = "The thread the item is about.")]
-    pub thread_id: String,
-    #[schemars(
-        description = "continue, needs_decision, waiting_on_others, can_settle, parked_or_superseded or unsure."
-    )]
-    pub group: String,
-    #[schemars(description = "clear_evidence, inference or unsure. Never a percentage.")]
-    pub confidence: String,
-    #[schemars(description = "Anchors and quoted facts the grouping rests on.")]
-    pub evidence: Vec<String>,
-    #[serde(default)]
-    #[schemars(description = "The suggested action, if any.")]
-    pub suggestion: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct RecordReviewParams {
-    #[schemars(description = "The reviewed items with their evidence.")]
-    pub items: Vec<ReviewItemInput>,
-    #[schemars(
-        description = "What the review covered, for example \"3 projects, 41 threads, 4 without enough data\"."
-    )]
-    pub coverage: String,
-    #[serde(default)]
-    #[schemars(description = "Idempotency key: a retry with the same key does not record twice.")]
-    pub request_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SettleSelfParams {
     #[schemars(
         description = "end_of_turn, {\"pr_merged\": {\"url\"}} or {\"pr_closed\": {\"url\"}}: when this thread settles."

@@ -561,7 +561,6 @@ impl AppState {
                 | Query::ComputerUsePermissions
                 | Query::ControlActivity { .. }
                 | Query::NativeMcpServers { .. }
-                | Query::ReviewRecords { .. }
                 | Query::ScanExternalHistory
                 | Query::BrowseDirectories { .. } => Err(refusal("query")),
             },

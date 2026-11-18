@@ -35,7 +35,6 @@ pub enum ControlOp {
     ReadTerminal(ReadTerminalParams),
     ReviewCandidates(ReviewCandidatesParams),
     UpdateThreads(UpdateThreadsParams),
-    RecordReview(RecordReviewParams),
     SettleSelf(SettleSelfParams),
     StartThread(StartThreadParams),
     SendMessage(SendMessageParams),
@@ -98,7 +97,6 @@ impl ControlOp {
             Self::ReadTerminal(_) => "read_terminal",
             Self::ReviewCandidates(_) => "review_candidates",
             Self::UpdateThreads(_) => "update_threads",
-            Self::RecordReview(_) => "record_review",
             Self::SettleSelf(_) => "settle_self",
             Self::StartThread(_) => "start_thread",
             Self::SendMessage(_) => "send_message",
@@ -177,7 +175,6 @@ impl ControlOp {
             | Self::GetSettings(_)
             | Self::ReadTerminal(_)
             | Self::ReviewCandidates(_)
-            | Self::RecordReview(_)
             | Self::SettleSelf(_)
             | Self::StartThread(_)
             | Self::CreateProject(_)
@@ -197,7 +194,6 @@ impl ControlOp {
             Self::GetGit(p) => p.thread_id.iter_mut().collect(),
             Self::GetPullRequest(p) => vec![&mut p.thread_id],
             Self::UpdateThreads(p) => p.changes.iter_mut().map(|c| &mut c.thread_id).collect(),
-            Self::RecordReview(p) => p.items.iter_mut().map(|i| &mut i.thread_id).collect(),
             Self::SendMessage(p) => p.thread_ids.iter_mut().collect(),
             Self::ControlThread(p) => p.changes.iter_mut().map(|c| &mut c.thread_id).collect(),
             Self::PullRequest(p) => vec![&mut p.thread_id],

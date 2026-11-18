@@ -1599,10 +1599,6 @@ fn dispatch_query(
                     })
             })
         }
-        Query::ReviewRecords { limit } => {
-            let records = app.review_records(limit as usize);
-            cx.spawn_background(async move { Ok(QueryResponse::ReviewRecords(records)) })
-        }
     }
 }
 

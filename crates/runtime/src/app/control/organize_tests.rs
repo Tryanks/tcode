@@ -1,9 +1,9 @@
 use super::*;
 use crate::app::test_support::*;
-use control_mcp::{GetThreadParams, ReviewItemInput};
+use control_mcp::GetThreadParams;
 use tcode_core::pull_request::{self, PullRequestKey, PullRequestSource};
 use tcode_core::pull_request_watch::PullRequestWatch;
-use tcode_protocol::{ClientPayload, HostMessage, Query, QueryResponse, TurnDue};
+use tcode_protocol::{HostMessage, TurnDue};
 
 fn thread(id: &str, cwd: &Path) -> SessionMeta {
     let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, cwd.to_path_buf(), None);
@@ -360,38 +360,34 @@ fn follow_up_parked_and_the_suggest_tier_hold_automatic_settlement() {
     assert_eq!(settled(cx), [true, true, true]);
 }
 
-/// A reviews.json, an activity log and a secrets.json this build cannot read do not stop the
-/// host: a review is still recorded, the first record refused saving says why, and no file is
-/// written over.
+/// An activity log this build cannot read does not stop the host: a write is still made,
+/// the first record refused saving says why, and the file is not written over.
 #[test]
 fn unreadable_own_files_do_not_stop_the_host_and_are_never_written_over() {
     let store = TestStore::new("tcode-control-unreadable");
     std::fs::create_dir_all(store.root()).unwrap();
     let torn = "[{\"id\":";
-    let files = ["reviews.json", "control_activity.json"];
-    for name in files {
-        std::fs::write(store.root().join(name), torn).unwrap();
-    }
+    let log = store.root().join("control_activity.json");
+    std::fs::write(&log, torn).unwrap();
     for id in ["caller", "old"] {
         store.upsert_meta(&thread(id, store.root())).unwrap();
     }
     let cx = &mut TestAppContext::default();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
-    for request in ["review-1", "review-2"] {
-        let review = ControlOp::RecordReview(RecordReviewParams {
-            items: vec![ReviewItemInput {
-                thread_id: "old".into(),
-                group: "can_settle".into(),
-                confidence: "clear_evidence".into(),
-                evidence: vec!["old#12: PR merged".into()],
-                suggestion: None,
-            }],
-            coverage: "1 project, 2 threads".into(),
-            request_id: Some(request.into()),
-        });
+    for title in ["Once", "Twice"] {
+        let rename = update(
+            vec![change(
+                "old",
+                ThreadOp::Rename {
+                    title: title.into(),
+                },
+                None,
+            )],
+            false,
+        );
         assert_eq!(
-            call(&state, cx, "caller", review).unwrap()["status"],
-            "recorded"
+            results(&call(&state, cx, "caller", rename).unwrap())[0].outcome,
+            Outcome::Applied
         );
     }
     let refusals = cx
@@ -407,75 +403,7 @@ fn unreadable_own_files_do_not_stop_the_host_and_are_never_written_over() {
             )
         })
         .count();
-    assert_eq!(refusals, 2, "one for each file written");
+    assert_eq!(refusals, 1, "said once, not at every write");
     state.update(cx, |state, _| state.close_store().unwrap());
-    for name in files {
-        assert_eq!(
-            std::fs::read_to_string(store.root().join(name)).unwrap(),
-            torn
-        );
-    }
-}
-
-/// A review is stored and announced without touching any thread, and survives a restart.
-#[test]
-fn a_recorded_review_changes_no_thread_and_is_read_back_after_a_restart() {
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("tcode-control-review");
-    for id in ["caller", "old"] {
-        store.upsert_meta(&thread(id, store.root())).unwrap();
-    }
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    state.subscribe(cx, Topic::Index);
-    let before = cx.seen().session("old").unwrap().clone();
-    let review = |group: &str| {
-        ControlOp::RecordReview(RecordReviewParams {
-            items: vec![ReviewItemInput {
-                thread_id: "old".into(),
-                group: group.into(),
-                confidence: "clear_evidence".into(),
-                evidence: vec!["old#12: PR merged".into()],
-                suggestion: Some("settle".into()),
-            }],
-            coverage: "1 project, 2 threads".into(),
-            request_id: Some("review-1".into()),
-        })
-    };
-    assert!(call(&state, cx, "caller", review("done")).is_err());
-    let recorded = call(&state, cx, "caller", review("can_settle")).unwrap();
-    assert_eq!(recorded["status"], "recorded");
-    assert_eq!(
-        call(&state, cx, "caller", review("can_settle")).unwrap(),
-        recorded,
-        "a retry records nothing twice"
-    );
-    assert!(cx.drain_outgoing().iter().any(|message| matches!(
-        message,
-        HostMessage::Event(envelope) if matches!(
-            &envelope.event,
-            ServerEvent::Runtime(RuntimeEvent::Notice(RuntimeNotice::ReviewRecorded { items: 1, .. }))
-        )
-    )));
-    cx.run_until_parked();
-    assert_eq!(cx.seen().session("old"), Some(&before));
-
-    // A restarted host is another process, which nothing the stopped host left running reaches.
-    let cx = &mut TestAppContext::default();
-    let restarted = cx.new_entity(TestClientState::new((*store).clone()));
-    restarted.deliver(
-        cx,
-        5,
-        ClientPayload::Query(Query::ReviewRecords { limit: 10 }),
-    );
-    let (records, _) = cx.run_until_sent(|message| match message {
-        HostMessage::QueryResult {
-            id: 5,
-            result: Ok(QueryResponse::ReviewRecords(records)),
-        } => Some(records.clone()),
-        _ => None,
-    });
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].id, "review-1");
-    assert_eq!(records[0].thread_id, "caller");
-    assert_eq!(records[0].items[0].group, "can_settle");
+    assert_eq!(std::fs::read_to_string(log).unwrap(), torn);
 }

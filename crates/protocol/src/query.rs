@@ -199,10 +199,6 @@ pub enum Query {
     NativeMcpServers {
         profile_id: String,
     },
-    /// Review records stored by `record_review`, newest first.
-    ReviewRecords {
-        limit: u32,
-    },
     /// A read of a pull request linked to the thread, answered from GitHub by the host.
     PullRequest {
         session_id: String,
@@ -282,7 +278,6 @@ pub enum QueryResponse {
     ArchivedSessions(crate::ArchivedSessions),
     ControlActivity(ControlActivityPage),
     NativeMcpServers(Vec<agent::NativeMcpServer>),
-    ReviewRecords(Vec<tcode_core::control::ReviewRecord>),
     PullRequest {
         response: Box<crate::PullRequestReadResponse>,
         /// Seconds from this answer until the host answers this read afresh:

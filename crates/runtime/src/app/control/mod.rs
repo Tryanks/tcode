@@ -28,8 +28,6 @@ const RESPONSE_CAP: usize = 64 * 1024;
 
 pub(super) struct ControlState {
     activity: VecDeque<ControlActivityEntry>,
-    review_records: Vec<tcode_core::control::ReviewRecord>,
-    reviews_unreadable: Option<UnreadableFile>,
     activity_unreadable: Option<UnreadableFile>,
     /// Answers to recent calls that carried a `request_id`, so a retry does not act twice.
     answered: VecDeque<(String, serde_json::Value)>,
@@ -37,16 +35,12 @@ pub(super) struct ControlState {
 
 impl ControlState {
     pub(super) fn new(
-        review_records: Vec<tcode_core::control::ReviewRecord>,
-        reviews_unreadable: Option<UnreadableFile>,
         mut activity: Vec<ControlActivityEntry>,
         activity_unreadable: Option<UnreadableFile>,
     ) -> Self {
         activity.truncate(CONTROL_ACTIVITY_LIMIT);
         Self {
             activity: activity.into(),
-            review_records,
-            reviews_unreadable,
             activity_unreadable,
             answered: VecDeque::new(),
         }
@@ -90,9 +84,6 @@ fn refusal(error: tcode_protocol::ProtocolError) -> String {
 pub(super) struct Caller {
     pub(super) thread_id: String,
     pub(super) project_id: Option<String>,
-    /// The thread that started it as its subagent and that thread's ancestors, which it may
-    /// neither read nor act on.
-    pub(super) ancestors: Vec<String>,
     /// The space whose member's turn makes the call, which confines it to that space's
     /// projects and policy.
     pub(super) space: Option<CallerSpace>,
@@ -250,14 +241,6 @@ impl AppState {
 
     /// `meta`'s thread as a `tcode_control` caller.
     pub(super) fn caller_of(&self, meta: &SessionMeta) -> Caller {
-        let mut ancestors: Vec<String> = Vec::new();
-        let mut next = meta.parent_session_id.clone();
-        while let Some(id) = next.filter(|id| !ancestors.contains(id)) {
-            next = self
-                .find_meta(&id)
-                .and_then(|parent| parent.parent_session_id);
-            ancestors.push(id);
-        }
         let space = self.turn_space_of(&meta.id).map(|id| CallerSpace {
             projects: self.space_scopes.get(&id).cloned().unwrap_or_default(),
             policy: self
@@ -268,19 +251,17 @@ impl AppState {
         Caller {
             thread_id: meta.id.clone(),
             project_id: meta.project_id.clone(),
-            ancestors,
             space,
         }
     }
 
-    /// Whether a call may name `target`: any thread on the host but the caller's own
-    /// Orchestrate parent and its ancestors, and, in a member's turn, one outside the space.
+    /// Whether a call may name `target`: any thread on the host, or, in a member's turn,
+    /// one inside the space.
     pub(super) fn open_to(&self, caller: &Caller, target: &SessionMeta) -> bool {
-        !caller.ancestors.contains(&target.id)
-            && caller
-                .space
-                .as_ref()
-                .is_none_or(|space| space.holds(target.project_id.as_deref()))
+        caller
+            .space
+            .as_ref()
+            .is_none_or(|space| space.holds(target.project_id.as_deref()))
     }
 
     /// Whether a listing or search covering `scope` includes `target`.
@@ -311,14 +292,17 @@ impl AppState {
             _ if !self.settings.control.enabled => Answer::Now(Err(
                 "tcode_control is turned off in Settings → Control".into(),
             )),
-            Some(meta) if meta.archived_at.is_none() => {
+            Some(meta) if meta.archived_at.is_some() => {
+                Answer::Now(Err("this thread is archived".into()))
+            }
+            Some(meta) => {
                 let caller = self.caller_of(&meta);
                 match self.authorize_control(&caller, &op) {
                     Ok(()) => self.dispatch_control_op(&caller, op, cx),
                     Err(refusal) => Answer::Now(Err(refusal)),
                 }
             }
-            _ => Answer::Now(Err("unknown thread".into())),
+            None => Answer::Now(Err("unknown thread".into())),
         };
         match answer {
             Answer::Now(result) => {
@@ -393,9 +377,6 @@ impl AppState {
         let Some(meta) = self.find_meta(target) else {
             return Err(TargetRefusal::Unknown);
         };
-        if caller.ancestors.iter().any(|ancestor| ancestor == target) {
-            return Err(TargetRefusal::Ancestor);
-        }
         if !self.open_to(caller, &meta) {
             return Err(TargetRefusal::OutsideSpace);
         }
@@ -430,7 +411,6 @@ impl AppState {
             ControlOp::ListProviders(p) => self.op_list_providers(caller, p, cx),
             ControlOp::GetSettings(p) => self.op_get_settings(caller, p, cx),
             ControlOp::ReadTerminal(p) => self.op_read_terminal(caller, p, cx),
-            ControlOp::RecordReview(p) => self.op_record_review(caller, p, cx),
             ControlOp::SettleSelf(p) => self.op_settle_self(caller, p, cx),
             ControlOp::StartThread(p) => return self.op_start_thread(caller, p, cx),
             ControlOp::SendMessage(p) => self.op_send_message(caller, p, cx),
@@ -537,16 +517,6 @@ impl AppState {
         }
     }
 
-    pub(crate) fn review_records(&self, limit: usize) -> Vec<tcode_core::control::ReviewRecord> {
-        self.control
-            .review_records
-            .iter()
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect()
-    }
-
     /// Write a changed meta through to the resident copy, the index and the store.
     pub(super) fn store_meta(&mut self, meta: SessionMeta, cx: &mut HostCx) {
         if let Some(live) = self.meta_mut(&meta.id) {
@@ -559,7 +529,6 @@ impl AppState {
 /// A target closed to the caller; worded for a whole-call refusal or a per-item skip.
 enum TargetRefusal {
     Unknown,
-    Ancestor,
     OutsideSpace,
 }
 
@@ -567,10 +536,6 @@ impl TargetRefusal {
     fn whole_call(&self, target: &str) -> String {
         match self {
             Self::Unknown => format!("unknown thread: {target}"),
-            Self::Ancestor => format!(
-                "refused: thread {target} orchestrates this thread; a child may not read or act \
-                 on its parent"
-            ),
             Self::OutsideSpace => {
                 format!("refused: thread {target} is outside the space this turn runs in")
             }
@@ -580,7 +545,6 @@ impl TargetRefusal {
     fn per_item(&self) -> String {
         match self {
             Self::Unknown => "unknown_thread".to_owned(),
-            Self::Ancestor => "ancestor: a child may not read or act on its parent".to_owned(),
             Self::OutsideSpace => "outside_space: this turn runs in a space".to_owned(),
         }
     }
