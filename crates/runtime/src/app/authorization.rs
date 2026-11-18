@@ -465,8 +465,6 @@ impl AppState {
                     session_id: None, ..
                 }
                 | Command::PatchSettings { .. }
-                | Command::SetControlGrant { .. }
-                | Command::RespondControlGrant { .. }
                 | Command::ResetSettings
                 | Command::SetSidebarCollapsed { .. }
                 | Command::CycleProjectSort

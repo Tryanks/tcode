@@ -2,7 +2,6 @@ use super::*;
 use crate::app::test_support::*;
 use crate::app::{ProviderLauncher, active_session::Runtime};
 use control_mcp::{ControlOp, MoveThreadParams, Workspace};
-use tcode_core::control::{ControlScope, ControlTier};
 
 /// Providers that never come up, so what a call queued stays observable.
 fn idle_launcher() -> ProviderLauncher {
@@ -129,10 +128,7 @@ fn start_thread_makes_one_ordinary_thread_across_retries_and_restarts() {
             .update(cx, |state, cx| call(state, cx, "caller", op))
             .unwrap_err();
         if refusal.is_empty() {
-            assert!(
-                error.starts_with("refused: attachment ") && error.ends_with("in your scope"),
-                "{error}"
-            );
+            assert!(error.starts_with("refused: attachment "), "{error}");
         } else {
             assert_eq!(error, refusal);
         }
@@ -416,7 +412,6 @@ fn send_message_queues_steers_and_schedules_as_the_agent() {
             state,
             ActiveSession::new(thread("later", "p", ProviderKind::Codex), false, Vec::new()),
         );
-        state.sessions.push(thread("far", "q", ProviderKind::Codex));
     });
     let send = |ids: &[&str], mode: SendMode| {
         ControlOp::SendMessage(SendMessageParams {
@@ -446,7 +441,7 @@ fn send_message_queues_steers_and_schedules_as_the_agent() {
                 state,
                 cx,
                 "caller",
-                send(&["running", "settled", "far"], SendMode::Steer),
+                send(&["running", "settled"], SendMode::Steer),
             )
             .unwrap(),
             call(
@@ -471,14 +466,6 @@ fn send_message_queues_steers_and_schedules_as_the_agent() {
     assert_eq!(
         steer["results"][1]["side_effects"][0],
         "no turn was running; queued instead"
-    );
-    assert_eq!(
-        steer["results"][2],
-        serde_json::json!({
-            "target": "far",
-            "outcome": "skipped",
-            "reason": "outside_scope: your grant's scope is project",
-        })
     );
     assert_eq!(scheduled["results"][0]["reason"], "scheduled");
     assert!(matches!(
@@ -513,10 +500,10 @@ fn send_message_queues_steers_and_schedules_as_the_agent() {
     });
 }
 
-/// Dropping a queued message the user wrote needs `history_edit`; the agent's own may go.
-/// A fork answers with the new thread's id.
+/// A queued message is dropped and the others stay; the permission mode stays the user's;
+/// a fork answers with the new thread's id.
 #[test]
-fn control_thread_guards_human_queued_messages_and_forks() {
+fn control_thread_drops_a_queued_message_keeps_the_permission_mode_and_forks() {
     let store = TestStore::new("tcode-control-thread");
     let cx = &mut TestAppContext::default();
     let state = host(&store, cx);
@@ -547,29 +534,16 @@ fn control_thread_guards_human_queued_messages_and_forks() {
             request_id: None,
         })
     };
-    let (refused, dropped) = state.update(cx, |state, cx| {
-        (
-            call(
-                state,
-                cx,
-                "caller",
-                change("queued", RunOp::DropQueued { id: human }),
-            )
-            .unwrap(),
+    let dropped = state
+        .update(cx, |state, cx| {
             call(
                 state,
                 cx,
                 "caller",
                 change("queued", RunOp::DropQueued { id: agent }),
             )
-            .unwrap(),
-        )
-    });
-    assert_eq!(refused["results"][0]["outcome"], "failed");
-    assert_eq!(
-        refused["results"][0]["reason"],
-        "refused: dropping a queued human message needs history_edit"
-    );
+        })
+        .unwrap();
     assert_eq!(dropped["results"][0]["outcome"], "applied");
     let permission = state
         .update(cx, |state, cx| {
@@ -607,23 +581,6 @@ fn control_thread_guards_human_queued_messages_and_forks() {
         let queue = &state.resident("queued").unwrap().queue;
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].id, human);
-    });
-
-    state.update(cx, |state, cx| {
-        let mut caller = state.find_meta("caller").unwrap();
-        let mut grant = ControlGrant::default_grant();
-        grant.categories.insert(ControlCategory::HistoryEdit);
-        caller.control_grant = Some(grant);
-        state.store_meta(caller, cx);
-        let allowed = call(
-            state,
-            cx,
-            "caller",
-            change("queued", RunOp::DropQueued { id: human }),
-        )
-        .unwrap();
-        assert_eq!(allowed["results"][0]["outcome"], "applied");
-        assert!(state.resident("queued").unwrap().queue.is_empty());
     });
 
     let forked = state
@@ -801,30 +758,23 @@ fn git_answers_with_the_outcome_and_refuses_unsafe_checkouts() {
     );
 }
 
-/// On the default project-scope grant a quick chat moves itself into a project it just
-/// created, which has no threads yet, but not into a project with threads outside its scope;
-/// a wider grant reaches that one. Each move is audited in the thread with the project it
-/// went to, and the turn that asked keeps its provider until it ends, when the provider
-/// leaves the old directory.
+/// A quick chat moves itself into another project. The move is audited in the thread with
+/// the project it went to, and the turn that asked keeps its provider until it ends, when
+/// the provider leaves the old directory.
 #[test]
-fn move_thread_moves_the_caller_within_its_grant_and_keeps_its_turn() {
+fn move_thread_moves_the_caller_and_keeps_its_turn() {
     let store = TestStore::new("tcode-control-move-thread");
     let quick = store.root().join("quick");
     let demo = store.root().join("demo");
-    let taken = store.root().join("taken");
-    for dir in [&quick, &demo, &taken] {
+    for dir in [&quick, &demo] {
         std::fs::create_dir_all(dir).unwrap();
     }
     let cx = &mut TestAppContext::default();
     let state = host(&store, cx);
     let (commands, _provider) = smol::channel::unbounded();
-    let (demo_id, taken_id) = state.update(cx, |state, cx| {
+    let demo_id = state.update(cx, |state, cx| {
         let quick_id = state.create_project(quick.clone(), cx).unwrap();
         let demo_id = state.create_project(demo.clone(), cx).unwrap();
-        let taken_id = state.create_project(taken.clone(), cx).unwrap();
-        let mut owner = thread("owner", &taken_id, ProviderKind::Codex);
-        owner.cwd = taken.clone();
-        state.persist_meta(&owner, cx);
         let mut caller = thread("caller", &quick_id, ProviderKind::ClaudeCode);
         caller.cwd = quick.clone();
         let mut session = ActiveSession::new(caller, false, Vec::new());
@@ -838,7 +788,7 @@ fn move_thread_moves_the_caller_within_its_grant_and_keeps_its_turn() {
         );
         session.turn_in_flight = true;
         park(state, session);
-        (demo_id, taken_id)
+        demo_id
     });
     let move_self = |project_id: &str, request_id: &str| {
         ControlOp::MoveThread(MoveThreadParams {
@@ -867,18 +817,6 @@ fn move_thread_moves_the_caller_within_its_grant_and_keeps_its_turn() {
     };
 
     state.update(cx, |state, cx| {
-        assert_eq!(
-            call(state, cx, "caller", move_self(&taken_id, "move-1")),
-            Err(format!(
-                "refused: project {taken_id} is outside your grant's scope (project) and \
-                 already has threads"
-            ))
-        );
-        assert_eq!(
-            state.find_meta("caller").unwrap().cwd,
-            quick,
-            "a refused move changes nothing"
-        );
         let moved = call(state, cx, "caller", move_self(&demo_id, "move-2")).unwrap();
         assert_eq!(moved["project_id"], demo_id.as_str());
         assert_eq!(moved["cwd"], demo.display().to_string());
@@ -915,21 +853,4 @@ fn move_thread_moves_the_caller_within_its_grant_and_keeps_its_turn() {
             Runtime::Idle
         ));
     });
-
-    state.update(cx, |state, cx| {
-        let mut caller = state.find_meta("caller").unwrap();
-        caller.control_grant = Some(ControlGrant {
-            scope: ControlScope::Host,
-            tiers: [ControlTier::Operate].into_iter().collect(),
-            ..ControlGrant::none()
-        });
-        state.store_meta(caller, cx);
-        call(state, cx, "caller", move_self(&taken_id, "move-3")).unwrap();
-        assert_eq!(
-            state.find_meta("caller").unwrap().project_id.as_deref(),
-            Some(taken_id.as_str())
-        );
-    });
-    cx.run_until_parked();
-    assert_eq!(audits(&state).len(), 2);
 }

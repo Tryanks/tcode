@@ -2,12 +2,12 @@ use super::*;
 use crate::app::active_session::Runtime;
 use crate::app::test_support::*;
 use control_mcp::{
-    CancelNotifyParams, DeleteThreadsParams, GetGitParams, GetThreadParams, GitOp, GitParams,
-    GitWhat, NotifyWhenParams, PatchSettingsParams, RequestGrantParams, TerminalOp, TerminalParams,
-    ThreadChange, ThreadOp, UpdateThreadsParams,
+    CancelNotifyParams, DeleteThreadsParams, GetThreadParams, GitOp, GitParams, NotifyWhenParams,
+    PatchSettingsParams, ReportResultParams, TerminalOp, TerminalParams, ThreadChange, ThreadOp,
+    UpdateThreadsParams,
 };
-use tcode_core::control::{ControlCategory, ControlTier, WatchEvent};
-use tcode_protocol::{Command, CommandResponse, HostMessage};
+use tcode_core::control::WatchEvent;
+use tcode_protocol::Command;
 
 fn thread(id: &str, project: &str) -> SessionMeta {
     let mut meta = SessionMeta::new(
@@ -21,19 +21,30 @@ fn thread(id: &str, project: &str) -> SessionMeta {
     meta
 }
 
-fn caller(project: &str, grant: ControlGrant) -> Caller {
+fn caller(project: &str) -> Caller {
     Caller {
         thread_id: "caller".into(),
         project_id: Some(project.into()),
-        grant,
         subagent: false,
         ancestors: Vec::new(),
         space: None,
     }
 }
 
+/// Every `tcode_control` tool but the subagent's `report_result`, in name order.
+fn every_tool() -> Vec<String> {
+    control_mcp::tool_descriptions(&control_mcp::ThreadAccess {
+        enabled: true,
+        subagent: false,
+    })
+    .into_iter()
+    .map(|(name, _)| name)
+    .collect()
+}
+
 /// The `tcode_control` tools the thread's status discloses.
 fn tool_names(state: &AppState, id: &str) -> Vec<String> {
+    let control = every_tool();
     state
         .session_status_snapshot(id)
         .unwrap()
@@ -43,7 +54,7 @@ fn tool_names(state: &AppState, id: &str) -> Vec<String> {
                 .tools
                 .into_iter()
                 .map(|(name, _)| name)
-                .filter(|name| control_mcp::tool_requirement(name).is_some())
+                .filter(|name| control.contains(name))
                 .collect()
         })
         .unwrap_or_default()
@@ -80,84 +91,35 @@ fn connect_and_list(registration: &agent::McpRegistration) -> Vec<String> {
     names
 }
 
-/// A thread whose provider takes MCP servers is given `tcode_control` even with nothing
-/// granted, so it can still ask; the disclosed tools are the ones its connection actually
-/// received, which a later grant change alters only when the provider connects again.
-/// Turning the setting off withdraws the server.
+/// A thread whose provider takes MCP servers is given `tcode_control` with every tool; the
+/// disclosed tools are the ones its connection received. Turning the setting off withdraws
+/// the server.
 #[test]
-fn control_tools_follow_the_grant_and_the_setting() {
+fn control_tools_are_all_offered_and_follow_the_setting() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-control-registration");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let mut host = mcp_host::Host::bind().unwrap();
     let server = control_mcp::start(&mut host);
-    let mut meta = thread("caller", "p");
-    meta.control_grant = Some(ControlGrant::none());
+    let meta = thread("caller", "p");
     let registration = state.update(cx, |state, _| {
         state.attach_control_mcp(server);
         state.sessions.push(meta.clone());
         state.install_selected(ActiveSession::new(meta.clone(), false, Vec::new()));
         let registration = state.control_registration_for(&meta).unwrap();
-        assert_eq!(tool_names(state, "caller"), ["request_grant"]);
+        assert_eq!(
+            tool_names(state, "caller"),
+            every_tool(),
+            "before the first connection every tool is disclosed"
+        );
         registration
     });
     host.start().unwrap();
 
-    let default_grant = ControlGrant::default_grant();
-    state.dispatch_command(
-        cx,
-        1,
-        Command::SetControlGrant {
-            session_id: "caller".into(),
-            grant: Some(default_grant.clone()),
-        },
-    );
-    cx.run_until_parked();
-    let expected = |grant: &ControlGrant| -> Vec<String> {
-        let mut names: Vec<String> = control_mcp::tool_descriptions(&control_mcp::ThreadAccess {
-            grant: grant.clone(),
-            subagent: false,
-        })
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect();
-        names.sort();
-        names
-    };
-    state.read(|state| {
-        assert_eq!(
-            tool_names(state, "caller"),
-            expected(&default_grant),
-            "before the first connection the grant's tools are disclosed"
-        );
-    });
-    let first = connect_and_list(&registration);
-    assert_eq!(first, expected(&default_grant));
-    assert!(!first.iter().any(|name| name == "delete_threads"));
-
-    let delete = ControlGrant {
-        categories: [ControlCategory::Delete].into_iter().collect(),
-        ..default_grant.clone()
-    };
-    state.dispatch_command(
-        cx,
-        2,
-        Command::SetControlGrant {
-            session_id: "caller".into(),
-            grant: Some(delete.clone()),
-        },
-    );
-    cx.run_until_parked();
-    state.read(|state| {
-        assert_eq!(
-            tool_names(state, "caller"),
-            first,
-            "the open connection still lists what it was given"
-        );
-    });
-    let second = connect_and_list(&registration);
-    assert!(second.iter().any(|name| name == "delete_threads"));
-    state.read(|state| assert_eq!(tool_names(state, "caller"), second));
+    let listed = connect_and_list(&registration);
+    assert_eq!(listed, every_tool());
+    assert!(listed.iter().any(|name| name == "delete_threads"));
+    state.read(|state| assert_eq!(tool_names(state, "caller"), listed));
 
     state.dispatch_command(
         cx,
@@ -182,10 +144,12 @@ fn control_tools_follow_the_grant_and_the_setting() {
     });
 }
 
-/// A call outside the grant is refused with the reason, and the operations no grant exposes
-/// are refused or absent whatever the grant.
+/// No call is refused for want of a permission: deleting a thread and pushing from another
+/// project's thread pass. A call is closed only where no thread's model may go: a
+/// subagent's own tool, a thread outside the space a member's turn runs in, a thread that
+/// is not there, and the settings no agent changes.
 #[test]
-fn control_calls_outside_the_grant_are_refused_with_the_reason() {
+fn a_call_is_closed_only_where_no_thread_may_go() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-control-authorize");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
@@ -195,114 +159,58 @@ fn control_calls_outside_the_grant_are_refused_with_the_reason() {
         state.sessions.push(thread("other", "b"));
     });
 
-    let observe = ControlGrant {
-        tiers: [ControlTier::Observe].into_iter().collect(),
-        ..ControlGrant::none()
-    };
-    let settle = ControlOp::UpdateThreads(UpdateThreadsParams {
-        changes: vec![ThreadChange {
-            thread_id: "same".into(),
-            op: ThreadOp::Settle,
-            expect: None,
-        }],
-        dry_run: None,
-    });
     let delete = ControlOp::DeleteThreads(DeleteThreadsParams {
         thread_ids: vec!["same".into()],
         remove_worktree: None,
         dry_run: None,
+    });
+    let push = ControlOp::Git(GitParams {
+        thread_id: "other".into(),
+        op: GitOp::Push,
     });
     let get = |id: &str| {
         ControlOp::GetThread(GetThreadParams {
             thread_id: id.into(),
         })
     };
-    let git = |id: &str| {
-        ControlOp::GetGit(GetGitParams {
-            thread_id: Some(id.into()),
-            project_id: None,
-            what: GitWhat::Status,
-        })
-    };
+    let report = ControlOp::ReportResult(ReportResultParams {
+        text: "done".into(),
+    });
     state.read(|state| {
+        assert_eq!(state.authorize_control(&caller("a"), &delete), Ok(()));
+        assert_eq!(state.authorize_control(&caller("a"), &push), Ok(()));
         assert_eq!(
-            state.authorize_control(&caller("a", observe.clone()), &settle),
-            Err("refused: `update_threads` needs tier organize; your grant: observe (project)".into())
+            state.authorize_control(&caller("a"), &report),
+            Err(
+                "refused: `report_result` is only for a thread another thread started as its \
+                 subagent"
+                    .into()
+            )
         );
-        assert_eq!(
-            state.authorize_control(&caller("a", ControlGrant::default_grant()), &delete),
-            Err("refused: `delete_threads` needs category delete; your grant: observe, organize, operate (project)".into())
-        );
-        assert_eq!(
-            state.authorize_control(&caller("a", ControlGrant::default_grant()), &settle),
-            Ok(())
-        );
-        assert_eq!(
-            state.authorize_control(&caller("a", observe.clone()), &git("other")),
-            Err("refused: thread other is outside your grant's scope (project)".into())
-        );
-        assert_eq!(
-            state.authorize_control(&caller("a", observe.clone()), &get("other")),
-            Ok(()),
-            "a thread the call names is read wherever it is"
-        );
+        let subagent = Caller {
+            subagent: true,
+            ..caller("a")
+        };
+        assert_eq!(state.authorize_control(&subagent, &report), Ok(()));
         let member = Caller {
             space: Some(CallerSpace {
                 projects: ["a".to_owned()].into_iter().collect(),
                 policy: tcode_protocol::SpacePolicy::new_space(),
             }),
-            ..caller("a", observe.clone())
+            ..caller("a")
         };
         assert_eq!(
             state.authorize_control(&member, &get("other")),
-            Err("refused: thread other is outside your grant's scope (project)".into()),
-            "a space member's thread reads nothing outside its space"
+            Err("refused: thread other is outside the space this turn runs in".into())
         );
+        assert_eq!(state.authorize_control(&member, &get("same")), Ok(()));
         assert_eq!(
-            state.authorize_control(&caller("a", observe.clone()), &get("missing")),
+            state.authorize_control(&caller("a"), &get("missing")),
             Err("unknown thread: missing".into())
         );
-        // Every scope keeps the caller's own project: a grant for project b still reaches a,
-        // as a search narrowed to the caller's project would.
-        let elsewhere = ControlGrant {
-            scope: ControlScope::Projects(vec!["b".into()]),
-            ..observe.clone()
-        };
-        assert_eq!(
-            state.authorize_control(&caller("a", elsewhere.clone()), &git("same")),
-            Ok(())
-        );
-        assert_eq!(
-            state.authorize_control(&caller("a", elsewhere), &git("other")),
-            Ok(())
-        );
-        let host = ControlGrant {
-            scope: ControlScope::Host,
-            ..observe.clone()
-        };
-        assert_eq!(
-            state.authorize_control(&caller("a", host), &git("other")),
-            Ok(())
-        );
-        let push = ControlOp::Git(GitParams {
-            thread_id: "same".into(),
-            op: GitOp::Push,
-        });
-        assert_eq!(
-            state.authorize_control(&caller("a", ControlGrant::default_grant()), &push),
-            Err("refused: `git` needs category git_remote; your grant: observe, organize, operate (project)".into())
-        );
-    });
 
-    let every_category = ControlGrant {
-        scope: ControlScope::Host,
-        tiers: ControlTier::ALL.into_iter().collect(),
-        categories: ControlCategory::ALL.into_iter().collect(),
-    };
-    state.read(|state| {
         for patch in [
             SettingsPatch::ControlEnabled(false),
-            SettingsPatch::ControlDefaultGrant(every_category.clone()),
             SettingsPatch::SettlementAutomation(tcode_core::control::SettlementAutomation::Off),
             SettingsPatch::RemoteHostingEnabled(true),
             SettingsPatch::SourceControlHost {
@@ -315,9 +223,7 @@ fn control_calls_outside_the_grant_are_refused_with_the_reason() {
             let op = ControlOp::PatchSettings(PatchSettingsParams {
                 patch: serde_json::to_value(&patch).unwrap(),
             });
-            let refusal = state
-                .authorize_control(&caller("a", every_category.clone()), &op)
-                .unwrap_err();
+            let refusal = state.authorize_control(&caller("a"), &op).unwrap_err();
             assert!(
                 refusal.starts_with("refused: `patch_settings` never changes"),
                 "{patch:?}: {refusal}"
@@ -326,117 +232,7 @@ fn control_calls_outside_the_grant_are_refused_with_the_reason() {
         let allowed = ControlOp::PatchSettings(PatchSettingsParams {
             patch: serde_json::to_value(SettingsPatch::WordWrapDiffs(true)).unwrap(),
         });
-        assert_eq!(
-            state.authorize_control(&caller("a", every_category.clone()), &allowed),
-            Ok(())
-        );
-    });
-}
-
-/// `request_grant` asks; the user's approval widens the thread's effective grant and the
-/// thread hears the answer as an agent-origin message.
-#[test]
-fn an_approved_grant_request_widens_the_grant_and_wakes_the_thread() {
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("tcode-control-grant-request");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let request_id = state.update(cx, |state, cx| {
-        let meta = thread("caller", "p");
-        state.sessions.push(meta.clone());
-        let mut session = ActiveSession::new(meta, false, Vec::new());
-        session.runtime = Runtime::Starting { generation: 1 };
-        state.residents.parked.insert("caller".into(), session);
-
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_control_op(
-            "caller".into(),
-            ControlOp::RequestGrant(RequestGrantParams {
-                scope: ControlScope::Host,
-                tiers: Vec::new(),
-                categories: vec![ControlCategory::Delete],
-                reason: "clean up finished threads".into(),
-            }),
-            reply,
-            cx,
-        );
-        let answer = response.try_recv().unwrap().unwrap();
-        assert_eq!(answer["status"], "pending");
-        let request_id = answer["request_id"].as_str().unwrap().to_owned();
-        let meta = state.find_meta("caller").unwrap();
-        assert_eq!(meta.control_grant_requests[0].id, request_id);
-        assert_eq!(
-            meta.control_grant_requests[0].reason,
-            "clean up finished threads"
-        );
-        assert_eq!(
-            state.caller_grant(&meta),
-            (ControlGrant::default_grant(), ControlGrantSource::Default)
-        );
-        request_id
-    });
-    cx.run_until_parked();
-    cx.drain_outgoing();
-
-    state.dispatch_command(
-        cx,
-        7,
-        Command::RespondControlGrant {
-            session_id: "caller".into(),
-            request_id,
-            approve: true,
-        },
-    );
-    cx.run_until_parked();
-    assert!(cx.drain_outgoing().iter().any(|message| matches!(
-        message,
-        HostMessage::Ack {
-            id: 7,
-            result: Ok(CommandResponse::Unit)
-        }
-    )));
-    state.read(|state| {
-        let meta = state.find_meta("caller").unwrap();
-        assert!(meta.control_grant_requests.is_empty());
-        let (grant, source) = state.caller_grant(&meta);
-        assert_eq!(source, ControlGrantSource::Thread);
-        assert_eq!(grant.scope, ControlScope::Host);
-        assert!(grant.allows_tier(ControlTier::Operate));
-        assert!(grant.allows_category(ControlCategory::Delete));
-        assert_eq!(
-            state
-                .session_status_snapshot("caller")
-                .unwrap()
-                .control
-                .unwrap()
-                .grant,
-            grant
-        );
-
-        let session = state.residents.parked.get("caller").unwrap();
-        assert_eq!(session.queue.len(), 1);
-        assert_eq!(session.queue[0].origin, MessageOrigin::Agent);
-        assert!(
-            session.queue[0]
-                .text
-                .starts_with("[control] grant approved: delete (host)"),
-            "{}",
-            session.queue[0].text
-        );
-        let audited = session.timeline.entries.iter().any(|entry| {
-            matches!(
-                &entry.content,
-                EntryContent::ControlAction(action)
-                    if action.actor_thread_id == "caller" && action.action == "request_grant"
-            )
-        });
-        assert!(audited, "the request is recorded in the thread");
-        assert_eq!(
-            state
-                .control_activity(&Default::default(), 10)
-                .entries
-                .len(),
-            1
-        );
+        assert_eq!(state.authorize_control(&caller("a"), &allowed), Ok(()));
     });
 }
 
@@ -512,14 +308,6 @@ fn call(
     let (reply, response) = smol::channel::bounded(1);
     state.handle_control_op(thread_id.into(), op, reply, cx);
     response.try_recv().unwrap()
-}
-
-fn granted(mut meta: SessionMeta, categories: &[ControlCategory]) -> SessionMeta {
-    meta.control_grant = Some(ControlGrant {
-        categories: categories.iter().copied().collect(),
-        ..ControlGrant::default_grant()
-    });
-    meta
 }
 
 /// A thread whose provider is still starting: a callback waits in its queue.
@@ -890,10 +678,10 @@ fn a_thread_stops_watching_threads_that_are_gone_or_when_the_user_stops_it() {
     cx.run_until_seen(|view| view.activity("caller").unwrap().wakes.notify == 1);
 }
 
-/// `respond_input` answers another thread's pending question through the provider, only
-/// with `answer_input` and only for the request actually pending.
+/// `respond_input` answers another thread's pending question through the provider, and
+/// only the request actually pending.
 #[test]
-fn respond_input_answers_only_the_pending_question_with_the_category() {
+fn respond_input_answers_only_the_pending_question() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-control-respond-input");
     let root = store.root().clone();
@@ -926,22 +714,6 @@ fn respond_input_answers_only_the_pending_question_with_the_category() {
         )
     };
     assert_eq!(
-        answer(cx, None),
-        Err("refused: `respond_input` needs category answer_input; your grant: observe, organize, operate (project)".into())
-    );
-    state
-        .command(
-            cx,
-            Command::SetControlGrant {
-                session_id: "caller".into(),
-                grant: Some(ControlGrant {
-                    categories: [ControlCategory::AnswerInput].into_iter().collect(),
-                    ..ControlGrant::default_grant()
-                }),
-            },
-        )
-        .unwrap();
-    assert_eq!(
         answer(cx, Some("q0")),
         Err("refused: request q0 is not pending in thread asker".into())
     );
@@ -969,17 +741,15 @@ fn respond_input_answers_only_the_pending_question_with_the_category() {
     });
 }
 
-/// A terminal is reachable only through the thread whose panel holds it, so naming an
-/// in-scope thread does not reach another project's shell.
+/// A terminal is reached only through the thread whose panel holds it: naming another
+/// thread with its id types nothing.
 #[test]
-fn terminal_input_cannot_reach_an_out_of_scope_threads_terminal() {
+fn terminal_input_reaches_a_terminal_only_through_its_own_thread() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-control-terminal");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     state.update(cx, |state, _| {
-        state
-            .sessions
-            .push(granted(thread("caller", "a"), &[ControlCategory::Terminal]));
+        state.sessions.push(thread("caller", "a"));
         state.sessions.push(thread("same", "a"));
         let mut other = thread("other", "b");
         other.cwd = std::env::temp_dir();
@@ -1023,10 +793,6 @@ fn terminal_input_cannot_reach_an_out_of_scope_threads_terminal() {
                 "refused: terminal {terminal_id} is not one of thread same's terminals"
             ))
         );
-        assert_eq!(
-            call(state, "caller", input("other"), cx),
-            Err("refused: thread other is outside your grant's scope (project)".into())
-        );
         state.close_terminal("other", terminal_id, cx);
     });
 }
@@ -1040,7 +806,7 @@ fn delete_threads_previews_then_deletes_the_tree() {
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let (reply, response) = smol::channel::bounded(1);
     state.update(cx, |state, cx| {
-        let caller = granted(thread("caller", "p"), &[ControlCategory::Delete]);
+        let caller = thread("caller", "p");
         state.sessions.push(caller.clone());
         park_waiting(state, caller);
         state.sessions.push(thread("lead", "p"));
@@ -1088,17 +854,14 @@ fn delete_threads_previews_then_deletes_the_tree() {
 }
 
 /// `patch_settings` applies an ordinary setting and refuses the ones that change
-/// authority or credentials, whatever the grant.
+/// authority or credentials.
 #[test]
 fn patch_settings_applies_allowed_patches_only() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-control-patch-settings");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     state.update(cx, |state, cx| {
-        state.sessions.push(granted(
-            thread("caller", "p"),
-            &[ControlCategory::SettingsWrite],
-        ));
+        state.sessions.push(thread("caller", "p"));
         let before = state.settings.clone();
         let patch = |patch: SettingsPatch| {
             ControlOp::PatchSettings(PatchSettingsParams {
@@ -1143,8 +906,8 @@ fn patch_settings_applies_allowed_patches_only() {
     });
 }
 
-/// An Orchestrate child may neither read nor act on its parent or the parent's ancestors,
-/// even inside its grant's scope; they are absent from its listings too.
+/// An Orchestrate child may neither read nor act on its parent or the parent's ancestors;
+/// they are absent from its listings too.
 #[test]
 fn a_child_may_not_read_or_act_on_its_parent() {
     let cx = &mut TestAppContext::default();

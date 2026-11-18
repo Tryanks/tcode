@@ -1,7 +1,6 @@
 mod approval;
 pub(super) mod checkout;
 mod context_window;
-mod control;
 pub(super) mod files;
 pub(super) mod force_terminate;
 pub(super) mod goal_strip;

@@ -244,12 +244,6 @@ pub struct SessionMeta {
     /// after a cancel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expectation: Option<ChildExpectation>,
-    /// This thread's own `tcode_control` grant, set by an approved request; absent means its project's or the default applies.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub control_grant: Option<crate::control::ControlGrant>,
-    /// Grants the model asked for that the user has not answered.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub control_grant_requests: Vec<crate::control::ControlGrantRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up: Option<crate::control::FollowUp>,
     /// Parked (unix secs): set aside on purpose, exempt from automatic settlement.
@@ -470,8 +464,6 @@ impl SessionMeta {
             native_subagent: None,
             cancelled_at: None,
             expectation: None,
-            control_grant: None,
-            control_grant_requests: Vec::new(),
             follow_up: None,
             parked_at: None,
             settle_suggestion_dismissed_at: None,

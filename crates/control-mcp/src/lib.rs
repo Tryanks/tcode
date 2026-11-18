@@ -1,10 +1,10 @@
-//! In-process MCP server through which a thread's model observes and operates Tcode,
-//! within the grant the user gave that thread.
+//! In-process MCP server through which a thread's model observes and operates Tcode.
+//! Every tool is offered to every thread the server is given to: what a call may do without
+//! asking is the harness's permission mode to decide, as for any other tool, and each tool's
+//! description says when it is the user's to ask for.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-
-use tcode_core::control::{ControlCategory, ControlGrant, ControlTier};
 
 pub mod params;
 mod tools;
@@ -53,134 +53,32 @@ pub enum ControlOp {
     DeleteThreads(DeleteThreadsParams),
     Rewind(RewindParams),
     PatchSettings(PatchSettingsParams),
-    RequestGrant(RequestGrantParams),
 }
 
-/// What a grant must hold for a tool to be offered and its calls accepted.
+/// What decides which tools a thread is offered: whether threads are given `tcode_control`
+/// at all, and whether another thread started this one as a subagent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolRequirement {
-    Tier(ControlTier),
-    Category(ControlCategory),
-    /// `report_result`: offered to a subagent, whatever its grant, for its one channel to the
-    /// thread that started it.
-    Subagent,
-    /// `request_grant`: offered whatever the grant, it only asks the user.
-    Always,
-}
-
-/// What decides which tools a thread is offered: its grant, and whether another thread
-/// started it as a subagent.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadAccess {
-    pub grant: ControlGrant,
+    pub enabled: bool,
     pub subagent: bool,
 }
 
 impl ThreadAccess {
     pub fn none() -> Self {
         Self {
-            grant: ControlGrant::none(),
+            enabled: false,
             subagent: false,
         }
     }
-}
 
-impl ToolRequirement {
-    pub fn allowed_by(self, access: &ThreadAccess) -> bool {
-        match self {
-            Self::Tier(tier) => access.grant.allows_tier(tier),
-            Self::Category(category) => access.grant.allows_category(category),
-            Self::Subagent => access.subagent,
-            Self::Always => true,
-        }
+    /// Every tool, and `report_result` only for a subagent: its one channel to the thread
+    /// that started it.
+    pub fn offers(&self, tool: &str) -> bool {
+        self.enabled && (tool != REPORT_RESULT || self.subagent)
     }
 }
 
-/// Tool name → requirement.
-pub const TOOLS: [(&str, ToolRequirement); 34] = [
-    ("list_projects", ToolRequirement::Tier(ControlTier::Observe)),
-    ("list_threads", ToolRequirement::Tier(ControlTier::Observe)),
-    ("get_thread", ToolRequirement::Tier(ControlTier::Observe)),
-    ("search", ToolRequirement::Tier(ControlTier::Observe)),
-    ("outline", ToolRequirement::Tier(ControlTier::Observe)),
-    ("read", ToolRequirement::Tier(ControlTier::Observe)),
-    (
-        "search_in_item",
-        ToolRequirement::Tier(ControlTier::Observe),
-    ),
-    ("file_history", ToolRequirement::Tier(ControlTier::Observe)),
-    ("get_git", ToolRequirement::Tier(ControlTier::Observe)),
-    (
-        "get_pull_request",
-        ToolRequirement::Tier(ControlTier::Observe),
-    ),
-    (
-        "list_providers",
-        ToolRequirement::Tier(ControlTier::Observe),
-    ),
-    ("get_settings", ToolRequirement::Tier(ControlTier::Observe)),
-    ("read_terminal", ToolRequirement::Tier(ControlTier::Observe)),
-    (
-        "review_candidates",
-        ToolRequirement::Tier(ControlTier::Observe),
-    ),
-    (
-        "update_threads",
-        ToolRequirement::Tier(ControlTier::Organize),
-    ),
-    (
-        "record_review",
-        ToolRequirement::Tier(ControlTier::Organize),
-    ),
-    ("settle_self", ToolRequirement::Tier(ControlTier::Organize)),
-    ("start_thread", ToolRequirement::Tier(ControlTier::Operate)),
-    ("send_message", ToolRequirement::Tier(ControlTier::Operate)),
-    (
-        "control_thread",
-        ToolRequirement::Tier(ControlTier::Operate),
-    ),
-    ("pull_request", ToolRequirement::Tier(ControlTier::Operate)),
-    ("git", ToolRequirement::Tier(ControlTier::Operate)),
-    (
-        "create_project",
-        ToolRequirement::Tier(ControlTier::Operate),
-    ),
-    ("move_thread", ToolRequirement::Tier(ControlTier::Operate)),
-    ("notify_when", ToolRequirement::Tier(ControlTier::Operate)),
-    ("cancel_notify", ToolRequirement::Tier(ControlTier::Operate)),
-    // Answering your own subagent needs no category; any other thread needs answer_input,
-    // which the host checks per target.
-    ("respond_input", ToolRequirement::Tier(ControlTier::Operate)),
-    (
-        "respond_approval",
-        ToolRequirement::Tier(ControlTier::Operate),
-    ),
-    ("report_result", ToolRequirement::Subagent),
-    (
-        "terminal",
-        ToolRequirement::Category(ControlCategory::Terminal),
-    ),
-    (
-        "delete_threads",
-        ToolRequirement::Category(ControlCategory::Delete),
-    ),
-    (
-        "rewind",
-        ToolRequirement::Category(ControlCategory::HistoryEdit),
-    ),
-    (
-        "patch_settings",
-        ToolRequirement::Category(ControlCategory::SettingsWrite),
-    ),
-    ("request_grant", ToolRequirement::Always),
-];
-
-pub fn tool_requirement(name: &str) -> Option<ToolRequirement> {
-    TOOLS
-        .iter()
-        .find(|(tool, _)| *tool == name)
-        .map(|(_, requirement)| *requirement)
-}
+const REPORT_RESULT: &str = "report_result";
 
 impl ControlOp {
     pub fn tool_name(&self) -> &'static str {
@@ -213,40 +111,16 @@ impl ControlOp {
             Self::CancelNotify(_) => "cancel_notify",
             Self::RespondInput(_) => "respond_input",
             Self::RespondApproval(_) => "respond_approval",
-            Self::ReportResult(_) => "report_result",
+            Self::ReportResult(_) => REPORT_RESULT,
             Self::Terminal(_) => "terminal",
             Self::DeleteThreads(_) => "delete_threads",
             Self::Rewind(_) => "rewind",
             Self::PatchSettings(_) => "patch_settings",
-            Self::RequestGrant(_) => "request_grant",
         }
     }
 
-    pub fn requirement(&self) -> ToolRequirement {
-        tool_requirement(self.tool_name()).expect("every op is a listed tool")
-    }
-
-    /// Categories the call's data needs beyond the tool's own requirement.
-    pub fn extra_categories(&self) -> Vec<ControlCategory> {
-        match self {
-            Self::PullRequest(p) if p.op.writes() => vec![ControlCategory::PrWrite],
-            Self::Git(p) if p.op.remote() => vec![ControlCategory::GitRemote],
-            _ => Vec::new(),
-        }
-    }
-
-    /// The scope the call asks for, where a tool takes one.
-    pub fn requested_scope(&self) -> Option<&tcode_core::control::ControlScope> {
-        match self {
-            Self::ListThreads(p) => p.scope.as_ref(),
-            Self::Search(p) => p.scope.as_ref(),
-            Self::ReviewCandidates(p) => p.scope.as_ref(),
-            _ => None,
-        }
-    }
-
-    /// Whether the call answers per target, so an unknown or out-of-scope target skips
-    /// that item instead of refusing the whole call.
+    /// Whether the call answers per target, so a target that is unknown or closed to the
+    /// caller skips that item instead of refusing the whole call.
     pub fn answers_per_target(&self) -> bool {
         matches!(
             self,
@@ -309,8 +183,7 @@ impl ControlOp {
             | Self::CreateProject(_)
             | Self::CancelNotify(_)
             | Self::PatchSettings(_)
-            | Self::ReportResult(_)
-            | Self::RequestGrant(_) => Vec::new(),
+            | Self::ReportResult(_) => Vec::new(),
         }
     }
 
@@ -349,29 +222,13 @@ impl ControlOp {
             | Self::CreateProject(_)
             | Self::CancelNotify(_)
             | Self::PatchSettings(_)
-            | Self::ReportResult(_)
-            | Self::RequestGrant(_) => Vec::new(),
+            | Self::ReportResult(_) => Vec::new(),
         };
         for id in ids {
             if id == OWN_THREAD {
                 *id = caller.to_owned();
             }
         }
-    }
-
-    /// Reads of a thread's content or state. One that names its thread by id reaches any
-    /// thread on the host, whatever the grant's scope.
-    pub fn reads_content(&self) -> bool {
-        matches!(
-            self,
-            Self::NotifyWhen(_)
-                | Self::GetThread(_)
-                | Self::Search(_)
-                | Self::Outline(_)
-                | Self::Read(_)
-                | Self::SearchInItem(_)
-                | Self::FileHistory(_)
-        )
     }
 }
 
@@ -387,23 +244,23 @@ pub type Broker = mcp_host::Broker<BrokerRequest>;
 pub type TokenRegistry = mcp_host::TokenRegistry<tools::Service>;
 
 /// Answers a thread id with its current access; `None` for a thread the host does not know,
-/// which gets `request_grant` alone.
-pub type GrantResolver = Arc<dyn Fn(&str) -> Option<ThreadAccess> + Send + Sync>;
+/// which is offered nothing.
+pub type AccessResolver = Arc<dyn Fn(&str) -> Option<ThreadAccess> + Send + Sync>;
 
 /// Tool names with the descriptions a connection listed them with.
 pub type ListedTools = Vec<(String, String)>;
 
 /// The resolver the runtime installs when it attaches the server, and the tools each
 /// thread's latest connection was actually given. Until a resolver is set, and for a thread
-/// it does not know, every connection sees the empty grant.
+/// it does not know, a connection is offered nothing.
 #[derive(Clone, Default)]
-pub struct GrantSource {
-    resolver: Arc<Mutex<Option<GrantResolver>>>,
+pub struct AccessSource {
+    resolver: Arc<Mutex<Option<AccessResolver>>>,
     offered: Arc<Mutex<HashMap<String, ListedTools>>>,
 }
 
-impl GrantSource {
-    pub fn set(&self, resolver: GrantResolver) {
+impl AccessSource {
+    pub fn set(&self, resolver: AccessResolver) {
         *self.resolver.lock().unwrap() = Some(resolver);
     }
 
@@ -415,7 +272,7 @@ impl GrantSource {
     }
 
     /// The tools, with descriptions, the thread's latest connection listed; `None` before
-    /// its provider first connected. A grant changed since then shows here only once the
+    /// its provider first connected. Access changed since then shows here only once the
     /// provider connects again.
     pub fn offered(&self, thread_id: &str) -> Option<ListedTools> {
         self.offered.lock().unwrap().get(thread_id).cloned()
@@ -437,7 +294,7 @@ pub struct ControlMcpServer {
     pub url: String,
     pub tokens: TokenRegistry,
     pub requests: async_channel::Receiver<BrokerRequest>,
-    pub grants: GrantSource,
+    pub access: AccessSource,
 }
 
 pub fn start(host: &mut mcp_host::Host) -> ControlMcpServer {
@@ -450,8 +307,8 @@ pub fn start(host: &mut mcp_host::Host) -> ControlMcpServer {
             dropped: "tcode control dropped the request",
         },
     );
-    let grants = GrantSource::default();
-    let resolver = grants.clone();
+    let access = AccessSource::default();
+    let resolver = access.clone();
     let tokens = TokenRegistry::new(move |thread_id| {
         tools::service(broker.clone(), thread_id, resolver.clone())
     });
@@ -461,6 +318,6 @@ pub fn start(host: &mut mcp_host::Host) -> ControlMcpServer {
         url,
         tokens,
         requests: req_rx,
-        grants,
+        access,
     }
 }

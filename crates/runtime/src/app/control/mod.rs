@@ -1,11 +1,9 @@
-//! The host side of `tcode_control`: which thread may do what, dispatch of its tool calls,
-//! and the record every write leaves.
+//! The host side of `tcode_control`: dispatch of a thread's tool calls, the few things a
+//! call is closed to whoever makes it, and the record every write leaves.
 
 use super::*;
-use control_mcp::{ControlOp, ThreadAccess, ToolRequirement};
-use tcode_core::control::{
-    ControlAction, ControlCategory, ControlGrant, ControlGrantSource, ControlScope, action,
-};
+use control_mcp::{ControlOp, ThreadAccess};
+use tcode_core::control::{ControlAction, ControlScope, action};
 use tcode_core::settings::SettingsPatch;
 use tcode_protocol::{
     ControlActivityEntry, ControlActivityFilter, ControlActivityPage, ControlActivityThread,
@@ -13,7 +11,6 @@ use tcode_protocol::{
 };
 
 mod content;
-mod grants;
 mod observe;
 mod operate;
 mod organize;
@@ -82,19 +79,18 @@ async fn finish_on_host(
         .unwrap_or_else(|_| Err("the host stopped before the call finished".into()))
 }
 
-/// The thread behind a `tcode_control` call, with the grant in force when it arrived.
+/// The thread behind a `tcode_control` call.
 #[derive(Clone)]
 pub(super) struct Caller {
     pub(super) thread_id: String,
     pub(super) project_id: Option<String>,
-    pub(super) grant: ControlGrant,
     /// Another thread started it as its subagent.
     pub(super) subagent: bool,
     /// The thread that started it as its subagent and that thread's ancestors, which it may
     /// neither read nor act on.
     pub(super) ancestors: Vec<String>,
     /// The space whose member's turn makes the call, which confines it to that space's
-    /// projects and policy whatever the grant says.
+    /// projects and policy.
     pub(super) space: Option<CallerSpace>,
 }
 
@@ -111,14 +107,18 @@ impl CallerSpace {
 }
 
 impl Caller {
-    /// Whether a call naming `project_id` reaches it: inside `scope`, and
-    /// inside the caller's space when a member's turn makes the call.
-    pub(super) fn reaches_project(&self, scope: &ControlScope, project_id: &str) -> bool {
+    /// Whether a call may name `project_id`: any project, or one of the caller's space when
+    /// a member's turn makes the call.
+    pub(super) fn holds_project(&self, project_id: &str) -> bool {
+        self.space
+            .as_ref()
+            .is_none_or(|space| space.holds(Some(project_id)))
+    }
+
+    /// Whether a listing or search covering `scope` includes `project_id`.
+    pub(super) fn covers_project(&self, scope: &ControlScope, project_id: &str) -> bool {
         scope.reaches(self.project_id.as_deref(), Some(project_id))
-            && self
-                .space
-                .as_ref()
-                .is_none_or(|space| space.holds(Some(project_id)))
+            && self.holds_project(project_id)
     }
 }
 
@@ -127,10 +127,10 @@ impl AppState {
         self.mcp.control_url = Some(server.url);
         self.mcp.control_tokens = Some(server.tokens);
         self.mcp.control_requests = Some(server.requests);
-        let grants = self.mcp.control_grants.clone();
-        self.mcp.control_source = Some(server.grants.clone());
-        server.grants.set(Arc::new(move |thread_id| {
-            grants.lock().unwrap().get(thread_id).cloned()
+        let access = self.mcp.control_thread_access.clone();
+        self.mcp.control_source = Some(server.access.clone());
+        server.access.set(Arc::new(move |thread_id| {
+            access.lock().unwrap().get(thread_id).copied()
         }));
     }
 
@@ -152,20 +152,11 @@ impl AppState {
         });
     }
 
-    pub(super) fn caller_grant(&self, meta: &SessionMeta) -> (ControlGrant, ControlGrantSource) {
-        self.settings
-            .control
-            .resolve(meta.control_grant.as_ref(), meta.project_id.as_deref())
-    }
-
-    /// What the control server offers `meta`'s thread: nothing but `request_grant` with the
-    /// feature off, otherwise its grant and, for a subagent, `report_result`.
+    /// What the control server offers `meta`'s thread: nothing with the feature off,
+    /// otherwise every tool and, for a subagent, `report_result`.
     pub(super) fn control_access(&self, meta: &SessionMeta) -> ThreadAccess {
-        if !self.settings.control.enabled {
-            return ThreadAccess::none();
-        }
         ThreadAccess {
-            grant: self.caller_grant(meta).0,
+            enabled: self.settings.control.enabled,
             subagent: meta.is_dispatched(),
         }
     }
@@ -175,8 +166,7 @@ impl AppState {
         target.is_dispatched() && target.parent_session_id.as_deref() == Some(&caller.thread_id)
     }
 
-    /// Whether the thread's provider is given the `tcode_control` server when it starts;
-    /// with an empty grant it lists `request_grant` alone, so the model can still ask.
+    /// Whether the thread's provider is given the `tcode_control` server when it starts.
     pub(super) fn control_offered(&self, meta: &SessionMeta) -> bool {
         self.settings.control.enabled
             && self.mcp.control_url.is_some()
@@ -203,7 +193,7 @@ impl AppState {
             .control_registrations
             .insert(meta.id.clone(), registration.clone());
         self.mcp
-            .control_grants
+            .control_thread_access
             .lock()
             .unwrap()
             .insert(meta.id.clone(), self.control_access(meta));
@@ -216,16 +206,20 @@ impl AppState {
         {
             tokens.revoke(&registration.bearer_token);
         }
-        self.mcp.control_grants.lock().unwrap().remove(session_id);
+        self.mcp
+            .control_thread_access
+            .lock()
+            .unwrap()
+            .remove(session_id);
         if let Some(source) = &self.mcp.control_source {
             source.forget(session_id);
         }
     }
 
-    /// Re-read every registered thread's effective grant after a grant or setting changed, so
-    /// the next connection lists the right tools; with the feature off a registered thread
-    /// keeps only `request_grant`.
-    pub(super) fn refresh_control_grants(&mut self) {
+    /// Re-read every registered thread's access after the setting or a thread's standing
+    /// changed, so the next connection lists the right tools; with the feature off a
+    /// registered thread is offered none.
+    pub(super) fn refresh_control_access(&mut self) {
         let registered: Vec<String> = self.mcp.control_registrations.keys().cloned().collect();
         let access: Vec<(String, ThreadAccess)> = registered
             .into_iter()
@@ -234,7 +228,7 @@ impl AppState {
                 Some((id, self.control_access(&meta)))
             })
             .collect();
-        let mut table = self.mcp.control_grants.lock().unwrap();
+        let mut table = self.mcp.control_thread_access.lock().unwrap();
         for (id, access) in access {
             table.insert(id, access);
         }
@@ -244,17 +238,13 @@ impl AppState {
         if !meta.provider.caps().mcp_servers {
             return None;
         }
-        let (grant, source) = self.caller_grant(meta);
         Some(ControlStatus {
-            grant,
-            source,
-            pending_requests: meta.control_grant_requests.clone(),
             self_settle: meta.self_settle.clone(),
             tools_offered: self.control_offered(meta),
         })
     }
 
-    /// `meta`'s thread as a `tcode_control` caller, with the grant in force now.
+    /// `meta`'s thread as a `tcode_control` caller.
     pub(super) fn caller_of(&self, meta: &SessionMeta) -> Caller {
         let mut ancestors: Vec<String> = Vec::new();
         let mut next = meta.parent_session_id.clone();
@@ -274,34 +264,31 @@ impl AppState {
         Caller {
             thread_id: meta.id.clone(),
             project_id: meta.project_id.clone(),
-            grant: self.caller_grant(meta).0,
             subagent: meta.is_dispatched(),
             ancestors,
             space,
         }
     }
 
-    /// Whether a call may reach `target`. A read of the content of a thread the call names
-    /// reaches every thread on the host: the user points a thread at another by linking it
-    /// in a message, and nothing is asked or recorded for that. Anything else stays inside
-    /// `scope` (the grant's, or the narrower one the call asked for). Never the caller's own
-    /// Orchestrate parent or its ancestors, nor a project outside the caller's space.
-    pub(super) fn target_reachable(
+    /// Whether a call may name `target`: any thread on the host but the caller's own
+    /// Orchestrate parent and its ancestors, and, in a member's turn, one outside the space.
+    pub(super) fn open_to(&self, caller: &Caller, target: &SessionMeta) -> bool {
+        !caller.ancestors.contains(&target.id)
+            && caller
+                .space
+                .as_ref()
+                .is_none_or(|space| space.holds(target.project_id.as_deref()))
+    }
+
+    /// Whether a listing or search covering `scope` includes `target`.
+    pub(super) fn covered(
         &self,
         caller: &Caller,
         scope: &ControlScope,
         target: &SessionMeta,
-        reads_content: bool,
     ) -> bool {
-        if caller.ancestors.contains(&target.id)
-            || caller
-                .space
-                .as_ref()
-                .is_some_and(|space| !space.holds(target.project_id.as_deref()))
-        {
-            return false;
-        }
-        reads_content || scope.reaches(caller.project_id.as_deref(), target.project_id.as_deref())
+        scope.reaches(caller.project_id.as_deref(), target.project_id.as_deref())
+            && self.open_to(caller, target)
     }
 
     /// Resolve one `tcode_control` call on the host thread.
@@ -363,58 +350,20 @@ impl AppState {
         self.control.answered.truncate(CONTROL_ACTIVITY_LIMIT);
     }
 
-    /// The grant check every call passes host-side, however the connection listed its tools:
-    /// tier or category, the call's own categories, the scope it asks for, the targets it
-    /// names, and the settings no grant lets an agent change. Dropping a queued human message needs `history_edit` and is judged where the
-    /// queue is read. The refusal names the reason and the grant.
+    /// What every call passes host-side, however the connection listed its tools. A call is
+    /// closed only where no thread's model may go: a tool that is a subagent's alone, what a
+    /// space withholds from its members' turns, the settings no agent changes, and a target
+    /// that is unknown, the caller's own Orchestrate ancestor or outside its space. Whether
+    /// a call that is open should be made is the harness's permission mode to settle.
     pub(super) fn authorize_control(&self, caller: &Caller, op: &ControlOp) -> Result<(), String> {
         let name = op.tool_name();
-        let grant = &caller.grant;
-        let refused = |need: String| {
-            Err(format!(
-                "refused: `{name}` needs {need}; your grant: {}",
-                grant.describe()
-            ))
-        };
-        match op.requirement() {
-            ToolRequirement::Tier(tier) if !grant.allows_tier(tier) => {
-                return refused(format!("tier {}", tier.name()));
-            }
-            ToolRequirement::Category(category) if !grant.allows_category(category) => {
-                return refused(format!("category {}", category.name()));
-            }
-            ToolRequirement::Subagent if !caller.subagent => {
-                return Err(format!(
-                    "refused: `{name}` is only for a thread another thread started as its \
-                     subagent"
-                ));
-            }
-            _ => {}
+        if matches!(op, ControlOp::ReportResult(_)) && !caller.subagent {
+            return Err(format!(
+                "refused: `{name}` is only for a thread another thread started as its subagent"
+            ));
         }
         if let Some(space) = &caller.space {
             self.authorize_space_control(space, op)?;
-        }
-        if let ControlOp::RespondInput(params) = op
-            && !grant.allows_category(ControlCategory::AnswerInput)
-            && !self
-                .find_meta(&params.thread_id)
-                .is_some_and(|target| self.own_subagent(caller, &target))
-        {
-            return refused(format!("category {}", ControlCategory::AnswerInput.name()));
-        }
-        for category in op.extra_categories() {
-            if !grant.allows_category(category) {
-                return refused(format!("category {}", category.name()));
-            }
-        }
-        if let Some(scope) = op.requested_scope()
-            && !scope.within(&grant.scope, caller.project_id.as_deref())
-        {
-            return Err(format!(
-                "refused: scope {} is wider than your grant's {}",
-                scope.describe(),
-                grant.scope.describe()
-            ));
         }
         if let ControlOp::PatchSettings(params) = op {
             let patch: SettingsPatch = serde_json::from_value(params.patch.clone())
@@ -436,28 +385,22 @@ impl AppState {
             return Ok(());
         }
         for target in op.target_thread_ids() {
-            self.check_target(caller, &grant.scope, target, op.reads_content())
-                .map_err(|refusal| refusal.whole_call(target, &grant.scope))?;
+            self.check_target(caller, target)
+                .map_err(|refusal| refusal.whole_call(target))?;
         }
         Ok(())
     }
 
     /// Why `target` is closed to `caller`, or its meta when it is open.
-    fn check_target(
-        &self,
-        caller: &Caller,
-        scope: &ControlScope,
-        target: &str,
-        reads_content: bool,
-    ) -> Result<SessionMeta, TargetRefusal> {
+    fn check_target(&self, caller: &Caller, target: &str) -> Result<SessionMeta, TargetRefusal> {
         let Some(meta) = self.find_meta(target) else {
             return Err(TargetRefusal::Unknown);
         };
         if caller.ancestors.iter().any(|ancestor| ancestor == target) {
             return Err(TargetRefusal::Ancestor);
         }
-        if !self.target_reachable(caller, scope, &meta, reads_content) {
-            return Err(TargetRefusal::OutsideScope);
+        if !self.open_to(caller, &meta) {
+            return Err(TargetRefusal::OutsideSpace);
         }
         Ok(meta)
     }
@@ -468,10 +411,9 @@ impl AppState {
         &self,
         caller: &Caller,
         target: &str,
-        reads_content: bool,
     ) -> Result<SessionMeta, String> {
-        self.check_target(caller, &caller.grant.scope, target, reads_content)
-            .map_err(|refusal| refusal.per_item(&caller.grant.scope))
+        self.check_target(caller, target)
+            .map_err(|refusal| refusal.per_item())
     }
 
     fn dispatch_control_op(&mut self, caller: &Caller, op: ControlOp, cx: &mut HostCx) -> Answer {
@@ -509,7 +451,6 @@ impl AppState {
             ControlOp::DeleteThreads(p) => return self.op_delete_threads(caller, p, cx),
             ControlOp::Rewind(p) => return self.op_rewind(caller, p, cx),
             ControlOp::PatchSettings(p) => self.op_patch_settings(caller, p, cx),
-            ControlOp::RequestGrant(p) => self.op_request_grant(caller, p, cx),
         };
         Answer::Now(now)
     }
@@ -622,39 +563,36 @@ impl AppState {
 enum TargetRefusal {
     Unknown,
     Ancestor,
-    OutsideScope,
+    OutsideSpace,
 }
 
 impl TargetRefusal {
-    fn whole_call(&self, target: &str, scope: &ControlScope) -> String {
+    fn whole_call(&self, target: &str) -> String {
         match self {
             Self::Unknown => format!("unknown thread: {target}"),
             Self::Ancestor => format!(
                 "refused: thread {target} orchestrates this thread; a child may not read or act \
                  on its parent"
             ),
-            Self::OutsideScope => format!(
-                "refused: thread {target} is outside your grant's scope ({})",
-                scope.describe()
-            ),
+            Self::OutsideSpace => {
+                format!("refused: thread {target} is outside the space this turn runs in")
+            }
         }
     }
 
-    fn per_item(&self, scope: &ControlScope) -> String {
+    fn per_item(&self) -> String {
         match self {
             Self::Unknown => "unknown_thread".to_owned(),
             Self::Ancestor => "ancestor: a child may not read or act on its parent".to_owned(),
-            Self::OutsideScope => {
-                format!("outside_scope: your grant's scope is {}", scope.describe())
-            }
+            Self::OutsideSpace => "outside_space: this turn runs in a space".to_owned(),
         }
     }
 }
 
 impl AppState {
-    /// What a call made during a member's turn may not do, whatever the thread's grant: what
-    /// a member could not do from their own device, and what their space's policy withholds.
-    /// Which threads it reaches is confined in [`Self::target_reachable`].
+    /// What a call made during a member's turn may not do: what a member could not do from
+    /// their own device, and what their space's policy withholds. Which threads it reaches
+    /// is confined in [`Self::open_to`].
     fn authorize_space_control(&self, space: &CallerSpace, op: &ControlOp) -> Result<(), String> {
         let policy = &space.policy;
         let name = op.tool_name();

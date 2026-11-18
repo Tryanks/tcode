@@ -649,10 +649,9 @@ fn child_native_approval_callback_and_respond_approval_preserve_options_and_scop
 }
 
 /// A `tcode_control` call made during a member's turn stays inside the member's space and
-/// its policy, whatever the thread's grant reaches; the owner's own turn keeps the grant.
+/// its policy; the owner's own turn is held to neither.
 #[test]
 fn control_calls_in_a_members_turn_stay_inside_the_space() {
-    use tcode_core::control::{ControlCategory, ControlGrant, ControlScope, ControlTier};
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-control-space");
     let root = store.root().join("project-a");
@@ -661,11 +660,6 @@ fn control_calls_in_a_members_turn_stay_inside_the_space() {
     store.upsert_project(&project).unwrap();
     stored_thread(&store, "caller", ProviderKind::Codex, &root, |meta| {
         meta.project_id = Some("a".into());
-        meta.control_grant = Some(ControlGrant {
-            scope: ControlScope::Host,
-            tiers: ControlTier::ALL.into_iter().collect(),
-            categories: ControlCategory::ALL.into_iter().collect(),
-        });
     });
     for (id, project) in [("same", "a"), ("other", "b")] {
         stored_thread(&store, id, ProviderKind::Codex, &root, |meta| {
@@ -770,22 +764,14 @@ fn control_calls_in_a_members_turn_stay_inside_the_space() {
 
 /// A subagent's question reaches its lead with the harness's own questions
 /// and says whether the subagent waits; the lead answers each question, or
-/// the user does when they keep subagent answers to themselves. Only the lead
-/// answers its own subagent unasked, a pending request, every question and
-/// no other; a question is never answered automatically.
+/// the user does when they keep subagent answers to themselves. An answer is
+/// for a pending request, every question and no other; a question is never
+/// answered automatically.
 #[test]
 fn child_questions_reach_the_lead_and_respond_input_answers_them() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-child-questions");
-    stored_thread(
-        &store,
-        "other-parent",
-        ProviderKind::Codex,
-        &store.root().join("other"),
-        |_| {},
-    );
     let fleet = Fleet::new(cx, &store, ProviderKind::Codex, &["child"], |_| {});
-    let other = first_turn(&fleet.state, cx, &fleet.providers, "other-parent", 2);
     let (state, child) = (&fleet.state, fleet.child("child"));
     let respond = |cx: &mut TestAppContext,
                    caller: &Played,
@@ -891,12 +877,6 @@ fn child_questions_reach_the_lead_and_respond_input_answers_them() {
             "{text}"
         );
         for (caller, request, answers, error) in [
-            (
-                &other,
-                None,
-                serde_json::json!({"lang": "Rust", "targets": []}),
-                "needs category answer_input",
-            ),
             (
                 &fleet.lead,
                 Some("missing"),

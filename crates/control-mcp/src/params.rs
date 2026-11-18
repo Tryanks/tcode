@@ -2,7 +2,7 @@
 //! runtime that answers it, plus the shapes the tools have in common.
 
 use serde::{Deserialize, Serialize};
-use tcode_core::control::{ControlCategory, ControlScope, ControlTier, SelfSettleWhen, WatchEvent};
+use tcode_core::control::{ControlScope, SelfSettleWhen, WatchEvent};
 
 /// `"<thread_id>#<position>"`: the thread and the position of one stored entry.
 pub fn parse_anchor(anchor: &str) -> Option<(&str, u64)> {
@@ -73,7 +73,7 @@ pub enum ItemKind {
     Other,
 }
 
-const SCOPE: &str = "Limit the call to the caller's own project (project), named projects ({\"projects\": [ids]}) or the whole host (host). Omit for the grant's scope. A scope wider than the grant is refused.";
+const SCOPE: &str = "Which projects the call covers: the caller's own (project), named ones ({\"projects\": [ids]}) or the whole host (host). Omit for the caller's own project.";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ListProjectsParams {}
@@ -416,9 +416,7 @@ pub struct StartThreadParams {
     )]
     pub message: String,
     #[serde(default)]
-    #[schemars(
-        description = "Image paths already in the attachments folder of a thread in your scope."
-    )]
+    #[schemars(description = "Image paths already in a thread's attachments folder.")]
     pub attachments: Option<Vec<String>>,
     #[schemars(
         description = "Idempotency key, stored on the thread: a retry after a failure or restart returns the same thread."
@@ -445,9 +443,7 @@ pub struct SendMessageParams {
     )]
     pub mode: SendMode,
     #[serde(default)]
-    #[schemars(
-        description = "Image paths already in the attachments folder of a thread in your scope."
-    )]
+    #[schemars(description = "Image paths already in a thread's attachments folder.")]
     pub attachments: Option<Vec<String>>,
     #[serde(default)]
     #[schemars(description = "Idempotency key: a retry with the same key does not send twice.")]
@@ -521,16 +517,6 @@ pub enum PullRequestOp {
     },
 }
 
-impl PullRequestOp {
-    /// Comment, reply and resolve write to the host and need `pr_write`.
-    pub fn writes(&self) -> bool {
-        matches!(
-            self,
-            Self::Comment { .. } | Self::Reply { .. } | Self::Resolve { .. }
-        )
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PullRequestParams {
     #[schemars(description = "The thread the pull request is or becomes linked to.")]
@@ -567,13 +553,6 @@ pub enum GitOp {
     },
     PublishBranch,
     MergeWorktree,
-}
-
-impl GitOp {
-    /// Push, pull, commit_push, publish_branch and merge_worktree need `git_remote`.
-    pub fn remote(&self) -> bool {
-        !matches!(self, Self::CheckoutBranch { .. } | Self::Commit { .. })
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -722,25 +701,9 @@ pub struct RewindParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PatchSettingsParams {
     #[schemars(
-        description = "A settings patch as {\"type\": <patch>, \"content\": <value>}, as get_settings shows the fields. Credentials, hosting, tcode_control grants and the settlement automation tier are refused whatever the grant."
+        description = "A settings patch as {\"type\": <patch>, \"content\": <value>}, as get_settings shows the fields. Credentials, hosting, whether threads are given tcode_control and the settlement automation tier are always refused."
     )]
     pub patch: serde_json::Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct RequestGrantParams {
-    #[schemars(description = "project, {\"projects\": [ids]} or host.")]
-    pub scope: ControlScope,
-    #[serde(default)]
-    #[schemars(description = "Tiers asked for: observe, organize, operate.")]
-    pub tiers: Vec<ControlTier>,
-    #[serde(default)]
-    #[schemars(
-        description = "Privileged categories asked for: answer_input, terminal, delete, git_remote, pr_write, history_edit, settings_write."
-    )]
-    pub categories: Vec<ControlCategory>,
-    #[schemars(description = "Why, shown to the user with the request.")]
-    pub reason: String,
 }
 
 // ---- observe responses ----

@@ -129,30 +129,13 @@ fn list_threads_honours_scope_hides_children_and_archived_and_pages() {
     }
     assert_eq!(paged, ["newest", "middle", "settled", "caller"]);
 
-    assert_eq!(
-        call(
-            &state,
-            cx,
-            ControlOp::ListThreads(ListThreadsParams {
-                scope: Some(ControlScope::Host),
-                ..ListThreadsParams::default()
-            })
-        ),
-        Err("refused: scope host is wider than your grant's project".into())
-    );
-    state.update(cx, |state, _| {
-        let mut caller = state.find_meta("caller").unwrap();
-        caller.control_grant = Some(ControlGrant {
-            scope: ControlScope::Host,
-            ..ControlGrant::default_grant()
-        });
-        state.sessions.retain(|meta| meta.id != "caller");
-        state.sessions.push(caller);
-    });
     let page = call(
         &state,
         cx,
-        ControlOp::ListThreads(ListThreadsParams::default()),
+        ControlOp::ListThreads(ListThreadsParams {
+            scope: Some(ControlScope::Host),
+            ..ListThreadsParams::default()
+        }),
     )
     .unwrap();
     assert_eq!(ids(&page, "threads")[0], "elsewhere");
@@ -217,8 +200,8 @@ fn get_thread_explains_why_an_unsettled_thread_was_not_auto_settled() {
     }
 }
 
-/// Left to itself `search` covers the grant's scope; a thread the call names is searched
-/// wherever it is.
+/// Left to itself `search` covers the caller's own project; a thread the call names is
+/// searched wherever it is.
 #[test]
 fn search_covers_the_scope_and_any_thread_it_names_and_returns_anchors() {
     let cx = &mut TestAppContext::default();

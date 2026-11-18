@@ -982,19 +982,6 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::SettleSession { session_id } => {
             app.settle_session(&session_id, cx);
         }
-        Command::SetControlGrant { session_id, grant } => {
-            app.set_control_grant(&session_id, grant, cx)
-        }
-        Command::RespondControlGrant {
-            session_id,
-            request_id,
-            approve,
-        } => {
-            return CommandOutcome::Immediate(
-                app.respond_control_grant(&session_id, &request_id, approve, cx)
-                    .map(|()| CommandResponse::Unit),
-            );
-        }
         Command::SetFollowUp {
             session_id,
             on,

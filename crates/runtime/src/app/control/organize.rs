@@ -114,7 +114,7 @@ impl AppState {
             reason: Some(reason),
             side_effects: None,
         };
-        let meta = match self.batch_target(caller, &target, false) {
+        let meta = match self.batch_target(caller, &target) {
             Ok(meta) => meta,
             Err(reason) => return skipped(reason),
         };
@@ -311,10 +311,10 @@ impl AppState {
         for (index, item) in params.items.into_iter().enumerate() {
             if !self
                 .find_meta(&item.thread_id)
-                .is_some_and(|meta| self.target_reachable(caller, &caller.grant.scope, &meta, true))
+                .is_some_and(|meta| self.open_to(caller, &meta))
             {
                 return Err(format!(
-                    "item {index}: thread {} is unknown or outside your grant's scope",
+                    "item {index}: thread {} is unknown or closed to this thread",
                     item.thread_id
                 ));
             }

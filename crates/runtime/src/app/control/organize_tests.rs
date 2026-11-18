@@ -97,9 +97,6 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
         state.residents.parked.insert("queued".into(), session);
 
         state.sessions.push(thread("stale", store.root()));
-        let mut far = thread("far", store.root());
-        far.project_id = Some("elsewhere".into());
-        state.sessions.push(far);
         for id in ["done", "running", "stale"] {
             state.thread_activity.insert(
                 id.into(),
@@ -132,7 +129,6 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
                         ..Default::default()
                     }),
                 ),
-                change("far", ThreadOp::Settle, None),
             ],
             dry_run,
         )
@@ -162,7 +158,6 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
             skipped("running", "busy"),
             skipped("queued", "busy"),
             skipped("stale", "changed_since_preview"),
-            skipped("far", "outside_scope: your grant's scope is project"),
         ]
     );
     state.read(|state| {
@@ -191,7 +186,6 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
             skipped("running", "busy"),
             skipped("queued", "busy"),
             skipped("stale", "changed_since_preview"),
-            skipped("far", "outside_scope: your grant's scope is project"),
         ]
     );
     state.read(|state| {
@@ -209,7 +203,6 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
         )));
         assert!(!state.find_meta("running").unwrap().is_settled());
         assert!(!state.find_meta("stale").unwrap().is_settled());
-        assert!(!state.find_meta("far").unwrap().is_settled());
     });
 
     let stale_state = call(

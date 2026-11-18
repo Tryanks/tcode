@@ -50,8 +50,7 @@ impl AppState {
 
         if let Command::PatchSettings { patch } = command {
             if let SettingsPatch::ProjectSettlement { project_id, .. }
-            | SettingsPatch::ProjectMergeMethod { project_id, .. }
-            | SettingsPatch::ControlProjectGrant { project_id, .. } = patch
+            | SettingsPatch::ProjectMergeMethod { project_id, .. } = patch
                 && !self
                     .projects
                     .iter()
@@ -298,8 +297,6 @@ impl AppState {
                 | Command::RunPullRequestAction { .. }
                 | Command::StopStackRebase { .. }
                 | Command::EditPullRequestReviewDraft { .. }
-                | Command::SetControlGrant { .. }
-                | Command::RespondControlGrant { .. }
                 | Command::SetFollowUp { .. }
                 | Command::SetParked { .. }
                 | Command::DismissSettleSuggestion { .. }

@@ -423,17 +423,6 @@ pub enum Command {
     SettleSession {
         session_id: String,
     },
-    /// Set or clear the thread's own `tcode_control` grant.
-    SetControlGrant {
-        session_id: String,
-        grant: Option<tcode_core::control::ControlGrant>,
-    },
-    /// Answer a grant the thread's model asked for with `request_grant`.
-    RespondControlGrant {
-        session_id: String,
-        request_id: String,
-        approve: bool,
-    },
     /// Put the thread on Follow-up or take it off. The host stamps when it
     /// went on, and a thread already on keeps that time.
     SetFollowUp {
@@ -804,8 +793,6 @@ impl Command {
             | Self::RemoveReviewComment { session_id, .. }
             | Self::SettleChildren { session_id }
             | Self::SettleSession { session_id, .. }
-            | Self::SetControlGrant { session_id, .. }
-            | Self::RespondControlGrant { session_id, .. }
             | Self::SetFollowUp { session_id, .. }
             | Self::SetParked { session_id, .. }
             | Self::DismissSettleSuggestion { session_id }

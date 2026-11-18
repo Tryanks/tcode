@@ -10,8 +10,8 @@ use tcode_core::settings::SettingsPatch;
 use tcode_protocol::{Command, Principal};
 
 /// The settings an agent may change, as display preferences only. Everything else touches
-/// authority (approvals, computer use, browser evaluation, plugins, child approval, grants,
-/// hosting, credentials), automation (settlement rules and tiers, resuming, the title model)
+/// authority (approvals, computer use, browser evaluation, plugins, child approval, whether
+/// threads are given `tcode_control`, hosting, credentials), automation (settlement rules and tiers, resuming, the title model)
 /// or UI state (sidebar, last project), and stays the user's. The match is exhaustive so a
 /// new setting is decided here, not allowed by default.
 pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
@@ -45,8 +45,6 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::BrowserHomeUrl(_)
         | SettingsPatch::BrowserAllowEvaluate(_)
         | SettingsPatch::ControlEnabled(_)
-        | SettingsPatch::ControlDefaultGrant(_)
-        | SettingsPatch::ControlProjectGrant { .. }
         | SettingsPatch::SettlementAutomation(_)
         | SettingsPatch::TitleGeneration(_)
         | SettingsPatch::SidebarLayout(_)
@@ -302,7 +300,7 @@ impl AppState {
         Ok(serde_json::json!(answer))
     }
 
-    /// The grant reached `thread_id`; a terminal id is only as reachable as the thread
+    /// The call may name `thread_id`; a terminal id is only as reachable as the thread
     /// whose panel holds it.
     fn terminal_in_thread(&self, terminal_id: u64, thread_id: &str) -> Result<(), String> {
         if self.terminal_owner(terminal_id) == Some(thread_id) {
@@ -332,7 +330,7 @@ impl AppState {
                 reason: Some(reason),
                 side_effects: None,
             };
-            let meta = match self.batch_target(caller, &target, false) {
+            let meta = match self.batch_target(caller, &target) {
                 Ok(meta) => meta,
                 Err(reason) => {
                     results.push(skipped(reason));

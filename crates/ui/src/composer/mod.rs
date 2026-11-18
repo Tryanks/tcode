@@ -2250,16 +2250,6 @@ impl Composer {
             let panel = self.render_approval_panel(request, *count, window, cx);
             panels.push(column_fold(&shown, panel));
         }
-        if let Some(shown) = self.motion.shown(
-            self.motion_key("control-request"),
-            self.control_request(cx),
-            SHOW,
-            window,
-            cx,
-        ) {
-            let panel = self.render_control_request_panel(&shown.value, window, cx);
-            panels.push(column_fold(&shown, panel));
-        }
         if let Some(shown) =
             self.motion
                 .shown(self.motion_key("user-input"), user_input, SHOW, window, cx)

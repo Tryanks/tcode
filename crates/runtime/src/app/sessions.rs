@@ -618,7 +618,6 @@ impl AppState {
         if let Some(moved) = moved {
             self.record_event(session_id, &moved, cx);
         }
-        self.refresh_control_grants();
         if self.resident(session_id).is_some() {
             self.refresh_session_git_branch(meta.id.clone(), meta.cwd.clone(), cx);
             self.refresh_git_status(session_id, cx);
@@ -665,7 +664,6 @@ impl AppState {
         session.branches.clear();
         let meta = session.meta.clone();
         self.persist_meta(&meta, cx);
-        self.refresh_control_grants();
         self.refresh_session_git_branch(meta.id, meta.cwd, cx);
         self.refresh_git_status(session_id, cx);
         true
@@ -1220,7 +1218,7 @@ impl AppState {
         self.executions.settings_changed(&self.settings);
         self.resume_provider_queues(cx);
         if control_changed {
-            self.refresh_control_grants();
+            self.refresh_control_access();
         }
         self.forge
             .configure(self.settings.source_control.hosts.clone());

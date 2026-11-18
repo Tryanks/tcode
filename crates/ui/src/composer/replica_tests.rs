@@ -1609,9 +1609,6 @@ fn an_at_thread_is_written_into_the_message_as_a_link(cx: &mut TestAppContext) {
     let (store, incoming, outgoing, mut status) = attach(cx);
     let session_id = Some(status.session_id.clone());
     status.control = Some(tcode_protocol::ControlStatus {
-        grant: tcode_core::control::ControlGrant::default_grant(),
-        source: tcode_core::control::ControlGrantSource::Default,
-        pending_requests: Vec::new(),
         self_settle: None,
         tools_offered: true,
     });

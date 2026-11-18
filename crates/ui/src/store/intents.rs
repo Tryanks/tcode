@@ -5,7 +5,7 @@ use gpui::{App, Context, Task};
 use tcode_client::ConnectionState;
 use tcode_core::{
     acp::AcpAgentPatch,
-    control::{ControlGrant, SettlementAutomation},
+    control::SettlementAutomation,
     git::GitAction,
     session::ReviewComment,
     settings::{ChildApprovalMode, ImageMode, ProfileSettingsPatch, TitleGenerationSettings},
@@ -338,28 +338,8 @@ impl WorkspaceStore {
     pub fn set_control_enabled(&mut self, enabled: bool) {
         self.patch_settings(SettingsPatch::ControlEnabled(enabled));
     }
-    pub fn set_control_default_grant(&mut self, grant: ControlGrant) {
-        self.patch_settings(SettingsPatch::ControlDefaultGrant(grant));
-    }
-    pub fn set_control_project_grant(&mut self, project_id: String, value: Option<ControlGrant>) {
-        self.patch_settings(SettingsPatch::ControlProjectGrant { project_id, value });
-    }
     pub fn set_settlement_automation(&mut self, value: SettlementAutomation) {
         self.patch_settings(SettingsPatch::SettlementAutomation(value));
-    }
-    /// Drops the thread's own grant, returning it to its project's or the default.
-    pub fn clear_control_grant(&mut self, session_id: String) {
-        self.dispatch(Command::SetControlGrant {
-            session_id,
-            grant: None,
-        });
-    }
-    pub fn respond_control_grant(&mut self, session_id: String, request_id: String, approve: bool) {
-        self.dispatch(Command::RespondControlGrant {
-            session_id,
-            request_id,
-            approve,
-        });
     }
     pub fn set_follow_up(&mut self, session_id: String, on: bool) {
         self.dispatch(Command::SetFollowUp {

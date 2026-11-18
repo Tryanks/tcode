@@ -373,7 +373,11 @@ pub use wire::{
 // longer keeps a list of threads it may read: thread metadata loses
 // references, ControlStatus loses references, the AddThreadReference and
 // RemoveThreadReference commands and the ThreadReferenceAdded answer go, and
-// RuntimeNotice loses reference_boundary_crossed.
+// RuntimeNotice loses reference_boundary_crossed. tcode_control keeps no
+// grants: thread metadata loses control_grant and control_grant_requests,
+// ControlStatus loses grant, source and pending_requests, Settings' control
+// keeps only enabled, and the SetControlGrant and RespondControlGrant
+// commands and the ControlDefaultGrant and ControlProjectGrant patches go.
 pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]

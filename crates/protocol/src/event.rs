@@ -1062,9 +1062,6 @@ pub struct PendingRewind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlStatus {
-    pub grant: tcode_core::control::ControlGrant,
-    pub source: tcode_core::control::ControlGrantSource,
-    pub pending_requests: Vec<tcode_core::control::ControlGrantRequest>,
     pub self_settle: Option<tcode_core::control::SelfSettleGrant>,
     /// Whether the thread's provider is given the `tcode_control` server when it starts.
     pub tools_offered: bool,

@@ -36,11 +36,12 @@ pub(super) struct McpWiring {
     pub(super) control_tokens: Option<control_mcp::TokenRegistry>,
     pub(super) control_registrations: HashMap<String, agent::McpRegistration>,
     pub(super) control_requests: Option<smol::channel::Receiver<control_mcp::BrokerRequest>>,
-    /// Each registered thread's effective access, read by the control server when a
-    /// connection opens to list the tools that access allows.
-    pub(super) control_grants: Arc<std::sync::Mutex<HashMap<String, control_mcp::ThreadAccess>>>,
+    /// Each registered thread's access, read by the control server when a connection
+    /// opens to list the tools it offers.
+    pub(super) control_thread_access:
+        Arc<std::sync::Mutex<HashMap<String, control_mcp::ThreadAccess>>>,
     /// The control server's record of the tools each thread's connection received.
-    pub(super) control_source: Option<control_mcp::GrantSource>,
+    pub(super) control_source: Option<control_mcp::AccessSource>,
     /// Why the MCP servers did not start, until the first thread that would have had them
     /// starts and the user is told.
     pub(super) unavailable: Option<String>,
