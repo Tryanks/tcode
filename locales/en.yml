@@ -315,6 +315,9 @@ sidebar:
   arrange_done: "Done"
   arrange_pinned_empty: "No pinned threads. Drag one here to pin it."
   arrange_handle: "Reorder %{title}"
+  undo_draft_deleted_one: "Draft deleted"
+  undo_draft_deleted: "%{count} drafts deleted"
+  delete_draft_tooltip: "Delete draft"
   undo_archived_one: "Thread archived"
   undo_archived: "%{count} threads archived"
   project_thread_rules: "Thread rules…"
@@ -387,6 +390,7 @@ sidebar:
   create_thread_on: "Create new thread on %{host}"
   working: "Working"
   background: "Background"
+  draft: "Draft"
   unsettled: "To settle"
   keeps_background: "%{count} background"
   keeps_agents: "%{count} subagents"
@@ -627,8 +631,9 @@ settings:
     description: "When Claude Code stops a turn because a usage limit was reached, Tcode resumes it when the limit resets. Off: the error card offers a button to schedule it by hand."
   title_generation:
     title: "Thread title model"
-    description: "Generates and regenerates thread titles, always at low reasoning effort."
+    description: "Generates and regenerates thread titles, always at low reasoning effort. Automatic names each thread on its own account, with a small model when the account has one."
 model_picker:
+  automatic: "Automatic"
   no_models: "No models available."
   models_unlisted: "Couldn't list the models: %{error}"
 computer_use:

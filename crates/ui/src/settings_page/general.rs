@@ -178,23 +178,12 @@ impl SettingsPage {
     }
 
     pub(super) fn title_generation_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        // Provider, model and profile are one setting to the user, so they
-        // reset together; the picker follows through the store observer.
-        let overridden =
-            self.store.read(cx).settings().title_generation != TitleGenerationSettings::default();
+        let chosen = self.store.read(cx).settings().title_generation.is_some();
         let reset = crate::settings_rows::reset_action(
             "reset-title-generation",
-            overridden,
+            chosen,
             cx.listener(|this, _, _, cx| {
-                let default = TitleGenerationSettings::default();
-                this.dispatch_settings(
-                    move |store| {
-                        store.set_title_generation_provider(default.provider);
-                        store.set_title_generation_model(default.model);
-                        store.set_title_generation_profile_id(default.profile_id);
-                    },
-                    cx,
-                );
+                this.dispatch_settings(|store| store.set_title_generation(None), cx);
             }),
         );
         let row = self.flip_row("title-generation", cx);

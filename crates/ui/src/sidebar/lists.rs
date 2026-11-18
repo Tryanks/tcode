@@ -121,7 +121,7 @@ impl SessionsSidebar {
     }
 
     /// The rows `scope` shows, as a drag over them would leave them, each
-    /// section of every host's merged by time ([`merged`]).
+    /// section of every host's merged into one ([`merged`]).
     pub(super) fn thread_rows<'a>(
         &self,
         lists: &'a [HostLists],
@@ -141,7 +141,7 @@ impl SessionsSidebar {
             pinned,
             active,
             mut settled,
-        } = merged(hosts);
+        } = merged(hosts, lists);
         let settled_count = settled.len();
         self.limit_settled_rows(shelf, &mut settled);
         ThreadRows {

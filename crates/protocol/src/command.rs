@@ -490,10 +490,6 @@ pub enum Command {
         session_id: String,
         order_key: String,
     },
-    ReorderActive {
-        session_id: String,
-        order_key: String,
-    },
     ArchiveSession {
         session_id: String,
     },
@@ -558,6 +554,18 @@ pub enum Command {
     SetDraftWorkspace {
         session_id: String,
         mode: WorkspaceMode,
+    },
+    /// Bring back the draft a `DeleteSession` just took, as it was; nothing
+    /// when the host no longer remembers it.
+    RestoreDraft {
+        session_id: String,
+    },
+    /// What the composer of a thread never sent to holds. With text the host
+    /// keeps the draft and lists it in the index; without, it is the
+    /// project's new thread page again. A thread that was sent to ignores it.
+    SetDraftText {
+        session_id: String,
+        text: String,
     },
 
     SendTurn {
@@ -823,7 +831,6 @@ impl Command {
             | Self::PinSession { session_id, .. }
             | Self::UnpinSession { session_id }
             | Self::ReorderPinned { session_id, .. }
-            | Self::ReorderActive { session_id, .. }
             | Self::SetAutoSettle { session_id, .. }
             | Self::ArchiveSession { session_id, .. }
             | Self::MoveSession { session_id, .. }
@@ -836,6 +843,7 @@ impl Command {
             | Self::MarkSessionUnread { session_id, .. }
             | Self::MarkSessionRead { session_id, .. }
             | Self::SetDraftWorkspace { session_id, .. }
+            | Self::SetDraftText { session_id, .. }
             | Self::SendTurn { session_id, .. }
             | Self::ScheduleTurn { session_id, .. }
             | Self::ConfirmRelayAndSend { session_id, .. }

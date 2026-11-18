@@ -553,6 +553,10 @@ impl SessionsSidebar {
             crate::i18n::join_list(&undo.harnesses)
         };
         let title = match (kind, count) {
+            (UndoKind::DiscardDraft, 1) => crate::tr!("sidebar.undo_draft_deleted_one"),
+            (UndoKind::DiscardDraft, _) => {
+                crate::tr!("sidebar.undo_draft_deleted", count = count)
+            }
             (UndoKind::Settle, 1) => crate::tr!("sidebar.undo_settled_one", harness = named),
             (UndoKind::Unpin, 1) => crate::tr!("sidebar.undo_unpinned_one"),
             (UndoKind::Archive, 1) => crate::tr!("sidebar.undo_archived_one"),
@@ -670,6 +674,38 @@ impl SessionsSidebar {
     ) {
         let title = self.thread_title(&action.0, cx).unwrap_or_default();
         self.delete_thread(&action.0, &title, window, cx);
+    }
+
+    /// Delete a draft at once: nothing is asked, and the deletion can be
+    /// taken back while its notice shows.
+    pub(super) fn discard_draft(
+        &mut self,
+        thread: &ThreadKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(store) = self.store_of(&thread.host) else {
+            return;
+        };
+        let session_id = thread.session_id.clone();
+        let reopen = store
+            .read(cx)
+            .is_thread_open(&session_id)
+            .then(|| session_id.clone());
+        store.update(cx, |store, _| {
+            store.delete_session(session_id.clone(), false)
+        });
+        self.push_lifecycle_undo(
+            UndoKind::DiscardDraft,
+            UndoEntry {
+                host: thread.host.clone(),
+                commands: vec![Command::RestoreDraft { session_id }],
+                reopen,
+            },
+            Vec::new(),
+            window,
+            cx,
+        );
     }
 
     pub(super) fn on_project_thread_rules(
@@ -971,6 +1007,15 @@ impl SessionsSidebar {
             return;
         };
         let session_id = thread.session_id.clone();
+        let draft = store
+            .read(cx)
+            .sidebar_sessions()
+            .iter()
+            .any(|meta| meta.id == session_id && meta.draft_text.is_some());
+        if draft {
+            self.discard_draft(thread, window, cx);
+            return;
+        }
         let skip = store.read(cx).settings().skip_delete_confirmation;
         if skip {
             proceed_delete(store, session_id, window, cx);

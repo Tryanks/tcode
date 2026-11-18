@@ -61,16 +61,28 @@ impl DomainDiff {
             .touched_since(self.residents_seen)
             .next()
             .is_some();
+        // A draft is listed from its resident, which changes without the
+        // stored sessions doing so.
+        let drafts_changed =
+            residents_touched || self.summary_revisions[1..3] != summary_revisions[1..3];
+        let lists = |listed: &[SessionMeta], in_scope: &dyn Fn(&SessionMeta) -> bool| {
+            let (threads, drafts) = (
+                listed.iter().filter(|meta| meta.draft_text.is_none()),
+                listed.iter().filter(|meta| meta.draft_text.is_some()),
+            );
+            (!sessions_changed
+                || threads.eq(state
+                    .sessions
+                    .iter()
+                    .filter(|meta| meta.archived_at.is_none() && in_scope(meta))))
+                && (!drafts_changed
+                    || drafts.eq(state.listed_drafts().filter(|meta| in_scope(meta))))
+        };
         if state.subscriptions.contains(&Topic::Index) {
             if !self.subscriptions.contains(&Topic::Index) {
                 self.index = state.index_snapshot();
             } else {
-                if self.index.projects != state.projects
-                    || (sessions_changed
-                        && !self.index.sessions.iter().eq(state
-                            .sessions
-                            .iter()
-                            .filter(|meta| meta.archived_at.is_none())))
+                if self.index.projects != state.projects || !lists(&self.index.sessions, &|_| true)
                 {
                     let index = state.index_snapshot();
                     for event in index_changes(&self.index, &index) {
@@ -127,14 +139,11 @@ impl DomainDiff {
                     .projects
                     .iter()
                     .eq(state.projects.iter().filter(|p| projects.contains(&p.id)))
-                && (!sessions_changed
-                    || old.sessions.iter().eq(state.sessions.iter().filter(|meta| {
-                        meta.archived_at.is_none()
-                            && meta
-                                .project_id
-                                .as_deref()
-                                .is_some_and(|id| visible_projects.contains(id))
-                    })))
+                && lists(&old.sessions, &|meta| {
+                    meta.project_id
+                        .as_deref()
+                        .is_some_and(|id| visible_projects.contains(id))
+                })
             {
                 if summary_changed
                     || residents_touched
@@ -433,17 +442,20 @@ fn index_changes(old: &IndexSnapshot, new: &IndexSnapshot) -> Vec<ServerEvent> {
             events.push(ServerEvent::IndexUpsertSession(Box::new(meta.clone())));
         }
     }
-    for meta in &old.sessions {
-        if !new_sessions.contains(meta.id.as_str()) {
-            events.push(ServerEvent::IndexRemoveSession {
-                session_id: meta.id.clone(),
-            });
-        }
-    }
+    // A project goes before what it held: a client showing its draft, which
+    // is listed for being shown, then looks for what to show next among the
+    // projects that remain.
     for project in &old.projects {
         if !new_projects.contains(project.id.as_str()) {
             events.push(ServerEvent::IndexRemoveProject {
                 project_id: project.id.clone(),
+            });
+        }
+    }
+    for meta in &old.sessions {
+        if !new_sessions.contains(meta.id.as_str()) {
+            events.push(ServerEvent::IndexRemoveSession {
+                session_id: meta.id.clone(),
             });
         }
     }
@@ -699,6 +711,11 @@ impl<'a> ActivityProjection<'a> {
                 .get(&meta.id)
                 .is_some_and(|activity| activity.failed),
             unread: self.state.session_unread(meta),
+            last_activity_at: self
+                .state
+                .thread_activity
+                .get(&meta.id)
+                .and_then(|activity| activity.last_activity_at()),
             fork: AppState::session_fork_availability(meta, resident),
             agent: self.agent_status(meta),
             // A log left with its turn open by a host that died folds to a
@@ -773,6 +790,7 @@ impl AppState {
                 .sessions
                 .iter()
                 .filter(|meta| meta.archived_at.is_none())
+                .chain(self.listed_drafts())
                 .cloned()
                 .collect(),
             projects: self.projects.clone(),
@@ -847,12 +865,12 @@ impl AppState {
         let sessions = self
             .sessions
             .iter()
+            .filter(|meta| meta.archived_at.is_none())
+            .chain(self.listed_drafts())
             .filter(|meta| {
-                meta.archived_at.is_none()
-                    && meta
-                        .project_id
-                        .as_deref()
-                        .is_some_and(|id| ids.contains(id))
+                meta.project_id
+                    .as_deref()
+                    .is_some_and(|id| ids.contains(id))
             })
             .cloned()
             .collect();

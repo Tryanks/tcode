@@ -1,6 +1,5 @@
 use super::*;
 use tcode_core::control::WatchEvent;
-use tcode_core::thread_sort::ThreadSection;
 
 /// What a settle did, or would do, beyond marking the thread settled. Unsettle restores none
 /// of it.
@@ -51,6 +50,9 @@ impl ResidentSessions {
             .chain(self.parked.touched_since(revision))
     }
 }
+
+/// How many deleted drafts the host remembers for a deletion to be taken back.
+const DELETED_DRAFTS_KEPT: usize = 8;
 
 impl AppState {
     /// Advanced by every record and metadata write for the thread, so a
@@ -1372,7 +1374,6 @@ impl AppState {
         self.end_pull_request_watches(&mut meta);
         meta.pinned_at = None;
         meta.pin_order = None;
-        meta.active_order = None;
         self.detach_provider_to_idle(id, cx);
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
@@ -1441,25 +1442,14 @@ impl AppState {
         self.persist_meta(&meta, cx);
     }
 
-    pub fn reorder_session(
-        &mut self,
-        id: &str,
-        section: ThreadSection,
-        order_key: String,
-        cx: &mut HostCx,
-    ) {
+    pub fn reorder_pinned(&mut self, id: &str, order_key: String, cx: &mut HostCx) {
         let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
             return;
         };
-        let slot = match section {
-            ThreadSection::Pinned => &mut meta.pin_order,
-            ThreadSection::Active => &mut meta.active_order,
-            ThreadSection::Settled => return,
-        };
-        if slot.as_deref() == Some(order_key.as_str()) {
+        if meta.pin_order.as_deref() == Some(order_key.as_str()) {
             return;
         }
-        *slot = Some(order_key);
+        meta.pin_order = Some(order_key);
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
         }
@@ -1626,8 +1616,6 @@ impl AppState {
         }
         if let Some(mut meta) = self.sessions.iter().find(|m| m.id == session_id).cloned() {
             meta.title = title.to_string();
-            meta.updated_at = cx.clock().unix_secs();
-            let meta = meta.clone();
             self.persist_meta(&meta, cx);
         }
     }
@@ -1684,6 +1672,14 @@ impl AppState {
             .cloned()
             .collect();
         for id in ids {
+            if let Some(draft) = self.resident(id).filter(|active| active.holds_draft_text()) {
+                self.deleted_drafts.push(draft.meta.clone());
+                let over = self
+                    .deleted_drafts
+                    .len()
+                    .saturating_sub(DELETED_DRAFTS_KEPT);
+                self.deleted_drafts.drain(..over);
+            }
             self.clear_approvals(id);
             if self.residents.live.contains_key(id) {
                 // shutdown_active drops the ActiveSession (and its terminal PTY).
@@ -1811,11 +1807,22 @@ impl AppState {
             .residents
             .live
             .values()
+            .chain(self.residents.parked.values())
             .filter(|s| s.draft && s.meta.project_id.as_deref() == Some(project_id))
             .map(|s| s.meta.id.clone())
             .collect();
         for id in &drafts {
             self.shutdown_active(id, cx);
+            self.drop_background(id, cx);
+        }
+        if !drafts.is_empty() {
+            self.enqueue_store_write(
+                StoreWrite::RemoveSessions {
+                    ids: drafts.clone(),
+                    kept_worktrees: Vec::new(),
+                },
+                cx,
+            );
         }
         let draft_uploads = self.remove_thread_uploads(drafts, cx);
         let draft_destination = ConversationDestination::ProjectDraft(project_id.to_string());
@@ -1943,6 +1950,83 @@ impl AppState {
         if let Some(active) = self.resident_mut(target_id).filter(|a| a.draft) {
             active.draft_workspace = mode;
         }
+    }
+
+    /// Take what the draft's composer holds. A draft holding text is kept: it
+    /// is stored, listed in the index, and no longer the page its project's
+    /// next new thread opens on.
+    pub fn set_draft_text(&mut self, target_id: &str, text: String, cx: &mut HostCx) {
+        let text = if text.trim().is_empty() {
+            String::new()
+        } else {
+            text
+        };
+        let Some(active) = self
+            .resident_mut(target_id)
+            .filter(|active| active.draft && active.meta.draft_text.as_ref() != Some(&text))
+        else {
+            return;
+        };
+        let was_kept = active.holds_draft_text();
+        active.meta.draft_text = Some(text);
+        active.meta.updated_at = tcode_core::project::now_secs();
+        active.idle_since = None;
+        let meta = active.meta.clone();
+        let write = if active.holds_draft_text() {
+            StoreWrite::UpsertMeta {
+                meta: Box::new(meta),
+                initial: !was_kept,
+            }
+        } else {
+            StoreWrite::RemoveSessions {
+                ids: vec![meta.id],
+                kept_worktrees: Vec::new(),
+            }
+        };
+        self.enqueue_store_write(write, cx);
+    }
+
+    /// Take back the deletion of a draft, while its project is still there.
+    pub fn restore_draft(&mut self, session_id: &str, cx: &mut HostCx) {
+        let Some(position) = self
+            .deleted_drafts
+            .iter()
+            .position(|meta| meta.id == session_id)
+        else {
+            return;
+        };
+        let meta = self.deleted_drafts.remove(position);
+        if !self
+            .projects
+            .iter()
+            .any(|project| Some(&project.id) == meta.project_id.as_ref())
+        {
+            return;
+        }
+        self.thread_activity
+            .insert(meta.id.clone(), Default::default());
+        self.enqueue_store_write(
+            StoreWrite::UpsertMeta {
+                meta: Box::new(meta.clone()),
+                initial: true,
+            },
+            cx,
+        );
+        let commands = self.cached_provider_commands_for(&meta);
+        self.residents
+            .park(ActiveSession::new(meta, true, commands));
+    }
+
+    /// The drafts the index lists beside the threads: those on a client's
+    /// screen, and those that hold text.
+    pub(super) fn listed_drafts(&self) -> impl Iterator<Item = &SessionMeta> {
+        let shown = self.residents.live.values().filter(|active| active.draft);
+        let kept = self
+            .residents
+            .parked
+            .values()
+            .filter(|active| active.holds_draft_text());
+        shown.chain(kept).map(|active| &active.meta)
     }
 
     /// Kick off background creation of a draft's worktree from `base`, the branch or
@@ -2213,12 +2297,16 @@ impl AppState {
             .chain(self.residents.parked.values())
             .find(|active| {
                 active.draft
+                    && !active.holds_draft_text()
                     && active.draft_device_id == device_id
                     && active.meta.project_id.as_deref() == Some(project_id.as_str())
                     && active.meta.cwd == cwd
             })
             .map(|active| active.meta.id.clone());
         if let Some(session_id) = standing {
+            if let Some(standing) = self.resident_mut(&session_id) {
+                standing.meta.updated_at = tcode_core::project::now_secs();
+            }
             let selection = self
                 .draft_model_selection(self.current_meta(&session_id).expect("standing draft"))?;
             if let Some(mut parked) = self.residents.adopt(&session_id) {
@@ -2247,6 +2335,7 @@ impl AppState {
             provider_commands,
         );
         draft.draft_device_id = device_id;
+        draft.meta.draft_text = Some(String::new());
         draft.meta.profile_id = profile_id;
         draft.meta.option_selections = reasoning_effort.into_iter().collect();
         if let Some(selection) = self.initial_permission_selection(
@@ -2341,6 +2430,7 @@ impl AppState {
             && active.draft
         {
             active.draft = false;
+            active.meta.draft_text = None;
             let meta = active.meta.clone();
             self.emit_domain(
                 Topic::SessionEvents {

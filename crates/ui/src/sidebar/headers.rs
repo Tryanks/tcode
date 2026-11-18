@@ -974,6 +974,11 @@ impl SessionsSidebar {
             show_unread: own_flags.unread && !own_flags.working,
             menu_can_fork: own_flags.forks,
             title_generating: store.title_generating(&meta.id),
+            draft: meta.draft_text.is_some(),
+            draft_kept: meta
+                .draft_text
+                .as_ref()
+                .is_some_and(|text| !text.is_empty()),
         }
     }
 

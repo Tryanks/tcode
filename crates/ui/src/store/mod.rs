@@ -1367,18 +1367,24 @@ impl WorkspaceStore {
         }
     }
 
-    /// Whether a thread is gone from the visible index. A draft has no index
-    /// entry of its own and stays until the user navigates away, unless its
-    /// project leaves the index.
+    /// Whether a thread is gone from the visible index. A draft stays until
+    /// the user navigates away, unless it is deleted or its project leaves
+    /// the index: the host lists it for being on screen, which its status
+    /// may tell this client of first.
     fn left_index(&self, status: &SessionStatus) -> bool {
         if status.draft {
-            return status.project_id.as_ref().is_some_and(|project_id| {
-                !self
-                    .index_replica
-                    .1
-                    .iter()
-                    .any(|project| project.id == *project_id)
-            });
+            let deleted = self
+                .removed_session
+                .as_ref()
+                .is_some_and(|removed| removed.id == status.session_id);
+            return deleted
+                || status.project_id.as_ref().is_some_and(|project_id| {
+                    !self
+                        .index_replica
+                        .1
+                        .iter()
+                        .any(|project| project.id == *project_id)
+                });
         }
         !self.session_visible(&status.session_id)
     }
@@ -1910,8 +1916,32 @@ impl WorkspaceStore {
             .filter(|meta| tcode_core::thread_sort::in_roster(meta))
             .cloned()
             .collect();
-        tcode_core::thread_sort::sort_threads(&mut visible);
+        tcode_core::thread_sort::sort_threads(&mut visible, |meta| self.standing(meta));
         visible
+    }
+
+    /// What orders and dates `meta` in the threads view besides the meta
+    /// itself: a thread that waits on the user leads the unread ones, those
+    /// lead the working ones, and the idle ones follow. A working thread is
+    /// not unread yet, as its row shows.
+    pub fn standing(&self, meta: &SessionMeta) -> tcode_core::thread_sort::Standing {
+        use tcode_core::thread_sort::Attention;
+        let id = meta.id.as_str();
+        let attention = if self.pending_approval_for(id) || self.pending_user_input_for(id) {
+            Attention::Waiting
+        } else if self.turn_running_for(id) {
+            Attention::Working
+        } else if self.session_unread(id) {
+            Attention::Unread
+        } else {
+            Attention::Idle
+        };
+        tcode_core::thread_sort::Standing {
+            attention,
+            last_activity_at: self
+                .activity(id)
+                .and_then(|activity| activity.last_activity_at),
+        }
     }
 
     pub(crate) fn project(&self, id: &str) -> Option<&Project> {
@@ -2003,6 +2033,7 @@ impl WorkspaceStore {
         if !self.scope.is_full() {
             return self.thread_meta(session_id).is_some_and(|meta| {
                 !meta.is_settled()
+                    && meta.draft_text.is_none()
                     && self
                         .settings_replica
                         .last_visited

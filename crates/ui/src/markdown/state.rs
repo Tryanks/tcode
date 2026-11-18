@@ -13,8 +13,8 @@ use crate::theme::ActiveTheme as _;
 use crate::widgets::copy::CopiedMark;
 use gpui::{
     Bounds, ClipboardItem, Context, FocusHandle, ImageSource, IntoElement, ListAlignment,
-    ListState, ParentElement as _, Pixels, Point, Render, SharedString, SharedUri, Size,
-    Styled as _, Window, px,
+    ListState, ParentElement as _, Pixels, Point, Render, ScrollHandle, SharedString, SharedUri,
+    Size, Styled as _, Window, px,
 };
 use gpui_base::{ElementExt as _, v_flex};
 
@@ -37,6 +37,17 @@ pub(super) struct PendingLinkMenu {
     pub(super) target: LinkTarget,
     pub(super) text: SharedString,
     pub(super) raw_url: SharedString,
+}
+
+/// The sideways scroll of one code block, shared by the list items that
+/// paint its lines.
+#[derive(Clone, Default)]
+pub(super) struct CodeScroll {
+    pub(super) handle: ScrollHandle,
+    /// The widest any of the block's items has laid its lines out. Every
+    /// item is given this width: a viewport clamps the offset to its own
+    /// content, so a narrower item would pull a wider one back.
+    pub(super) width: Rc<Cell<Pixels>>,
 }
 
 /// What the last right-click landed on, recorded by the inline that was hit
@@ -111,6 +122,10 @@ pub struct MarkdownState {
     /// not in element state, because the document measures its blocks under
     /// other element ids than it paints them, and both must size alike.
     glides: RefCell<HashMap<String, crate::motion::GlideState>>,
+    /// How far each code block is scrolled sideways, by render path. Kept
+    /// here because a long block is painted as several list items, which
+    /// must move as one.
+    code_scrolls: RefCell<HashMap<String, CodeScroll>>,
     /// The clocks of the document's other motion (a picture fading in over
     /// its stand-in), by render path: kept with the document, not in element
     /// state, so they carry on when its view is drawn under a new parent.
@@ -186,6 +201,7 @@ impl MarkdownState {
             items,
             image_sizes: HashMap::new(),
             glides: RefCell::default(),
+            code_scrolls: RefCell::default(),
             motion: Default::default(),
             layout_revision: 0,
             selection: None,
@@ -454,6 +470,15 @@ impl MarkdownState {
             .clone()
     }
 
+    /// The sideways scroll of the code block at render `path`.
+    pub(super) fn code_scroll(&self, path: &str) -> CodeScroll {
+        self.code_scrolls
+            .borrow_mut()
+            .entry(path.to_string())
+            .or_default()
+            .clone()
+    }
+
     /// The clocks of the document's motion, kept with the document.
     pub(super) fn motion(&self) -> crate::motion::owned::Owned {
         self.motion.clone()
@@ -699,6 +724,7 @@ impl MarkdownState {
         self.stream_fade.clear();
         self.image_sizes.clear();
         self.glides.borrow_mut().clear();
+        self.code_scrolls.borrow_mut().clear();
         render::clear_code_measurements(cx.entity_id(), cx);
         let parsed_document = super::parse::parse_document(&self.text);
         self.items = root_items(&parsed_document.root);

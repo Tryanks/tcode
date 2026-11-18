@@ -334,10 +334,11 @@ impl AppState {
                 }
                 Command::RegenerateSessionTitle { session_id } => {
                     session(session_id)?;
-                    self.setup_allowed(
-                        policy,
-                        &super::events::title_session_meta(&self.settings, PathBuf::new()),
-                    )
+                    match self.sessions.iter().find(|meta| &meta.id == session_id) {
+                        Some(thread) => self
+                            .setup_allowed(policy, &self.title_session_meta(thread, Some(policy))),
+                        None => Err(refusal("session")),
+                    }
                 }
                 Command::SetActiveModel {
                     session_id,
@@ -417,7 +418,6 @@ impl AppState {
                 | Command::PinSession { session_id, .. }
                 | Command::UnpinSession { session_id }
                 | Command::ReorderPinned { session_id, .. }
-                | Command::ReorderActive { session_id, .. }
                 | Command::RewindTurn { session_id, .. }
                 | Command::PreviewRewind { session_id, .. }
                 | Command::UndoRewind { session_id, .. }
@@ -428,6 +428,7 @@ impl AppState {
                 | Command::CheckoutBranch { session_id, .. }
                 | Command::MergeWorktree { session_id }
                 | Command::SetDraftWorkspace { session_id, .. }
+                | Command::SetDraftText { session_id, .. }
                 | Command::WriteRelaunchMarker {
                     session_id: Some(session_id),
                     ..
@@ -457,6 +458,7 @@ impl AppState {
                 // Read marks are the host owner's, kept in their settings like the sidebar
                 // and favourite marks below.
                 Command::DeleteSession { .. }
+                | Command::RestoreDraft { .. }
                 | Command::MarkSessionRead { .. }
                 | Command::MarkSessionUnread { .. }
                 | Command::DeleteProject { .. }
@@ -529,6 +531,7 @@ impl AppState {
                 | Query::RenderThreadExport { session_id, .. }
                 | Query::ReadItemOutput { session_id, .. }
                 | Query::ThreadAnchorTurn { session_id, .. }
+                | Query::ThreadTurnMarks { session_id }
                 | Query::ReadItemImage { session_id, .. }
                 | Query::ReadItemImagePreview { session_id, .. }
                 | Query::BeginUpload { session_id, .. }

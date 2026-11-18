@@ -286,6 +286,7 @@ mod tests {
                 settle_blocked: false,
                 failed: false,
                 unread: false,
+                last_activity_at: None,
                 fork: tcode_protocol::ForkAvailability::Available,
                 agent: None,
                 latest_activity: None,

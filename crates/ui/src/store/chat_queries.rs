@@ -98,19 +98,20 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn with_composer_destination_for<R>(
-        &self,
-        session_id: Option<&str>,
-        read: impl FnOnce(bool, &str, Option<&str>) -> R,
-        cx: &App,
-    ) -> Option<R> {
-        self.thread_status(session_id, cx).map(|status| {
-            read(
-                status.draft,
-                &status.session_id,
-                status.project_id.as_deref(),
-            )
-        })
+    /// What the host holds as the text of `session_id`'s composer while the
+    /// thread is a draft: nothing for one it does not list yet.
+    pub fn draft_text_for(&self, session_id: Option<&str>, cx: &App) -> Option<&str> {
+        let status = self
+            .thread_status(session_id, cx)
+            .filter(|status| status.draft)?;
+        Some(
+            self.index_replica
+                .0
+                .iter()
+                .find(|meta| meta.id == status.session_id)
+                .and_then(|meta| meta.draft_text.as_deref())
+                .unwrap_or_default(),
+        )
     }
 
     pub(crate) fn native_subagent_readonly_for(&self, session_id: Option<&str>, cx: &App) -> bool {
@@ -517,6 +518,24 @@ impl WorkspaceStore {
                 Err(error) => Err(error.message),
             }
         })
+    }
+
+    /// The marks of every turn of `session_id` the user spoke in, as the
+    /// host folds them from the whole log.
+    pub(crate) fn thread_turn_marks(
+        &self,
+        session_id: &str,
+        cx: &mut App,
+    ) -> Task<Result<Vec<tcode_core::turn_marks::TurnMark>, String>> {
+        let session_id = session_id.to_owned();
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::ThreadTurnMarks { session_id }).await {
+                Ok(QueryResponse::ThreadTurnMarks(marks)) => Ok(marks),
+                Ok(other) => Err(format!("unexpected turn-marks response: {other:?}")),
+                Err(error) => Err(error.message),
+            },
+        )
     }
 
     pub fn absolute_turn_for(&self, session_id: Option<&str>, local: usize) -> usize {

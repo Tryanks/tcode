@@ -4,7 +4,6 @@ use std::sync::{Arc, OnceLock};
 
 use tcode_client::HostLink;
 use tcode_client::attachment::{AttachmentMessage, AttachmentPolicy, AttachmentSender};
-use tcode_core::thread_sort::ThreadSection;
 use tcode_protocol::{
     ClientMessage, ClientPayload, Command, CommandResponse, HostMessage, Principal, ProtocolError,
     Query, QueryResponse, decode_client_line,
@@ -1039,11 +1038,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::ReorderPinned {
             session_id,
             order_key,
-        } => app.reorder_session(&session_id, ThreadSection::Pinned, order_key, cx),
-        Command::ReorderActive {
-            session_id,
-            order_key,
-        } => app.reorder_session(&session_id, ThreadSection::Active, order_key, cx),
+        } => app.reorder_pinned(&session_id, order_key, cx),
         Command::ArchiveSession { session_id } => app.archive_session(&session_id, cx),
         Command::UnarchiveSession { session_id } => app.unarchive_session(&session_id, cx),
         Command::RenameSession { session_id, title } => app.rename_session(&session_id, &title, cx),
@@ -1110,6 +1105,8 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             app.fit_draft_to_space(&id, cx);
             response = CommandResponse::SessionId(Some(id));
         }
+        Command::RestoreDraft { session_id } => app.restore_draft(&session_id, cx),
+        Command::SetDraftText { session_id, text } => app.set_draft_text(&session_id, text, cx),
         Command::SetDraftWorkspace { session_id, mode } => {
             app.set_draft_workspace(&session_id, mode, cx)
         }
@@ -1585,6 +1582,7 @@ fn dispatch_query(
             session_id,
             position,
         } => app.thread_anchor_turn(&session_id, position, cx),
+        Query::ThreadTurnMarks { session_id } => app.thread_turn_marks(&session_id, cx),
         Query::ReadItemImage {
             session_id,
             item_id,

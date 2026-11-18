@@ -778,6 +778,10 @@ pub struct SessionActivity {
     /// The latest run ended in an error and nothing has run since.
     pub failed: bool,
     pub unread: bool,
+    /// The thread's last message or run, in Unix milliseconds; absent for a
+    /// thread with neither.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<u64>,
     pub fork: ForkAvailability,
     /// A dispatched orchestrate child's execution and delivery; absent for
     /// every other thread.

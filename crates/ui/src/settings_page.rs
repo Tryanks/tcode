@@ -690,9 +690,7 @@ impl SettingsPage {
                 store.clone(),
                 "title-model-popover",
                 "title-model-dropdown",
-                title_generation.provider,
-                title_generation.model,
-                title_generation.profile_id,
+                title_generation.map(|title| (title.provider, title.model, title.profile_id)),
                 cx,
             )
         });
@@ -703,15 +701,11 @@ impl SettingsPage {
                     return;
                 }
                 let settings = this.store.read(cx).settings();
-                let selection = settings.title_generation;
-                this.title_model_picker.update(cx, |picker, cx| {
-                    picker.set_selected(
-                        selection.provider,
-                        selection.model,
-                        selection.profile_id,
-                        cx,
-                    );
-                });
+                let selection = settings
+                    .title_generation
+                    .map(|title| (title.provider, title.model, title.profile_id));
+                this.title_model_picker
+                    .update(cx, |picker, cx| picker.set_selected(selection, cx));
                 cx.notify();
             }),
             cx.observe(&window_state, |_, _, cx| cx.notify()),
@@ -731,9 +725,11 @@ impl SettingsPage {
                 let selected = event.0.clone();
                 this.dispatch_settings(
                     move |store| {
-                        store.set_title_generation_provider(selected.provider);
-                        store.set_title_generation_model(selected.id);
-                        store.set_title_generation_profile_id(selected.profile_id);
+                        store.set_title_generation(Some(TitleGenerationSettings {
+                            provider: selected.provider,
+                            model: selected.id,
+                            profile_id: selected.profile_id,
+                        }));
                     },
                     cx,
                 );

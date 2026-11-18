@@ -8,7 +8,7 @@ use tcode_core::{
     control::{ControlGrant, SettlementAutomation},
     git::GitAction,
     session::ReviewComment,
-    settings::{ChildApprovalMode, ImageMode, ProfileSettingsPatch},
+    settings::{ChildApprovalMode, ImageMode, ProfileSettingsPatch, TitleGenerationSettings},
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
 use tcode_protocol::{
@@ -253,14 +253,8 @@ impl WorkspaceStore {
     pub fn set_browser_allow_evaluate(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::BrowserAllowEvaluate(value));
     }
-    pub fn set_title_generation_provider(&mut self, value: ProviderKind) {
-        self.patch_settings(SettingsPatch::TitleGenerationProvider(value));
-    }
-    pub fn set_title_generation_model(&mut self, value: String) {
-        self.patch_settings(SettingsPatch::TitleGenerationModel(value));
-    }
-    pub fn set_title_generation_profile_id(&mut self, value: Option<String>) {
-        self.patch_settings(SettingsPatch::TitleGenerationProfileId(value));
+    pub fn set_title_generation(&mut self, value: Option<TitleGenerationSettings>) {
+        self.patch_settings(SettingsPatch::TitleGeneration(value));
     }
     pub fn reset_settings(&mut self) {
         self.dispatch(Command::ResetSettings);
@@ -764,7 +758,9 @@ impl WorkspaceStore {
     pub fn show_thread_at_turn(&mut self, session_id: String, turn: usize, cx: &mut Context<Self>) {
         self.pending_chat_turn = Some((session_id.clone(), turn));
         self.show_thread(session_id, cx);
-        // Showing the thread already shown changes nothing else.
+        // Showing the thread already shown changes nothing else, and a turn
+        // above the window it holds is read in from here.
+        self.load_pending_chat_history(cx);
         cx.notify();
     }
     /// Open a thread, then scroll it to the turn holding the entry at
@@ -1014,13 +1010,13 @@ impl WorkspaceStore {
         self.create_and_show(Command::StartDraft { project_id, cwd }, false, None, cx);
     }
     /// Start a draft in the project `session_id` belongs to, or a scratch
-    /// draft when it belongs to none. Beside a draft nothing starts: the host
-    /// answers a project's or a quick chat's draft request with its standing
-    /// draft, which would be that same draft.
+    /// draft when it belongs to none. Beside a draft holding no text nothing
+    /// starts: the host answers a project's or a quick chat's draft request
+    /// with its standing draft, which would be that same draft.
     pub(crate) fn start_draft_beside(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
         if self
-            .session_status_for(session_id, cx)
-            .is_some_and(|status| status.draft)
+            .draft_text_for(session_id, cx)
+            .is_some_and(|text| text.is_empty())
         {
             return;
         }
@@ -1092,6 +1088,10 @@ impl WorkspaceStore {
             });
         })
         .detach();
+    }
+    /// Tell the host what the draft's composer holds.
+    pub fn set_draft_text(&mut self, session_id: String, text: String) {
+        self.dispatch(Command::SetDraftText { session_id, text });
     }
     pub fn set_draft_workspace_for(&mut self, session_id: String, mode: WorkspaceMode) {
         self.dispatch(Command::SetDraftWorkspace { session_id, mode });

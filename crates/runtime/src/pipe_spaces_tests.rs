@@ -985,19 +985,17 @@ fn space_policy_refuses_what_it_withholds() {
         model(ProviderKind::Codex, "team-model", Some("shared-profile")),
     );
     host.command(member.clone(), permission("auto_review"));
-    host.command(
-        Principal::Full,
-        Command::PatchSettings {
-            patch: tcode_core::settings::SettingsPatch::TitleGenerationProfileId(Some(
-                "shared-profile".into(),
-            )),
-        },
-    );
     for model in ["other-model", "team-model"] {
         host.command(
             Principal::Full,
             Command::PatchSettings {
-                patch: tcode_core::settings::SettingsPatch::TitleGenerationModel(model.into()),
+                patch: tcode_core::settings::SettingsPatch::TitleGeneration(Some(
+                    tcode_core::settings::TitleGenerationSettings {
+                        provider: ProviderKind::Codex,
+                        model: model.into(),
+                        profile_id: Some("shared-profile".into()),
+                    },
+                )),
             },
         );
         let title = Command::RegenerateSessionTitle {
