@@ -230,15 +230,8 @@ impl TimelineView {
                 this.hold_still_for_selection(*gesture, cx)
             }),
         ];
-        let spine_timeline = cx.entity().downgrade();
-        let spine = cx.new(|_| {
-            spine::SpineView::new(
-                workspace_store.clone(),
-                spine_timeline,
-                session_id.clone(),
-                scene,
-            )
-        });
+        let spine =
+            cx.new(|_| spine::SpineView::new(workspace_store.clone(), session_id.clone(), scene));
         let mut this = Self {
             spine,
             workspace_store,
@@ -671,6 +664,53 @@ impl TimelineView {
             .into_any_element()
     }
 
+    /// The turn the reader is at, among those held, of the rows `painted`:
+    /// the last with the thread's end on screen and the first with its
+    /// start, and between them the one whose opening message is nearest the
+    /// middle of the screen, or with none on screen, the one the middle of
+    /// the screen is in.
+    fn turn_being_read(&self, painted: Range<usize>) -> Option<usize> {
+        let viewport = self.list_state.viewport_bounds();
+        let middle = viewport.center().y;
+        let on_screen = |index: usize| {
+            self.list_state
+                .bounds_for_item(index)
+                .filter(|row| row.top() < viewport.bottom() && row.bottom() > viewport.top())
+        };
+        let last = self.rows.len().checked_sub(1)?;
+        // The scrollbar's geometry, which keeps size hints for rows not
+        // measured, as the jump to the latest row reads it.
+        let (reach, offset) = (
+            self.list_state.max_offset_for_scrollbar().y,
+            self.list_state.scroll_px_offset_for_scrollbar().y,
+        );
+        let at_end = self.list_state.is_following_tail() || reach + offset <= px(1.);
+        let at_start = offset >= px(-1.);
+        let index = if at_end {
+            last
+        } else if at_start {
+            0
+        } else {
+            painted
+                .clone()
+                .filter(|index| self.rows.get(*index).is_some_and(|row| row.first_in_turn))
+                .filter_map(|index| {
+                    let row = on_screen(index)?;
+                    Some((index, f32::from(row.center().y - middle).abs()))
+                })
+                .min_by(|(_, a), (_, b)| a.total_cmp(b))
+                .map(|(index, _)| index)
+                .or_else(|| {
+                    painted.clone().find(|index| {
+                        on_screen(*index)
+                            .is_some_and(|row| row.top() <= middle && middle < row.bottom())
+                    })
+                })
+                .unwrap_or(painted.start)
+        };
+        Some(self.rows.get(index)?.turn)
+    }
+
     /// After the list's layout: the jump to the latest row follows the
     /// geometry the list's prepaint settled on, the command panels their
     /// screens, and the Markdown the rows the frame painted.
@@ -702,18 +742,13 @@ impl TimelineView {
                         return;
                     };
                     let timeline = view.read(cx);
-                    let turns = painted.and_then(|(start, end)| {
-                        let last = end.checked_sub(1)?.max(start);
-                        Some((
-                            timeline.rows.get(start)?.turn,
-                            timeline.rows.get(last)?.turn,
-                        ))
-                    });
-                    if let Some(turns) = turns {
+                    if let Some(turn) =
+                        painted.and_then(|(start, end)| timeline.turn_being_read(start..end))
+                    {
                         timeline
                             .spine
                             .clone()
-                            .update(cx, |spine, cx| spine.set_turns_in_view(turns, cx));
+                            .update(cx, |spine, cx| spine.set_reading(turn, cx));
                     }
                     let timeline = view.read(cx);
                     let panels = timeline.command_panels.borrow_mut().settle();
