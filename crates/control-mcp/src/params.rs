@@ -211,7 +211,7 @@ pub struct SearchInItemParams {
     #[schemars(description = "Substring to find in the output.")]
     pub query: String,
     #[serde(default)]
-    #[schemars(description = "Lines of context around each match; default 2.")]
+    #[schemars(description = "Lines of context around each match; default 2, at most 10.")]
     pub context_lines: Option<u32>,
 }
 

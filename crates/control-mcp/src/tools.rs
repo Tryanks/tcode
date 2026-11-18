@@ -246,7 +246,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Store a conversation review: the grouped items with their evidence and your coverage statement. Changes no thread state; the user acts on it in Tcode."
+        description = "Store a conversation review: the grouped items with their evidence and your coverage statement. Changes no thread state. Tcode tells the user only that a review was recorded, with the number of items and your coverage."
     )]
     async fn record_review(
         &self,
