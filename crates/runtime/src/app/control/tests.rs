@@ -272,7 +272,7 @@ fn run_callback_turn(cx: &mut TestAppContext, provider: &Played, id: &str, deliv
 }
 
 /// What was said in thread `id` with `origin`, as the client's copy of its log has it.
-fn said(cx: &TestAppContext, id: &str, origin: MessageOrigin) -> Vec<String> {
+pub(super) fn said(cx: &TestAppContext, id: &str, origin: MessageOrigin) -> Vec<String> {
     cx.seen()
         .records(id)
         .iter()
@@ -308,7 +308,7 @@ fn question(request_id: &str) -> AgentEvent {
     }
 }
 
-fn turn_completed() -> AgentEvent {
+pub(super) fn turn_completed() -> AgentEvent {
     AgentEvent::TurnCompleted {
         turn_id: "turn".into(),
         status: agent::TurnStatus::Completed,

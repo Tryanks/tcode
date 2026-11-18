@@ -1,44 +1,49 @@
 use super::*;
+use crate::app::control::tests::{said, turn_completed};
+use crate::app::next_command;
 use crate::app::test_support::*;
-use crate::app::{ProviderLauncher, active_session::Runtime};
-use control_mcp::{ControlOp, MoveThreadParams, Workspace};
+use control_mcp::{ControlOp, GetThreadParams, MoveThreadParams, Workspace};
+use tcode_protocol::TurnDue;
 
-/// Providers that never come up, so what a call queued stays observable.
-fn idle_launcher() -> ProviderLauncher {
-    ProviderLauncher(Arc::new(|_, _| Box::pin(std::future::pending())))
-}
+const MESSAGE: &str = "Find out why the sync test flakes";
 
-fn host(store: &TestStore, cx: &mut TestAppContext) -> TestEntity {
-    let mut state = TestClientState::new((**store).clone());
-    state.set_provider_launcher(idle_launcher());
-    cx.new_entity(state)
-}
-
+/// Run one `tcode_control` call from `caller` the way the broker does, and wait for its answer.
 fn call(
-    state: &mut AppState,
-    cx: &mut HostCx,
+    state: &TestEntity,
+    cx: &mut TestAppContext,
     caller: &str,
     op: ControlOp,
 ) -> Result<serde_json::Value, String> {
-    let (reply, response) = smol::channel::bounded(1);
-    state.handle_control_op(caller.into(), op, reply, cx);
-    response.try_recv().unwrap()
+    let (reply, answer) = smol::channel::bounded(1);
+    state.update(cx, |state, cx| {
+        state.handle_control_op(caller.into(), op, reply, cx)
+    });
+    cx.run_until_recv(&answer)
 }
 
-fn thread(id: &str, project: &str, provider: ProviderKind) -> SessionMeta {
-    let mut meta = SessionMeta::new(provider, PathBuf::from("/tmp/synthetic-checkout"), None);
-    meta.id = id.into();
-    meta.title = format!("Thread {id}");
-    meta.project_id = Some(project.into());
-    meta
+/// A project at `root` that the store held before the host started.
+fn stored_project(store: &TestStore, id: &str, root: &Path, edit: impl FnOnce(&mut Project)) {
+    std::fs::create_dir_all(root).unwrap();
+    let mut project = Project::from_root(root.to_path_buf());
+    project.id = id.into();
+    edit(&mut project);
+    store.upsert_project(&project).unwrap();
 }
 
-fn park(state: &mut AppState, session: ActiveSession) {
-    state.sessions.push(session.meta.clone());
-    state
-        .residents
-        .parked
-        .insert(session.meta.id.clone(), session);
+/// A thread of `project` working in `cwd` that the store held before the host started.
+fn stored(
+    store: &TestStore,
+    id: &str,
+    provider: ProviderKind,
+    project: &str,
+    cwd: &Path,
+    edit: impl FnOnce(&mut SessionMeta),
+) {
+    stored_thread(store, id, provider, cwd, |meta| {
+        meta.project_id = Some(project.into());
+        meta.title = format!("Thread {id}");
+        edit(meta);
+    });
 }
 
 fn start(project_id: &str) -> ControlOp {
@@ -52,19 +57,26 @@ fn start(project_id: &str) -> ControlOp {
         profile: None,
         options: None,
         title: Some("Investigate the flaky test".into()),
-        message: "Find out why the sync test flakes".into(),
+        message: MESSAGE.into(),
         attachments: None,
         request_id: "start-1".into(),
     })
 }
 
-fn started(state: &AppState) -> Vec<SessionMeta> {
-    state
-        .sessions
-        .iter()
+/// The threads the index lists as started by another thread.
+fn started(cx: &TestAppContext) -> Vec<SessionMeta> {
+    cx.seen()
+        .sessions()
         .filter(|meta| meta.started_by.is_some())
         .cloned()
         .collect()
+}
+
+fn permission(meta: &SessionMeta) -> Option<&serde_json::Value> {
+    meta.option_selections
+        .iter()
+        .find(|selection| selection.id == "permissions")
+        .map(|selection| &selection.value)
 }
 
 /// `start_thread` makes one ordinary thread whose first message is the agent's, leaves the
@@ -74,28 +86,46 @@ fn started(state: &AppState) -> Vec<SessionMeta> {
 fn start_thread_makes_one_ordinary_thread_across_retries_and_restarts() {
     let store = TestStore::new("tcode-control-start-thread");
     let root = store.root().join("project");
-    std::fs::create_dir_all(&root).unwrap();
-    let cx = &mut TestAppContext::default();
-    let state = host(&store, cx);
-    let project_id = state.update(cx, |state, cx| {
-        let project_id = state.create_project(root.clone(), cx).unwrap();
-        let mut caller = thread("caller", &project_id, ProviderKind::ClaudeCode);
-        caller.cwd = root.clone();
-        state.persist_meta(&caller, cx);
-        state.start_draft(project_id.clone(), root.clone(), cx);
-        project_id
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(root.join("notes.txt"), b"notes").unwrap();
+    stored_project(&store, "a", &root, |project| {
+        project
+            .permission_defaults
+            .insert("codex".into(), "read_only".into());
     });
-    let draft = state.read(|state| state.active_session_id().unwrap().to_owned());
+    stored(
+        &store,
+        "caller",
+        ProviderKind::ClaudeCode,
+        "a",
+        &root,
+        |_| {},
+    );
+    let cx = &mut TestAppContext::default();
+    let (state, providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    state.open(cx, "caller");
+    let draft = state
+        .command(
+            cx,
+            Command::StartDraft {
+                project_id: "a".into(),
+                cwd: root.clone(),
+            },
+        )
+        .unwrap();
+    let CommandResponse::SessionId(Some(draft)) = draft else {
+        panic!("unexpected answer: {draft:?}");
+    };
+    state.open(cx, &draft);
 
     // The model may not choose the permission mode, leave the project or attach a file the
     // user did not attach; nothing is made.
-    std::fs::create_dir_all(root.join("sub")).unwrap();
-    std::fs::write(root.join("notes.txt"), b"notes").unwrap();
-    let shot = state.read(|state| state.attachments_dir_for("caller").join("shot.png"));
+    let shot = cx.seen().status("caller").attachments_dir.join("shot.png");
     std::fs::create_dir_all(shot.parent().unwrap()).unwrap();
     std::fs::write(&shot, b"png").unwrap();
     let with = |edit: &dyn Fn(&mut StartThreadParams)| {
-        let ControlOp::StartThread(mut params) = start(&project_id) else {
+        let ControlOp::StartThread(mut params) = start("a") else {
             unreachable!()
         };
         edit(&mut params);
@@ -115,91 +145,82 @@ fn start_thread_makes_one_ordinary_thread_across_retries_and_restarts() {
         with(&|p| p.cwd = Some(outside.clone())),
         with(&|p| p.attachments = Some(vec![notes.clone()])),
     ] {
-        assert!(
-            state
-                .update(cx, |state, cx| call(state, cx, "caller", op))
-                .is_err()
-        );
+        assert!(call(&state, cx, "caller", op).is_err());
     }
-    state.read(|state| assert!(started(state).is_empty()));
-    state.update(cx, |state, _| {
-        let project = state
-            .projects
-            .iter_mut()
-            .find(|project| project.id == project_id)
-            .unwrap();
-        project
-            .permission_defaults
-            .insert("codex".into(), "read_only".into());
-    });
+    cx.run_until_parked();
+    assert!(started(cx).is_empty());
 
-    let first = state
-        .update(cx, |state, cx| {
-            call(
-                state,
-                cx,
-                "caller",
-                with(&|p| {
-                    p.cwd = Some("sub".into());
-                    p.attachments = Some(vec![shot.display().to_string()]);
-                }),
-            )
-        })
-        .unwrap();
+    // The new thread's provider is still starting, so its first message waits where a
+    // client sees it.
+    providers.hold();
+    let first = call(
+        &state,
+        cx,
+        "caller",
+        with(&|p| {
+            p.cwd = Some("sub".into());
+            p.attachments = Some(vec![shot.display().to_string()]);
+        }),
+    )
+    .unwrap();
     assert_eq!(first["created"], true);
     let id = first["thread_id"].as_str().unwrap().to_owned();
-    state.read(|state| {
-        let threads = started(state);
-        assert_eq!(threads.len(), 1);
-        let meta = &threads[0];
-        assert_eq!(meta.id, id);
-        assert_eq!(
-            meta.parent_session_id, None,
-            "an ordinary thread, not a child"
-        );
-        assert_eq!(meta.title, "Investigate the flaky test");
-        assert_eq!(meta.cwd, root.join("sub"));
-        assert!(
-            meta.option_selections
-                .iter()
-                .any(|selection| selection.id == "permissions"
-                    && selection.value == serde_json::json!("read_only")),
-            "the project's default permission: {:?}",
-            meta.option_selections
-        );
-        let session = state.resident(&id).unwrap();
-        assert!(!session.draft);
-        assert_eq!(session.queue[0].text, "Find out why the sync test flakes");
-        assert_eq!(session.queue[0].attachments.len(), 1);
-        assert_eq!(session.queue[0].origin, MessageOrigin::Agent);
+    state.open(cx, &id);
+    let threads = started(cx);
+    assert_eq!(threads.len(), 1);
+    let meta = &threads[0];
+    assert_eq!(meta.id, id);
+    assert_eq!(
+        meta.parent_session_id, None,
+        "an ordinary thread, not a child"
+    );
+    assert_eq!(meta.title, "Investigate the flaky test");
+    assert_eq!(meta.cwd, root.join("sub"));
+    assert_eq!(
+        permission(meta),
+        Some(&serde_json::json!("read_only")),
+        "the project's default permission"
+    );
+    let status = cx.seen().status(&id);
+    assert!(!status.draft);
+    assert_eq!(status.queued_messages[0].text, MESSAGE);
+    let standing = cx.seen().status(&draft);
+    assert!(standing.draft, "the user's draft stays a draft");
+    assert!(standing.queued_messages.is_empty());
 
-        assert_eq!(state.active_session_id(), Some(draft.as_str()));
-        let standing = state.resident(&draft).unwrap();
-        assert!(standing.draft, "the user's draft stays a draft");
-        assert!(standing.queue.is_empty());
-    });
-
-    let retry = state
-        .update(cx, |state, cx| {
-            call(state, cx, "caller", start(&project_id))
-        })
-        .unwrap();
+    let retry = call(&state, cx, "caller", start("a")).unwrap();
     assert_eq!(retry["created"], false);
     assert_eq!(retry["thread_id"], id.as_str());
-    state.read(|state| assert_eq!(started(state).len(), 1));
+    cx.run_until_parked();
+    assert_eq!(started(cx).len(), 1);
+
+    providers.let_go();
+    let provider = providers.started(cx, 0);
+    let SessionCommand::SendTurn {
+        delivery_id,
+        text,
+        attachments,
+        ..
+    } = provider.next_command(cx)
+    else {
+        panic!("expected the first message to reach the provider");
+    };
+    assert_eq!(text, MESSAGE);
+    assert_eq!(attachments.len(), 1);
+    provider.play([AgentEvent::TurnAccepted { delivery_id }]);
+    provider.fence(cx, &id);
+    assert_eq!(said(cx, &id, MessageOrigin::Agent), [MESSAGE]);
     cx.run_until_parked();
     drop(state);
 
     let cx = &mut TestAppContext::default();
-    let restarted = host(&store, cx);
-    let after_restart = restarted
-        .update(cx, |state, cx| {
-            call(state, cx, "caller", start(&project_id))
-        })
-        .unwrap();
+    let (restarted, _providers) = played_host(cx, &store);
+    restarted.subscribe(cx, Topic::Index);
+    let after_restart = call(&restarted, cx, "caller", start("a")).unwrap();
     assert_eq!(after_restart["created"], false);
     assert_eq!(after_restart["thread_id"], id.as_str());
-    restarted.read(|state| assert_eq!(started(state).len(), 1));
+    cx.run_until_parked();
+    assert_eq!(started(cx).len(), 1);
 }
 
 /// `subagent: true` makes the thread the caller's child: it works in the caller's directory,
@@ -213,26 +234,28 @@ fn a_subagent_is_a_child_that_owes_its_caller_a_report() {
 
     let store = TestStore::new("tcode-control-start-subagent");
     let root = store.root().join("project");
-    std::fs::create_dir_all(root.join("sub")).unwrap();
-    let cx = &mut TestAppContext::default();
-    let state = host(&store, cx);
-    let project_id = state.update(cx, |state, cx| {
-        let project_id = state.create_project(root.clone(), cx).unwrap();
-        let mut caller = thread("caller", &project_id, ProviderKind::ClaudeCode);
-        caller.cwd = root.join("sub");
-        state.persist_meta(&caller, cx);
-        let project = state
-            .projects
-            .iter_mut()
-            .find(|project| project.id == project_id)
-            .unwrap();
+    stored_project(&store, "a", &root, |project| {
         project
             .permission_defaults
             .insert("codex".into(), "read_only".into());
-        project_id
     });
+    let cwd = root.join("sub");
+    stored(
+        &store,
+        "caller",
+        ProviderKind::ClaudeCode,
+        "a",
+        &cwd,
+        |_| {},
+    );
+    let cx = &mut TestAppContext::default();
+    let (state, providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    let set = |cx: &mut TestAppContext, patch: SettingsPatch| {
+        state.command(cx, Command::PatchSettings { patch }).unwrap();
+    };
     let with = |request_id: &str, edit: &dyn Fn(&mut StartThreadParams)| {
-        let ControlOp::StartThread(mut params) = start(&project_id) else {
+        let ControlOp::StartThread(mut params) = start("a") else {
             unreachable!()
         };
         params.request_id = request_id.into();
@@ -245,13 +268,10 @@ fn a_subagent_is_a_child_that_owes_its_caller_a_report() {
         p.subagent = None;
         p.workspace = Some(Workspace::Worktree);
     });
-    assert!(
-        state
-            .update(cx, |state, cx| call(state, cx, "caller", ordinary_worktree))
-            .is_err()
-    );
+    assert!(call(&state, cx, "caller", ordinary_worktree).is_err());
 
-    for (n, (mode, permission)) in [
+    set(cx, SettingsPatch::OrchestrateChildWorktrees(false));
+    for (n, (mode, permitted)) in [
         (ChildApprovalMode::Orchestrator, "ask"),
         (ChildApprovalMode::Auto, "auto_review"),
         (ChildApprovalMode::AlwaysAllow, "full_access"),
@@ -260,47 +280,32 @@ fn a_subagent_is_a_child_that_owes_its_caller_a_report() {
     .into_iter()
     .enumerate()
     {
-        let started = state
-            .update(cx, |state, cx| {
-                state.settings.subagents.child_approval = mode;
-                state.settings.subagents.child_worktrees = false;
-                call(state, cx, "caller", with(&format!("child-{n}"), &|_| {}))
-            })
-            .unwrap();
+        set(cx, SettingsPatch::OrchestrateChildApproval(mode));
+        let started = call(&state, cx, "caller", with(&format!("child-{n}"), &|_| {})).unwrap();
         assert_eq!(started["subagent"], true, "{started}");
         let id = started["thread_id"].as_str().unwrap().to_owned();
-        state.read(|state| {
-            let meta = state.find_meta(&id).unwrap();
-            assert_eq!(meta.parent_session_id.as_deref(), Some("caller"));
-            assert_eq!(meta.cwd, root.join("sub"), "the caller's own directory");
-            assert_eq!(meta.report(), AgentReport::Expected);
-            assert!(
-                meta.option_selections
-                    .iter()
-                    .any(|selection| selection.id == "permissions"
-                        && selection.value == serde_json::json!(permission)),
-                "{mode:?}: {:?}",
-                meta.option_selections
-            );
-            let message = &state.resident(&id).unwrap().queue[0].text;
-            assert!(message.starts_with("Find out why the sync test flakes"));
-            assert!(message.ends_with(crate::app::orchestrate::CHILD_REPORT_FOOTER));
-        });
+        let (_, message) = providers.started(cx, n).next_turn(cx);
+        assert!(message.starts_with(MESSAGE));
+        assert!(message.ends_with(crate::app::orchestrate::CHILD_REPORT_FOOTER));
+        let meta = cx.seen().session(&id).unwrap();
+        assert_eq!(meta.parent_session_id.as_deref(), Some("caller"));
+        assert_eq!(meta.cwd, cwd, "the caller's own directory");
+        assert_eq!(meta.report(), AgentReport::Expected);
+        assert_eq!(
+            permission(meta),
+            Some(&serde_json::json!(permitted)),
+            "{mode:?}"
+        );
     }
 
     // The setting isolates a subagent by default; the project root is not a Git repository,
     // so no subagent starts, in the shared checkout or anywhere else.
-    let before = state.read(|state| started(state).len());
-    let (reply, response) = smol::channel::bounded(1);
-    state.update(cx, |state, cx| {
-        state.settings.subagents.child_worktrees = true;
-        let ControlOp::StartThread(params) = with("isolated", &|p| p.cwd = Some(".".into())) else {
-            unreachable!()
-        };
-        state.handle_control_op("caller".into(), ControlOp::StartThread(params), reply, cx);
-    });
-    assert!(cx.run_until_recv(&response).is_err());
-    assert_eq!(state.read(|state| started(state).len()), before);
+    let before = started(cx).len();
+    set(cx, SettingsPatch::OrchestrateChildWorktrees(true));
+    let isolated = with("isolated", &|p| p.cwd = Some(".".into()));
+    assert!(call(&state, cx, "caller", isolated).is_err());
+    cx.run_until_parked();
+    assert_eq!(started(cx).len(), before);
 }
 
 /// An untitled `start_thread` thread is titled from its first message once the provider
@@ -309,49 +314,34 @@ fn a_subagent_is_a_child_that_owes_its_caller_a_report() {
 fn an_untitled_started_thread_is_titled_from_its_first_message() {
     let store = TestStore::new("tcode-control-start-title");
     let root = store.root().join("project");
-    std::fs::create_dir_all(&root).unwrap();
+    stored_project(&store, "a", &root, |_| {});
+    stored(
+        &store,
+        "caller",
+        ProviderKind::ClaudeCode,
+        "a",
+        &root,
+        |_| {},
+    );
     let cx = &mut TestAppContext::default();
-    let provider = scripted_provider(ProviderKind::Codex);
-    let (commands, events) = (provider.commands.clone(), provider.events.clone());
-    let state = cx.new_entity({
-        let mut state = TestClientState::new((*store).clone());
-        state.set_provider_launcher(provider.launcher);
-        state
-    });
-    let project_id = state.update(cx, |state, cx| {
-        let project_id = state.create_project(root.clone(), cx).unwrap();
-        let mut caller = thread("caller", &project_id, ProviderKind::ClaudeCode);
-        caller.cwd = root.clone();
-        state.persist_meta(&caller, cx);
-        project_id
-    });
-    let mut untitled = start(&project_id);
+    let (state, providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    let mut untitled = start("a");
     if let ControlOp::StartThread(params) = &mut untitled {
         params.title = None;
     }
-    let id = state
-        .update(cx, |state, cx| call(state, cx, "caller", untitled))
-        .unwrap()["thread_id"]
+    let id = call(&state, cx, "caller", untitled).unwrap()["thread_id"]
         .as_str()
         .unwrap()
         .to_owned();
-    let SessionCommand::SendTurn { delivery_id, .. } = cx.run_until_command(&commands) else {
-        panic!("expected the first message to reach the provider");
-    };
-    events
-        .try_send(AgentEvent::TurnAccepted { delivery_id })
-        .unwrap();
-    cx.run_until(|state| {
-        state
-            .find_meta(&id)
+    let provider = providers.started(cx, 0);
+    let (delivery_id, _) = provider.next_turn(cx);
+    provider.play([AgentEvent::TurnAccepted { delivery_id }]);
+    cx.run_until_seen(|view| {
+        view.session(&id)
             .is_some_and(|meta| !meta.title.starts_with("New "))
     });
-    state.read(|state| {
-        assert_eq!(
-            state.find_meta(&id).unwrap().title,
-            "Find out why the sync test flakes"
-        );
-    });
+    assert_eq!(cx.seen().session(&id).unwrap().title, MESSAGE);
 }
 
 /// `send_message` reaches threads in each mode as the agent's message, reopens a settled
@@ -359,45 +349,58 @@ fn an_untitled_started_thread_is_titled_from_its_first_message() {
 #[test]
 fn send_message_queues_steers_and_schedules_as_the_agent() {
     let store = TestStore::new("tcode-control-send");
-    store
-        .upsert_meta(&thread("caller", "p", ProviderKind::ClaudeCode))
-        .unwrap();
+    let root = store.root().clone();
+    stored(
+        &store,
+        "caller",
+        ProviderKind::ClaudeCode,
+        "p",
+        &root.join("caller"),
+        |_| {},
+    );
+    for id in ["settled", "running", "later"] {
+        stored(
+            &store,
+            id,
+            ProviderKind::Codex,
+            "p",
+            &root.join(id),
+            |meta| {
+                if id == "settled" {
+                    meta.settled_at = Some(1);
+                }
+            },
+        );
+    }
     let cx = &mut TestAppContext::default();
-    let state = host(&store, cx);
-    let (commands, steered) = smol::channel::unbounded();
-    state.update(cx, |state, _| {
-        let mut settled = thread("settled", "p", ProviderKind::Codex);
-        settled.settled_at = Some(1);
-        park(state, ActiveSession::new(settled, false, Vec::new()));
-        let mut running = ActiveSession::new(
-            thread("running", "p", ProviderKind::Codex),
-            false,
-            Vec::new(),
-        );
-        let settings = state.settings.clone();
-        running.runtime = Runtime::Live(
-            state
-                .executions
-                .prepare(&settings, &running.meta)
-                .unwrap()
-                .connect(commands),
-        );
-        running.turn_in_flight = true;
-        park(state, running);
-        park(
-            state,
-            ActiveSession::new(thread("later", "p", ProviderKind::Codex), false, Vec::new()),
-        );
-    });
+    let (state, providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    for id in ["settled", "later"] {
+        state.open(cx, id);
+    }
+    let running = first_turn(&state, cx, &providers, "running", 0);
+    // A provider started from here on is still starting, so what it is to be sent waits
+    // where a client sees it.
+    providers.hold();
+    let text = "Rebase on main when you can";
     let send = |ids: &[&str], mode: SendMode| {
         ControlOp::SendMessage(SendMessageParams {
             thread_ids: ids.iter().map(|id| id.to_string()).collect(),
-            text: "Rebase on main when you can".into(),
+            text: text.into(),
             mode,
             attachments: None,
             request_id: None,
         })
     };
+    let last_human = |cx: &mut TestAppContext| {
+        ["settled", "running", "later"].map(|id| {
+            let shown = ControlOp::GetThread(GetThreadParams {
+                thread_id: id.into(),
+            });
+            call(&state, cx, "caller", shown).unwrap()["last_human_message_at"].clone()
+        })
+    };
+    let before = last_human(cx);
     let at = cx.now_secs() + 3600;
     let hosts = ControlOp::SendMessage(SendMessageParams {
         attachments: Some(vec![std::env::temp_dir().display().to_string()]),
@@ -406,31 +409,23 @@ fn send_message_queues_steers_and_schedules_as_the_agent() {
             _ => unreachable!(),
         }
     });
-    assert!(
-        state
-            .update(cx, |state, cx| call(state, cx, "caller", hosts))
-            .is_err()
-    );
-    let (queued, steer, scheduled) = state.update(cx, |state, cx| {
-        (
-            call(state, cx, "caller", send(&["settled"], SendMode::Queue)).unwrap(),
-            call(
-                state,
-                cx,
-                "caller",
-                send(&["running", "settled"], SendMode::Steer),
-            )
-            .unwrap(),
-            call(
-                state,
-                cx,
-                "caller",
-                send(&["later"], SendMode::Schedule { at }),
-            )
-            .unwrap(),
-        )
-    });
-    cx.run_until_parked();
+    assert!(call(&state, cx, "caller", hosts).is_err());
+
+    let queued = call(&state, cx, "caller", send(&["settled"], SendMode::Queue)).unwrap();
+    let steer = call(
+        &state,
+        cx,
+        "caller",
+        send(&["running", "settled"], SendMode::Steer),
+    )
+    .unwrap();
+    let scheduled = call(
+        &state,
+        cx,
+        "caller",
+        send(&["later"], SendMode::Schedule { at }),
+    )
+    .unwrap();
 
     assert_eq!(queued["results"][0]["outcome"], "applied");
     assert_eq!(queued["results"][0]["reason"], "queued");
@@ -445,36 +440,31 @@ fn send_message_queues_steers_and_schedules_as_the_agent() {
         "a steer that was queued instead says so"
     );
     assert_eq!(scheduled["results"][0]["reason"], "scheduled");
-    assert!(matches!(
-        steered.try_recv(),
-        Ok(SessionCommand::Steer { text, .. }) if text == "Rebase on main when you can"
-    ));
-    state.read(|state| {
-        assert!(!state.find_meta("settled").unwrap().is_settled());
-        let settled = state.resident("settled").unwrap();
-        assert_eq!(settled.queue.len(), 2);
-        assert!(
-            settled
-                .queue
-                .iter()
-                .all(|m| m.origin == MessageOrigin::Agent)
-        );
-        let running = state.resident("running").unwrap();
-        assert_eq!(running.pending_steers[0].origin, Some(MessageOrigin::Agent));
-        let later = state.resident("later").unwrap();
-        assert_eq!(later.queue[0].origin, MessageOrigin::Agent);
-        assert!(later.queue[0].not_before.is_some());
-        for id in ["settled", "running", "later"] {
-            assert_eq!(
-                state
-                    .thread_activity
-                    .get(id)
-                    .and_then(|activity| activity.last_human_message_at),
-                None,
-                "{id}: an agent's message is not the user's activity"
-            );
-        }
-    });
+
+    assert_eq!(running.next_steer(cx), text);
+    running.fence(cx, "running");
+    assert_eq!(said(cx, "running", MessageOrigin::Agent), [text]);
+    assert!(!cx.seen().session("settled").unwrap().is_settled());
+    let waiting = |cx: &TestAppContext, id: &str| cx.seen().status(id).queued_messages.clone();
+    assert_eq!(
+        waiting(cx, "settled")
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        [text, text]
+    );
+    assert_eq!(waiting(cx, "later")[0].fire_at_unix_secs, Some(at));
+    assert_eq!(
+        last_human(cx),
+        before,
+        "an agent's message is not the user's activity"
+    );
+
+    providers.let_go();
+    let settled = providers.started_in(cx, &root.join("settled"));
+    settled.start_turn(cx, "turn");
+    settled.fence(cx, "settled");
+    assert_eq!(said(cx, "settled", MessageOrigin::Agent)[0], text);
 }
 
 /// A queued message is dropped and the others stay; the permission mode stays the user's;
@@ -482,26 +472,111 @@ fn send_message_queues_steers_and_schedules_as_the_agent() {
 #[test]
 fn control_thread_drops_a_queued_message_keeps_the_permission_mode_and_forks() {
     let store = TestStore::new("tcode-control-thread");
-    store
-        .upsert_meta(&thread("caller", "p", ProviderKind::ClaudeCode))
-        .unwrap();
-    let cx = &mut TestAppContext::default();
-    let state = host(&store, cx);
-    let (human, agent) = state.update(cx, |state, _| {
-        let mut queued = ActiveSession::new(
-            thread("queued", "p", ProviderKind::Codex),
-            false,
-            Vec::new(),
+    let root = store.root().clone();
+    let resumable = |meta: &mut SessionMeta| {
+        meta.resume_cursor = Some(agent::ResumeCursor(serde_json::json!({"thread_id": "t"})))
+    };
+    stored(
+        &store,
+        "caller",
+        ProviderKind::ClaudeCode,
+        "p",
+        &root.join("caller"),
+        |_| {},
+    );
+    stored(
+        &store,
+        "queued",
+        ProviderKind::Codex,
+        "p",
+        &root.join("queued"),
+        |_| {},
+    );
+    for id in ["source", "history"] {
+        stored(
+            &store,
+            id,
+            ProviderKind::Codex,
+            "p",
+            &root.join(id),
+            resumable,
         );
-        let human = queued.push_queued("from the user".into(), Vec::new());
-        let agent = queued.push_queued("from an agent".into(), Vec::new());
-        queued.queue[1].origin = MessageOrigin::Agent;
-        park(state, queued);
-        let mut source = thread("source", "p", ProviderKind::Codex);
-        source.resume_cursor = Some(agent::ResumeCursor(serde_json::json!({"thread_id": "t"})));
-        state.sessions.push(source);
-        (human, agent)
+    }
+    // Two turns of `history`, the second with a checkpoint to fork before.
+    for (ts, event) in [
+        AgentEvent::ItemCompleted(agent::ThreadItem {
+            id: "first".into(),
+            parent_item_id: None,
+            content: agent::ItemContent::UserMessage {
+                text: "first".into(),
+                attachments: Vec::new(),
+            },
+        }),
+        AgentEvent::TurnCompleted {
+            turn_id: "t1".into(),
+            status: agent::TurnStatus::Completed,
+            usage: None,
+        },
+        AgentEvent::ItemCompleted(agent::ThreadItem {
+            id: "second".into(),
+            parent_item_id: None,
+            content: agent::ItemContent::UserMessage {
+                text: "second".into(),
+                attachments: Vec::new(),
+            },
+        }),
+        AgentEvent::TurnCheckpoint {
+            turn_id: String::new(),
+            checkpoint_id: "t2".into(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        store
+            .append_event("history", 1_000 + ts as u64, &event)
+            .unwrap();
+    }
+    let cx = &mut TestAppContext::default();
+    let (state, providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    state.open(cx, "history");
+    // A turn runs in `queued`, so what is sent to it now waits its turn.
+    first_turn(&state, cx, &providers, "queued", 0);
+    state
+        .command(
+            cx,
+            Command::ScheduleTurn {
+                session_id: "queued".into(),
+                text: "from the user".into(),
+                attachment_paths: Vec::new(),
+                due: TurnDue::AfterSecs(3600),
+            },
+        )
+        .unwrap();
+    let sent = ControlOp::SendMessage(SendMessageParams {
+        thread_ids: vec!["queued".into()],
+        text: "from an agent".into(),
+        mode: SendMode::Queue,
+        attachments: None,
+        request_id: None,
     });
+    call(&state, cx, "caller", sent).unwrap();
+    cx.run_until_parked();
+    let waiting = |cx: &TestAppContext| {
+        cx.seen()
+            .status("queued")
+            .queued_messages
+            .iter()
+            .map(|message| (message.id, message.text.clone()))
+            .collect::<Vec<_>>()
+    };
+    let agent = waiting(cx)
+        .into_iter()
+        .find(|(_, text)| text == "from an agent")
+        .expect("the agent's message waits behind the running turn")
+        .0;
+
     let change = |thread_id: &str, op: RunOp| {
         ControlOp::ControlThread(ControlThreadParams {
             changes: vec![RunChange {
@@ -511,133 +586,80 @@ fn control_thread_drops_a_queued_message_keeps_the_permission_mode_and_forks() {
             request_id: None,
         })
     };
-    let dropped = state
-        .update(cx, |state, cx| {
-            call(
-                state,
-                cx,
-                "caller",
-                change("queued", RunOp::DropQueued { id: agent }),
-            )
-        })
-        .unwrap();
+    let dropped = call(
+        &state,
+        cx,
+        "caller",
+        change("queued", RunOp::DropQueued { id: agent }),
+    )
+    .unwrap();
     assert_eq!(dropped["results"][0]["outcome"], "applied");
-    let permission = state
-        .update(cx, |state, cx| {
-            call(
-                state,
-                cx,
-                "caller",
-                change(
-                    "queued",
-                    RunOp::SetOption {
-                        id: "permissions".into(),
-                        value: serde_json::json!("full_access"),
-                    },
-                ),
-            )
-        })
-        .unwrap();
-    assert_eq!(permission["results"][0]["outcome"], "failed");
-    state.read(|state| {
-        assert!(
-            state
-                .find_meta("queued")
-                .unwrap()
-                .option_selections
-                .iter()
-                .all(|selection| selection.id != "permissions"),
-            "the permission mode stays the user's"
-        );
-    });
-    state.read(|state| {
-        let queue = &state.resident("queued").unwrap().queue;
-        assert_eq!(queue.len(), 1);
-        assert_eq!(queue[0].id, human);
-    });
+    let permitted = call(
+        &state,
+        cx,
+        "caller",
+        change(
+            "queued",
+            RunOp::SetOption {
+                id: "permissions".into(),
+                value: serde_json::json!("full_access"),
+            },
+        ),
+    )
+    .unwrap();
+    assert_eq!(permitted["results"][0]["outcome"], "failed");
+    cx.run_until_parked();
+    assert_ne!(
+        permission(cx.seen().session("queued").unwrap()),
+        Some(&serde_json::json!("full_access")),
+        "the permission mode stays the user's"
+    );
+    assert_eq!(
+        waiting(cx)
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect::<Vec<_>>(),
+        ["from the user"]
+    );
 
-    let forked = state
-        .update(cx, |state, cx| {
-            call(state, cx, "caller", change("source", RunOp::Fork))
-        })
-        .unwrap();
+    let forked = call(&state, cx, "caller", change("source", RunOp::Fork)).unwrap();
     assert_eq!(forked["results"][0]["outcome"], "applied");
     let fork = forked["results"][0]["new_thread_id"].as_str().unwrap();
     assert_ne!(fork, "source");
-    state.read(|state| assert!(state.find_meta(fork).is_some()));
+    cx.run_until_parked();
+    assert!(cx.seen().session(fork).is_some());
 
-    let refused = state
-        .update(cx, |state, cx| {
-            call(
-                state,
-                cx,
-                "caller",
-                change("queued", RunOp::ForkAt { turn: 3 }),
-            )
-        })
-        .unwrap();
+    let refused = call(
+        &state,
+        cx,
+        "caller",
+        change("history", RunOp::ForkAt { turn: 3 }),
+    )
+    .unwrap();
     assert_eq!(refused["results"][0]["outcome"], "failed");
-    state.update(cx, |state, cx| {
-        for event in [
-            AgentEvent::ItemCompleted(agent::ThreadItem {
-                id: "first".into(),
-                parent_item_id: None,
-                content: agent::ItemContent::UserMessage {
-                    text: "first".into(),
-                    attachments: Vec::new(),
-                },
-            }),
-            AgentEvent::TurnCompleted {
-                turn_id: "t1".into(),
-                status: agent::TurnStatus::Completed,
-                usage: None,
-            },
-            AgentEvent::ItemCompleted(agent::ThreadItem {
-                id: "second".into(),
-                parent_item_id: None,
-                content: agent::ItemContent::UserMessage {
-                    text: "second".into(),
-                    attachments: Vec::new(),
-                },
-            }),
-            AgentEvent::TurnCheckpoint {
-                turn_id: String::new(),
-                checkpoint_id: "t2".into(),
-            },
-        ] {
-            state.record_event("queued", &event, cx);
-        }
-        let queued = state.resident_mut("queued").unwrap();
-        queued.meta.resume_cursor =
-            Some(agent::ResumeCursor(serde_json::json!({"thread_id": "t"})));
-    });
-    let forked = state
-        .update(cx, |state, cx| {
-            call(
-                state,
-                cx,
-                "caller",
-                change("queued", RunOp::ForkAt { turn: 0 }),
-            )
-        })
-        .unwrap();
+    let forked = call(
+        &state,
+        cx,
+        "caller",
+        change("history", RunOp::ForkAt { turn: 0 }),
+    )
+    .unwrap();
     assert_eq!(forked["results"][0]["outcome"], "applied");
     let fork = forked["results"][0]["new_thread_id"].as_str().unwrap();
-    state.read(|state| {
-        let fork = state.find_meta(fork).unwrap();
-        assert_eq!(
-            fork.fork_origin
-                .as_ref()
-                .map(|origin| origin.thread_id.as_str()),
-            Some("queued")
-        );
-        assert_eq!(
-            fork.pending_fork,
-            Some(agent::ForkPoint::Before {
-                checkpoint_id: "t2".into()
-            })
-        );
-    });
+    cx.run_until_parked();
+    let fork = cx.seen().session(fork).unwrap();
+    assert_eq!(
+        fork.fork_origin
+            .as_ref()
+            .map(|origin| origin.thread_id.as_str()),
+        Some("history")
+    );
+    assert_eq!(
+        fork.pending_fork,
+        Some(agent::ForkPoint::Before {
+            checkpoint_id: "t2".into()
+        })
+    );
 }
 
 /// `git` answers with what git did: checkout refuses a dirty tree and a thread whose turn is
@@ -662,30 +684,23 @@ fn git_answers_with_the_outcome_and_refuses_unsafe_checkouts() {
     run_git(&root, &["branch", "topic"]).unwrap();
     std::fs::write(root.join("tracked.txt"), "changed\n").unwrap();
 
-    store
-        .upsert_meta(&thread("caller", "p", ProviderKind::ClaudeCode))
-        .unwrap();
+    stored(
+        &store,
+        "caller",
+        ProviderKind::ClaudeCode,
+        "p",
+        &store.root().join("caller"),
+        |_| {},
+    );
+    stored(&store, "target", ProviderKind::Codex, "p", &root, |_| {});
     let cx = &mut TestAppContext::default();
-    let state = host(&store, cx);
-    state.update(cx, |state, _| {
-        let mut target = thread("target", "p", ProviderKind::Codex);
-        target.cwd = root.clone();
-        park(state, ActiveSession::new(target, false, Vec::new()));
-    });
+    let (state, providers) = played_host(cx, &store);
     let git = |cx: &mut TestAppContext, op: GitOp| {
-        let (reply, response) = smol::channel::bounded(1);
-        state.update(cx, |state, cx| {
-            state.handle_control_op(
-                "caller".into(),
-                ControlOp::Git(GitParams {
-                    thread_id: "target".into(),
-                    op,
-                }),
-                reply,
-                cx,
-            )
+        let op = ControlOp::Git(GitParams {
+            thread_id: "target".into(),
+            op,
         });
-        cx.run_until_recv(&response).unwrap()
+        call(&state, cx, "caller", op).unwrap()
     };
     let checkout = || GitOp::CheckoutBranch {
         branch: "topic".into(),
@@ -709,14 +724,11 @@ fn git_answers_with_the_outcome_and_refuses_unsafe_checkouts() {
             .contains("Record the change")
     );
 
-    state.update(cx, |state, _| {
-        state.resident_mut("target").unwrap().turn_in_flight = true;
-    });
+    let target = first_turn(&state, cx, &providers, "target", 0);
     let busy = git(cx, checkout());
     assert_eq!(busy["outcome"], "skipped");
-    state.update(cx, |state, _| {
-        state.resident_mut("target").unwrap().turn_in_flight = false;
-    });
+    target.play([turn_completed()]);
+    cx.run_until_seen(|view| view.status("target").running_turn.is_none());
 
     assert_eq!(git(cx, checkout())["outcome"], "applied");
     assert_eq!(
@@ -735,91 +747,66 @@ fn move_thread_moves_the_caller_and_keeps_its_turn() {
     let store = TestStore::new("tcode-control-move-thread");
     let quick = store.root().join("quick");
     let demo = store.root().join("demo");
-    for dir in [&quick, &demo] {
-        std::fs::create_dir_all(dir).unwrap();
-    }
+    stored_project(&store, "quick", &quick, |_| {});
+    stored_project(&store, "demo", &demo, |_| {});
+    stored(
+        &store,
+        "caller",
+        ProviderKind::ClaudeCode,
+        "quick",
+        &quick,
+        |_| {},
+    );
     let cx = &mut TestAppContext::default();
-    let state = host(&store, cx);
-    let (commands, _provider) = smol::channel::unbounded();
-    let demo_id = state.update(cx, |state, cx| {
-        let quick_id = state.create_project(quick.clone(), cx).unwrap();
-        let demo_id = state.create_project(demo.clone(), cx).unwrap();
-        let mut caller = thread("caller", &quick_id, ProviderKind::ClaudeCode);
-        caller.cwd = quick.clone();
-        let mut session = ActiveSession::new(caller, false, Vec::new());
-        let settings = state.settings.clone();
-        session.runtime = Runtime::Live(
-            state
-                .executions
-                .prepare(&settings, &session.meta)
-                .unwrap()
-                .connect(commands),
-        );
-        session.turn_in_flight = true;
-        park(state, session);
-        demo_id
-    });
-    let move_self = |project_id: &str, request_id: &str| {
+    let (state, providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    let caller = first_turn(&state, cx, &providers, "caller", 0);
+
+    let moved = call(
+        &state,
+        cx,
+        "caller",
         ControlOp::MoveThread(MoveThreadParams {
             thread_id: "caller".into(),
-            project_id: project_id.into(),
+            project_id: "demo".into(),
             cwd: None,
-            request_id: Some(request_id.into()),
-        })
-    };
-    let audits = |state: &TestEntity| {
-        state.read(|state| {
-            state
-                .resident("caller")
-                .unwrap()
-                .timeline
-                .entries
-                .iter()
-                .filter_map(|entry| match &entry.content {
-                    EntryContent::ControlAction(action) => {
-                        Some((action.action.clone(), action.detail.clone()))
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        })
-    };
-
-    state.update(cx, |state, cx| {
-        let moved = call(state, cx, "caller", move_self(&demo_id, "move-2")).unwrap();
-        assert_eq!(moved["project_id"], demo_id.as_str());
-        assert_eq!(moved["cwd"], demo.display().to_string());
-    });
+            request_id: Some("move-2".into()),
+        }),
+    )
+    .unwrap();
+    assert_eq!(moved["project_id"], "demo");
+    assert_eq!(moved["cwd"], demo.display().to_string());
     cx.run_until_parked();
-    state.read(|state| {
-        let session = state.resident("caller").unwrap();
-        assert_eq!(session.meta.project_id.as_deref(), Some(demo_id.as_str()));
-        assert_eq!(session.meta.cwd, demo);
-        assert!(
-            matches!(session.runtime, Runtime::Live(_)),
-            "the turn that asked keeps its provider"
-        );
-    });
+    let shown = cx.seen().session("caller").unwrap();
+    assert_eq!(shown.project_id.as_deref(), Some("demo"));
+    assert_eq!(shown.cwd, demo);
+    assert!(
+        next_command(&caller.commands).is_err(),
+        "the turn that asked keeps its provider"
+    );
+    let audits: Vec<_> = cx
+        .seen()
+        .timeline("caller")
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.content {
+            EntryContent::ControlAction(action) => {
+                Some((action.action.clone(), action.detail.clone()))
+            }
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        audits(&state),
+        audits,
         [(
             tcode_core::control::action::MOVE.to_owned(),
             Some(format!("demo ({})", demo.display()))
         )]
     );
-    state.update(cx, |state, cx| {
-        state.on_event(
-            "caller",
-            AgentEvent::TurnCompleted {
-                turn_id: "turn-1".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            cx,
-        );
-        assert!(matches!(
-            state.resident("caller").unwrap().runtime,
-            Runtime::Idle
-        ));
-    });
+
+    caller.play([turn_completed()]);
+    assert!(
+        matches!(caller.next_command(cx), SessionCommand::Shutdown),
+        "its turn over, the provider leaves the old directory"
+    );
 }
