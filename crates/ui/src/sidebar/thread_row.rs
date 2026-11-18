@@ -427,11 +427,14 @@ impl SessionsSidebar {
             window,
             cx,
             |(color, breathes), _, _| {
+                let diameter = px(6.);
                 if *breathes {
-                    crate::widgets::BreathingDot::new(*color).into_any_element()
+                    crate::widgets::BreathingDot::new(*color)
+                        .diameter(diameter)
+                        .into_any_element()
                 } else {
                     div()
-                        .size(px(6.))
+                        .size(diameter)
                         .rounded_full()
                         .bg(*color)
                         .into_any_element()
