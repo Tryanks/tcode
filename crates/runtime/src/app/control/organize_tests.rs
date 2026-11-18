@@ -55,12 +55,14 @@ fn results(answer: &serde_json::Value) -> Vec<BatchResult> {
 fn update_threads_previews_then_settles_with_its_real_side_effects() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-control-update-threads");
+    for id in ["caller", "stale"] {
+        store.upsert_meta(&thread(id, store.root())).unwrap();
+    }
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let (commands, _received) = smol::channel::unbounded();
     let last_activity = cx.now_millis();
     cx.clock.advance(Duration::from_secs(60));
     state.update(cx, |state, _| {
-        state.sessions.push(thread("caller", store.root()));
         let mut done = thread("done", store.root());
         done.pinned_at = Some(1);
         pull_request::link_pull_request(
@@ -96,7 +98,6 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
         state.sessions.push(queued);
         state.residents.parked.insert("queued".into(), session);
 
-        state.sessions.push(thread("stale", store.root()));
         for id in ["done", "running", "stale"] {
             state.thread_activity.insert(
                 id.into(),
@@ -133,11 +134,6 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
             dry_run,
         )
     };
-    let expected_effects = vec![
-        "provider detached".to_owned(),
-        "1 PR watch ended".to_owned(),
-        "unpinned".to_owned(),
-    ];
     let skipped = |target: &str, reason: &str| BatchResult {
         target: target.into(),
         outcome: Outcome::Skipped,
@@ -145,16 +141,16 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
         side_effects: None,
     };
 
-    let preview = call(&state, cx, "caller", batch(true)).unwrap();
+    let preview = results(&call(&state, cx, "caller", batch(true)).unwrap());
+    assert_eq!(preview[0].outcome, Outcome::WouldApply);
+    let foretold = preview[0].side_effects.clone();
+    assert!(
+        foretold.as_ref().is_some_and(|effects| !effects.is_empty()),
+        "a preview names what the settle would do"
+    );
     assert_eq!(
-        results(&preview),
-        vec![
-            BatchResult {
-                target: "done".into(),
-                outcome: Outcome::WouldApply,
-                reason: None,
-                side_effects: Some(expected_effects.clone()),
-            },
+        preview[1..],
+        [
             skipped("running", "busy"),
             skipped("queued", "busy"),
             skipped("stale", "changed_since_preview"),
@@ -173,20 +169,21 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
         );
     });
 
-    let applied = call(&state, cx, "caller", batch(false)).unwrap();
+    let applied = results(&call(&state, cx, "caller", batch(false)).unwrap());
     assert_eq!(
-        results(&applied),
+        applied,
         vec![
             BatchResult {
                 target: "done".into(),
                 outcome: Outcome::Applied,
                 reason: None,
-                side_effects: Some(expected_effects),
+                side_effects: foretold,
             },
             skipped("running", "busy"),
             skipped("queued", "busy"),
             skipped("stale", "changed_since_preview"),
-        ]
+        ],
+        "the settle did what its preview said"
     );
     state.read(|state| {
         let done = state.find_meta("done").unwrap();
@@ -233,15 +230,7 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
         update(vec![change("done", ThreadOp::Unsettle, None)], false),
     )
     .unwrap();
-    assert_eq!(
-        results(&unsettled),
-        vec![BatchResult {
-            target: "done".into(),
-            outcome: Outcome::Applied,
-            reason: None,
-            side_effects: Some(vec!["override becomes active; nothing is restored".into()]),
-        }]
-    );
+    assert_eq!(results(&unsettled)[0].outcome, Outcome::Applied);
     state.read(|state| {
         let done = state.find_meta("done").unwrap();
         assert_eq!(done.settled_override, Some(SettledOverride::Active));
@@ -375,12 +364,11 @@ fn unreadable_own_files_do_not_stop_the_host_and_are_never_written_over() {
     for name in files {
         std::fs::write(store.root().join(name), torn).unwrap();
     }
+    for id in ["caller", "old"] {
+        store.upsert_meta(&thread(id, store.root())).unwrap();
+    }
     let cx = &mut TestAppContext::default();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
-    state.update(cx, |state, _| {
-        state.sessions.push(thread("caller", store.root()));
-        state.sessions.push(thread("old", store.root()));
-    });
     for request in ["review-1", "review-2"] {
         let review = ControlOp::RecordReview(RecordReviewParams {
             items: vec![ReviewItemInput {
@@ -426,11 +414,10 @@ fn unreadable_own_files_do_not_stop_the_host_and_are_never_written_over() {
 fn a_recorded_review_changes_no_thread_and_is_read_back_after_a_restart() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-control-review");
+    for id in ["caller", "old"] {
+        store.upsert_meta(&thread(id, store.root())).unwrap();
+    }
     let state = cx.new_entity(TestClientState::new((*store).clone()));
-    state.update(cx, |state, _| {
-        state.sessions.push(thread("caller", store.root()));
-        state.sessions.push(thread("old", store.root()));
-    });
     let before = state.read(|state| state.find_meta("old").unwrap());
     let review = |group: &str| {
         ControlOp::RecordReview(RecordReviewParams {

@@ -250,12 +250,16 @@ fn search_covers_the_scope_and_any_thread_it_names_and_returns_anchors() {
     anchors.sort();
     assert_eq!(anchors, ["caller#1", "same#1"]);
     assert_eq!(answer["total"], 2);
+    let hit = &answer["hits"][0];
     assert!(
-        answer["hits"][0]["snippet"]
+        hit["snippet"]
             .as_str()
             .unwrap()
-            .contains("begin quoted data"),
-        "snippets are fenced as data"
+            .lines()
+            .next()
+            .unwrap()
+            .contains(hit["anchor"].as_str().unwrap()),
+        "a snippet is fenced as data under its anchor: {hit}"
     );
 
     let answer = call(&state, cx, search(Some(vec!["other".into()]))).unwrap();
