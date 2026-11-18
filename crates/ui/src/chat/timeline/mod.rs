@@ -607,6 +607,19 @@ impl TimelineView {
                         },
                     ),
             )
+            // The spine stands at the conversation's left edge, whatever
+            // the column does.
+            .when(!compact && !self.is_side(), |timeline| {
+                timeline.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .bottom(timeline_bottom_inset(cx))
+                        .w(px(spine::SLOT))
+                        .child(self.spine.clone()),
+                )
+            })
             .when(!window.is_inspector_picking(cx), |timeline| {
                 let side = self.is_side();
                 let (left, right) = self.column_insets(cx);
@@ -630,18 +643,6 @@ impl TimelineView {
                                 .w_full()
                                 .min_w_0()
                                 .max_w(px(CONTENT_MAX_WIDTH))
-                                .when(!side && !compact, |column| {
-                                    column.child(
-                                        div()
-                                            .absolute()
-                                            .top_0()
-                                            .bottom_0()
-                                            .right(gpui::relative(1.))
-                                            .mr(px(spine::SLOT_GAP))
-                                            .w(px(spine::SLOT))
-                                            .child(self.spine.clone()),
-                                    )
-                                })
                                 .child(
                                     div()
                                         .debug_selector(move || {
@@ -700,6 +701,20 @@ impl TimelineView {
                     let Some(view) = view.upgrade() else {
                         return;
                     };
+                    let timeline = view.read(cx);
+                    let turns = painted.and_then(|(start, end)| {
+                        let last = end.checked_sub(1)?.max(start);
+                        Some((
+                            timeline.rows.get(start)?.turn,
+                            timeline.rows.get(last)?.turn,
+                        ))
+                    });
+                    if let Some(turns) = turns {
+                        timeline
+                            .spine
+                            .clone()
+                            .update(cx, |spine, cx| spine.set_turns_in_view(turns, cx));
+                    }
                     let timeline = view.read(cx);
                     let panels = timeline.command_panels.borrow_mut().settle();
                     let painted =
