@@ -390,6 +390,14 @@ From the round over the Wayland preview (the nested compositor):
   wait never ended. A wait with no bound of its own is looked at running
   before it is pushed.
 
+- **It audited an area when a pull request was meant.** Asked to run the
+  audit once before a merge, it took the widest reading, cut everything the
+  pull request touched into two lanes of fourteen thousand lines, most of
+  them untouched by it, and ran half an hour before the maintainer asked why.
+  An audit asked for on a pull request reads the diff: what it changes is
+  judged and brought to the bar, and what it meets beyond the diff is listed
+  for a later round, not changed.
+
 ## Families beyond the defence
 
 Named by the maintainer, not yet inventoried:
@@ -529,6 +537,16 @@ next round, not a reason to keep the timeouts for good.
 - On agents following the code they find: "That is what is wrong with the
   codebase as it stands: you carry on its old inertia without telling good
   from bad, and the old bad inertia is exactly what I want gone."
+
+- On `tcode_control`, and one thread's model reaching another: "I feel there
+  should be no authorization or approval behaviour here either", and then
+  "I want it fully open. Like Codex, guide only from the tool descriptions,
+  because that is how we get to use the harness's own auto mode, rather than
+  building another system on top." A permission system of Tcode's own over a
+  harness's tool calls answers a second time what the harness's permission
+  mode already answers. What stays closed is what no thread's model may
+  reach whatever the harness allows: a space's boundary, the settings no
+  agent changes.
 
 On tests kept because a defect was once fixed, and on a test said to hold the
 motion the maintainer chose out of three prototypes:

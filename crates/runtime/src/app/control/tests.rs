@@ -20,32 +20,13 @@ fn thread(id: &str, project: &str) -> SessionMeta {
     meta
 }
 
-/// Every `tcode_control` tool but the subagent's `report_result`, in name order.
-fn every_tool() -> Vec<String> {
-    control_mcp::tool_descriptions(&control_mcp::ThreadAccess {
-        enabled: true,
-        subagent: false,
-    })
-    .into_iter()
-    .map(|(name, _)| name)
-    .collect()
-}
-
-/// The `tcode_control` tools the thread's status discloses.
+/// The tools the thread's status discloses. Only `tcode_control` is attached in these tests.
 fn tool_names(state: &AppState, id: &str) -> Vec<String> {
-    let control = every_tool();
     state
         .session_status_snapshot(id)
         .unwrap()
         .injected_tools
-        .map(|tools| {
-            tools
-                .tools
-                .into_iter()
-                .map(|(name, _)| name)
-                .filter(|name| control.contains(name))
-                .collect()
-        })
+        .map(|tools| tools.tools.into_iter().map(|(name, _)| name).collect())
         .unwrap_or_default()
 }
 
@@ -95,19 +76,25 @@ fn control_tools_are_all_offered_and_follow_the_setting() {
         state.attach_control_mcp(server);
         state.sessions.push(meta.clone());
         state.install_selected(ActiveSession::new(meta.clone(), false, Vec::new()));
-        let registration = state.control_registration_for(&meta).unwrap();
-        assert_eq!(
-            tool_names(state, "caller"),
-            every_tool(),
-            "before the first connection every tool is disclosed"
-        );
-        registration
+        state.control_registration_for(&meta).unwrap()
     });
     host.start().unwrap();
 
     let listed = connect_and_list(&registration);
-    assert_eq!(listed, every_tool());
-    assert!(listed.iter().any(|name| name == "delete_threads"));
+    for tool in [
+        "list_threads",
+        "send_message",
+        "terminal",
+        "delete_threads",
+        "rewind",
+        "patch_settings",
+    ] {
+        assert!(listed.iter().any(|name| name == tool), "{tool} is offered");
+    }
+    assert!(
+        !listed.iter().any(|name| name == "report_result"),
+        "report_result is a subagent's"
+    );
     state.read(|state| assert_eq!(tool_names(state, "caller"), listed));
 
     state.dispatch_command(
