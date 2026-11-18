@@ -252,15 +252,19 @@ fn targets(input: &Value) -> Vec<&str> {
     ids
 }
 
-/// The text a call carried to a thread: the message, the report, the reason.
-fn carried(input: &Value) -> Option<(&'static str, &str)> {
-    [
-        ("text", "tools.message"),
-        ("message", "tools.message"),
-        ("reason", "tools.reason"),
-    ]
-    .into_iter()
-    .find_map(|(key, label)| string(input, key).map(|text| (label, text)))
+/// The text a call carried to a thread: the message or the report.
+fn carried(input: &Value) -> Option<&str> {
+    string(input, "text").or_else(|| string(input, "message"))
+}
+
+/// The variant an input names under `key`: the word itself, or the one key
+/// of the object that carries the variant's fields.
+fn variant<'v>(value: &'v Value, key: &str) -> Option<&'v str> {
+    match value.get(key)? {
+        Value::String(name) => Some(name),
+        Value::Object(fields) => fields.keys().next().map(String::as_str),
+        _ => None,
+    }
 }
 
 impl Threads {
@@ -293,21 +297,23 @@ impl Threads {
         match self.kind {
             Kind::Outline | Kind::GetThread | Kind::Message => Argument::plain(threads()),
             Kind::Read => {
-                let from = string(input, "from").or_else(|| string(input, "anchor"));
-                let to = string(input, "to");
-                let mut found = Vec::new();
-                from.into_iter()
-                    .chain(to)
-                    .for_each(|text| anchors_in(text, &mut found));
-                let text = match found.as_slice() {
+                let mut range = Vec::new();
+                [string(input, "from"), string(input, "to")]
+                    .into_iter()
+                    .flatten()
+                    .for_each(|text| anchors_in(text, &mut range));
+                let text = match range.as_slice() {
                     [from, to] if from.thread_id == to.thread_id => format!(
                         "{} #{}–#{}",
                         named.thread(&from.thread_id),
                         from.position.unwrap_or_default(),
                         to.position.unwrap_or_default()
                     ),
-                    [first, ..] => named.label(first),
-                    [] => threads(),
+                    [from, ..] => named.label(from),
+                    // By `anchors` or a `cursor`: the first entry it names.
+                    [] => entry()
+                        .map(|anchor| named.label(anchor))
+                        .unwrap_or_default(),
                 };
                 Argument::plain(text)
             }
@@ -324,7 +330,6 @@ impl Threads {
             }
             Kind::ListThreads => Argument::plain(
                 string(input, "title_query")
-                    .or_else(|| string(input, "query"))
                     .or_else(|| string(input, "scope"))
                     .map(one_line)
                     .unwrap_or_default(),
@@ -346,7 +351,7 @@ impl Threads {
                         changes
                             .iter()
                             .map(|change| {
-                                let op = string(change, "op").unwrap_or_default();
+                                let op = variant(change, "op").unwrap_or_default();
                                 let thread = string(change, "thread_id")
                                     .map(|id| named.thread(id))
                                     .unwrap_or_default();
@@ -361,7 +366,7 @@ impl Threads {
             // The events it watches for stay in the body: beside the threads
             // they would crowd them out of a narrow header.
             Kind::NotifyWhen => Argument::plain(threads()),
-            Kind::SettleSelf => Argument::plain(string(input, "when").unwrap_or_default()),
+            Kind::SettleSelf => Argument::plain(variant(input, "when").unwrap_or_default()),
             Kind::Approve => Argument::plain(
                 string(input, "option")
                     .or_else(|| {
@@ -425,9 +430,9 @@ impl ToolView for Threads {
             )
             .into_any_element()
         });
-        let carried = carried(call.input).map(|(label, text)| {
+        let carried = carried(call.input).map(|text| {
             let text = bounded_text(call.entry, "carried", text, false, Bound::HEAD, ctx);
-            section(&crate::tr!(label), text, ctx.app()).into_any_element()
+            section(&crate::tr!("tools.message"), text, ctx.app()).into_any_element()
         });
         let output = (call.status != ItemStatus::InProgress)
             .then(|| output_section(call, Bound::HEAD, ctx))
@@ -437,7 +442,7 @@ impl ToolView for Threads {
 
     fn copy_items(&self, call: &Call<'_>) -> Vec<(String, String)> {
         let mut items = Vec::new();
-        if let Some((_, text)) = carried(call.input) {
+        if let Some(text) = carried(call.input) {
             copy(&mut items, "chat.copy_text", text);
         }
         copy(
