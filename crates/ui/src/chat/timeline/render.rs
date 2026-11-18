@@ -344,11 +344,17 @@ impl TimelineView {
                         [message] => message.lines().next().unwrap_or_default().to_owned(),
                         _ => crate::tr!("chat.warnings", count = messages.len()).into_owned(),
                     };
-                    column = column.child(self.compose_disclosure(
-                        index,
-                        format!("warnings-{}", warnings[0].id),
+                    let key = format!("warnings-{}", warnings[0].id);
+                    let toggle_key = key.clone();
+                    column = column.child(components::disclosure::warning_disclosure(
+                        &key,
                         label.into(),
                         &messages.join("\n"),
+                        self.expanded.contains(&key),
+                        cx.listener(move |this, _, _, cx| {
+                            this.toggle_expanded(index, &toggle_key, cx);
+                        }),
+                        &self.motion,
                         cx,
                     ));
                 }

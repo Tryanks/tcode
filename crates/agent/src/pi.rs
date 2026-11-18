@@ -16,11 +16,11 @@ use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
 use crate::process::{ChildOutput, ProcessTree, send_json as write_json, spawn_line_reader};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
-    ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ForkPoint, ItemContent,
-    ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand,
-    ProviderCommandKind, ProviderKind, ResumeCursor, SearchHit, SearchScope, SelectOption,
-    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput,
-    UserInputDelivery, UserInputOption, UserInputQuestion,
+    ApprovalRequest, Attachment, Compaction, DeltaKind, FileChange, FileChangeKind, ForkPoint,
+    ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection,
+    ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SearchHit, SearchScope,
+    SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
+    ToolFamily, ToolOutput, UserInputDelivery, UserInputOption, UserInputQuestion,
 };
 
 /// The directory pi launched with `launch_env` keeps its settings, sign-in
@@ -1327,6 +1327,9 @@ struct PiMapper {
     context_window: Option<u64>,
     interrupt_pending: bool,
     failed: bool,
+    /// Why the run's request failed. pi says at `agent_end` whether it tries
+    /// the request again, and then tells the reason with that attempt.
+    failure: Option<String>,
     tool_items: HashMap<String, PiTool>,
     /// Item ids of this turn's assistant messages, keyed by the message
     /// `timestamp` (the only field present from `message_start` through
@@ -1357,6 +1360,7 @@ impl PiMapper {
             context_window: None,
             interrupt_pending: false,
             failed: false,
+            failure: None,
             tool_items: HashMap::new(),
             assistant_ids: HashMap::new(),
             streaming_assistant: None,
@@ -1365,7 +1369,19 @@ impl PiMapper {
 
     fn on_message(&mut self, message: &Value) -> Vec<AgentEvent> {
         match message.get("type").and_then(Value::as_str).unwrap_or("") {
-            "agent_start" => self.start_turn(),
+            "agent_start" => {
+                self.failure = None;
+                self.start_turn()
+            }
+            "agent_end" => match &self.failure {
+                Some(reason) if message.get("willRetry").and_then(Value::as_bool) != Some(true) => {
+                    vec![AgentEvent::Error {
+                        message: reason.clone(),
+                        fatal: false,
+                    }]
+                }
+                _ => Vec::new(),
+            },
             "agent_settled" => self.complete_turn(),
             "message_start" => {
                 let message = message.get("message").unwrap_or(&Value::Null);
@@ -1392,18 +1408,23 @@ impl PiMapper {
                 },
                 true,
             ),
-            "compaction_start" => vec![AgentEvent::Warning {
-                message: format!(
-                    "pi is compacting context ({})",
-                    message
-                        .get("reason")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown reason")
-                ),
-            }],
+            "compaction_start" => vec![AgentEvent::ContextCompacted(Compaction {
+                in_progress: true,
+                trigger: message
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                ..Compaction::default()
+            })],
             "compaction_end" => {
                 if message.get("result").is_some_and(|value| !value.is_null()) {
-                    vec![AgentEvent::ContextCompacted(Default::default())]
+                    vec![AgentEvent::ContextCompacted(Compaction {
+                        trigger: message
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        ..Compaction::default()
+                    })]
                 } else {
                     vec![AgentEvent::Warning {
                         message: format!(
@@ -1416,22 +1437,32 @@ impl PiMapper {
                     }]
                 }
             }
-            "auto_retry_start" => vec![AgentEvent::RequestRetry {
-                message: format!(
-                    "pi retry {}/{} in {} ms: {}",
-                    crate::json_u64(message.get("attempt")).unwrap_or(0),
-                    crate::json_u64(message.get("maxAttempts")).unwrap_or(0),
-                    crate::json_u64(message.get("delayMs")).unwrap_or(0),
-                    message
-                        .get("errorMessage")
-                        .and_then(Value::as_str)
-                        .unwrap_or("transient provider error")
-                ),
-            }],
+            "auto_retry_start" => {
+                self.failure = None;
+                vec![AgentEvent::RequestRetry {
+                    message: format!(
+                        "pi retry {}/{} in {} ms: {}",
+                        crate::json_u64(message.get("attempt")).unwrap_or(0),
+                        crate::json_u64(message.get("maxAttempts")).unwrap_or(0),
+                        crate::json_u64(message.get("delayMs")).unwrap_or(0),
+                        message
+                            .get("errorMessage")
+                            .and_then(Value::as_str)
+                            .unwrap_or("transient provider error")
+                    ),
+                }]
+            }
             // pi ends a retry with success once a retried request answers;
             // the failures it retried are behind the turn then.
             "auto_retry_end" if message.get("success").and_then(Value::as_bool) == Some(true) => {
                 self.failed = false;
+                Vec::new()
+            }
+            // Out of attempts, pi repeats here the reason its `agent_end`
+            // already left as the run's error; a retry the user stopped has
+            // none.
+            "auto_retry_end" if self.failure.is_some() => {
+                self.failed = true;
                 Vec::new()
             }
             "auto_retry_end" => {
@@ -1572,19 +1603,13 @@ impl PiMapper {
             Some("assistant") => {
                 // pi ends a failed provider request with this message, its
                 // `errorMessage` saying why; no `message_update` reports it.
-                let failure = if message.get("stopReason").and_then(Value::as_str) == Some("error")
-                {
+                if message.get("stopReason").and_then(Value::as_str) == Some("error") {
                     self.failed = true;
-                    message
+                    self.failure = message
                         .get("errorMessage")
                         .and_then(Value::as_str)
-                        .map(|text| AgentEvent::Error {
-                            message: text.to_owned(),
-                            fatal: false,
-                        })
-                } else {
-                    None
-                };
+                        .map(str::to_owned);
+                }
                 let Some(id) = self.assistant_id(message) else {
                     return Vec::new();
                 };
@@ -1636,7 +1661,6 @@ impl PiMapper {
                     turn.context_window = usage.context_window;
                     events.push(AgentEvent::TokenUsage(usage));
                 }
-                events.extend(failure);
                 events
             }
             // A tool that ran a model of its own, or whose nested calls did,

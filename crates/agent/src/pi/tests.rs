@@ -310,9 +310,11 @@ fn a_failed_provider_request_reaches_the_user_with_its_reason() {
 /// reports it (`dist/core/agent-session.js`): the failed attempt's
 /// `message_end`, `auto_retry_start` before it continues the run, and
 /// `auto_retry_end` with `success: true` once an assistant message ends
-/// without an error. The turn completed.
+/// without an error. The failed attempt's `agent_end` says `willRetry`, so
+/// its reason is told with the retry and is no error of the turn, which
+/// completed.
 #[test]
-fn a_request_that_succeeds_on_retry_completes_its_turn() {
+fn a_request_that_succeeds_on_retry_completes_its_turn_without_an_error() {
     let mut mapper = PiMapper::new();
     let usage = json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,
                            "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}});
@@ -332,7 +334,7 @@ fn a_request_that_succeeds_on_retry_completes_its_turn() {
         json!({"type":"message_start","message":failed}),
         json!({"type":"message_end","message":failed}),
         json!({"type":"turn_end","message":failed,"toolResults":[]}),
-        json!({"type":"agent_end","messages":[failed]}),
+        json!({"type":"agent_end","messages":[failed],"willRetry":true}),
         json!({"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":2000,
                    "errorMessage":"429 rate limit reached for gpt-test"}),
         json!({"type":"agent_start"}),
@@ -345,6 +347,16 @@ fn a_request_that_succeeds_on_retry_completes_its_turn() {
     ] {
         events.extend(mapper.on_message(&line));
     }
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RequestRetry { message }
+            if message.contains("429 rate limit reached for gpt-test")
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Error { .. }))
+    );
     assert!(matches!(
         events.last(),
         Some(AgentEvent::TurnCompleted {
