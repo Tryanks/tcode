@@ -11,7 +11,7 @@ use control_mcp::{
     MoveThreadResponse, Outcome, PullRequestOp, PullRequestParams, RunChange, RunOp, RunResult,
     SendMessageParams, SendMode, StartThreadParams, StartThreadResponse, Workspace,
 };
-use tcode_core::control::{ControlCategory, StartedBy, action};
+use tcode_core::control::{StartedBy, action};
 use tcode_core::project::ChildExpectation;
 use tcode_core::pull_request::{PullRequestKey, PullRequestSource};
 use tcode_protocol::{Command, CommandResponse, PullRequestAction, PullRequestActionResult};
@@ -133,7 +133,7 @@ fn cwd_inside(root: &Path, cwd: &str) -> Result<PathBuf, String> {
 
 impl AppState {
     /// `paths` as attachments the caller may send: the same rule a space client's attachment
-    /// passes, over the projects the caller's grant reaches.
+    /// passes, over the projects the caller may name.
     fn agent_attachments(
         &self,
         caller: &Caller,
@@ -143,12 +143,7 @@ impl AppState {
         let projects: Vec<String> = self
             .projects
             .iter()
-            .filter(|project| {
-                caller
-                    .grant
-                    .scope
-                    .reaches(caller.project_id.as_deref(), Some(&project.id))
-            })
+            .filter(|project| caller.holds_project(&project.id))
             .map(|project| project.id.clone())
             .collect();
         paths
@@ -160,8 +155,7 @@ impl AppState {
                     .map(|()| path.clone())
                     .map_err(|_| {
                         format!(
-                            "refused: attachment {} is not in the attachments folder of a \
-                             thread in your scope",
+                            "refused: attachment {} is not in a thread's attachments folder",
                             path.display()
                         )
                     })
@@ -281,11 +275,10 @@ impl AppState {
             .find(|project| project.id == project_id)
             .cloned()
             .ok_or_else(|| format!("unknown project: {project_id}"))?;
-        if !caller.reaches_project(&caller.grant.scope, &project.id) {
+        if !caller.holds_project(&project.id) {
             return Err(format!(
-                "refused: project {} is outside your grant's scope ({})",
-                project.id,
-                caller.grant.scope.describe()
+                "refused: project {} is outside the space this turn runs in",
+                project.id
             ));
         }
         let isolate = match params.workspace {
@@ -493,7 +486,7 @@ impl AppState {
         cx: &mut HostCx,
     ) -> BatchResult {
         if let Some(reason) = self
-            .batch_target(caller, target, false)
+            .batch_target(caller, target)
             .err()
             .or_else(|| self.agent_write_refusal(target))
         {
@@ -703,7 +696,7 @@ impl AppState {
         let skipped = |reason: String| (Outcome::Skipped, reason);
         let failed = |reason: String| (Outcome::Failed, reason);
         if let Some(reason) = self
-            .batch_target(caller, target, false)
+            .batch_target(caller, target)
             .err()
             .or_else(|| self.agent_write_refusal(target))
         {
@@ -821,11 +814,11 @@ impl AppState {
             }
             RunOp::SteerQueued { id } | RunOp::DropQueued { id } => {
                 let id = *id;
-                let (origin, editable) = self
+                let editable = self
                     .resident(target)
                     .and_then(|session| {
-                        let message = session.queue.iter().find(|message| message.id == id)?;
-                        Some((message.origin, Self::queued_message_editable(session, id)))
+                        session.queue.iter().find(|message| message.id == id)?;
+                        Some(Self::queued_message_editable(session, id))
                     })
                     .ok_or_else(|| skipped(format!("no queued message {id}")))?;
                 if !editable {
@@ -834,13 +827,6 @@ impl AppState {
                     )));
                 }
                 if matches!(op, RunOp::DropQueued { .. }) {
-                    if origin == MessageOrigin::Human
-                        && !caller.grant.allows_category(ControlCategory::HistoryEdit)
-                    {
-                        return Err(failed(
-                            "refused: dropping a queued human message needs history_edit".into(),
-                        ));
-                    }
                     (
                         Command::DropQueued { session_id, id },
                         action::DROP_QUEUED,
@@ -1235,45 +1221,8 @@ impl AppState {
         })
     }
 
-    /// Whether `caller` may move `thread_id` into `project`: into a project its grant reaches,
-    /// or, for the caller itself, into a project that has no threads yet, whose history the
-    /// move therefore opens to no one.
-    fn move_target_refusal(
-        &self,
-        caller: &Caller,
-        thread_id: &str,
-        project: &Project,
-    ) -> Option<String> {
-        if caller
-            .grant
-            .scope
-            .reaches(caller.project_id.as_deref(), Some(project.id.as_str()))
-        {
-            return None;
-        }
-        let empty = !self
-            .sessions
-            .iter()
-            .chain(self.residents.live.values().map(|session| &session.meta))
-            .chain(self.residents.parked.values().map(|session| &session.meta))
-            .any(|meta| meta.project_id.as_deref() == Some(project.id.as_str()));
-        if thread_id == caller.thread_id && empty {
-            return None;
-        }
-        Some(format!(
-            "refused: project {} is outside your grant's scope ({}){}",
-            project.id,
-            caller.grant.scope.describe(),
-            if thread_id == caller.thread_id {
-                " and already has threads"
-            } else {
-                ""
-            }
-        ))
-    }
-
-    /// Move a thread into a project [`Self::move_target_refusal`] allows; a thread may move
-    /// itself, keeping the turn that asked ([`AppState::move_session_by`]).
+    /// Move a thread into another project; a thread may move itself, keeping the turn that
+    /// asked ([`AppState::move_session_by`]).
     pub(super) fn op_move_thread(
         &mut self,
         caller: &Caller,
@@ -1293,9 +1242,6 @@ impl AppState {
             .find(|project| project.id == params.project_id)
             .cloned()
             .ok_or_else(|| format!("unknown project: {}", params.project_id))?;
-        if let Some(refusal) = self.move_target_refusal(caller, &params.thread_id, &project) {
-            return Err(refusal);
-        }
         let cwd = cwd_inside(&project.root, params.cwd.as_deref().unwrap_or("."))?;
         let before = self
             .find_meta(&params.thread_id)

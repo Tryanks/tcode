@@ -115,7 +115,7 @@ impl AppState {
         thread_ids.sort();
         thread_ids.dedup();
         let mut skipped = Vec::new();
-        thread_ids.retain(|target| match self.batch_target(caller, target, true) {
+        thread_ids.retain(|target| match self.batch_target(caller, target) {
             Ok(_) => true,
             Err(reason) => {
                 skipped.push(BatchResult {
@@ -224,9 +224,10 @@ impl AppState {
             let Some(mut meta) = self.find_meta(&watcher) else {
                 continue;
             };
-            // The watcher's grant may have narrowed since it asked.
+            // The target may have left the watcher's reach since it asked, as when its
+            // project left the space the watcher runs in.
             let caller = self.caller_of(&meta);
-            if !self.target_reachable(&caller, &caller.grant.scope, &target, true) {
+            if !self.open_to(&caller, &target) {
                 continue;
             }
             let space = meta

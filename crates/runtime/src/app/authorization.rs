@@ -406,7 +406,6 @@ impl AppState {
                 | Command::UnarchiveSession { session_id }
                 | Command::SettleChildren { session_id }
                 | Command::SettleSession { session_id }
-                | Command::RemoveThreadReference { session_id, .. }
                 | Command::SetFollowUp { session_id, .. }
                 | Command::SetParked { session_id, .. }
                 | Command::DismissSettleSuggestion { session_id }
@@ -446,15 +445,6 @@ impl AppState {
                         .then_some(())
                         .ok_or_else(|| refusal("project"))
                 }
-                // A reference lets the thread's model read the referenced thread, so a space
-                // may only point at threads it can read itself.
-                Command::AddThreadReference {
-                    session_id,
-                    thread_id,
-                } => {
-                    session(session_id)?;
-                    session(thread_id)
-                }
                 // Read marks are the host owner's, kept in their settings like the sidebar
                 // and favourite marks below.
                 Command::DeleteSession { .. }
@@ -475,8 +465,6 @@ impl AppState {
                     session_id: None, ..
                 }
                 | Command::PatchSettings { .. }
-                | Command::SetControlGrant { .. }
-                | Command::RespondControlGrant { .. }
                 | Command::ResetSettings
                 | Command::SetSidebarCollapsed { .. }
                 | Command::CycleProjectSort

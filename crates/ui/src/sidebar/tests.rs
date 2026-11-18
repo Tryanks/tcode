@@ -352,7 +352,7 @@ fn canceling_inline_rename_on_the_phone_discards_the_unsaved_title(cx: &mut Test
     touch(cx, gpui::TouchPhase::Ended, trigger);
     crate::test_frames::draw_settled(cx);
     let rename = cx
-        .debug_bounds("menu-item-2")
+        .debug_bounds("menu-item-0")
         .expect("thread menu opens")
         .center();
     touch(cx, gpui::TouchPhase::Started, rename);

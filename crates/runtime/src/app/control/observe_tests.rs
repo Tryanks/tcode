@@ -1,6 +1,6 @@
 use super::*;
 use crate::app::test_support::*;
-use tcode_core::control::{ControlScope, FollowUp, ReferenceOrigin, ThreadReference};
+use tcode_core::control::{ControlScope, FollowUp};
 use tcode_core::settlement::ThreadActivity;
 
 const HOUR_MS: u64 = 3_600_000;
@@ -129,30 +129,13 @@ fn list_threads_honours_scope_hides_children_and_archived_and_pages() {
     }
     assert_eq!(paged, ["newest", "middle", "settled", "caller"]);
 
-    assert_eq!(
-        call(
-            &state,
-            cx,
-            ControlOp::ListThreads(ListThreadsParams {
-                scope: Some(ControlScope::Host),
-                ..ListThreadsParams::default()
-            })
-        ),
-        Err("refused: scope host is wider than your grant's project".into())
-    );
-    state.update(cx, |state, _| {
-        let mut caller = state.find_meta("caller").unwrap();
-        caller.control_grant = Some(ControlGrant {
-            scope: ControlScope::Host,
-            ..ControlGrant::default_grant()
-        });
-        state.sessions.retain(|meta| meta.id != "caller");
-        state.sessions.push(caller);
-    });
     let page = call(
         &state,
         cx,
-        ControlOp::ListThreads(ListThreadsParams::default()),
+        ControlOp::ListThreads(ListThreadsParams {
+            scope: Some(ControlScope::Host),
+            ..ListThreadsParams::default()
+        }),
     )
     .unwrap();
     assert_eq!(ids(&page, "threads")[0], "elsewhere");
@@ -217,13 +200,14 @@ fn get_thread_explains_why_an_unsettled_thread_was_not_auto_settled() {
     }
 }
 
-/// `search` reads only threads the caller may read: its scope, itself and its references.
+/// Left to itself `search` covers the caller's own project; a thread the call names is
+/// searched wherever it is.
 #[test]
-fn search_is_limited_to_readable_threads_and_returns_anchors() {
+fn search_covers_the_scope_and_any_thread_it_names_and_returns_anchors() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-control-search");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
-    for id in ["caller", "same", "other", "referenced"] {
+    for id in ["caller", "same", "other"] {
         store
             .append_event(
                 id,
@@ -246,15 +230,7 @@ fn search_is_limited_to_readable_threads_and_returns_anchors() {
     state.update(cx, |state, _| {
         add(state, thread("same", "a"), None);
         add(state, thread("other", "b"), None);
-        add(state, thread("referenced", "b"), None);
-        let mut caller = thread("caller", "a");
-        caller.references.push(ThreadReference {
-            thread_id: "referenced".into(),
-            by: ReferenceOrigin::User,
-            created_at: 0,
-            boundary_notice: true,
-        });
-        add(state, caller, None);
+        add(state, thread("caller", "a"), None);
     });
     let search = |thread_ids: Option<Vec<String>>| {
         ControlOp::Search(SearchParams {
@@ -272,8 +248,8 @@ fn search_is_limited_to_readable_threads_and_returns_anchors() {
         .map(|hit| hit["anchor"].as_str().unwrap())
         .collect();
     anchors.sort();
-    assert_eq!(anchors, ["caller#1", "referenced#1", "same#1"]);
-    assert_eq!(answer["total"], 3);
+    assert_eq!(anchors, ["caller#1", "same#1"]);
+    assert_eq!(answer["total"], 2);
     assert!(
         answer["hits"][0]["snippet"]
             .as_str()
@@ -282,13 +258,9 @@ fn search_is_limited_to_readable_threads_and_returns_anchors() {
         "snippets are fenced as data"
     );
 
-    let answer = call(&state, cx, search(Some(vec!["referenced".into()]))).unwrap();
-    assert_eq!(answer["hits"][0]["anchor"], "referenced#1");
+    let answer = call(&state, cx, search(Some(vec!["other".into()]))).unwrap();
+    assert_eq!(answer["hits"][0]["anchor"], "other#1");
     assert_eq!(answer["total"], 1);
-    assert_eq!(
-        call(&state, cx, search(Some(vec!["other".into()]))),
-        Err("refused: thread other is outside your grant's scope (project)".into())
-    );
 }
 
 /// `review_candidates` changes nothing, finds old unresolved work, and states its coverage.

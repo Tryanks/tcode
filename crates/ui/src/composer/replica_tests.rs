@@ -1601,26 +1601,19 @@ fn dragging_a_queued_row_moves_it_in_the_host_queue(cx: &mut TestAppContext) {
     assert!(moves(&outgoing).is_empty(), "a row dropped in place stays");
 }
 
-/// Choosing a thread from the `@` menu references it: the host is asked to
-/// add the reference and the draft keeps no mention text.
+/// Choosing a thread from the `@` menu writes a link to it into the message,
+/// as a file is, also in a new thread's first message. The link is the whole
+/// mention: the model reads the thread by the id it carries.
 #[gpui::test]
-fn an_at_thread_is_referenced_rather_than_written_into_the_draft(cx: &mut TestAppContext) {
+fn an_at_thread_is_written_into_the_message_as_a_link(cx: &mut TestAppContext) {
     let (store, incoming, outgoing, mut status) = attach(cx);
     let session_id = Some(status.session_id.clone());
-    status.draft = false;
     status.control = Some(tcode_protocol::ControlStatus {
-        grant: tcode_core::control::ControlGrant::default_grant(),
-        source: tcode_core::control::ControlGrantSource::Default,
-        pending_requests: Vec::new(),
-        references: Vec::new(),
         self_settle: None,
         tools_offered: true,
     });
-    let mut current =
+    let mut other =
         tcode_core::project::SessionMeta::new(status.provider, std::env::temp_dir(), None);
-    current.id = status.session_id.clone();
-    current.title = "Current".into();
-    let mut other = current.clone();
     other.id = "release-thread".into();
     other.title = "Release notes".into();
     replace(
@@ -1628,7 +1621,7 @@ fn an_at_thread_is_referenced_rather_than_written_into_the_draft(cx: &mut TestAp
         Topic::Index,
         ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
             summary: Default::default(),
-            sessions: vec![current, other],
+            sessions: vec![other],
             projects: Vec::new(),
         }),
     );
@@ -1650,24 +1643,15 @@ fn an_at_thread_is_referenced_rather_than_written_into_the_draft(cx: &mut TestAp
     cx.simulate_input("@release");
     // The menu has folded open by the time it is clicked.
     crate::test_frames::draw_settled(cx);
-    composer.read_with(cx, |composer, cx| {
-        assert_eq!(composer.menu_rows(cx).0[0].primary, "Release notes");
-    });
     let row = cx.debug_bounds("menu-row-0").expect("thread row");
     cx.simulate_click(row.center(), Modifiers::default());
     cx.update(|window, cx| window.draw(cx).clear(cx));
     cx.run_until_parked();
-    assert!(
-        std::iter::from_fn(|| outgoing.try_recv().ok()).any(|line| matches!(
-            tcode_protocol::decode_client_line(&line).unwrap().payload,
-            tcode_protocol::ClientPayload::Command(
-                tcode_protocol::Command::AddThreadReference { thread_id, .. }
-            ) if thread_id == "release-thread"
-        )),
-        "no AddThreadReference was sent"
-    );
     cx.simulate_input("go");
     cx.simulate_keystrokes("enter");
     draw_settled(cx);
-    assert_eq!(sent_texts(&outgoing), ["go"], "the draft kept no mention");
+    assert_eq!(
+        sent_texts(&outgoing),
+        ["[@Release notes](tcode-thread://release-thread) go"]
+    );
 }

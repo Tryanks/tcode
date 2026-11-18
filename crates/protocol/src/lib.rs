@@ -51,7 +51,7 @@ pub use event::{
     RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification, RuntimeOperationId,
     RuntimeToast, Scope, ScopedProviderChoice, ServerEvent, SessionActivity, SessionPlan,
     SessionStatus, StorageMigration, TcodeDiskUsage, TcodeUpdateStatus, TerminalContextStatus,
-    TerminalSplitStatus, TerminalStatus, ThreadReferenceStatus, ThreadWakes, Topic,
+    TerminalSplitStatus, TerminalStatus, ThreadWakes, Topic,
 };
 pub use query::{
     AgentAccess, AgentGrant, ControlActivityFilter, ControlActivityPage, ControlActivityThread,
@@ -369,7 +369,15 @@ pub use wire::{
 // metadata's active_order go, and SessionActivity gains last_activity_at.
 // The protocol adds the ThreadTurnMarks query. It adds the SetDraftText and
 // RestoreDraft commands, thread metadata gains draft_text, and the index
-// lists the drafts on a client's screen and those that hold text.
+// lists the drafts on a client's screen and those that hold text. A thread no
+// longer keeps a list of threads it may read: thread metadata loses
+// references, ControlStatus loses references, the AddThreadReference and
+// RemoveThreadReference commands and the ThreadReferenceAdded answer go, and
+// RuntimeNotice loses reference_boundary_crossed. tcode_control keeps no
+// grants: thread metadata loses control_grant and control_grant_requests,
+// ControlStatus loses grant, source and pending_requests, Settings' control
+// keeps only enabled, and the SetControlGrant and RespondControlGrant
+// commands and the ControlDefaultGrant and ControlProjectGrant patches go.
 pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]

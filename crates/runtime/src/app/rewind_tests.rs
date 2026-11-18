@@ -377,12 +377,6 @@ fn a_control_rewind_answers_with_the_harness_outcome() {
         let mut caller = SessionMeta::new(ProviderKind::ClaudeCode, cwd, None);
         caller.id = "caller".into();
         caller.project_id = Some("project".into());
-        caller.control_grant = Some(tcode_core::control::ControlGrant {
-            categories: [tcode_core::control::ControlCategory::HistoryEdit]
-                .into_iter()
-                .collect(),
-            ..tcode_core::control::ControlGrant::default_grant()
-        });
         state.sessions.push(caller);
         state.handle_control_op(
             "caller".into(),

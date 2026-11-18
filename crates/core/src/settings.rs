@@ -679,11 +679,6 @@ pub enum SettingsPatch {
     BrowserHomeUrl(Option<String>),
     BrowserAllowEvaluate(bool),
     ControlEnabled(bool),
-    ControlDefaultGrant(crate::control::ControlGrant),
-    ControlProjectGrant {
-        project_id: String,
-        value: Option<crate::control::ControlGrant>,
-    },
     SettlementAutomation(crate::control::SettlementAutomation),
     TitleGeneration(Option<TitleGenerationSettings>),
     SidebarLayout(SidebarLayout),
@@ -971,7 +966,7 @@ pub struct Settings {
     /// `subagents`), so legacy files stay clean and load with the defaults.
     #[serde(default, skip_serializing_if = "BrowserSettings::is_default")]
     pub browser: BrowserSettings,
-    /// What a thread's model may do in Tcode through `tcode_control`.
+    /// Whether a thread's model is given `tcode_control`.
     #[serde(
         default,
         skip_serializing_if = "crate::control::ControlSettings::is_default"
@@ -1253,15 +1248,6 @@ impl Settings {
             SettingsPatch::BrowserHomeUrl(value) => self.browser.home_url = value,
             SettingsPatch::BrowserAllowEvaluate(value) => self.browser.allow_evaluate = value,
             SettingsPatch::ControlEnabled(value) => self.control.enabled = value,
-            SettingsPatch::ControlDefaultGrant(value) => self.control.default_grant = value,
-            SettingsPatch::ControlProjectGrant { project_id, value } => match value {
-                Some(value) => {
-                    self.control.project_overrides.insert(project_id, value);
-                }
-                None => {
-                    self.control.project_overrides.remove(&project_id);
-                }
-            },
             SettingsPatch::SettlementAutomation(value) => self.settlement_automation = value,
             SettingsPatch::TitleGeneration(value) => self.title_generation = value,
             SettingsPatch::SidebarLayout(value) => self.sidebar_layout = value,
@@ -1700,6 +1686,24 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&older).unwrap()["orchestrate"],
             serde_json::json!({"child_approval": "manual", "child_worktrees": true})
+        );
+    }
+
+    #[test]
+    fn a_control_block_with_its_grants_keeps_only_whether_it_is_on() {
+        let older: Settings = serde_json::from_str(
+            r#"{"control":{
+                "enabled":false,
+                "default_grant":{"scope":"host","tiers":["observe"],"categories":["delete"]},
+                "project_overrides":{"p":{"scope":{"projects":["q"]},"tiers":["observe","organize","operate"],"categories":[]}}
+            }}"#,
+        )
+        .unwrap();
+        assert!(!older.control.enabled);
+        assert!(older.unknown.is_empty());
+        assert_eq!(
+            serde_json::to_value(&older).unwrap()["control"],
+            serde_json::json!({"enabled": false})
         );
     }
 

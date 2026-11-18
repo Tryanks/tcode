@@ -39,7 +39,6 @@ enum Kind {
     Update,
     NotifyWhen,
     SettleSelf,
-    RequestGrant,
     Approve,
     Report,
 }
@@ -68,8 +67,6 @@ pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView
         Kind::NotifyWhen
     } else if control(&["settle_self"]) {
         Kind::SettleSelf
-    } else if control(&["request_grant"]) {
-        Kind::RequestGrant
     } else if control(&["respond_approval"]) {
         Kind::Approve
     } else if control(&["report_result"]) {
@@ -91,15 +88,6 @@ struct Threads {
 pub(in crate::chat) struct Anchor {
     pub(in crate::chat) thread_id: String,
     pub(in crate::chat) position: Option<u64>,
-}
-
-impl Anchor {
-    fn url(&self) -> String {
-        match self.position {
-            Some(position) => format!("tcode-thread://{}#{position}", self.thread_id),
-            None => format!("tcode-thread://{}", self.thread_id),
-        }
-    }
 }
 
 /// Whether `text` starts with a thread id: a UUID.
@@ -288,7 +276,6 @@ impl Threads {
             Kind::Update => "update_threads",
             Kind::NotifyWhen => "notify_when",
             Kind::SettleSelf => "settle_self",
-            Kind::RequestGrant => "request_grant",
             Kind::Approve => "approve",
             Kind::Report => "report",
         })
@@ -375,16 +362,6 @@ impl Threads {
             // they would crowd them out of a narrow header.
             Kind::NotifyWhen => Argument::plain(threads()),
             Kind::SettleSelf => Argument::plain(string(input, "when").unwrap_or_default()),
-            Kind::RequestGrant => {
-                let scope = [string(input, "scope").map(str::to_owned)]
-                    .into_iter()
-                    .flatten()
-                    .chain([strings(input, "tiers").join(", ")])
-                    .filter(|part| !part.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                Argument::plain(scope)
-            }
             Kind::Approve => Argument::plain(
                 string(input, "option")
                     .or_else(|| {
@@ -483,11 +460,11 @@ fn thread_link(
 ) -> AnyElement {
     let theme = cx.theme();
     let selector = format!("tool-thread-{call_id}-{index}");
-    let url = anchor.url();
     let open = crate::markdown::OpenThreadAnchor {
         thread_id: anchor.thread_id,
         position: anchor.position,
     };
+    let url = open.url();
     let accent = theme.accent;
     div()
         .id(SharedString::from(selector.clone()))

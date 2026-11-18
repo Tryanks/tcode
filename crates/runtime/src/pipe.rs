@@ -982,34 +982,6 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::SettleSession { session_id } => {
             app.settle_session(&session_id, cx);
         }
-        Command::SetControlGrant { session_id, grant } => {
-            app.set_control_grant(&session_id, grant, cx)
-        }
-        Command::RespondControlGrant {
-            session_id,
-            request_id,
-            approve,
-        } => {
-            return CommandOutcome::Immediate(
-                app.respond_control_grant(&session_id, &request_id, approve, cx)
-                    .map(|()| CommandResponse::Unit),
-            );
-        }
-        Command::AddThreadReference {
-            session_id,
-            thread_id,
-        } => {
-            return CommandOutcome::Immediate(
-                app.add_thread_reference(&session_id, &thread_id, cx)
-                    .map(|boundary_notice| CommandResponse::ThreadReferenceAdded {
-                        boundary_notice,
-                    }),
-            );
-        }
-        Command::RemoveThreadReference {
-            session_id,
-            thread_id,
-        } => app.remove_thread_reference(&session_id, &thread_id, cx),
         Command::SetFollowUp {
             session_id,
             on,

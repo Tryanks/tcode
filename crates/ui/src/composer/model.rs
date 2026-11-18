@@ -208,8 +208,8 @@ pub(super) enum MenuIcon {
 pub(super) enum MenuAccept {
     /// Insert the serialized `[basename](path)` mention for this relative path.
     InsertPath(String),
-    /// Reference this thread from the active one: a chip, not text.
-    ReferenceThread(String),
+    /// Insert the serialized `[@title](tcode-thread://id)` mention for this thread id.
+    InsertThread(String),
     /// Insert `$<name> ` for this provider skill.
     InsertSkill(String),
     /// Insert `/<name> ` for this provider slash command.

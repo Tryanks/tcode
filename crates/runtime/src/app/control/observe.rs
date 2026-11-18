@@ -571,7 +571,7 @@ impl AppState {
         let projects: Vec<serde_json::Value> = self
             .projects
             .iter()
-            .filter(|project| caller.reaches_project(&caller.grant.scope, &project.id))
+            .filter(|project| caller.holds_project(&project.id))
             .map(|project| {
                 let (mut active, mut settled, mut archived) = (0, 0, 0);
                 for meta in self
@@ -736,10 +736,7 @@ impl AppState {
         params: ListThreadsParams,
         cx: &mut HostCx,
     ) -> Answer {
-        let scope = params
-            .scope
-            .clone()
-            .unwrap_or_else(|| caller.grant.scope.clone());
+        let scope = params.scope.clone().unwrap_or(ControlScope::Project);
         let states = params
             .states
             .clone()
@@ -756,7 +753,7 @@ impl AppState {
             .sessions
             .iter()
             .filter(|meta| {
-                self.target_reachable(caller, &scope, meta, false)
+                self.covered(caller, &scope, meta)
                     && states.contains(&thread_state(meta))
                     && (include_children || meta.parent_session_id.is_none())
                     && params
@@ -928,23 +925,27 @@ impl AppState {
         if query.is_empty() {
             return Answer::Now(Err("search needs a non-empty query".into()));
         }
-        let scope = params
-            .scope
-            .clone()
-            .unwrap_or_else(|| caller.grant.scope.clone());
+        let scope = params.scope.clone().unwrap_or(ControlScope::Project);
         let mut omitted = Vec::new();
+        // Threads the call names are searched wherever they are; left to itself the search
+        // covers the scope and the caller's own Orchestrate children.
+        let searched = |meta: &SessionMeta| match &params.thread_ids {
+            Some(ids) => ids.contains(&meta.id) && self.open_to(caller, meta),
+            None => {
+                self.covered(caller, &scope, meta)
+                    || (meta.parent_session_id.as_deref() == Some(caller.thread_id.as_str())
+                        && self.open_to(caller, meta))
+            }
+        };
         let mut readable: Vec<(u64, SessionMeta)> = self
             .sessions
             .iter()
-            .filter(|meta| self.target_reachable(caller, &scope, meta, true))
+            .filter(|meta| searched(meta))
             .map(|meta| (self.activity_at(meta), meta.clone()))
             .collect();
-        if let Some(ids) = &params.thread_ids {
-            readable.retain(|(_, meta)| ids.contains(&meta.id));
-            for id in ids {
-                if !readable.iter().any(|(_, meta)| &meta.id == id) {
-                    omitted.push(format!("thread {id} is outside the requested scope"));
-                }
+        for id in params.thread_ids.iter().flatten() {
+            if !readable.iter().any(|(_, meta)| &meta.id == id) {
+                omitted.push(format!("thread {id} is unknown or closed to this thread"));
             }
         }
         readable.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
@@ -1059,7 +1060,7 @@ impl AppState {
             }
             (None, Some(project_id)) => {
                 answer.project_id = Some(project_id.clone());
-                if caller.reaches_project(&caller.grant.scope, project_id) {
+                if caller.holds_project(project_id) {
                     self.projects
                         .iter()
                         .find(|project| &project.id == project_id)
@@ -1067,8 +1068,7 @@ impl AppState {
                         .ok_or_else(|| format!("unknown project: {project_id}"))
                 } else {
                     Err(format!(
-                        "refused: project {project_id} is outside your grant's scope ({})",
-                        caller.grant.scope.describe()
+                        "refused: project {project_id} is outside the space this turn runs in"
                     ))
                 }
             }
@@ -1319,10 +1319,9 @@ impl AppState {
         let meta = self
             .find_meta(&owner)
             .ok_or_else(|| format!("unknown terminal: {id}"))?;
-        if !self.target_reachable(caller, &caller.grant.scope, &meta, true) {
+        if !self.open_to(caller, &meta) {
             return Err(format!(
-                "refused: terminal {id} belongs to thread {owner}, outside your grant's scope ({})",
-                caller.grant.scope.describe()
+                "refused: terminal {id} belongs to thread {owner}, which is closed to this thread"
             ));
         }
         let terminal = self
@@ -1356,10 +1355,7 @@ impl AppState {
         params: ReviewCandidatesParams,
         cx: &mut HostCx,
     ) -> Answer {
-        let scope = params
-            .scope
-            .clone()
-            .unwrap_or_else(|| caller.grant.scope.clone());
+        let scope = params.scope.clone().unwrap_or(ControlScope::Project);
         let now = cx.clock().unix_millis();
         let since = params
             .since
@@ -1368,16 +1364,14 @@ impl AppState {
         let mut in_scope: Vec<(u64, &SessionMeta)> = self
             .sessions
             .iter()
-            .filter(|meta| {
-                meta.archived_at.is_none() && self.target_reachable(caller, &scope, meta, false)
-            })
+            .filter(|meta| meta.archived_at.is_none() && self.covered(caller, &scope, meta))
             .map(|meta| (self.activity_at(meta), meta))
             .collect();
         in_scope.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
         let projects: Vec<(String, PathBuf)> = self
             .projects
             .iter()
-            .filter(|project| !project.quick_chat && caller.reaches_project(&scope, &project.id))
+            .filter(|project| !project.quick_chat && caller.covers_project(&scope, &project.id))
             .map(|project| (project.id.clone(), project.root.clone()))
             .collect();
         let thread_cwds: HashSet<PathBuf> =

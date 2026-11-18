@@ -507,7 +507,6 @@ impl SessionsSidebar {
         let watching = state.wakes.notify > 0;
         let hover = self.hover.clone();
         let row_key = state.row_key.clone();
-        let grant = crate::control::thread_grant_line(&store.read(cx).settings().control, meta);
         let draft = state.draft;
         let menu = row
             .context_menu(move |menu, window, cx| {
@@ -538,8 +537,6 @@ impl SessionsSidebar {
                     .and_then(|sidebar| sidebar.read(cx).move_bounds(&id, cx));
                 let open_beside = crate::shell::pane_controls(window, cx)
                     .map(|panes| panes.split_right || crate::shell::shown_in_pane(&thread, cx));
-                let menu =
-                    menu.when_some(grant.clone(), |menu, grant| menu.label(grant).separator());
                 menu.when_some(open_beside, |menu, enabled| {
                     menu.menu_with_enable(
                         crate::tr!("panes.open_beside").into_owned(),

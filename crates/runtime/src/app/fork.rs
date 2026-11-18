@@ -254,8 +254,6 @@ impl AppState {
             fork.resume_cursor = Some(left.session.resume);
             fork.session_transfer_from = None;
         }
-        // The fork carries the source's context, so it may read what the source could.
-        fork.references = source.references.clone();
         fork.pending_fork = Some(plan.point);
         let new_session = plan.branch.is_none();
         fork.fork_origin = Some(ForkOrigin {

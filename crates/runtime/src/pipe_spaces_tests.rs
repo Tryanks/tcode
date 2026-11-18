@@ -490,17 +490,6 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
             parent: None,
         },
         Command::StartScratchDraft,
-        // Authority over tcode_control is the host owner's: a space member may neither give
-        // its threads a grant nor approve one their model asked for.
-        Command::SetControlGrant {
-            session_id: "a".into(),
-            grant: Some(tcode_core::control::ControlGrant::default_grant()),
-        },
-        Command::RespondControlGrant {
-            session_id: "a".into(),
-            request_id: "request".into(),
-            approve: true,
-        },
         // Read marks are the host owner's: a member's reading leaves them as they are.
         Command::MarkSessionUnread {
             session_id: "a".into(),
@@ -514,11 +503,6 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
             session_id: "a".into(),
             client_id: "member-device".into(),
             take_over: true,
-        },
-        // A reference would let thread a's model read thread b, which the space cannot read.
-        Command::AddThreadReference {
-            session_id: "a".into(),
-            thread_id: "b".into(),
         },
         // A space moves its threads only between its own projects.
         Command::MoveSession {

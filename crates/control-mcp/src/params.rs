@@ -2,7 +2,7 @@
 //! runtime that answers it, plus the shapes the tools have in common.
 
 use serde::{Deserialize, Serialize};
-use tcode_core::control::{ControlCategory, ControlScope, ControlTier, SelfSettleWhen, WatchEvent};
+use tcode_core::control::{ControlScope, SelfSettleWhen, WatchEvent};
 
 /// `"<thread_id>#<position>"`: the thread and the position of one stored entry.
 pub fn parse_anchor(anchor: &str) -> Option<(&str, u64)> {
@@ -73,7 +73,7 @@ pub enum ItemKind {
     Other,
 }
 
-const SCOPE: &str = "Limit the call to the caller's own project (project), named projects ({\"projects\": [ids]}) or the whole host (host). Omit for the grant's scope. A scope wider than the grant is refused.";
+const SCOPE: &str = "Which projects the call covers: the caller's own (project), named ones ({\"projects\": [ids]}) or the whole host (host). Omit for the caller's own project.";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ListProjectsParams {}
@@ -130,7 +130,9 @@ pub struct SearchParams {
     #[schemars(description = SCOPE)]
     pub scope: Option<ControlScope>,
     #[serde(default)]
-    #[schemars(description = "Only these threads.")]
+    #[schemars(
+        description = "Only these threads. A thread named here is searched wherever it is, whatever the scope."
+    )]
     pub thread_ids: Option<Vec<String>>,
     #[serde(default)]
     #[schemars(
@@ -414,9 +416,7 @@ pub struct StartThreadParams {
     )]
     pub message: String,
     #[serde(default)]
-    #[schemars(
-        description = "Image paths already in the attachments folder of a thread in your scope."
-    )]
+    #[schemars(description = "Image paths already in a thread's attachments folder.")]
     pub attachments: Option<Vec<String>>,
     #[schemars(
         description = "Idempotency key, stored on the thread: a retry after a failure or restart returns the same thread."
@@ -443,9 +443,7 @@ pub struct SendMessageParams {
     )]
     pub mode: SendMode,
     #[serde(default)]
-    #[schemars(
-        description = "Image paths already in the attachments folder of a thread in your scope."
-    )]
+    #[schemars(description = "Image paths already in a thread's attachments folder.")]
     pub attachments: Option<Vec<String>>,
     #[serde(default)]
     #[schemars(description = "Idempotency key: a retry with the same key does not send twice.")]
@@ -485,7 +483,7 @@ pub struct RunChange {
     #[schemars(description = "The thread id.")]
     pub thread_id: String,
     #[schemars(
-        description = "One of interrupt, {\"retry\": {\"turn\"}}, compact, {\"set_model\": {\"model\"}} (a model of the thread's own provider and profile), {\"set_option\": {\"id\", \"value\"}}, fork, {\"fork_at\": {\"turn\"}} (a new thread holding everything through that finished turn, answer included, as outline numbers them, where the provider of the thread forks at a turn), {\"steer_queued\": {\"id\"}}, {\"drop_queued\": {\"id\"}}, or cancel (your own subagent only: stop it and drop its queue without delivering its result). Dropping a queued human message needs history_edit."
+        description = "One of interrupt, {\"retry\": {\"turn\"}}, compact, {\"set_model\": {\"model\"}} (a model of the thread's own provider and profile), {\"set_option\": {\"id\", \"value\"}}, fork, {\"fork_at\": {\"turn\"}} (a new thread holding everything through that finished turn, answer included, as outline numbers them, where the provider of the thread forks at a turn), {\"steer_queued\": {\"id\"}}, {\"drop_queued\": {\"id\"}}, or cancel (your own subagent only: stop it and drop its queue without delivering its result)."
     )]
     pub op: RunOp,
 }
@@ -519,16 +517,6 @@ pub enum PullRequestOp {
     },
 }
 
-impl PullRequestOp {
-    /// Comment, reply and resolve write to the host and need `pr_write`.
-    pub fn writes(&self) -> bool {
-        matches!(
-            self,
-            Self::Comment { .. } | Self::Reply { .. } | Self::Resolve { .. }
-        )
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PullRequestParams {
     #[schemars(description = "The thread the pull request is or becomes linked to.")]
@@ -542,7 +530,7 @@ pub struct PullRequestParams {
     )]
     pub reference: Option<String>,
     #[schemars(
-        description = "link, unlink, watch, unwatch, refresh, or a write: {\"comment\": {\"body\"}}, {\"reply\": {\"review_thread_id\", \"body\"}} (a reply in a review comment thread), {\"resolve\": {\"review_thread_id\"}}. Writes need pr_write."
+        description = "link, unlink, watch, unwatch, refresh, or a write: {\"comment\": {\"body\"}}, {\"reply\": {\"review_thread_id\", \"body\"}} (a reply in a review comment thread), {\"resolve\": {\"review_thread_id\"}}."
     )]
     pub op: PullRequestOp,
 }
@@ -567,19 +555,12 @@ pub enum GitOp {
     MergeWorktree,
 }
 
-impl GitOp {
-    /// Push, pull, commit_push, publish_branch and merge_worktree need `git_remote`.
-    pub fn remote(&self) -> bool {
-        !matches!(self, Self::CheckoutBranch { .. } | Self::Commit { .. })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitParams {
     #[schemars(description = "The thread whose checkout to act in.")]
     pub thread_id: String,
     #[schemars(
-        description = "{\"checkout_branch\": {\"branch\"}}, {\"commit\": {\"message\", \"included\"?}}, or with git_remote: push, pull, {\"commit_push\": {\"message\", \"included\"?}}, publish_branch, merge_worktree."
+        description = "{\"checkout_branch\": {\"branch\"}}, {\"commit\": {\"message\", \"included\"?}}, push, pull, {\"commit_push\": {\"message\", \"included\"?}}, publish_branch or merge_worktree."
     )]
     pub op: GitOp,
 }
@@ -623,17 +604,6 @@ pub struct NotifyWhenParams {
 pub struct CancelNotifyParams {
     #[schemars(description = "Watch ids notify_when returned.")]
     pub ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ReferenceParams {
-    #[schemars(
-        description = "The thread to reference; its archived log becomes readable to this thread."
-    )]
-    pub thread_id: String,
-    #[serde(default)]
-    #[schemars(description = "Why, shown to the user beside the reference.")]
-    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -731,25 +701,9 @@ pub struct RewindParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PatchSettingsParams {
     #[schemars(
-        description = "A settings patch as {\"type\": <patch>, \"content\": <value>}, as get_settings shows the fields. Credentials, hosting, tcode_control grants and the settlement automation tier are refused whatever the grant."
+        description = "A settings patch as {\"type\": <patch>, \"content\": <value>}, as get_settings shows the fields. Credentials, hosting, whether threads are given tcode_control and the settlement automation tier are always refused."
     )]
     pub patch: serde_json::Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct RequestGrantParams {
-    #[schemars(description = "project, {\"projects\": [ids]} or host.")]
-    pub scope: ControlScope,
-    #[serde(default)]
-    #[schemars(description = "Tiers asked for: observe, organize, operate.")]
-    pub tiers: Vec<ControlTier>,
-    #[serde(default)]
-    #[schemars(
-        description = "Privileged categories asked for: answer_input, terminal, delete, git_remote, pr_write, history_edit, settings_write."
-    )]
-    pub categories: Vec<ControlCategory>,
-    #[schemars(description = "Why, shown to the user with the request.")]
-    pub reason: String,
 }
 
 // ---- observe responses ----
@@ -849,13 +803,4 @@ pub struct MoveThreadResponse {
     pub project_id: String,
     pub project_name: String,
     pub cwd: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReferenceResponse {
-    pub thread_id: String,
-    pub title: String,
-    /// The thread is in another project or runs another provider, so its content goes to
-    /// this thread's model vendor.
-    pub boundary_notice: bool,
 }
