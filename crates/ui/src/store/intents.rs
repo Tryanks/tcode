@@ -977,6 +977,11 @@ impl WorkspaceStore {
         self.remember_project(Some(project_id.clone()));
         self.create_and_show(Command::StartDraft { project_id, cwd }, false, None, cx);
     }
+    /// The quick thread's draft, on the same terms.
+    pub(super) fn fall_back_to_scratch_draft(&mut self, cx: &mut Context<Self>) {
+        self.create_and_show(Command::StartScratchDraft, false, None, cx);
+    }
+
     /// Start a draft in the project `session_id` belongs to, or a scratch
     /// draft when it belongs to none. Beside a draft holding no text nothing
     /// starts: the host answers a project's or a quick chat's draft request

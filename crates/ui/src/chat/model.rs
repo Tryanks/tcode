@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use agent::{FileChange, ItemContent, ItemStatus, TurnStatus};
 use tcode_core::notice::{HostNotice, host_notice};
-use tcode_core::project::{Project, SessionMeta};
 use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnMeta, TurnTiming};
 
 use super::timeline::rows::TimelineRow;
@@ -778,47 +777,6 @@ pub(crate) fn format_local_time(unix_ms: u64) -> String {
         .unwrap_or_default()
 }
 
-const START_HUB_PROJECT_LIMIT: usize = 6;
-
-/// Projects shown by the empty-chat start hub, ordered by latest unarchived
-/// thread activity. Projects without threads follow alphabetically.
-pub(crate) fn start_hub_projects(
-    projects: &[Project],
-    sessions: &[SessionMeta],
-) -> Vec<(Project, Option<u64>)> {
-    let mut projects: Vec<(Project, Option<u64>)> = projects
-        .iter()
-        .cloned()
-        .map(|project| {
-            let last_activity = sessions
-                .iter()
-                .filter(|session| session.archived_at.is_none())
-                .filter(|session| session.project_id.as_deref() == Some(project.id.as_str()))
-                .map(|session| session.updated_at)
-                .max();
-            (project, last_activity)
-        })
-        .collect();
-    projects.sort_by(|(project_a, activity_a), (project_b, activity_b)| {
-        match (activity_a, activity_b) {
-            (Some(activity_a), Some(activity_b)) => activity_b.cmp(activity_a).then_with(|| {
-                project_a
-                    .name
-                    .to_lowercase()
-                    .cmp(&project_b.name.to_lowercase())
-            }),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => project_a
-                .name
-                .to_lowercase()
-                .cmp(&project_b.name.to_lowercase()),
-        }
-    });
-    projects.truncate(START_HUB_PROJECT_LIMIT);
-    projects
-}
-
 /// Pre-measure this many full-window heights on each side of the chat viewport.
 ///
 /// GPUI's list performs the expensive first layout for items in this band, so a
@@ -941,10 +899,9 @@ pub(crate) fn disclosure_keys(content: &EntryContent, entry_id: &str) -> Vec<Str
 #[cfg(test)]
 pub(in crate::chat) mod tests {
     use super::*;
-    use agent::{FileChange, FileChangeKind, ItemContent, ItemStatus, ProviderKind};
-    use std::path::{Path, PathBuf};
+    use agent::{FileChange, FileChangeKind, ItemContent, ItemStatus};
+    use std::path::Path;
     use std::sync::Arc;
-    use tcode_core::project::{Project, SessionMeta};
     use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnTiming};
 
     pub(in crate::chat) const REAL_DIFF: &str = "--- a/src/foo.rs\n\
@@ -954,57 +911,6 @@ pub(in crate::chat) mod tests {
                              +added one\n\
                              +added two\n\
                              -removed one\n";
-
-    #[test]
-    fn start_hub_orders_active_projects_then_alphabetical_empty_projects_and_caps_at_six() {
-        let project = |id: &str, name: &str| Project {
-            id: id.into(),
-            name: name.into(),
-            root: PathBuf::from(format!("/{id}")),
-            quick_chat: false,
-            icon_path: None,
-            permission_defaults: Default::default(),
-            created_at: 0,
-        };
-        let projects = vec![
-            project("archived", "Archived only"),
-            project("alpha", "Alpha"),
-            project("recent", "Recent"),
-            project("older", "Older"),
-            project("middle", "Middle"),
-            project("extra", "Extra"),
-            project("zulu", "Zulu"),
-        ];
-        let session = |id: &str, project_id: &str, updated_at: u64, archived: bool| {
-            let mut session =
-                SessionMeta::new(ProviderKind::Codex, PathBuf::from("/project"), None);
-            session.id = id.into();
-            session.project_id = Some(project_id.into());
-            session.updated_at = updated_at;
-            session.archived_at = archived.then_some(updated_at);
-            session
-        };
-        let sessions = vec![
-            session("recent-thread", "recent", 50, false),
-            session("middle-thread", "middle", 30, false),
-            session("older-thread", "older", 20, false),
-            session("extra-thread", "extra", 10, false),
-            session("archived-thread", "archived", 100, true),
-        ];
-
-        let ordered = start_hub_projects(&projects, &sessions);
-        let ids: Vec<&str> = ordered
-            .iter()
-            .map(|(project, _)| project.id.as_str())
-            .collect();
-
-        assert_eq!(
-            ids,
-            vec!["recent", "middle", "older", "extra", "alpha", "archived"]
-        );
-        assert_eq!(ordered[0].1, Some(50));
-        assert_eq!(ordered[5].1, None);
-    }
 
     pub(in crate::chat) fn entry(id: &str, content: EntryContent) -> Arc<TimelineEntry> {
         Arc::new(TimelineEntry {
