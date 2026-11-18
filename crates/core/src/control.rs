@@ -307,8 +307,7 @@ pub enum ReferenceOrigin {
     Model,
 }
 
-/// Another thread this one may read, linked from a message the user sent. `by: model` is
-/// what an earlier release's `reference` tool made, kept so those references still read.
+/// Another thread this one may read, named by a chip or the `reference` tool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadReference {
     pub thread_id: String,
@@ -316,8 +315,8 @@ pub struct ThreadReference {
     /// Unix seconds.
     pub created_at: u64,
     /// The reference crosses a project or provider boundary: the referenced thread's content
-    /// may reach another model vendor. The user is told once, when the message linking it
-    /// is sent.
+    /// may reach another model vendor. The user is told once when the reference is made,
+    /// at the mention for a chip and by a runtime notice for the `reference` tool.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub boundary_notice: bool,
 }
@@ -479,8 +478,7 @@ pub mod action {
     pub const GIT_INITIALIZE: &str = "git_initialize";
     /// Detail: the project root.
     pub const CREATE_PROJECT: &str = "create_project";
-    /// Detail: the referenced thread's title. Written by an earlier release's `reference`
-    /// tool; kept so the activity it logged still reads with its label.
+    /// Detail: the referenced thread's title.
     pub const REFERENCE: &str = "reference";
 }
 

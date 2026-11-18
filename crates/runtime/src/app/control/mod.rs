@@ -545,6 +545,7 @@ impl AppState {
             ControlOp::MoveThread(p) => self.op_move_thread(caller, p, cx),
             ControlOp::NotifyWhen(p) => self.op_notify_when(caller, p, cx),
             ControlOp::CancelNotify(p) => self.op_cancel_notify(caller, p, cx),
+            ControlOp::Reference(p) => self.op_reference(caller, p, cx),
             ControlOp::RespondInput(p) => self.op_respond_input(caller, p, cx),
             ControlOp::RespondApproval(p) => self.op_respond_approval(caller, p, cx),
             ControlOp::ReportResult(p) => self.op_report_result(caller, p),

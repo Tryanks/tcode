@@ -1,7 +1,7 @@
 //! Composer inline-trigger detection and mention serialization.
 //!
 //! Detects `@file`, `$skill` and `/command` at a UTF-8 cursor offset, and
-//! serializes selected paths and threads as Markdown links.
+//! serializes selected paths as Markdown links.
 
 use std::ops::Range;
 
@@ -140,30 +140,6 @@ pub fn serialize_composer_file_link(path: &str) -> String {
     let label = escape_markdown_link_label(basename(path));
     let dest = encode_markdown_link_destination(path);
     format!("[{label}]({dest})")
-}
-
-/// The scheme of a link to a Tcode thread, as the model cites an anchor.
-const THREAD_LINK_SCHEME: &str = "tcode-thread://";
-
-/// Serialize a mentioned thread as `[@title](tcode-thread://id)`.
-pub fn serialize_composer_thread_link(thread_id: &str, title: &str) -> String {
-    let label = escape_markdown_link_label(title);
-    let dest = encode_markdown_link_destination(thread_id);
-    format!("[@{label}]({THREAD_LINK_SCHEME}{dest})")
-}
-
-/// The threads `text` links to with `tcode-thread://`, in order.
-pub fn linked_thread_ids(text: &str) -> Vec<String> {
-    text.match_indices(THREAD_LINK_SCHEME)
-        .map(|(start, _)| {
-            let rest = &text[start + THREAD_LINK_SCHEME.len()..];
-            let end = rest
-                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-                .unwrap_or(rest.len());
-            rest[..end].to_owned()
-        })
-        .filter(|id| !id.is_empty())
-        .collect()
 }
 
 #[cfg(test)]

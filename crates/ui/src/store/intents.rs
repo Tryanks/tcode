@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use agent::{ApprovalDecision, PluginAction, ProviderKind, RewindMode};
 use gpui::{App, Context, Task};
-use tcode_client::{ConnectionState, HostLink};
+use tcode_client::ConnectionState;
 use tcode_core::{
     acp::AcpAgentPatch,
     control::{ControlGrant, SettlementAutomation},
@@ -86,9 +86,13 @@ impl WorkspaceStore {
         self.send(command);
     }
 
-    /// Send `command` now; a refusal reaches the window in the host's words
-    /// ([`refusal_shown`]). A message the composer sent shows its own failure
-    /// in its thread.
+    /// Send `command` now; a refusal reaches the window in the host's words.
+    /// A message the composer sent shows its own failure in its thread. A
+    /// link that closed or dropped answers nothing of the host's: its
+    /// connection state says so, and a retained write waits in the outbox
+    /// for the next link. A write the client could not keep for it (one that
+    /// carries a secret, or was lost unacknowledged) is `disconnected`, and
+    /// that is shown: nothing will send it again.
     fn send(&self, command: Command) {
         let shown_in_thread = matches!(
             command,
@@ -104,7 +108,12 @@ impl WorkspaceStore {
             .spawn(async move {
                 if let Err(error) = ack.await
                     && !shown_in_thread
-                    && refusal_shown(&link, &error)
+                    && error.code != "transport_closed"
+                    && (error.code == "disconnected"
+                        || !matches!(
+                            link.connection_state(),
+                            ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
+                        ))
                 {
                     let _ = refused.send(error).await;
                 }
@@ -117,44 +126,9 @@ impl WorkspaceStore {
         command: Command,
         cx: &mut App,
     ) -> Task<Result<CommandResponse, ProtocolError>> {
-        // Sent now, so it reaches the host before anything dispatched after it.
-        let answer = self.host.command(command);
-        cx.spawn(async move |_| answer.await)
+        let host = self.host.clone();
+        cx.spawn(async move |_| host.command(command).await)
     }
-
-    /// [`Self::command`], its refusal shown as [`Self::send`] shows one.
-    pub(crate) fn command_shown(
-        &self,
-        command: Command,
-        cx: &mut App,
-    ) -> Task<Result<CommandResponse, ProtocolError>> {
-        let answer = self.command(command, cx);
-        let link = self.host.clone();
-        let refused = self.refused.clone();
-        cx.spawn(async move |_| {
-            let answer = answer.await;
-            if let Err(error) = &answer
-                && refusal_shown(&link, error)
-            {
-                let _ = refused.send(error.clone()).await;
-            }
-            answer
-        })
-    }
-}
-
-/// Whether a refused write is shown. A link that closed or dropped answers
-/// nothing of the host's: its connection state says so, and a retained write
-/// waits in the outbox for the next link. A write the client could not keep
-/// for it (one that carries a secret, or was lost unacknowledged) is
-/// `disconnected`, and that is shown: nothing will send it again.
-fn refusal_shown(link: &HostLink, error: &ProtocolError) -> bool {
-    error.code != "transport_closed"
-        && (error.code == "disconnected"
-            || !matches!(
-                link.connection_state(),
-                ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
-            ))
 }
 
 impl WorkspaceStore {

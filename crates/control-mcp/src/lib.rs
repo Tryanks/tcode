@@ -46,6 +46,7 @@ pub enum ControlOp {
     MoveThread(MoveThreadParams),
     NotifyWhen(NotifyWhenParams),
     CancelNotify(CancelNotifyParams),
+    Reference(ReferenceParams),
     RespondInput(RespondInputParams),
     RespondApproval(RespondApprovalParams),
     ReportResult(ReportResultParams),
@@ -97,7 +98,7 @@ impl ToolRequirement {
 }
 
 /// Tool name → requirement.
-pub const TOOLS: [(&str, ToolRequirement); 34] = [
+pub const TOOLS: [(&str, ToolRequirement); 35] = [
     ("list_projects", ToolRequirement::Tier(ControlTier::Observe)),
     ("list_threads", ToolRequirement::Tier(ControlTier::Observe)),
     ("get_thread", ToolRequirement::Tier(ControlTier::Observe)),
@@ -124,6 +125,8 @@ pub const TOOLS: [(&str, ToolRequirement); 34] = [
         "review_candidates",
         ToolRequirement::Tier(ControlTier::Observe),
     ),
+    // Referencing only makes a thread in the observe scope readable later; it writes nothing.
+    ("reference", ToolRequirement::Tier(ControlTier::Observe)),
     (
         "update_threads",
         ToolRequirement::Tier(ControlTier::Organize),
@@ -211,6 +214,7 @@ impl ControlOp {
             Self::MoveThread(_) => "move_thread",
             Self::NotifyWhen(_) => "notify_when",
             Self::CancelNotify(_) => "cancel_notify",
+            Self::Reference(_) => "reference",
             Self::RespondInput(_) => "respond_input",
             Self::RespondApproval(_) => "respond_approval",
             Self::ReportResult(_) => "report_result",
@@ -292,6 +296,7 @@ impl ControlOp {
             Self::Git(p) => vec![p.thread_id.as_str()],
             Self::MoveThread(p) => vec![p.thread_id.as_str()],
             Self::NotifyWhen(p) => p.thread_ids.iter().map(String::as_str).collect(),
+            Self::Reference(p) => vec![p.thread_id.as_str()],
             Self::RespondInput(p) => vec![p.thread_id.as_str()],
             Self::RespondApproval(p) => vec![p.thread_id.as_str()],
             Self::Terminal(p) => vec![p.thread_id.as_str()],
@@ -331,6 +336,7 @@ impl ControlOp {
             Self::Git(p) => vec![&mut p.thread_id],
             Self::MoveThread(p) => vec![&mut p.thread_id],
             Self::NotifyWhen(p) => p.thread_ids.iter_mut().collect(),
+            Self::Reference(p) => vec![&mut p.thread_id],
             Self::RespondInput(p) => vec![&mut p.thread_id],
             Self::RespondApproval(p) => vec![&mut p.thread_id],
             Self::Terminal(p) => vec![&mut p.thread_id],

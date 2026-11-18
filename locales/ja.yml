@@ -1484,6 +1484,7 @@ notice:
   tcode_update_available: "Tcode %{version} が利用可能です"
   review_recorded: "レビューを記録しました：%{items} 項目、カバレッジ %{coverage}"
   usage_limit_reached: "%{harness} が使用量の上限に達しました"
+  reference_boundary_crossed: "「%{thread}」のモデルが、別のプロジェクトまたはハーネスの「%{title}」を参照しました。そこで読み取った内容は、そのモデルの提供元に送信されます"
 attach:
   unsupported_type: "「%{name}」を画像として読み込めませんでした。"
   decode_failed: "「%{name}」を画像として読み込めませんでした: %{error}"
@@ -3023,6 +3024,12 @@ control:
     note: "ここでのみ回答できます。チャットのメッセージでは承認されません。"
   reference:
     group: "スレッド"
+    model: "モデル"
+    boundary: "共有"
+    boundary_tooltip: "その内容は、このスレッドのモデルプロバイダーに送信されます。"
+    deleted: "削除済み"
+    remove: "参照を削除"
+    chip_tooltip: "このスレッドのモデルは「%{title}」を必要に応じて読み取れます。すでに読み取った内容はモデルに残ります。"
     notice_title: "別のモデルプロバイダーと共有されます"
     notice_description: "「%{title}」は別のプロジェクトにあるか、別のハーネスを使用しています。このスレッドのモデルがそこから読み取った内容は、このスレッドのモデルプロバイダーに送信されます。"
     notice_ok: "参照を残す"
