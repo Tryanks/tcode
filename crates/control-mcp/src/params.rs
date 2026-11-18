@@ -275,7 +275,9 @@ pub struct ReviewCandidatesParams {
     #[schemars(description = SCOPE)]
     pub scope: Option<ControlScope>,
     #[serde(default)]
-    #[schemars(description = "Only threads active at or after this unix time in ms.")]
+    #[schemars(
+        description = "Settled threads are included only when active at or after this unix time in ms; omit for the last seven days."
+    )]
     pub since: Option<u64>,
 }
 
