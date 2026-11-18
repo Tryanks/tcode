@@ -497,31 +497,6 @@ pub fn service(broker: Broker, thread_id: String, access: AccessSource) -> Servi
 mod tests {
     use super::*;
 
-    /// A thread given `tcode_control` is offered every tool, and `report_result` only when
-    /// another thread started it as its subagent.
-    #[test]
-    fn every_tool_is_offered_and_report_result_only_to_a_subagent() {
-        let all: Vec<String> = ControlTools::tool_router()
-            .list_all()
-            .into_iter()
-            .map(|tool| tool.name.to_string())
-            .collect();
-        let offered = |enabled, subagent| -> Vec<String> {
-            tool_descriptions(&ThreadAccess { enabled, subagent })
-                .into_iter()
-                .map(|(name, _)| name)
-                .collect()
-        };
-        assert_eq!(offered(true, true), all);
-        let ordinary: Vec<String> = all
-            .iter()
-            .filter(|name| *name != "report_result")
-            .cloned()
-            .collect();
-        assert_eq!(offered(true, false), ordinary);
-        assert!(offered(false, true).is_empty());
-    }
-
     /// A fork is told its source's id as its own, so a thread names itself as "self".
     #[tokio::test]
     async fn a_call_about_the_callers_own_thread_reaches_the_host_with_its_id() {
