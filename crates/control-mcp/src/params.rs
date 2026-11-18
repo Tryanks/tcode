@@ -211,7 +211,7 @@ pub struct SearchInItemParams {
     #[schemars(description = "Substring to find in the output.")]
     pub query: String,
     #[serde(default)]
-    #[schemars(description = "Lines of context around each match; default 2.")]
+    #[schemars(description = "Lines of context around each match; default 2, at most 10.")]
     pub context_lines: Option<u32>,
 }
 
@@ -275,7 +275,9 @@ pub struct ReviewCandidatesParams {
     #[schemars(description = SCOPE)]
     pub scope: Option<ControlScope>,
     #[serde(default)]
-    #[schemars(description = "Only threads active at or after this unix time in ms.")]
+    #[schemars(
+        description = "Settled threads are included only when active at or after this unix time in ms; omit for the last seven days."
+    )]
     pub since: Option<u64>,
 }
 
@@ -328,9 +330,7 @@ pub struct ReviewItemInput {
         description = "continue, needs_decision, waiting_on_others, can_settle, parked_or_superseded or unsure."
     )]
     pub group: String,
-    #[schemars(
-        description = "In words: clear evidence, inference, or unsure. Never a percentage."
-    )]
+    #[schemars(description = "clear_evidence, inference or unsure. Never a percentage.")]
     pub confidence: String,
     #[schemars(description = "Anchors and quoted facts the grouping rests on.")]
     pub evidence: Vec<String>,

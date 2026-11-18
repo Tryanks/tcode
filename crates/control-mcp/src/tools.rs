@@ -246,7 +246,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Store a conversation review: the grouped items with their evidence and your coverage statement. Changes no thread state; the user acts on it in Tcode."
+        description = "Store a conversation review: the grouped items with their evidence and your coverage statement. Changes no thread state. Tcode tells the user only that a review was recorded, with the number of items and your coverage."
     )]
     async fn record_review(
         &self,
@@ -431,7 +431,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Apply one settings patch. Only display preferences can be changed: language, theme, diff word wrap, the live command panel, sidebar provider marks, inactive frame throttling and scrolling to the latest message on send. Everything else (approvals, computer use, the browser, orchestration, settlement rules and tiers, models, tcode_control, hosting, credentials, sidebar and window state) is refused."
+        description = "Apply one settings patch. Only display preferences can be changed: language, theme, diff word wrap, the live command panel, sidebar provider marks, inactive frame throttling, scrolling to the latest message on send and shortening long commands. Everything else (approvals, computer use, the browser, orchestration, settlement rules and tiers, models, tcode_control, hosting, credentials, sidebar and window state) is refused."
     )]
     async fn patch_settings(
         &self,

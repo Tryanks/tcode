@@ -3263,7 +3263,6 @@ tools:
   threads: "%{count} 件のスレッド"
   threads_caption: "スレッド"
   message: "メッセージ"
-  reason: "理由"
   copy_link: "リンクをコピー"
   tools_one: "1 個のツール"
   tools: "%{count} 個のツール"

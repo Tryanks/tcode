@@ -3256,7 +3256,6 @@ tools:
   threads: "%{count} 个线程"
   threads_caption: "线程"
   message: "消息"
-  reason: "理由"
   copy_link: "复制链接"
   tools_one: "1 个工具"
   tools: "%{count} 个工具"

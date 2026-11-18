@@ -791,9 +791,6 @@ impl TestClientState {
     pub(super) fn selected_session(&self) -> Option<&ActiveSession> {
         self.host.residents.live.get(self.selected.as_deref()?)
     }
-    pub(super) fn active_session_id(&self) -> Option<&str> {
-        self.selected.as_deref()
-    }
     pub(super) fn install_selected(&mut self, session: ActiveSession) {
         let _ = self.take_selected();
         self.selected = Some(session.meta.id.clone());
@@ -818,12 +815,6 @@ impl TestClientState {
         self.host.select_session(id, cx);
         if self.host.resident(id).is_some() {
             self.selected = Some(id.to_string());
-        }
-    }
-    pub(super) fn fork_thread(&mut self, id: &str, cx: &mut HostCx) {
-        if let Ok(id) = self.host.fork_thread(id, cx) {
-            self.park_active(cx);
-            self.selected = Some(id);
         }
     }
     pub(super) fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut HostCx) {
@@ -1260,27 +1251,4 @@ pub(crate) fn next_command_blocking(
 
 fn answer_usage_read(reply: smol::channel::Sender<Result<serde_json::Value, String>>) {
     let _ = reply.try_send(Err("the scripted provider has no account".into()));
-}
-
-impl AppState {
-    /// Deliver an event as a session's provider would.
-    pub(crate) fn provider_event_for_test(
-        &mut self,
-        session_id: &str,
-        event: AgentEvent,
-        cx: &mut HostCx,
-    ) {
-        if let Some(meta) = self
-            .resident(session_id)
-            .filter(|session| matches!(session.runtime, Runtime::Idle))
-            .map(|session| session.meta.clone())
-        {
-            let execution = self.executions.prepare(&self.settings, &meta).unwrap();
-            let (commands, receiver) = smol::channel::unbounded();
-            smol::spawn(async move { while receiver.recv().await.is_ok() {} }).detach();
-            self.resident_mut(session_id).unwrap().runtime =
-                Runtime::Live(execution.connect(commands));
-        }
-        self.on_event(session_id, event, cx);
-    }
 }

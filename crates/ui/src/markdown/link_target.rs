@@ -57,7 +57,7 @@ pub(super) fn resolve_link(url: &str, base_dir: Option<&Path>) -> LinkTarget {
             None => (anchor, None),
         };
         return LinkTarget::Thread(OpenThreadAnchor {
-            thread_id: thread_id.trim_end_matches('/').to_owned(),
+            thread_id: thread_id.to_owned(),
             position,
         });
     }

@@ -3,7 +3,7 @@
 
 use super::*;
 use control_mcp::{ControlOp, ThreadAccess};
-use tcode_core::control::{ControlAction, ControlScope, action};
+use tcode_core::control::{ControlAction, ControlScope};
 use tcode_core::settings::SettingsPatch;
 use tcode_protocol::{
     ControlActivityEntry, ControlActivityFilter, ControlActivityPage, ControlActivityThread,
@@ -14,7 +14,7 @@ mod content;
 mod observe;
 mod operate;
 mod organize;
-mod privileged;
+mod respond;
 #[cfg(test)]
 mod tests;
 mod watches;
@@ -62,21 +62,27 @@ pub(super) enum Answer {
 }
 
 /// The part of a call that needs the host state, run on the host thread once the call's
-/// off-thread work has finished; its result is the call's answer.
+/// off-thread work has finished; its result is the call's answer. It runs in `call_cx`, the
+/// context the call was given: the host's own carries no author, origin or space.
 async fn finish_on_host(
-    host_cx: HostCx,
+    call_cx: HostCx,
     finish: impl FnOnce(&mut AppState, &mut HostCx) -> Result<serde_json::Value, String>
     + Send
     + 'static,
 ) -> Result<serde_json::Value, String> {
     let (answered, answer) = smol::channel::bounded(1);
-    host_cx.enqueue(move |state, cx| {
-        let _ = answered.try_send(finish(state, cx));
+    let mut cx = call_cx.clone();
+    call_cx.enqueue(move |state, _| {
+        let _ = answered.try_send(finish(state, &mut cx));
     });
     answer
         .recv()
         .await
         .unwrap_or_else(|_| Err("the host stopped before the call finished".into()))
+}
+
+fn refusal(error: tcode_protocol::ProtocolError) -> String {
+    format!("refused: {}", error.message)
 }
 
 /// The thread behind a `tcode_control` call.
@@ -358,7 +364,7 @@ impl AppState {
         if let ControlOp::PatchSettings(params) = op {
             let patch: SettingsPatch = serde_json::from_value(params.patch.clone())
                 .map_err(|error| format!("invalid settings patch: {error}"))?;
-            if privileged::settings_patch_never_exposed(&patch) {
+            if operate::settings_patch_never_exposed(&patch) {
                 let key = params
                     .patch
                     .get("type")
@@ -367,7 +373,8 @@ impl AppState {
                 return Err(format!(
                     "refused: `patch_settings` never changes {key}: an agent may change only \
                      display preferences (language, theme, diff word wrap, panels, sidebar \
-                     provider marks, frame throttling, scrolling to the latest on send)"
+                     provider marks, frame throttling, scrolling to the latest on send, \
+                     shortening long commands)"
                 ));
             }
         }
@@ -623,7 +630,7 @@ impl AppState {
                     .map(str::trim)
                     .filter(|id| !id.is_empty());
                 self.model_allowed(policy, provider, profile, params.model.as_deref())
-                    .map_err(|error| format!("refused: {}", error.message))
+                    .map_err(refusal)
             }
             ControlOp::RespondApproval(params)
                 if policy.approval == tcode_protocol::SpaceApproval::ReviewedOnly =>
@@ -645,7 +652,6 @@ impl AppState {
             ControlOp::ControlThread(params) => {
                 use control_mcp::params::RunOp;
                 for change in &params.changes {
-                    let refusal = |error: ProtocolError| format!("refused: {}", error.message);
                     match &change.op {
                         RunOp::SetModel { model } => {
                             if let Some(meta) = self.current_meta(&change.thread_id) {

@@ -654,12 +654,17 @@ fn search_in_item(
     let output = item_output(log, position)
         .ok_or_else(|| format!("no tool call or command output at {}", params.anchor))?;
     let (output, redacted) = thread_index::redact(output);
-    let context = params
+    let asked = params
         .context_lines
-        .map_or(CONTEXT_LINES_DEFAULT, |lines| lines as usize)
-        .min(CONTEXT_LINES_MAX);
+        .map_or(CONTEXT_LINES_DEFAULT, |lines| lines as usize);
+    let context = asked.min(CONTEXT_LINES_MAX);
     let found = thread_index::search_in_item(&output, &params.query, context, usize::MAX);
     let mut notes = Vec::new();
+    if asked > context {
+        notes.push(format!(
+            "context_lines {asked} cut to {CONTEXT_LINES_MAX}, the most a match is shown with"
+        ));
+    }
     let mut hits = Vec::new();
     let mut used = 0;
     for (index, hit) in found.iter().enumerate() {

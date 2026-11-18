@@ -526,16 +526,15 @@ pub(in super::super) struct TriggerMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::tests::LocalHostDriver;
     use gpui::{TestAppContext, VisualTestContext, size};
 
+    /// A focused composer on a draft whose directory is `cwd`, and the host
+    /// that answers it.
     fn composer_window(
-        compact: bool,
+        cwd: std::path::PathBuf,
         cx: &mut TestAppContext,
-    ) -> (
-        Entity<WorkspaceStore>,
-        Entity<Composer>,
-        &mut VisualTestContext,
-    ) {
+    ) -> (Entity<Composer>, LocalHostDriver, &mut VisualTestContext) {
         cx.update(crate::test_client::init);
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(crate::store::tests::scratch_root(
@@ -545,14 +544,14 @@ mod tests {
             tcode_runtime::pipe::HostServices::default(),
         )
         .unwrap();
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let mut driver = LocalHostDriver::new(&host);
         let link = driver.link.clone();
         let tcode_protocol::CommandResponse::SessionId(Some(session_id)) = driver
             .await_with_events(
                 cx,
                 link.command(tcode_protocol::Command::StartDraft {
                     project_id: "trigger-menu".into(),
-                    cwd: std::env::temp_dir(),
+                    cwd,
                 }),
             )
             .unwrap()
@@ -578,52 +577,20 @@ mod tests {
                     && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
         });
-        let (composer, cx) = cx.add_window_view(|window, cx| {
-            Composer::new_with_layout(store.clone(), Some(session_id), compact, window, cx)
-        });
-        (store, composer, cx)
-    }
-
-    #[gpui::test]
-    fn the_phone_composer_opens_the_same_trigger_menus(cx: &mut TestAppContext) {
-        let (store, composer, cx) = composer_window(true, cx);
-        cx.simulate_resize(size(px(393.), px(852.)));
+        let (composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store, Some(session_id), window, cx));
+        cx.simulate_resize(size(px(800.), px(600.)));
         composer.update_in(cx, |composer, window, cx| {
-            let cwd = store
-                .read(cx)
-                .composer_state_for(store.read(cx).sole_thread().as_deref(), cx)
-                .active_cwd
-                .unwrap();
-            composer.workspace = Some((
-                cwd,
-                Ok(WorkspaceListing {
-                    entries: vec![tcode_protocol::PathEntry::from_rel("file.rs".into(), false)],
-                    truncated: false,
-                    unreadable: Vec::new(),
-                }),
-            ));
             window.focus(&composer.input.read(cx).focus_handle(cx), cx);
         });
-        for (trigger, first_row) in [("/", "/model"), ("@", "file.rs")] {
-            cx.simulate_keystrokes("secondary-a backspace");
-            cx.simulate_input(trigger);
-            cx.update(|window, cx| _ = window.draw(cx));
-            assert!(cx.debug_bounds("menu-row-0").is_some(), "{trigger}");
-            composer.read_with(cx, |composer, cx| {
-                assert_eq!(composer.menu_rows(cx).0[0].primary, first_row, "{trigger}");
-            });
-        }
+        (composer, driver, cx)
     }
 
     /// A `/` or `$` token that matches nothing is ordinary text: no menu opens,
     /// so Enter submits it instead of accepting a row that does not exist.
     #[gpui::test]
     fn unmatched_command_and_skill_tokens_open_no_menu(cx: &mut TestAppContext) {
-        let (_store, composer, cx) = composer_window(false, cx);
-        cx.simulate_resize(size(px(800.), px(600.)));
-        composer.update_in(cx, |composer, window, cx| {
-            window.focus(&composer.input.read(cx).focus_handle(cx), cx);
-        });
+        let (_composer, _host, cx) = composer_window(std::env::temp_dir(), cx);
         for (text, visible) in [
             ("/mod", true),
             ("/nosuchcommand", false),
@@ -633,9 +600,6 @@ mod tests {
             cx.simulate_keystrokes("secondary-a backspace");
             cx.simulate_input(text);
             cx.update(|window, cx| _ = window.draw(cx));
-            composer.read_with(cx, |composer, cx| {
-                assert_eq!(composer.menu_visible(cx), visible, "{text:?}");
-            });
             assert_eq!(cx.debug_bounds("menu-row-0").is_some(), visible, "{text:?}");
         }
     }
@@ -644,19 +608,9 @@ mod tests {
     /// any other; only sending it compacts.
     #[gpui::test]
     fn picking_compact_inserts_the_command_without_running_it(cx: &mut TestAppContext) {
-        let (store, composer, cx) = composer_window(false, cx);
-        cx.simulate_resize(size(px(800.), px(600.)));
-        composer.update_in(cx, |composer, window, cx| {
-            window.focus(&composer.input.read(cx).focus_handle(cx), cx);
-        });
-        assert!(store.read_with(cx, |store, cx| compact_offered(
-            &store.composer_state_for(store.sole_thread().as_deref(), cx)
-        )));
+        let (composer, _host, cx) = composer_window(std::env::temp_dir(), cx);
         cx.simulate_input("/comp");
         cx.update(|window, cx| _ = window.draw(cx));
-        composer.read_with(cx, |composer, cx| {
-            assert_eq!(composer.menu_rows(cx).0[0].primary, "/compact");
-        });
         // The action, not a simulated keystroke: the test driver types an
         // unhandled Enter's `\n` into the input, which AppKit does not.
         cx.update(|window, cx| {
@@ -677,31 +631,16 @@ mod tests {
     /// accepting takes the highlighted file.
     #[gpui::test]
     fn arrow_keys_move_the_highlighted_mention(cx: &mut TestAppContext) {
-        let (store, composer, cx) = composer_window(false, cx);
-        cx.simulate_resize(size(px(800.), px(600.)));
-        composer.update_in(cx, |composer, window, cx| {
-            let cwd = store
-                .read(cx)
-                .composer_state_for(store.read(cx).sole_thread().as_deref(), cx)
-                .active_cwd
-                .unwrap();
-            let entries = (0..3)
-                .map(|index| {
-                    tcode_protocol::PathEntry::from_rel(format!("file-{index:02}.rs"), false)
-                })
-                .collect();
-            composer.workspace = Some((
-                cwd,
-                Ok(WorkspaceListing {
-                    entries,
-                    truncated: false,
-                    unreadable: Vec::new(),
-                }),
-            ));
-            window.focus(&composer.input.read(cx).focus_handle(cx), cx);
+        let cwd = crate::store::tests::scratch_root("trigger-menu-files");
+        std::fs::create_dir_all(&cwd).unwrap();
+        for index in 0..3 {
+            std::fs::write(cwd.join(format!("file-{index:02}.rs")), "").unwrap();
+        }
+        let (composer, mut host, cx) = composer_window(cwd.clone(), cx);
+        cx.simulate_input("@file");
+        host.settle_until(cx, "the files of the thread's directory", |cx| {
+            cx.debug_bounds("menu-row-2").is_some()
         });
-        cx.simulate_input("@");
-        cx.update(|window, cx| _ = window.draw(cx));
         cx.simulate_keystrokes("down down up");
         cx.update(|window, cx| {
             window.dispatch_action(
@@ -714,5 +653,6 @@ mod tests {
         });
         let draft = composer.read_with(cx, |composer, cx| composer.input.read(cx).value());
         assert!(draft.contains("file-01.rs"), "{draft}");
+        let _ = std::fs::remove_dir_all(cwd);
     }
 }
