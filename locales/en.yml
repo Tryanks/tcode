@@ -2855,7 +2855,6 @@ control:
     keep_off: "stop keeping"
     settle_self: "settle itself later"
     record_review: "record a review"
-    request_grant: "ask for a grant"
     notify_when: "watch threads"
     cancel_notify: "stop watching"
     respond_input: "answer input"
@@ -2897,7 +2896,6 @@ control:
     git_initialize: "initialize git"
     create_project: "create a project"
     move: "move to another project"
-    reference: "reference a thread"
   settings:
     enabled: "Let threads use tcode_control"
     enabled_description: "A thread's model can then view other threads, organize them, delegate threads, message them and act on them. What a call may do without asking you is its Harness's permission mode to decide, as for any other tool."
@@ -3172,10 +3170,6 @@ tools:
       running: "Arranging to settle this thread"
       done: "Arranged to settle this thread"
       asked: "Arrange to settle this thread"
-    request_grant:
-      running: "Requesting access"
-      done: "Requested access"
-      asked: "Request access"
     approve:
       running: "Answering an approval"
       done: "Answered an approval"

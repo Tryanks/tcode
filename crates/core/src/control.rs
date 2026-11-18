@@ -166,9 +166,6 @@ pub mod action {
     pub const SETTLE_SELF: &str = "settle_self";
     /// Detail: the number of items.
     pub const RECORD_REVIEW: &str = "record_review";
-    /// Detail: the model's reason. Nothing writes it now: the `request_grant` tool of
-    /// earlier releases did, and the activity they stored still reads with its label.
-    pub const REQUEST_GRANT: &str = "request_grant";
     /// Detail: the watch id.
     pub const NOTIFY_WHEN: &str = "notify_when";
     /// Detail: the removed watch ids.
@@ -229,9 +226,6 @@ pub mod action {
     pub const GIT_INITIALIZE: &str = "git_initialize";
     /// Detail: the project root.
     pub const CREATE_PROJECT: &str = "create_project";
-    /// Detail: the referenced thread's title. Nothing writes it now: the `reference` tool
-    /// of earlier releases did, and the activity they stored still reads with its label.
-    pub const REFERENCE: &str = "reference";
 }
 
 /// One `tcode_control` write, as Settings → Control lists it.

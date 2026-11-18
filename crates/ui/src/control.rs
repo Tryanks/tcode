@@ -80,7 +80,6 @@ pub(crate) fn action_label(key: &str) -> String {
         action::KEEP_OFF => "control.action.keep_off",
         action::SETTLE_SELF => "control.action.settle_self",
         action::RECORD_REVIEW => "control.action.record_review",
-        action::REQUEST_GRANT => "control.action.request_grant",
         action::NOTIFY_WHEN => "control.action.notify_when",
         action::CANCEL_NOTIFY => "control.action.cancel_notify",
         action::RESPOND_INPUT => "control.action.respond_input",
@@ -122,7 +121,6 @@ pub(crate) fn action_label(key: &str) -> String {
         action::GIT_INITIALIZE => "control.action.git_initialize",
         action::CREATE_PROJECT => "control.action.create_project",
         action::MOVE => "control.action.move",
-        action::REFERENCE => "control.action.reference",
         _ => return key.to_owned(),
     };
     crate::tr!(key).into_owned()

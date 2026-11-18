@@ -1690,6 +1690,24 @@ mod tests {
     }
 
     #[test]
+    fn a_control_block_with_its_grants_keeps_only_whether_it_is_on() {
+        let older: Settings = serde_json::from_str(
+            r#"{"control":{
+                "enabled":false,
+                "default_grant":{"scope":"host","tiers":["observe"],"categories":["delete"]},
+                "project_overrides":{"p":{"scope":{"projects":["q"]},"tiers":["observe","organize","operate"],"categories":[]}}
+            }}"#,
+        )
+        .unwrap();
+        assert!(!older.control.enabled);
+        assert!(older.unknown.is_empty());
+        assert_eq!(
+            serde_json::to_value(&older).unwrap()["control"],
+            serde_json::json!({"enabled": false})
+        );
+    }
+
+    #[test]
     fn custom_providers_take_distinct_palette_slots_apart_from_the_brands() {
         for (profiles, agents) in [
             (vec!["work-claude".to_string()], vec!["gemini"]),

@@ -39,7 +39,6 @@ enum Kind {
     Update,
     NotifyWhen,
     SettleSelf,
-    RequestGrant,
     Approve,
     Report,
 }
@@ -68,8 +67,6 @@ pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView
         Kind::NotifyWhen
     } else if control(&["settle_self"]) {
         Kind::SettleSelf
-    } else if control(&["request_grant"]) {
-        Kind::RequestGrant
     } else if control(&["respond_approval"]) {
         Kind::Approve
     } else if control(&["report_result"]) {
@@ -279,7 +276,6 @@ impl Threads {
             Kind::Update => "update_threads",
             Kind::NotifyWhen => "notify_when",
             Kind::SettleSelf => "settle_self",
-            Kind::RequestGrant => "request_grant",
             Kind::Approve => "approve",
             Kind::Report => "report",
         })
@@ -366,16 +362,6 @@ impl Threads {
             // they would crowd them out of a narrow header.
             Kind::NotifyWhen => Argument::plain(threads()),
             Kind::SettleSelf => Argument::plain(string(input, "when").unwrap_or_default()),
-            Kind::RequestGrant => {
-                let scope = [string(input, "scope").map(str::to_owned)]
-                    .into_iter()
-                    .flatten()
-                    .chain([strings(input, "tiers").join(", ")])
-                    .filter(|part| !part.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                Argument::plain(scope)
-            }
             Kind::Approve => Argument::plain(
                 string(input, "option")
                     .or_else(|| {

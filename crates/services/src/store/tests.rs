@@ -76,7 +76,18 @@ fn legacy_index() -> serde_json::Value {
                 "id": "mixed", "title": "Mixed", "provider": "codex", "cwd": "/work/alpha",
                 "project_id": "p1", "created_at": 1, "updated_at": 30,
                 "forked_from": "source",
-                "checkpoints": [{"turn": 2, "commit": "deadbeef", "event_offset": 7}]
+                "checkpoints": [{"turn": 2, "commit": "deadbeef", "event_offset": 7}],
+                "control_grant": {
+                    "scope": "host", "tiers": ["observe", "organize", "operate"],
+                    "categories": ["delete"]
+                },
+                "control_grant_requests": [{
+                    "id": "r1", "reason": "clean up", "requested_at": 5,
+                    "grant": {"scope": "project", "tiers": [], "categories": ["terminal"]}
+                }],
+                "references": [{
+                    "thread_id": "empty", "by": "user", "created_at": 3, "boundary_notice": true
+                }]
             },
             {
                 "id": "empty", "title": "Empty", "provider": "claude_code",

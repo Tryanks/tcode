@@ -2855,7 +2855,6 @@ control:
     keep_off: "保持を解除"
     settle_self: "後で自ら完了にする"
     record_review: "レビューを記録"
-    request_grant: "アクセス権を求める"
     notify_when: "スレッドを監視"
     cancel_notify: "監視を停止"
     respond_input: "入力要求に応答"
@@ -2897,7 +2896,6 @@ control:
     git_initialize: "git を初期化"
     create_project: "プロジェクトを作成"
     move: "別のプロジェクトに移動"
-    reference: "スレッドを参照"
   settings:
     enabled: "スレッドに tcode_control の使用を許可"
     enabled_description: "スレッドのモデルは、他のスレッドの閲覧、整理、委任、メッセージのやり取り、操作ができるようになります。呼び出しに承認が必要かどうかは、他のツールと同じくハーネスの権限モードが決めます。"
@@ -3172,10 +3170,6 @@ tools:
       running: "このスレッドの完了を予約中"
       done: "このスレッドの完了を予約済み"
       asked: "このスレッドの完了を予約"
-    request_grant:
-      running: "アクセス権を要求中"
-      done: "アクセス権を要求済み"
-      asked: "アクセス権を要求"
     approve:
       running: "承認リクエストに回答中"
       done: "承認リクエストに回答済み"

@@ -2848,7 +2848,6 @@ control:
     keep_off: "取消保留"
     settle_self: "稍后自行收尾"
     record_review: "记录审查"
-    request_grant: "申请授权"
     notify_when: "关注线程"
     cancel_notify: "取消关注"
     respond_input: "回答输入"
@@ -2890,7 +2889,6 @@ control:
     git_initialize: "初始化 git"
     create_project: "创建项目"
     move: "移动到其他项目"
-    reference: "引用线程"
   settings:
     enabled: "允许线程使用 tcode_control"
     enabled_description: "线程的模型可以借此查看、整理、委派其他线程，给它们发消息并对它们操作。一次调用是否需要你批准，由 Harness 的权限模式决定，与其他工具一样。"
@@ -3165,10 +3163,6 @@ tools:
       running: "安排收尾本线程中"
       done: "已安排收尾本线程"
       asked: "安排收尾本线程"
-    request_grant:
-      running: "申请权限中"
-      done: "已申请权限"
-      asked: "申请权限"
     approve:
       running: "答复审批中"
       done: "已答复审批"
