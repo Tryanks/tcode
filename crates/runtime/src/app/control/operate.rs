@@ -1069,16 +1069,12 @@ impl AppState {
         )
     }
 
-    /// Checkout and commit refuse while a turn runs in the target thread, so they never act on
-    /// work half made; checkout also refuses uncommitted changes. A thread may commit its own.
     pub(super) fn op_git(&mut self, caller: &Caller, params: GitParams, cx: &mut HostCx) -> Answer {
         let thread = params.thread_id;
         if let Some(reason) = self.agent_write_refusal(&thread) {
             return action_now(&thread, Outcome::Skipped, reason);
         }
         self.ensure_resident(&thread, cx);
-        let busy = thread != caller.thread_id
-            && self.resident(&thread).is_some_and(Self::checkout_blocked);
         let (action, message, included) = match params.op {
             GitOp::CheckoutBranch { branch } => {
                 let command = Command::CheckoutBranch {
@@ -1142,14 +1138,6 @@ impl AppState {
             GitOp::Pull => (GitAction::Pull, None, None),
             GitOp::PublishBranch => (GitAction::PublishBranch, None, None),
         };
-        if busy && matches!(action, GitAction::Commit | GitAction::CommitPush) {
-            return action_now(
-                &thread,
-                Outcome::Skipped,
-                "busy: a turn is running in this thread; committing now could take half-made \
-                 changes",
-            );
-        }
         let command = Command::RunGitAction {
             session_id: thread.clone(),
             action,
