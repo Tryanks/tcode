@@ -1398,6 +1398,11 @@ impl Render for AppShell {
             .font_family(cx.theme().font_family.clone())
             // First, so it hears each scroll packet before any area acts on it.
             .child(crate::scroll::gesture_recorder())
+            // Phones and tablets have no middle-button autoscroll convention.
+            .when(
+                !cfg!(any(target_os = "ios", target_os = "android")),
+                |this| this.child(crate::scroll::MiddleAutoscroll),
+            )
             .children(dismissal.map(|dismissal| dismissal.release_listener().into_any_element()))
             .child(body)
             // Each host's pages, which panes of several hosts show at once.

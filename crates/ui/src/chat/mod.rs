@@ -45,6 +45,7 @@ pub(crate) use header::{
 
 use crate::markdown::{SelectionArea, SelectionDocument};
 use crate::overlay::OverlayExt as _;
+use crate::scroll::AutoscrollTarget as _;
 use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -1304,7 +1305,8 @@ impl ChatView {
                         .px(delivery_inset)
                         .pr(delivery_inset + shift)
                         .gap_2()
-                        .children(delivery_rows),
+                        .children(delivery_rows)
+                        .autoscroll_target(),
                 )
                 .child(composer)
             })

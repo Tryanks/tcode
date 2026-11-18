@@ -1,6 +1,7 @@
 //! The search window: the pattern and where it looked, then what it found,
 //! each path opening its file.
 
+use crate::scroll::AutoscrollTarget as _;
 use std::path::Path;
 
 use agent::{SearchHit, SearchScope, ToolFamily};
@@ -130,7 +131,8 @@ impl ToolView for Search<'_> {
                     .w_full()
                     .min_w_0()
                     .when(open, |list| list.max_h(px(360.)).overflow_y_scroll())
-                    .children(rows),
+                    .children(rows)
+                    .autoscroll_target(),
             )
             .children(control)
             .children(raw)

@@ -26,6 +26,11 @@ impl TerminalDrawer {
     ) {
         self.focus_handle.focus(window, cx);
         window.request_virtual_keyboard();
+        // The middle button is the terminal's (a paste on Linux, a report to a
+        // program reading the mouse), never the window's autoscroll.
+        if event.button == MouseButton::Middle {
+            cx.stop_propagation();
+        }
         let Some((point, side)) = self.grid_point_and_side(terminal_id, event.position) else {
             return;
         };
@@ -78,7 +83,6 @@ impl TerminalDrawer {
                                 prepare_terminal_paste(&text, mode.contains(Mode::BRACKETED_PASTE));
                             entry.terminal.write_input(text.into_bytes());
                         }
-                        stop_propagation = true;
                         return;
                     }
                     if event.button != MouseButton::Left {
