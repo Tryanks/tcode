@@ -292,14 +292,17 @@ impl AppState {
             _ if !self.settings.control.enabled => Answer::Now(Err(
                 "tcode_control is turned off in Settings → Control".into(),
             )),
-            Some(meta) if meta.archived_at.is_none() => {
+            Some(meta) if meta.archived_at.is_some() => {
+                Answer::Now(Err("this thread is archived".into()))
+            }
+            Some(meta) => {
                 let caller = self.caller_of(&meta);
                 match self.authorize_control(&caller, &op) {
                     Ok(()) => self.dispatch_control_op(&caller, op, cx),
                     Err(refusal) => Answer::Now(Err(refusal)),
                 }
             }
-            _ => Answer::Now(Err("unknown thread".into())),
+            None => Answer::Now(Err("unknown thread".into())),
         };
         match answer {
             Answer::Now(result) => {

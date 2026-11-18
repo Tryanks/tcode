@@ -223,8 +223,12 @@ impl Named {
     }
 
     /// How a thread reads: its title when the call gave it one, else the
-    /// head of its id.
+    /// head of its id. A call names its own thread as `self` (`tcode_control`'s
+    /// word, which the server replaces with the id only on its way to the host).
     fn thread(&self, thread_id: &str) -> String {
+        if thread_id == "self" {
+            return crate::tr!("tools.this_thread").into_owned();
+        }
         self.titles
             .get(thread_id)
             .cloned()

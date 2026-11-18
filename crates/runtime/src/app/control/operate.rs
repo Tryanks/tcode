@@ -224,7 +224,8 @@ impl AppState {
     }
 
     /// Why an agent may not write to `target`, if it may not: archived threads, read-only
-    /// subagent mirrors and unsent drafts, which belong to their composer.
+    /// subagent mirrors and unsent drafts. A draft is what the user has not sent yet: a
+    /// message into one would start their thread for them.
     fn agent_write_refusal(&self, target: &str) -> Option<String> {
         let Some(meta) = self.find_meta(target) else {
             return Some("unknown thread".into());
