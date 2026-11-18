@@ -202,46 +202,62 @@ pub(in crate::chat) fn stop_all(
         cx,
     )?;
     let (store, session_id) = (store.clone(), session_id.map(str::to_owned));
+    let ask = Rc::new(move |window: &mut Window, cx: &mut App| {
+        cx.stop_propagation();
+        let (Some(session_id), false) = (session_id.clone(), names.is_empty()) else {
+            return;
+        };
+        let (store, names) = (store.clone(), names.clone());
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (store, session_id) = (store.clone(), session_id.clone());
+            alert
+                .title(match names.len() {
+                    1 => crate::tr!("background.stop_confirm_title_one"),
+                    count => crate::tr!("background.stop_confirm_title", count = count),
+                })
+                .description(crate::tr!(
+                    "background.stop_confirm_description",
+                    names = names.join("\n")
+                ))
+                .button_props(
+                    DialogButtons::default()
+                        .ok_variant(ButtonVariant::Danger)
+                        .ok_text(crate::tr!("background.stop_confirm"))
+                        .cancel_text(crate::tr!("settings.cancel"))
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    store.update(cx, |store, _| {
+                        store.stop_background_task(session_id.clone(), None)
+                    });
+                    true
+                })
+        });
+    });
     let stop = Button::new("background-stop-all")
         .debug_selector(|| "background-stop-all".into())
         .outline()
         .xsmall()
-        .touch(touch)
-        .text_secondary(touch, cx)
+        .text_secondary(false, cx)
         .label(crate::tr!("background.stop_all").into_owned())
-        .on_click(move |_, window, cx| {
-            cx.stop_propagation();
-            let (Some(session_id), false) = (session_id.clone(), names.is_empty()) else {
-                return;
-            };
-            let (store, names) = (store.clone(), names.clone());
-            window.open_alert_dialog(cx, move |alert, _, _| {
-                let (store, session_id) = (store.clone(), session_id.clone());
-                alert
-                    .title(match names.len() {
-                        1 => crate::tr!("background.stop_confirm_title_one"),
-                        count => crate::tr!("background.stop_confirm_title", count = count),
-                    })
-                    .description(crate::tr!(
-                        "background.stop_confirm_description",
-                        names = names.join("\n")
-                    ))
-                    .button_props(
-                        DialogButtons::default()
-                            .ok_variant(ButtonVariant::Danger)
-                            .ok_text(crate::tr!("background.stop_confirm"))
-                            .cancel_text(crate::tr!("settings.cancel"))
-                            .show_cancel(true),
-                    )
-                    .on_ok(move |_, _, cx| {
-                        store.update(cx, |store, _| {
-                            store.stop_background_task(session_id.clone(), None)
-                        });
-                        true
-                    })
-            });
+        .on_click({
+            let ask = ask.clone();
+            move |_, window, cx| ask(window, cx)
         });
-    Some(shown.fold_across(div().flex_none().child(stop)))
+    // The footer's line is the same size on a touch layout, so the button
+    // drawn in it is too. `Button::touch` would grow the outline itself to
+    // the touch height; the height a finger is owed stands around it.
+    let stop = div()
+        .id("background-stop-all-touch")
+        .flex_none()
+        .when(touch, |hit| {
+            hit.flex()
+                .items_center()
+                .min_h(px(crate::material::TOUCH_TARGET))
+                .on_click(move |_, window, cx| ask(window, cx))
+        })
+        .child(stop);
+    Some(shown.fold_across(stop))
 }
 
 /// The list: a row for each piece, folding in and out as the harness
