@@ -100,8 +100,23 @@ fn uuid_len(text: &str) -> Option<usize> {
     ok.then_some(36)
 }
 
-/// The anchors in `text`, in order.
-fn anchors_in(text: &str, found: &mut Vec<Anchor>) {
+/// The fields in which a call or its answer names a thread by its id alone.
+/// An id anywhere else is a project's, a request's or a watch's.
+const THREAD_FIELDS: &[&str] = &[
+    "thread_id",
+    "thread_ids",
+    "target",
+    "new_thread_id",
+    "parent_session_id",
+    "parent",
+    "children",
+    "forked_from",
+    "started_by",
+];
+
+/// The anchors in `text`, in order: each entry, written `<thread>#<position>`,
+/// and each bare thread id where `threads` says the text holds them.
+fn anchors_in(text: &str, threads: bool, found: &mut Vec<Anchor>) {
     let mut index = 0;
     while index < text.len() {
         let rest = &text[index..];
@@ -122,7 +137,7 @@ fn anchors_in(text: &str, found: &mut Vec<Anchor>) {
                 thread_id,
                 position,
             };
-            if !found.contains(&anchor) {
+            if (threads || anchor.position.is_some()) && !found.contains(&anchor) {
                 found.push(anchor);
             }
             index += len + if digits > 0 { digits + 1 } else { 0 };
@@ -132,11 +147,18 @@ fn anchors_in(text: &str, found: &mut Vec<Anchor>) {
     }
 }
 
-fn walk_strings<'v>(value: &'v Value, visit: &mut impl FnMut(&'v str)) {
+/// The threads and entries `value` names: an entry wherever its anchor is
+/// written, a thread in a field that holds thread ids or in a row that
+/// carries its title beside its id.
+fn named_in(value: &Value, threads: bool, found: &mut Vec<Anchor>) {
     match value {
-        Value::String(text) => visit(text),
-        Value::Array(items) => items.iter().for_each(|item| walk_strings(item, visit)),
-        Value::Object(map) => map.values().for_each(|item| walk_strings(item, visit)),
+        Value::String(text) => anchors_in(text, threads, found),
+        Value::Array(items) => items.iter().for_each(|item| named_in(item, threads, found)),
+        Value::Object(map) => map.iter().for_each(|(key, item)| {
+            let threads =
+                THREAD_FIELDS.contains(&key.as_str()) || key == "id" && map.contains_key("title");
+            named_in(item, threads, found);
+        }),
         _ => {}
     }
 }
@@ -179,11 +201,11 @@ impl Named {
         let output = call
             .output
             .and_then(|output| serde_json::from_str::<Value>(output.trim()).ok());
-        walk_strings(call.input, &mut |text| anchors_in(text, &mut anchors));
+        named_in(call.input, false, &mut anchors);
         let mut titles_found = HashMap::new();
         titles(call.input, &mut titles_found);
         if let Some(output) = &output {
-            walk_strings(output, &mut |text| anchors_in(text, &mut anchors));
+            named_in(output, false, &mut anchors);
             titles(output, &mut titles_found);
         }
         // An entry's thread is named by the entry; the bare thread adds
@@ -301,14 +323,20 @@ impl Threads {
                 [string(input, "from"), string(input, "to")]
                     .into_iter()
                     .flatten()
-                    .for_each(|text| anchors_in(text, &mut range));
+                    .for_each(|text| anchors_in(text, false, &mut range));
                 let text = match range.as_slice() {
-                    [from, to] if from.thread_id == to.thread_id => format!(
-                        "{} #{}–#{}",
-                        named.thread(&from.thread_id),
-                        from.position.unwrap_or_default(),
-                        to.position.unwrap_or_default()
-                    ),
+                    [
+                        Anchor {
+                            thread_id,
+                            position: Some(from),
+                        },
+                        Anchor {
+                            thread_id: to_thread,
+                            position: Some(to),
+                        },
+                    ] if thread_id == to_thread => {
+                        format!("{} #{from}–#{to}", named.thread(thread_id))
+                    }
                     [from, ..] => named.label(from),
                     // By `anchors` or a `cursor`: the first entry it names.
                     [] => entry()
