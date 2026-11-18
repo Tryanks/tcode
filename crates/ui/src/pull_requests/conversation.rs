@@ -1,5 +1,6 @@
 //! The Conversation view: the description, comments, reviews and review threads, oldest first.
 
+use crate::scroll::AutoscrollTarget as _;
 use crate::widgets::TooltipTrigger as _;
 use std::rc::Rc;
 
@@ -2018,6 +2019,7 @@ impl PullRequestView {
                         })
                         .child(self.composer(cx)),
                 )
+                .autoscroll_target()
                 .into_any_element();
         }
         let items = self.items(cx);

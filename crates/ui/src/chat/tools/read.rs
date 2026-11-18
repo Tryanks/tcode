@@ -1,6 +1,7 @@
 //! The read window: the file and the lines read, numbered and highlighted
 //! as the file's language, or the image read.
 
+use crate::scroll::AutoscrollTarget as _;
 use std::sync::Arc;
 
 use agent::ToolFamily;
@@ -215,7 +216,8 @@ fn code(call: &Call<'_>, read: &Read<'_>, output: &str, ctx: &mut ToolCtx<'_, '_
                     StyledText::new(highlighted.source().clone())
                         .with_highlights(highlighted.runs().cloned()),
                 ),
-        );
+        )
+        .autoscroll_target();
     let beyond = beyond.map(|count| {
         div()
             .text_secondary(false, cx)

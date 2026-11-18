@@ -1,6 +1,7 @@
 //! Reviewers and labels: the block at the top of the conversation and the one picker both are
 //! changed through. A picker stages its changes and applies them together.
 
+use crate::scroll::AutoscrollTarget as _;
 use crate::widgets::TooltipTrigger as _;
 use std::collections::BTreeMap;
 
@@ -675,6 +676,7 @@ impl PullRequestView {
                                 })
                                 .into_any_element()
                         }))
+                        .autoscroll_target()
                         .into_any_element()
                 }
             }

@@ -2,6 +2,7 @@
 //! under its parent, its reference set off faintly — folded to a count of
 //! its elements until asked for.
 
+use crate::scroll::AutoscrollTarget as _;
 use gpui::{
     AnyElement, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _, px,
@@ -249,6 +250,7 @@ pub(in crate::chat) fn section_of(
             .text_secondary(false, cx)
             .children(rows)
             .children(beyond)
+            .autoscroll_target()
     });
     Some(
         section(

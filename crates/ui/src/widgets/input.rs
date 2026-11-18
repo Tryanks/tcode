@@ -10,9 +10,9 @@ use crate::{
 };
 use gpui::{
     Action, AnyElement, App, DefiniteLength, Edges, Entity, Focusable as _, HitboxBehavior,
-    InteractiveElement as _, IntoElement, LongPressEvent, MouseUpEvent, ParentElement as _,
-    RenderOnce, SharedString, StyleRefinement, Styled, TextAlign, TouchPhase, Window, div,
-    prelude::FluentBuilder as _, px,
+    InteractiveElement as _, IntoElement, LongPressEvent, MouseButton, MouseUpEvent,
+    ParentElement as _, RenderOnce, SharedString, StyleRefinement, Styled, TextAlign, TouchPhase,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::InputBase;
 use gpui_base::StyledExt as _;
@@ -371,6 +371,9 @@ impl RenderOnce for Input {
                 .when(disabled, |this| {
                     this.capture_any_mouse_down(|_, window, _| window.prevent_default())
                 })
+                // A middle press in a field is never the window's autoscroll:
+                // on Linux that press is a primary-selection paste.
+                .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
                 .when_some(aria_label.clone(), |this, label| {
                     this.accessibility_label(label)
                 })

@@ -9,9 +9,11 @@
 //! ancestor scroller, and a gesture stays with the area that first moved for
 //! it ([`gesture`]).
 
+mod autoscroll;
 pub(crate) mod gesture;
 mod mask;
 
+pub(crate) use autoscroll::{AutoscrollTarget, MiddleAutoscroll, report_room};
 pub(crate) use gesture::recorder as gesture_recorder;
 pub(crate) use mask::AreaMask;
 
@@ -67,12 +69,12 @@ pub(crate) trait ScrollableElement:
 /// `handle` must be the scroll handle of `element`.
 /// Scrollbars and toolbars stay outside; never nest one inside a masked area.
 #[track_caller]
-pub(crate) fn page_viewport<H: ScrollbarHandle + Clone>(
+pub(crate) fn page_viewport<H: ScrollbarHandle + Clone + 'static>(
     id: impl Into<ElementId>,
     handle: &H,
     element: impl IntoElement,
-) -> ScrollBounce {
-    ScrollBounce::new(id, handle, element)
+) -> impl IntoElement {
+    report_room(handle, ScrollBounce::new(id, handle, element))
 }
 
 /// How far a reader rising from the end of a list following its tail goes

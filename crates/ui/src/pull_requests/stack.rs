@@ -3,6 +3,7 @@
 //! progress and the words every answer gets. The host owns every write and its state; the map
 //! reads only the stored topology and links, and each confirmation reads GitHub fresh.
 
+use crate::scroll::AutoscrollTarget as _;
 use crate::widgets::TooltipTrigger as _;
 use std::rc::Rc;
 
@@ -1046,6 +1047,7 @@ fn map_content(
         .child(base)
         .child(summary)
         .children(actions)
+        .autoscroll_target()
         .into_any_element()
 }
 
@@ -1705,6 +1707,7 @@ fn scope_box(rows: Vec<AnyElement>, cx: &App) -> AnyElement {
         .id("pr-stack-scope")
         .max_h(px(240.))
         .overflow_y_scroll()
+        .autoscroll_target()
         .into_any_element()
 }
 
