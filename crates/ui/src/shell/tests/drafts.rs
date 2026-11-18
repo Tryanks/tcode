@@ -84,8 +84,7 @@ fn a_fallback_draft_leaves_a_phone_on_its_threads(cx: &mut TestAppContext) {
 
 /// A column showing nothing opens the remembered project's new thread
 /// page instead of a dead empty page, though another project is listed
-/// first; a host with no project at all is asked for nothing and the
-/// column keeps its add-project state.
+/// first; a host with no project at all is asked for the quick thread's.
 #[gpui::test]
 fn an_empty_column_opens_the_remembered_projects_draft(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -93,9 +92,9 @@ fn an_empty_column_opens_the_remembered_projects_draft(cx: &mut TestAppContext) 
     for (projects, asked) in [
         (
             vec![project("first"), project("remembered")],
-            vec!["remembered"],
+            vec![Some("remembered".to_owned())],
         ),
-        (Vec::new(), Vec::new()),
+        (Vec::new(), vec![None]),
     ] {
         let (shell, host, cx) = mount(cx);
         send_events(
@@ -120,12 +119,14 @@ fn an_empty_column_opens_the_remembered_projects_draft(cx: &mut TestAppContext) 
         );
         await_restore_update(&shell, cx, |store, _| store.index_hydrated());
         draw(cx);
-        let drafted: Vec<String> = std::iter::from_fn(|| host.outgoing.try_recv().ok())
+        // The project a draft was asked for, `None` for the quick thread's.
+        let drafted: Vec<Option<String>> = std::iter::from_fn(|| host.outgoing.try_recv().ok())
             .filter_map(
                 |line| match decode_client_line(&line).expect("client line").payload {
                     ClientPayload::Command(Command::StartDraft { project_id, .. }) => {
-                        Some(project_id)
+                        Some(Some(project_id))
                     }
+                    ClientPayload::Command(Command::StartScratchDraft) => Some(None),
                     _ => None,
                 },
             )

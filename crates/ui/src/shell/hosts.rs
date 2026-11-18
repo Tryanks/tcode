@@ -1002,7 +1002,7 @@ impl AppShell {
                 if !follows {
                     self.drop_leads(0, cx);
                     pane.update(cx, |pane, cx| pane.set_session(None, cx));
-                    store.update(cx, |store, cx| store.open_last_project_draft(cx));
+                    store.update(cx, |store, cx| store.open_fallback_draft(cx));
                 }
             } else {
                 if let Some(column) = self.column.as_mut()
@@ -1158,7 +1158,7 @@ impl AppShell {
         {
             return;
         }
-        store.update(cx, |store, cx| store.open_last_project_draft(cx));
+        store.update(cx, |store, cx| store.open_fallback_draft(cx));
     }
 
     /// What a change of `store` changes for the window.

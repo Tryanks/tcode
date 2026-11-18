@@ -82,12 +82,6 @@ chat:
   screen_position: "%{index} / %{total}"
   screen_earlier: "前のスクリーンショット"
   screen_later: "次のスクリーンショット"
-  empty_title: "続けるスレッドを選択"
-  no_projects_title: "スレッドを開始"
-  no_projects_description: "プロジェクトを追加するか、フォルダーを選ばずにクイックスレッドを開始してください。"
-  start_hub_title: "新しいスレッドを開始するプロジェクト"
-  start_hub_title_on: "%{host} で新しいスレッドを開始するプロジェクト"
-  palette_hint: "または %{shortcut} を押して検索"
   slogan_project:
     "1": "%{project} で SOTA を作る準備はできましたか？"
   slogan_quick:

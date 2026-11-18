@@ -82,12 +82,6 @@ chat:
   screen_position: "第 %{index} 张，共 %{total} 张"
   screen_earlier: "上一张截图"
   screen_later: "下一张截图"
-  empty_title: "选择一个线程以继续"
-  no_projects_title: "开始新线程"
-  no_projects_description: "添加项目，或无需选择文件夹即可开始快速线程。"
-  start_hub_title: "开始新线程"
-  start_hub_title_on: "在 %{host} 上开始新线程"
-  palette_hint: "或按 %{shortcut} 搜索"
   slogan_project:
     "1": "准备在 %{project} 中打造 SOTA 了吗？"
   slogan_quick:

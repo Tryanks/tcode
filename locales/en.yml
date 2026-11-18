@@ -82,12 +82,6 @@ chat:
   screen_position: "%{index} of %{total}"
   screen_earlier: "Earlier screenshot"
   screen_later: "Later screenshot"
-  empty_title: "Pick a thread to continue"
-  no_projects_title: "Start a thread"
-  no_projects_description: "Add a project or start a quick thread without choosing a folder."
-  start_hub_title: "Start a new thread in"
-  start_hub_title_on: "Start a new thread on %{host} in"
-  palette_hint: "or press %{shortcut} to search"
   slogan_project:
     "1": "Ready to build a SOTA in %{project}?"
   slogan_quick:

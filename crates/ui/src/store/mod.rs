@@ -1491,14 +1491,14 @@ impl WorkspaceStore {
     /// Open the new-thread draft of the project the user last interacted with.
     /// The runtime returns that project's standing draft when it already has
     /// one, keeping its composer attachments. A remembered project that is
-    /// gone falls back to the first listed one; with no projects at all the
-    /// chat view keeps its add-project state.
-    pub(crate) fn open_last_project_draft(&mut self, cx: &mut Context<Self>) {
+    /// gone falls back to the first listed one, and a host with no project
+    /// to the quick thread's draft, which only a full workspace may start.
+    pub(crate) fn open_fallback_draft(&mut self, cx: &mut Context<Self>) {
         if self.draft_fallback_pending {
             return;
         }
         let remembered = self.settings_replica.last_project_id.as_deref();
-        let Some(project) = self
+        let project = self
             .index_replica
             .1
             .iter()
@@ -1510,11 +1510,12 @@ impl WorkspaceStore {
                     .iter()
                     .find(|project| !project.quick_chat)
             })
-            .cloned()
-        else {
-            return;
-        };
-        self.fall_back_to_draft(project.id, project.root, cx);
+            .cloned();
+        match project {
+            Some(project) => self.fall_back_to_draft(project.id, project.root, cx),
+            None if self.scope.is_full() => self.fall_back_to_scratch_draft(cx),
+            None => {}
+        }
     }
 
     fn apply_conversation_event(&mut self, session_id: &str, event: &agent::AgentEvent) {

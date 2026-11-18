@@ -75,7 +75,6 @@ use tcode_core::ui::RightTab;
 use crate::commit_dialog::CommitDialog;
 use crate::composer::Composer;
 use crate::git::{git_action_label_key, git_hint_key};
-use crate::shortcut::format_secondary_shortcut;
 use crate::store::WorkspaceStore;
 use crate::terminal_drawer::TerminalDrawer;
 use crate::window_caption;
@@ -174,9 +173,9 @@ pub(crate) struct OpenFileDiff {
 use self::model::{
     LimitResumeAction, RowRenderArgs, Segment, activity_run_duration_ms, displayed_error_text,
     divergent_served_model, latest_message_ids, limit_resume_action, live_edit_counts, notice_keys,
-    partition_activity_run, plain_text_as_markdown, segment_entries, start_hub_projects,
-    timeline_overdraw, user_content, user_notice, work_log_capsule_label, work_log_counts,
-    work_log_key, work_log_outcome,
+    partition_activity_run, plain_text_as_markdown, segment_entries, timeline_overdraw,
+    user_content, user_notice, work_log_capsule_label, work_log_counts, work_log_key,
+    work_log_outcome,
 };
 use self::timeline::rows::{
     ListSync, RowPart, TimelineContinuity, TimelineRow, TurnIndexCache, row_of_entry, rows_of_turn,
@@ -881,7 +880,7 @@ impl Render for ChatView {
                     .when(!compact && !self.is_side(), |el| {
                         el.child(self.render_header(None, false, None, None, window, cx))
                     })
-                    .child(self.render_empty_state(window, cx))
+                    .child(self.render_empty_state(cx))
                     .into_any_element(),
             ));
         }
