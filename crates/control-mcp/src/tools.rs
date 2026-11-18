@@ -257,7 +257,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Arrange for this thread, and only this thread, to settle itself: at the end of your current turn, or when a named pull request merges or closes. Requires the user's consent, quoted verbatim in consent_quote from a message the user sent in this thread (case and spacing aside); a quote the user never said here is refused. The user can revoke it from the thread's title menu, and any new message from the user withdraws it. Settle stops the provider, ends the thread's pull request watches, ends the shells of its idle terminals (their output stays readable), unpins it, and closes pending non-blocking input unanswered. Never fires mid-turn or while a message is queued."
+        description = "Arrange for this thread, and only this thread, to settle itself: at the end of your current turn, or when a named pull request merges or closes. Only when the user asked this thread to settle itself: give their words in consent_quote, which this thread's record of the arrangement shows them. The user can revoke it from the thread's title menu, and any new message from the user withdraws it. Settle stops the provider, ends the thread's pull request watches, ends the shells of its idle terminals (their output stays readable), unpins it, and closes pending non-blocking input unanswered. Never fires mid-turn or while a message is queued."
     )]
     async fn settle_self(
         &self,
