@@ -62,16 +62,18 @@ pub(super) enum Answer {
 }
 
 /// The part of a call that needs the host state, run on the host thread once the call's
-/// off-thread work has finished; its result is the call's answer.
+/// off-thread work has finished; its result is the call's answer. It runs in `call_cx`, the
+/// context the call was given: the host's own carries no author, origin or space.
 async fn finish_on_host(
-    host_cx: HostCx,
+    call_cx: HostCx,
     finish: impl FnOnce(&mut AppState, &mut HostCx) -> Result<serde_json::Value, String>
     + Send
     + 'static,
 ) -> Result<serde_json::Value, String> {
     let (answered, answer) = smol::channel::bounded(1);
-    host_cx.enqueue(move |state, cx| {
-        let _ = answered.try_send(finish(state, cx));
+    let mut cx = call_cx.clone();
+    call_cx.enqueue(move |state, _| {
+        let _ = answered.try_send(finish(state, &mut cx));
     });
     answer
         .recv()
