@@ -1745,6 +1745,7 @@ mod tests {
                         enabled: true,
                         env: Vec::new(),
                         launch_args: None,
+                        http_mcp: false,
                     },
                 );
             }

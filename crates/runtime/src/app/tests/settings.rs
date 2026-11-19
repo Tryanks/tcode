@@ -97,6 +97,7 @@ fn reset_settings_clears_preferences_but_keeps_credentials_installs_and_unknown_
             enabled: true,
             env: Vec::new(),
             launch_args: None,
+            http_mcp: false,
         },
     );
     settings.collapsed_projects.push("project".into());
@@ -589,6 +590,7 @@ fn installed_acp_duplicates_of_native_providers_only_serve_their_existing_sessio
         enabled: true,
         env: Vec::new(),
         launch_args: None,
+        http_mcp: false,
     };
     let draft = state.update(cx, |state, cx| {
         for id in ["cursor", "grok-build", "gemini"] {
@@ -679,6 +681,7 @@ fn marketplace_items_are_runtime_owned_views() {
             enabled: true,
             env: Vec::new(),
             launch_args: None,
+            http_mcp: false,
         },
     );
     state.acp_installing.insert(

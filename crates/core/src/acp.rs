@@ -26,6 +26,11 @@ pub struct InstalledAcpAgent {
     /// Extra CLI arguments appended at launch.
     #[serde(default)]
     pub launch_args: Option<String>,
+    /// Hand Tcode's HTTP MCP servers to the agent although its `initialize`
+    /// does not declare `mcpCapabilities.http`: `agy acp` 1.5.12 declares no
+    /// MCP capabilities and still connects to the HTTP servers it is given.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub http_mcp: bool,
 }
 
 /// Serializable edits the UI can make to an installed ACP agent.
@@ -35,6 +40,7 @@ pub enum AcpAgentPatch {
     SetEnabled { enabled: bool },
     SetLaunchArgs { launch_args: Option<String> },
     SetEnv { env: Vec<EnvVar> },
+    SetHttpMcp { enabled: bool },
 }
 
 /// The agent's variables, also as the `[name, value]` pairs earlier builds

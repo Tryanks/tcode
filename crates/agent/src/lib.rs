@@ -1128,6 +1128,10 @@ pub struct AcpAgent {
     pub id: String,
     pub name: String,
     pub launch: AcpLaunch,
+    /// Offer Tcode's HTTP MCP servers although the agent does not declare
+    /// `mcpCapabilities.http` (Settings → Harnesses).
+    #[serde(default)]
+    pub http_mcp: bool,
 }
 
 /// How to start an ACP agent process (ACP is JSON-RPC over the child's stdio).

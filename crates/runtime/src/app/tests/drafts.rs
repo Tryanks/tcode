@@ -294,6 +294,7 @@ fn draft_defaults_follow_history_within_current_account_and_model_settings() {
             enabled: true,
             env: Vec::new(),
             launch_args: None,
+            http_mcp: false,
         },
     );
     tcode_services::settings::SettingsStore::new(store.root().clone())

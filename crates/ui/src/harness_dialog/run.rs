@@ -82,6 +82,40 @@ impl HarnessDialog {
                     .into_any_element(),
             );
         }
+        if let HarnessId::Acp(id) = &self.harness {
+            let enabled = self
+                .store
+                .read(cx)
+                .installed_acp_agent(id)
+                .is_some_and(|agent| agent.http_mcp);
+            let id = id.clone();
+            rows.push(
+                div()
+                    .w_full()
+                    .debug_selector(|| "harness-acp-http-mcp".into())
+                    .child(
+                        ToggleRow::new(
+                            SharedString::from("harness-acp-http-mcp"),
+                            crate::tr!("providers.acp.http_mcp").into_owned(),
+                            enabled,
+                            self.compact(),
+                            cx.listener(move |this, checked: &bool, _, cx| {
+                                let id = id.clone();
+                                this.store.update(cx, |store, _| {
+                                    store.update_acp_agent(
+                                        id,
+                                        tcode_core::acp::AcpAgentPatch::SetHttpMcp {
+                                            enabled: *checked,
+                                        },
+                                    )
+                                });
+                            }),
+                        )
+                        .description(crate::tr!("providers.acp.http_mcp_help").into_owned()),
+                    )
+                    .into_any_element(),
+            );
+        }
         let env = self.harness_env(window, cx);
         let unreadable = self.secrets_unreadable(cx);
         rows.push(

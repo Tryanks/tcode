@@ -167,6 +167,7 @@ impl AppState {
                             installed.enabled = previous.enabled;
                             installed.env = previous.env.clone();
                             installed.launch_args = previous.launch_args.clone();
+                            installed.http_mcp = previous.http_mcp;
                         }
                         state.settings.acp_agents.insert(id.clone(), installed);
                         state.persist_settings(cx);
@@ -267,6 +268,7 @@ impl AppState {
                 enabled: true,
                 env: Vec::new(),
                 launch_args: None,
+                http_mcp: false,
             },
         );
         self.persist_settings(cx);
@@ -286,6 +288,7 @@ impl AppState {
                         .filter(|args| !args.is_empty());
                 }
                 AcpAgentPatch::SetEnv { env } => agent.env = named(env),
+                AcpAgentPatch::SetHttpMcp { enabled } => agent.http_mcp = enabled,
             }
             self.persist_settings(cx);
         }

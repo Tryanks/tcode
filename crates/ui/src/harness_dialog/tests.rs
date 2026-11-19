@@ -148,6 +148,7 @@ fn settings_and_status() -> (Settings, ProvidersStatus) {
             enabled: true,
             env: Vec::new(),
             launch_args: None,
+            http_mcp: false,
         },
     );
     let mut status = ProvidersStatus {

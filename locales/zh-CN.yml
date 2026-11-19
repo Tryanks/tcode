@@ -808,6 +808,8 @@ providers:
     custom_help: "任何通过标准输入输出使用 ACP 的命令。"
     add: "添加 Harness"
     name_placeholder: "我的 Harness"
+    http_mcp: "提供 Tcode MCP 服务"
+    http_mcp_help: "即使这个 Harness 没有声明支持 HTTP MCP，也通过 HTTP 把 Tcode 的 MCP 工具交给它。只对实际能接收的 Harness 打开；下次启动会话时生效。"
   plugins:
     no_providers: "没有已启用且可由 Tcode 管理插件的 Harness。"
     refresh: "重新列出 %{name} 插件"

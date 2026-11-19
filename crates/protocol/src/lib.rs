@@ -379,7 +379,8 @@ pub use wire::{
 // keeps only enabled, and the SetControlGrant and RespondControlGrant
 // commands and the ControlDefaultGrant and ControlProjectGrant patches go.
 // tcode_control records no reviews: the ReviewRecords query and
-// RuntimeNotice's review_recorded go.
+// RuntimeNotice's review_recorded go. An installed ACP agent gains
+// http_mcp, set by the AcpAgentPatch set_http_mcp.
 pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]

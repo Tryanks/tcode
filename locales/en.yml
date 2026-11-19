@@ -814,6 +814,8 @@ providers:
     args_unreadable: "These arguments cannot be read: %{error}"
     add: "Add Harness"
     name_placeholder: "My Harness"
+    http_mcp: "Offer Tcode MCP servers"
+    http_mcp_help: "Give this Harness Tcode's MCP tools over HTTP even though it does not declare HTTP MCP support. Turn on only for a Harness that accepts them anyway; takes effect the next time a session starts."
   # Native provider plugins (claude plugin …), managed on the host.
   plugins:
     no_providers: "No enabled Harness has plugins Tcode can manage."
