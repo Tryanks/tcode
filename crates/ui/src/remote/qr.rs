@@ -43,8 +43,8 @@ pub(super) fn beside_qr(
             CHANGE,
             window,
             cx,
-            |payload, _, cx| {
-                qr_element(payload, compact, cx).unwrap_or_else(|| div().into_any_element())
+            |payload, window, cx| {
+                qr_element(payload, compact, window, cx).unwrap_or_else(|| div().into_any_element())
             },
         );
         reflow.part("qr", qr)
@@ -71,11 +71,21 @@ pub(super) fn beside_qr(
 /// same-colour modules into a single box — a per-module element would be
 /// thousands of nodes repainting every countdown tick.
 ///
-/// A module is a whole number of points, so it stays crisp: 4 on a compact
-/// layout, where the code is held up to another phone's camera, 3 on a wide
-/// one, where it sits beside its text without outgrowing it.
-pub(super) fn qr_element(payload: &str, compact: bool, cx: &App) -> Option<AnyElement> {
-    let module: f32 = if compact { 4. } else { 3. };
+/// A module is about 4 points on a compact layout, where the code is held up
+/// to another phone's camera, and 3 on a wide one, where it sits beside its
+/// text without outgrowing it — taken to a whole number of device pixels.
+/// Layout rounds every explicit length to device pixels on its own, so at a
+/// fractional scale a module that is not whole would make a run of `n` of
+/// them differ from `n` single modules, and the rows would shear apart.
+pub(super) fn qr_element(
+    payload: &str,
+    compact: bool,
+    window: &Window,
+    cx: &App,
+) -> Option<AnyElement> {
+    let points: f32 = if compact { 4. } else { 3. };
+    let scale = window.scale_factor();
+    let module = (points * scale).round() / scale;
     let (width, modules) = qr_modules(payload)?;
     // A QR is scanned by a camera, not read by a human: it must stay black on
     // white in both themes, so neither colour comes from the palette.
