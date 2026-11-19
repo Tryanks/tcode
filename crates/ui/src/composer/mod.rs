@@ -83,6 +83,7 @@ enum ComposerMenu {
     ImageRemove(usize),
     FileRemove(usize),
 }
+use crate::scroll::ScrollableElement as _;
 use gpui_base::{ElementExt as _, h_flex, v_flex};
 
 use crate::attachments::attach_error_message;
@@ -182,6 +183,10 @@ pub struct Composer {
     /// Keeping it separate from the turn composer makes the pending question
     /// and the destination of typed text unambiguous.
     user_input_custom: Entity<TextareaState>,
+    /// The typed answer's field as it glides to the height of its lines,
+    /// and how tall its row was last drawn.
+    user_input_custom_glide: crate::motion::GlideState,
+    user_input_custom_height: Rc<Cell<Pixels>>,
     /// Unsent text is isolated by persisted thread or project New thread page.
     input_destination: Option<ComposerDestination>,
     input_cache: std::collections::HashMap<ComposerDestination, Entity<TextareaState>>,
@@ -393,6 +398,8 @@ impl Composer {
         let (min_rows, max_rows) = auto_grow_rows(compact);
         self.input
             .update(cx, |input, cx| input.set_auto_grow(min_rows, max_rows, cx));
+        self.user_input_custom
+            .update(cx, |input, cx| input.set_auto_grow(1, max_rows, cx));
         cx.notify();
     }
 
@@ -438,10 +445,11 @@ impl Composer {
                 .submit_on_enter(true)
         });
         let model_search = cx.new(|cx| InputState::new(window, cx));
+        // A typed answer grows as the draft does, from one line.
         let user_input_custom = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .input_action(gpui::TextInputAction::Enter)
-                .rows(1)
+                .auto_grow(1, max_rows)
                 .submit_on_enter(true)
         });
 
@@ -495,6 +503,8 @@ impl Composer {
             draft_has_text,
             field,
             user_input_custom,
+            user_input_custom_glide: Default::default(),
+            user_input_custom_height: Rc::default(),
             input_destination: None,
             input_cache: Default::default(),
             draft_save: None,
@@ -1738,7 +1748,7 @@ impl Composer {
         v_flex()
             .id(self.scene.id("composer"))
             .relative()
-            .flex_shrink_0()
+            .min_h_0()
             .w_full()
             .items_center()
             .px(inset)
@@ -1749,16 +1759,35 @@ impl Composer {
             .child(
                 v_flex()
                     .w_full()
+                    .min_h_0()
                     .max_w(px(crate::chat::CONTENT_MAX_WIDTH))
-                    .children(panels)
+                    // The card keeps its place at the foot of the column;
+                    // the panels over it have what the column has left, and
+                    // scroll in it where that is less than they draw: under
+                    // a software keyboard, a question's answer field is
+                    // brought into view there instead of pushing the card
+                    // off the screen.
+                    .child(
+                        div()
+                            .id("composer-panels")
+                            .debug_selector(|| "composer-panels".into())
+                            .min_h_0()
+                            // Room at the sides for the panels' shadows,
+                            // which the viewport would otherwise clip.
+                            .mx(-PANEL_SHADOW_ROOM)
+                            .px(PANEL_SHADOW_ROOM)
+                            .overflow_y_scroll_area()
+                            .children(panels),
+                    )
                     .child(
                         v_flex()
                             .w_full()
+                            .flex_none()
                             .child(card)
                             .child(under_card)
                             .children(drawer),
                     )
-                    .children(checkout),
+                    .children(checkout.map(|checkout| div().w_full().flex_none().child(checkout))),
             )
             .child(extent)
             .into_any_element()
@@ -2398,6 +2427,9 @@ impl Render for ComposerField {
         .on_change(draft_key)
     }
 }
+
+/// How far a panel's shadow reaches past its sides.
+const PANEL_SHADOW_ROOM: Pixels = px(4.);
 
 /// A panel in the column above the card, folding in as it comes and away as
 /// it goes. It carries the space under it, so the space folds with it.

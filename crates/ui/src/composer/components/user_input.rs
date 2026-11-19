@@ -345,7 +345,18 @@ impl Composer {
         let custom_has_text = !custom_input.read(cx).value().trim().is_empty();
         // Sent empty, an optional question is passed over unanswered.
         let skips = question.optional && !custom_has_text;
+        // The answer grows a line at a time as it is typed, wrapped or
+        // broken, and its height glides there as the draft's does.
+        let answer_key = {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            custom_input.read(cx).value().hash(&mut hasher);
+            hasher.finish()
+        };
+        let answer_focused = custom_input.read(cx).focus_handle(cx).is_focused(window);
+        let answer_height = self.user_input_custom_height.clone();
         let custom_answer = h_flex()
+            .debug_selector(|| "ui-custom-answer".into())
             .w_full()
             .items_center()
             .gap_2()
@@ -356,27 +367,45 @@ impl Composer {
             .bg(cx.theme().background)
             .child(
                 div().flex_1().min_w_0().child(
-                    Textarea::new(&self.user_input_custom)
-                        .placeholder(crate::tr!("userinput.custom_placeholder"))
-                        .appearance(false),
+                    crate::motion::SizeGlide::new(
+                        &self.user_input_custom_glide,
+                        Textarea::new(&self.user_input_custom)
+                            .placeholder(crate::tr!("userinput.custom_placeholder"))
+                            .appearance(false),
+                    )
+                    .on_change(answer_key),
                 ),
             )
+            // The field is this row, which draws its frame: when the editor
+            // in it asks to be brought into view, or grows a line while it
+            // is typed in, the whole row is, with the space the card keeps
+            // around it.
+            .on_prepaint(move |bounds, window, cx| {
+                let asked = window.take_autoscroll().is_some();
+                let grew = answer_height.replace(bounds.size.height) != bounds.size.height;
+                if asked || (answer_focused && grew) {
+                    window.request_autoscroll(bounds.dilate(cx.theme().tokens.spacing.sm));
+                }
+            })
             .child(
-                Button::new("ui-custom-submit")
-                    .motion(&self.button_motion())
-                    .ghost()
-                    .xsmall()
-                    .touch(self.compact)
-                    .icon(IconName::ArrowUp)
-                    .disabled(!custom_has_text && !skips)
-                    .tooltip(if skips {
-                        crate::tr!("userinput.skip")
-                    } else {
-                        crate::tr!("userinput.submit_custom")
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.submit_custom_user_input(&custom_input, window, cx);
-                    })),
+                // Send stays beside the answer's last line.
+                div().flex_none().self_end().child(
+                    Button::new("ui-custom-submit")
+                        .motion(&self.button_motion())
+                        .ghost()
+                        .xsmall()
+                        .touch(self.compact)
+                        .icon(IconName::ArrowUp)
+                        .disabled(!custom_has_text && !skips)
+                        .tooltip(if skips {
+                            crate::tr!("userinput.skip")
+                        } else {
+                            crate::tr!("userinput.submit_custom")
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.submit_custom_user_input(&custom_input, window, cx);
+                        })),
+                ),
             );
 
         // A single-select click is its question's answer and moves on by

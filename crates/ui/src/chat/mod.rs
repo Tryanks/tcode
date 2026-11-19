@@ -1257,7 +1257,12 @@ impl ChatView {
                     .id("chat-composer")
                     .debug_selector(|| "chat-composer".into())
                     .w_full()
-                    .flex_none()
+                    // The composer is as tall as it draws while the column
+                    // has that much room, and no taller than the column:
+                    // its panels give way inside it.
+                    .flex()
+                    .flex_col()
+                    .min_h_0()
                     // A press on the composer puts the keyboard resting
                     // there to use. Capture, so the composer's own handling
                     // still runs and cannot hide it.
