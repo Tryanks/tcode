@@ -257,6 +257,82 @@ fn an_agent_opens_beside_its_lead_in_the_leads_pane(cx: &mut TestAppContext) {
     });
 }
 
+/// An agent another agent dispatched, opened beside the lead from that
+/// agent, has Back to that agent as well as Close on its card. Back shows
+/// the agent it came from beside the lead again, which, the lead's own,
+/// has only Close; Close then takes it away.
+#[gpui::test]
+fn an_agent_of_an_agent_goes_back_to_it_beside_the_lead(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let (shell, host, cx) = mount_panes(cx);
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    let (topic, ServerEvent::IndexSnapshot(mut index)) = lead_with_agent_index("thread-1") else {
+        unreachable!("lead_with_agent_index sends a snapshot");
+    };
+    let mut nested = index.sessions[2].clone();
+    nested.id = "agent-2".into();
+    nested.title = "agent-2".into();
+    nested.parent_session_id = Some("agent-1".into());
+    nested.created_at = 4;
+    index.sessions.push(nested);
+    send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
+    await_restore_update(&shell, cx, |store, _| {
+        store.thread_meta("agent-2").is_some()
+    });
+    let store = store_of(&shell, cx);
+    store.update(cx, |store, cx| {
+        store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Agents, cx)
+    });
+    crate::test_frames::draw_settled(cx);
+    open_agent_from_panel(&shell, &host, cx);
+    assert!(cx.debug_bounds("side-back").is_none());
+
+    cx.update(|window, cx| {
+        crate::agents_panel::open_agent(
+            &store,
+            "agent-2".into(),
+            crate::shell::side_host_for(&store.read(cx).thread_key("thread-1"), cx),
+            None,
+            window,
+            cx,
+        )
+    });
+    draw(cx);
+    serve_thread(&host, "agent-2");
+    await_restore_update(&shell, cx, |store, cx| {
+        !store.chat_loading_for(Some("agent-2"), cx) && store.timeline_settled_for("agent-2")
+    });
+    crate::test_frames::draw_settled(cx);
+    store.read_with(cx, |store, _| {
+        assert_eq!(
+            store.side_thread_for("thread-1").as_deref(),
+            Some("agent-2")
+        );
+    });
+    assert!(cx.debug_bounds("side-close").is_some());
+
+    press_control("side-back", cx);
+    serve_thread(&host, "agent-1");
+    await_restore_update(&shell, cx, |store, cx| {
+        !store.chat_loading_for(Some("agent-1"), cx)
+    });
+    crate::test_frames::draw_settled(cx);
+    store.read_with(cx, |store, _| {
+        assert_eq!(
+            store.side_thread_for("thread-1").as_deref(),
+            Some("agent-1")
+        );
+        assert!(!store.is_thread_open("agent-2"));
+    });
+    assert!(cx.debug_bounds("side-back").is_none());
+
+    press_control("side-close", cx);
+    assert!(cx.debug_bounds("chat-side-header").is_none());
+    store.read_with(cx, |store, _| {
+        assert_eq!(store.side_thread_for("thread-1"), None);
+    });
+}
+
 /// On a tablet: an agent beside its lead is neither drawn nor held open
 /// while the window is compact, which shows the lead alone, and is beside
 /// its lead again once the window is wide. An agent opened from its lead
