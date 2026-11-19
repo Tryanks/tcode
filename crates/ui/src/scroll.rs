@@ -12,6 +12,7 @@
 mod autoscroll;
 pub(crate) mod gesture;
 mod mask;
+mod reveal;
 
 pub(crate) use autoscroll::{AutoscrollTarget, MiddleAutoscroll, report_room};
 pub(crate) use gesture::recorder as gesture_recorder;
@@ -74,6 +75,8 @@ pub(crate) fn page_viewport<H: ScrollbarHandle + Clone + 'static>(
     handle: &H,
     element: impl IntoElement,
 ) -> impl IntoElement {
+    let id = id.into();
+    let element = reveal::reveals((id.clone(), "reveals"), handle, element);
     report_room(handle, ScrollBounce::new(id, handle, element))
 }
 
@@ -250,6 +253,8 @@ where
             .overflow_y_scroll()
             .lock_scroll_axis()
             .child(content);
+        let scroll_area =
+            reveal::reveals((self.id.clone(), "reveals"), &scroll_handle, scroll_area);
 
         div()
             .id(self.id.clone())
@@ -362,11 +367,16 @@ where
         let viewport = match self.axis {
             // The mask moves the offset; the viewport only clips. GPUI's own
             // horizontal container would map vertical input onto this axis.
-            Axis::Horizontal => viewport.overflow_hidden(),
-            Axis::Vertical => viewport
-                .when(!bounded, |viewport| viewport.max_h_full())
-                .overflow_y_scroll()
-                .lock_scroll_axis(),
+            Axis::Horizontal => viewport.overflow_hidden().into_any_element(),
+            Axis::Vertical => reveal::reveals(
+                (self.id.clone(), "reveals"),
+                &scroll_handle,
+                viewport
+                    .when(!bounded, |viewport| viewport.max_h_full())
+                    .overflow_y_scroll()
+                    .lock_scroll_axis(),
+            )
+            .into_any_element(),
         };
         div()
             .relative()

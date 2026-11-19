@@ -735,3 +735,84 @@ fn a_focused_control_keeps_the_keyboard_through_a_zoom_and_a_compact_flip(cx: &m
     shell.read_with(cx, |shell, cx| assert!(shell.compact(cx)));
     still("compact", cx);
 }
+
+/// A question taller than what a software keyboard leaves of a phone's
+/// thread page: the answer field being typed in is brought into view above
+/// the keyboard, in the panels over the card, and the card stays on screen
+/// under it. An answer of several lines is shown whole, and stays in view
+/// as it grows. The turn runs, so motion is reduced and the window rests.
+#[gpui::test]
+fn a_question_answer_field_stays_above_the_keyboard(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let (_shell, host, cx) = mount_panes(cx);
+    as_mobile(cx);
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    cx.simulate_resize(size(px(393.), px(852.)));
+    let mut status = session_status("thread-1", std::path::Path::new(PANES_CWD));
+    status.activity.working = true;
+    status.activity.turn_running = true;
+    status.running_turn = Some(tcode_core::session::RunningTurn {
+        turn: 0,
+        started_at: None,
+    });
+    status.pending_user_input = Some(tcode_core::session::PendingUserInput {
+        request_id: "ask".into(),
+        questions: vec![agent::UserInputQuestion {
+            id: "storage".into(),
+            header: "Storage".into(),
+            question: "Which storage should the migration use?".into(),
+            options: (0..4)
+                .map(|n| agent::UserInputOption {
+                    label: format!("Option {n}"),
+                    description: "What choosing this one would mean for the migration.".into(),
+                })
+                .collect(),
+            multi_select: false,
+            prefill: None,
+            optional: false,
+        }],
+        delivery: agent::UserInputDelivery::Blocking,
+    });
+    scenes::serve_log(&host, status, vec![scenes::started()]);
+    crate::test_frames::draw_settled(cx);
+    let bounds = |selector: &'static str, cx: &mut VisualTestContext| {
+        cx.debug_bounds(selector).expect(selector)
+    };
+    let field = bounds("ui-custom-answer", cx);
+    cx.simulate_click(field.center(), gpui::Modifiers::default());
+    draw(cx);
+    // The status bar and the keyboard cover the window.
+    crate::test_frames::occlude(
+        cx,
+        gpui::Edges {
+            top: px(59.),
+            bottom: px(336.),
+            ..Default::default()
+        },
+    );
+    crate::test_frames::draw_settled(cx);
+    let shown = cx.update(|window, _| window.fully_visible_bounds());
+    let panels = bounds("composer-panels", cx);
+    let field = bounds("ui-custom-answer", cx);
+    let card = bounds("composer-card", cx);
+    assert!(
+        panels.top() >= shown.top() && card.bottom() <= shown.bottom(),
+        "the composer is drawn in what the keyboard leaves: {panels:?} and {card:?} in {shown:?}"
+    );
+    assert!(
+        field.top() >= panels.top() && field.bottom() <= panels.bottom(),
+        "the answer field is in view in its panels: {field:?} in {panels:?}"
+    );
+    cx.simulate_input("one\ntwo\nthree");
+    crate::test_frames::draw_settled(cx);
+    let grown = bounds("ui-custom-answer", cx);
+    let panels = bounds("composer-panels", cx);
+    assert!(
+        grown.size.height > field.size.height,
+        "the field shows every line of the answer: {grown:?} after {field:?}"
+    );
+    assert!(
+        grown.top() >= panels.top() && grown.bottom() <= panels.bottom(),
+        "the grown field is still in view in its panels: {grown:?} in {panels:?}"
+    );
+}
