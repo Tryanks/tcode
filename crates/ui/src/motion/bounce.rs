@@ -22,7 +22,7 @@ use gpui::{
     AnyElement, App, Bounds, ContentMask, Element, ElementId, GlobalElementId, InspectorElementId,
     IntoElement, LayoutId, Pixels, Window, point, px,
 };
-use gpui_base::{ScrollBounce, ScrollBounceMotion};
+use gpui_base::ScrollBounceMotion;
 #[cfg(target_family = "wasm")]
 use web_time::Instant;
 
@@ -110,11 +110,11 @@ impl BounceState {
     /// The bounce `bounce` makes around `child`, which it must take as its
     /// own child as it is handed over: what it draws `child` displaced by is
     /// read from where it draws it.
-    pub(crate) fn render(
+    pub(crate) fn render<E: IntoElement>(
         &self,
         id: impl Into<ElementId>,
         child: impl IntoElement,
-        bounce: impl FnOnce(Probe) -> ScrollBounce,
+        bounce: impl FnOnce(Probe) -> E,
     ) -> Bounce {
         let probe = Rc::new(Cell::new(None));
         Bounce {

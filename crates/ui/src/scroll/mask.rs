@@ -111,6 +111,15 @@ impl<H: ScrollbarHandle + Clone + 'static> Element for AreaMask<H> {
         let hitbox = hitbox.id;
         let handle = self.handle.clone();
         let view = window.current_view();
+        super::autoscroll::listen_for_press(
+            hitbox,
+            handle.clone(),
+            super::autoscroll::Axes {
+                horizontal,
+                vertical: !horizontal,
+            },
+            window,
+        );
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
                 // In the capture phase: the scrollers around a viewport

@@ -656,7 +656,7 @@ fn render_layout<H: DiffListHost>(
     // vertical wheel input into horizontal movement. The event can then
     // bubble to the List's vertical scroll handler; explicit horizontal
     // wheel/trackpad deltas (or Shift-wheel) still scroll this viewport.
-    div()
+    let viewport = div()
         .id(id)
         .text_size(cx.theme().tokens.typography.mono_md.size)
         .font_family(cx.theme().mono_font_family.clone())
@@ -695,8 +695,8 @@ fn render_layout<H: DiffListHost>(
             )
             .absolute()
             .inset_0(),
-        )
-        .into_any_element()
+        );
+    crate::scroll::report_room(&diff.horizontal, viewport).into_any_element()
 }
 
 /// A drag from a line number selects down to the line level with the pointer

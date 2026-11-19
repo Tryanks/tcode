@@ -12439,6 +12439,7 @@ dependencies = [
  "latex-rust",
  "lb-wry",
  "log",
+ "lyon",
  "mermaid-rs-renderer",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",

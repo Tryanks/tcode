@@ -1,6 +1,7 @@
 //! The Files view: a pull request's changed files drawn by the diff list, from the host's
 //! files read and never from the local checkout.
 
+use crate::scroll::AutoscrollTarget as _;
 use crate::widgets::TooltipTrigger as _;
 use std::ops::Range;
 use std::rc::Rc;
@@ -749,7 +750,8 @@ impl PullRequestView {
                         .max_h(px(240.))
                         .overflow_y_scroll()
                         .pb_1()
-                        .child(rows.render(v_flex().w_full())),
+                        .child(rows.render(v_flex().w_full()))
+                        .autoscroll_target(),
                 ),
             );
         kept.fold(card)

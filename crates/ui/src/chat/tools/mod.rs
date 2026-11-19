@@ -26,6 +26,7 @@ pub(in crate::chat) mod threads;
 pub(in crate::chat) mod web;
 pub(in crate::chat) mod window;
 
+use crate::scroll::AutoscrollTarget as _;
 use std::{any::Any, collections::HashMap, ops::Deref, path::Path, rc::Rc, sync::Arc};
 
 use agent::{Attachment, ItemContent, ItemStatus, ToolFamily, ToolName};
@@ -611,7 +612,8 @@ pub(in crate::chat) fn bounded_text(
                         .id(SharedString::from(key.clone()))
                         .max_h(px(OPEN_MAX_HEIGHT))
                         .overflow_y_scroll()
-                        .child(shown),
+                        .child(shown)
+                        .autoscroll_target(),
                 )
                 .child(less)
                 .into_any_element(),
@@ -976,6 +978,7 @@ pub(in crate::chat) fn code_section(
                 gpui::StyledText::new(highlighted.source().clone())
                     .with_highlights(highlighted.runs().cloned()),
             )
+            .autoscroll_target()
     });
     v_flex()
         .w_full()

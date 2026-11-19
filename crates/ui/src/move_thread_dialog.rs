@@ -3,6 +3,7 @@
 //! conversation so far.
 
 use crate::overlay::{DialogActions, OverlayExt as _};
+use crate::scroll::AutoscrollTarget as _;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
@@ -202,7 +203,8 @@ impl Render for MoveThreadDialog {
             .w_full()
             .max_h(gpui::px(320.))
             .overflow_y_scroll()
-            .child(rows.render(v_flex().w_full().mt(gpui::rems(-0.125))));
+            .child(rows.render(v_flex().w_full().mt(gpui::rems(-0.125))))
+            .autoscroll_target();
         let provider = self
             .store
             .read(cx)
