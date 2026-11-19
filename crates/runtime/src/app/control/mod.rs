@@ -22,9 +22,15 @@ mod watches;
 /// How many writes Settings → Control lists.
 const CONTROL_ACTIVITY_LIMIT: usize = 200;
 
-/// What one answer may hold, whatever the caller asks for: about 16k tokens, under the
-/// 25 000-token MCP tool result Claude Code accepts by default (`MAX_MCP_OUTPUT_TOKENS`).
-const RESPONSE_CAP: usize = 64 * 1024;
+/// What one answer may hold, whatever the caller asks for, in bytes of JSON. Claude Code
+/// refuses an MCP tool result over 25 000 tokens by default (`MAX_MCP_OUTPUT_TOKENS`), and
+/// an answer made of thread ids, anchors and field names runs near two bytes a token: a
+/// 64 KiB search answer of them was refused.
+const RESPONSE_CAP: usize = 32 * 1024;
+
+fn json_len<T: serde::Serialize>(value: &T) -> usize {
+    serde_json::to_vec(value).map_or(0, |json| json.len())
+}
 
 pub(super) struct ControlState {
     activity: VecDeque<ControlActivityEntry>,

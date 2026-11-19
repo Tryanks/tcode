@@ -337,6 +337,93 @@ fn search_covers_the_scope_and_any_thread_it_names_and_returns_anchors() {
     assert_eq!(answer["total"], 1);
 }
 
+/// A search whose page and counts would not fit one tool result is answered within the
+/// budget: the hits that fit, with a cursor that continues at the first one left off, and
+/// the per-turn counts it had no room for named as left out.
+#[test]
+fn a_search_too_large_for_one_answer_fits_and_continues_where_it_stopped() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-control-search-budget");
+    stored(&store, "caller", "a", None, |_| {});
+    stored(&store, "target", "a", None, |meta| {
+        meta.title = "a long title naming the thread ".repeat(25);
+    });
+    let turns = 200;
+    for n in 0..turns {
+        let ts = 10 * n + 1;
+        let reply = AgentEvent::ItemCompleted(ThreadItem {
+            id: format!("reply-{n}"),
+            parent_item_id: None,
+            content: ItemContent::AssistantMessage {
+                text: format!("answer {n} mentions the needle"),
+                summarized: false,
+            },
+        });
+        for (at, event) in [
+            (
+                ts,
+                AgentEvent::TurnStarted {
+                    turn_id: format!("t{n}"),
+                },
+            ),
+            (ts + 1, reply),
+            (ts + 2, turn_ended()),
+        ] {
+            store.append_event("target", at, &event).unwrap();
+        }
+    }
+    let (state, _providers) = host(cx, &store, &[]);
+    let search = |cursor: Option<String>| {
+        ControlOp::Search(SearchParams {
+            query: "needle".into(),
+            limit: Some(50),
+            cursor,
+            ..SearchParams::default()
+        })
+    };
+    let answers = |page: &serde_json::Value| -> Vec<usize> {
+        page["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|hit| {
+                let snippet = hit["snippet"].as_str().unwrap();
+                let (_, rest) = snippet.split_once("answer ").unwrap();
+                rest.split(' ').next().unwrap().parse().unwrap()
+            })
+            .collect()
+    };
+
+    let first = call(&state, cx, search(None)).unwrap();
+    let size = serde_json::to_vec(&first).unwrap().len();
+    assert!(size <= 32 * 1024, "{size} bytes");
+    let shown = answers(&first);
+    assert!(
+        !shown.is_empty() && shown.len() < 50,
+        "the page holds the hits that fit: {}",
+        shown.len()
+    );
+    assert_eq!(shown, (0..shown.len()).collect::<Vec<_>>());
+    assert_eq!(first["total"], turns);
+    let thread = &first["threads"][0];
+    assert_eq!(
+        (&thread["thread_id"], &thread["hits"]),
+        (&"target".into(), &turns.into())
+    );
+    assert!(thread.get("turns").is_none(), "{thread}");
+    let omitted = first["omitted"].as_array().unwrap();
+    assert!(
+        omitted
+            .iter()
+            .any(|note| note.as_str().unwrap().contains("turns")),
+        "the turns it had no room for are named: {omitted:?}"
+    );
+
+    let cursor = first["next_cursor"].as_str().unwrap().to_owned();
+    let second = call(&state, cx, search(Some(cursor))).unwrap();
+    assert_eq!(answers(&second)[0], shown.len(), "no hit is skipped");
+}
+
 /// `review_candidates` changes nothing, finds old unresolved work, and states its coverage.
 #[test]
 fn review_candidates_changes_no_state_and_reports_coverage() {

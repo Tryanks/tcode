@@ -366,7 +366,7 @@ fn reading_a_very_long_thread_stays_within_budget_and_says_what_it_left_out() {
         json!({ "tool": "read", "params": { "cursor": cursor, "max_bytes": 1_000_000 } }),
     )
     .unwrap();
-    assert!(serde_json::to_vec(&continued).unwrap().len() <= 64 * 1024);
+    assert!(serde_json::to_vec(&continued).unwrap().len() <= 32 * 1024);
     let head = text.split("\n[… ").next().unwrap();
     let last_shown: usize = head
         .rsplit_once("compiling crate ")
@@ -388,7 +388,7 @@ fn reading_a_very_long_thread_stays_within_budget_and_says_what_it_left_out() {
         json!({ "tool": "outline", "params": { "thread_id": "target", "level": "segments" } }),
     )
     .unwrap();
-    assert!(serde_json::to_vec(&outline).unwrap().len() <= 64 * 1024);
+    assert!(serde_json::to_vec(&outline).unwrap().len() <= 32 * 1024);
     assert!(outline["omitted"].is_string(), "what was left out is said");
     let turns = outline["turns"].as_array().unwrap();
     assert_eq!(

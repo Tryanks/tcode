@@ -8,14 +8,15 @@ use control_mcp::{
 use tcode_core::control::{FollowUp, SettlementAutomation, StartedBy};
 use tcode_core::pull_request::{PullRequestKey, PullRequestState, ThreadPullRequestLink};
 use tcode_core::settings::provider_key;
-use tcode_services::session_search::{SearchFilter, SearchKind};
+use tcode_services::session_search::{SearchFilter, SearchKind, ThreadHits};
 use tcode_services::thread_index::{fence, redact};
 
 const PAGE_LIMIT: u32 = 50;
 const PAGE_CAP: u32 = 100;
 const SEARCH_LIMIT: u32 = 20;
 const SEARCH_CAP: u32 = 50;
-const PER_TURN_CAP: usize = 200;
+/// Room a search answer keeps for the notes on what fitting it left out.
+const SEARCH_NOTE_ROOM: usize = 512;
 /// How many collapsed threads, and how many left-out thread ids, a review lists by name.
 const REVIEW_LIST_CAP: usize = 100;
 /// A thread active this recently is still in progress for a review, whatever its run state.
@@ -177,11 +178,13 @@ struct SearchHitRow {
 struct ThreadCount {
     thread_id: String,
     hits: usize,
+    /// Absent where the answer had no room for them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    turns: Vec<TurnCount>,
 }
 
 #[derive(Debug, Serialize)]
 struct TurnCount {
-    thread_id: String,
     turn: usize,
     hits: usize,
 }
@@ -190,8 +193,7 @@ struct TurnCount {
 struct SearchAnswer {
     query: String,
     hits: Vec<SearchHitRow>,
-    per_thread: Vec<ThreadCount>,
-    per_turn: Vec<TurnCount>,
+    threads: Vec<ThreadCount>,
     total: usize,
     truncated: bool,
     next_cursor: Option<String>,
@@ -377,6 +379,81 @@ struct ReviewAnswer {
 
 fn to_value(value: &impl Serialize) -> Result<serde_json::Value, String> {
     serde_json::to_value(value).map_err(|error| error.to_string())
+}
+
+/// Fit `answer` to [`RESPONSE_CAP`]: the page of hits, with its cursor moved back to the
+/// first hit left off, in the room the threads' counts leave it, which is at most a
+/// quarter; then each thread's count while they fit; then each thread's turns, whole, while
+/// they fit. What was left out is named.
+fn fit_search(answer: &mut SearchAnswer, offset: usize, threads: Vec<ThreadHits>) {
+    let room = RESPONSE_CAP - SEARCH_NOTE_ROOM;
+    let (rows, turns): (Vec<ThreadCount>, Vec<_>) = threads
+        .into_iter()
+        .map(|thread| {
+            let row = ThreadCount {
+                thread_id: thread.thread_id,
+                hits: thread.hits,
+                turns: Vec::new(),
+            };
+            (row, thread.turns)
+        })
+        .unzip();
+    let page_room = room - json_len(&rows).min(room / 4);
+    let page = answer.hits.len();
+    loop {
+        answer.truncated = answer.total > offset + answer.hits.len();
+        answer.next_cursor = answer
+            .truncated
+            .then(|| (offset + answer.hits.len()).to_string());
+        if answer.hits.len() <= 1 || json_len(answer) <= page_room {
+            break;
+        }
+        answer.hits.pop();
+    }
+    if answer.hits.len() < page {
+        answer.omitted.push(format!(
+            "{} of the page's {page} hits fit; next_cursor continues after them",
+            answer.hits.len()
+        ));
+    }
+    let mut used = json_len(answer);
+    let all = rows.len();
+    for row in rows {
+        let size = json_len(&row) + 1;
+        if used + size > room {
+            break;
+        }
+        used += size;
+        answer.threads.push(row);
+    }
+    if answer.threads.len() < all {
+        let counted: usize = answer.threads.iter().map(|thread| thread.hits).sum();
+        answer.omitted.push(format!(
+            "threads lists {} of {all} threads with hits ({} hits not counted there); \
+             search with thread_ids to count the others",
+            answer.threads.len(),
+            answer.total - counted,
+        ));
+    }
+    let mut listed = 0;
+    for (row, turns) in answer.threads.iter_mut().zip(turns) {
+        let turns: Vec<TurnCount> = turns
+            .into_iter()
+            .map(|(turn, hits)| TurnCount { turn, hits })
+            .collect();
+        let size = json_len(&turns) + r#","turns":"#.len();
+        if used + size > room {
+            break;
+        }
+        used += size;
+        row.turns = turns;
+        listed += 1;
+    }
+    if listed < answer.threads.len() {
+        answer.omitted.push(format!(
+            "turns are listed for the first {listed} threads; search with thread_ids for the others"
+        ));
+    }
 }
 
 /// How a pull request is named to the model: `host/repository#number`.
@@ -972,8 +1049,7 @@ impl AppState {
             return Answer::Now(to_value(&SearchAnswer {
                 query,
                 hits: Vec::new(),
-                per_thread: Vec::new(),
-                per_turn: Vec::new(),
+                threads: Vec::new(),
                 total: 0,
                 truncated: false,
                 next_cursor: None,
@@ -990,14 +1066,14 @@ impl AppState {
                     .iter()
                     .map(|thread| format!("a thread that could not be searched: {thread}")),
             );
-            let mut redacted = 0;
+            let mut redactions = Vec::new();
             let hits: Vec<SearchHitRow> = results
                 .hits
                 .into_iter()
                 .map(|hit| {
                     let anchor = format!("{}#{}", hit.hit.session_id, hit.position);
                     let (snippet, count) = redact(&hit.hit.snippet);
-                    redacted += count;
+                    redactions.push(count);
                     SearchHitRow {
                         snippet: fence(&anchor, &snippet),
                         anchor,
@@ -1008,39 +1084,19 @@ impl AppState {
                     }
                 })
                 .collect();
-            if results.per_turn.len() > PER_TURN_CAP {
-                omitted.push(format!(
-                    "per_turn lists the first {PER_TURN_CAP} of {} turns with hits",
-                    results.per_turn.len()
-                ));
-            }
-            let next_cursor = results
-                .truncated
-                .then(|| (filter.offset + hits.len()).to_string());
-            to_value(&SearchAnswer {
+            let mut answer = SearchAnswer {
                 query,
-                per_thread: results
-                    .per_thread
-                    .into_iter()
-                    .map(|(thread_id, hits)| ThreadCount { thread_id, hits })
-                    .collect(),
-                per_turn: results
-                    .per_turn
-                    .into_iter()
-                    .take(PER_TURN_CAP)
-                    .map(|(thread_id, turn, hits)| TurnCount {
-                        thread_id,
-                        turn,
-                        hits,
-                    })
-                    .collect(),
                 hits,
+                threads: Vec::new(),
                 total: results.total,
-                truncated: results.truncated,
-                next_cursor,
-                redacted,
+                truncated: false,
+                next_cursor: None,
+                redacted: 0,
                 omitted,
-            })
+            };
+            fit_search(&mut answer, filter.offset, results.threads);
+            answer.redacted = redactions.iter().take(answer.hits.len()).sum();
+            to_value(&answer)
         }))
     }
 

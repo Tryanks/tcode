@@ -19,10 +19,6 @@ fn anchor(thread_id: &str, position: u64) -> String {
     format!("{thread_id}#{position}")
 }
 
-fn json_len<T: Serialize>(value: &T) -> usize {
-    serde_json::to_vec(value).map_or(0, |json| json.len())
-}
-
 fn to_json<T: Serialize>(value: &T) -> Result<serde_json::Value, String> {
     serde_json::to_value(value).map_err(|error| error.to_string())
 }
