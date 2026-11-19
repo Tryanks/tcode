@@ -83,14 +83,20 @@ pub struct SearchHit {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SearchResults {
     pub hits: Vec<SearchHit>,
-    pub per_thread: Vec<(String, usize)>,
-    /// (thread, turn, hits in that turn).
-    pub per_turn: Vec<(String, usize, usize)>,
+    /// Every thread with a hit, in the order searched.
+    pub threads: Vec<ThreadHits>,
     pub total: usize,
-    /// Hits exist beyond the returned page.
-    pub truncated: bool,
     /// A thread that could not be searched, and why, one per entry.
     pub unreadable: Vec<String>,
+}
+
+/// How many hits one thread holds, and in which of its turns.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThreadHits {
+    pub thread_id: String,
+    pub hits: usize,
+    /// (turn, hits in that turn), in the thread's order.
+    pub turns: Vec<(usize, usize)>,
 }
 
 fn unreadable_session(meta: &SessionMeta, error: &std::io::Error) -> String {
@@ -175,8 +181,11 @@ impl SessionSearch {
                 results.unreadable.push(unreadable_session(meta, &error));
                 continue;
             }
-            let mut in_thread = 0;
-            // Where each of this thread's turns sits in `per_turn`.
+            let mut thread = ThreadHits {
+                thread_id: meta.id.clone(),
+                ..ThreadHits::default()
+            };
+            // Where each of this thread's turns sits in `thread.turns`.
             let mut turn_rows: HashMap<usize, usize> = HashMap::new();
             let visited = self
                 .store
@@ -189,20 +198,33 @@ impl SessionSearch {
                     {
                         return true;
                     }
-                    let Some(snippet) = match_snippet(matched.text, query, 140) else {
+                    // A hit past the page is only counted, so it needs no snippet,
+                    // only the check a snippet makes that the match begins on a
+                    // character; stored text is already collapsed as a snippet's is.
+                    let on_page =
+                        results.total >= filter.offset && results.hits.len() < filter.limit;
+                    let snippet = if on_page {
+                        match match_snippet(matched.text, query, 140) {
+                            Some(snippet) => Some(snippet),
+                            None => return true,
+                        }
+                    } else if !matched.unicode_folded
+                        || case_insensitive_range(matched.text, &folded).is_some()
+                    {
+                        None
+                    } else {
                         return true;
                     };
-                    in_thread += 1;
+                    thread.hits += 1;
                     match turn_rows.get(&matched.turn) {
-                        Some(&row) => results.per_turn[row].2 += 1,
+                        Some(&row) => thread.turns[row].1 += 1,
                         None => {
-                            turn_rows.insert(matched.turn, results.per_turn.len());
-                            results.per_turn.push((meta.id.clone(), matched.turn, 1));
+                            turn_rows.insert(matched.turn, thread.turns.len());
+                            thread.turns.push((matched.turn, 1));
                         }
                     }
-                    let index = results.total;
                     results.total += 1;
-                    if index >= filter.offset && results.hits.len() < filter.limit {
+                    if let Some(snippet) = snippet {
                         results.hits.push(SearchHit {
                             hit: protocol_hit(meta, &matched, snippet),
                             position: matched.position,
@@ -214,11 +236,10 @@ impl SessionSearch {
             if let Err(error) = visited {
                 results.unreadable.push(unreadable_session(meta, &error));
             }
-            if in_thread > 0 {
-                results.per_thread.push((meta.id.clone(), in_thread));
+            if thread.hits > 0 {
+                results.threads.push(thread);
             }
         }
-        results.truncated = results.total > filter.offset + results.hits.len();
         results
     }
 
@@ -440,21 +461,30 @@ pub fn match_snippet(text: &str, query: &str, max_chars: usize) -> Option<String
     Some(snippet)
 }
 
+/// Where `text` matches `lower_query` lowercased: the match the stored folded
+/// text holds, at the first character of `text` it begins on, through the last
+/// character it reaches. Linear in `text`, which may be a long tool input.
 fn case_insensitive_range(text: &str, lower_query: &str) -> Option<(usize, usize)> {
-    for (start, _) in text.char_indices() {
-        let suffix = &text[start..];
-        if !suffix.to_lowercase().starts_with(lower_query) {
-            continue;
+    let folded = text.to_lowercase();
+    // Where each character starts in `folded`, and in `text`. `to_lowercase`
+    // differs from lowering each character alone only for a final sigma, whose
+    // two forms are the same length, so these offsets are `folded`'s.
+    let mut starts = Vec::with_capacity(text.len() + 1);
+    let mut at = 0;
+    for (index, ch) in text.char_indices() {
+        starts.push((at, index));
+        at += ch.to_lowercase().map(char::len_utf8).sum::<usize>();
+    }
+    starts.push((at, text.len()));
+    let mut from = 0;
+    while let Some(offset) = folded[from..].find(lower_query) {
+        let found = from + offset;
+        if let Ok(first) = starts.binary_search_by_key(&found, |&(folded_at, _)| folded_at) {
+            let end = found + lower_query.len();
+            let last = first + starts[first..].partition_point(|&(folded_at, _)| folded_at < end);
+            return Some((starts[first].1, starts[last].1));
         }
-        let mut folded_len = 0;
-        let mut end = start;
-        for ch in suffix.chars() {
-            folded_len += ch.to_lowercase().map(char::len_utf8).sum::<usize>();
-            end += ch.len_utf8();
-            if folded_len >= lower_query.len() {
-                return Some((start, end));
-            }
-        }
+        from = found + folded[found..].chars().next().map_or(1, char::len_utf8);
     }
     None
 }
@@ -819,17 +849,19 @@ mod tests {
 
         let results = search.search_filtered(&sessions, "AUTH.rs", &all(10, 0));
         assert_eq!(results.total, 6);
-        assert!(!results.truncated);
         assert_eq!(
-            results.per_thread,
-            vec![(a.id.clone(), 5), (b.id.clone(), 1)]
-        );
-        assert_eq!(
-            results.per_turn,
+            results.threads,
             vec![
-                (a.id.clone(), 0, 3),
-                (a.id.clone(), 1, 2),
-                (b.id.clone(), 0, 1)
+                ThreadHits {
+                    thread_id: a.id.clone(),
+                    hits: 5,
+                    turns: vec![(0, 3), (1, 2)],
+                },
+                ThreadHits {
+                    thread_id: b.id.clone(),
+                    hits: 1,
+                    turns: vec![(0, 1)],
+                },
             ]
         );
         assert_eq!(
@@ -859,8 +891,12 @@ mod tests {
         );
         assert_eq!(kinds.total, 2);
         assert_eq!(
-            kinds.per_turn,
-            vec![(a.id.clone(), 0, 1), (a.id.clone(), 1, 1)]
+            kinds.threads,
+            vec![ThreadHits {
+                thread_id: a.id.clone(),
+                hits: 2,
+                turns: vec![(0, 1), (1, 1)],
+            }]
         );
         assert!(
             kinds
@@ -877,9 +913,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["a0", "u1"]
         );
-        assert_eq!((page.total, page.truncated), (6, true));
+        assert_eq!(page.total, 6);
         let last = search.search_filtered(&sessions, "auth.rs", &all(10, 5));
-        assert_eq!((last.hits.len(), last.truncated), (1, false));
+        assert_eq!(last.hits.len(), 1);
         let whole = search.search(&sessions, "auth.rs", 6);
         assert_eq!((whole.hits.len(), whole.truncated), (6, false));
         let cut = search.search(&sessions, "auth.rs", 5);

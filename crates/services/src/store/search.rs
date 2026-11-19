@@ -73,6 +73,10 @@ pub struct SearchMatch<'a> {
     pub turn: usize,
     pub kind: &'a str,
     pub text: &'a str,
+    /// The text lowercases otherwise than ASCII lowercasing would, so the
+    /// query may have matched inside the lowercase form of one of its
+    /// characters. Otherwise the match lies on whole characters of `text`.
+    pub unicode_folded: bool,
 }
 
 fn current_source(st: &Storage, connection: &Connection, id: &str) -> io::Result<SearchSource> {
@@ -185,7 +189,8 @@ impl SessionStore {
             st.read(|st, connection| {
                 st.query_while(
                     connection,
-                    "SELECT e.entry_id, e.position, e.turn, e.kind, e.text FROM search_entries e \
+                    "SELECT e.entry_id, e.position, e.turn, e.kind, e.text, e.folded IS NOT NULL \
+                     FROM search_entries e \
                      JOIN threads t ON t.key = e.thread WHERE t.id = ?1 \
                      AND instr(COALESCE(e.folded, lower(e.text)), ?2) > 0 ORDER BY e.ordinal",
                     (id, folded),
@@ -196,6 +201,7 @@ impl SessionStore {
                             turn: integer(row, 2)? as usize,
                             kind: &text(row, 3)?,
                             text: &text(row, 4)?,
+                            unicode_folded: integer(row, 5)? != 0,
                         }))
                     },
                 )

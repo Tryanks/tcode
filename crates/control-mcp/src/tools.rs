@@ -116,7 +116,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Substring search over stored thread content in scope, optionally limited to threads and item kinds. Each hit carries its anchor, turn and a snippet; read around an anchor for its neighbours. Counts per thread and per turn follow. A paraphrase will not match: rephrase and filter. Reasoning is not indexed, and command and tool output is searched with search_in_item. To narrow by time, find threads with list_threads active_since/active_before and pass their thread_ids. Reads only."
+        description = "Substring search over stored thread content in scope, optionally limited to threads and item kinds. Each hit carries its anchor, turn and a snippet; read around an anchor for its neighbours. Hit counts per thread, each with its turns, follow as far as the answer has room. A paraphrase will not match: rephrase and filter. Reasoning is not indexed, and command and tool output is searched with search_in_item. To narrow by time, find threads with list_threads active_since/active_before and pass their thread_ids. Reads only."
     )]
     async fn search(
         &self,
