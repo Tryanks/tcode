@@ -1295,10 +1295,11 @@ impl ChatView {
             .into_any_element()
     }
 
-    /// An agent's own header beside its lead: on the sheet over the lead,
-    /// Back at its start, naming the lead it goes back to, and a badge
-    /// saying this is an agent of the lead's; its state and title; and
-    /// Close at its end while it sits beside the lead on its card.
+    /// An agent's own header beside its lead: Back at its start, naming the
+    /// thread it goes back to, on the sheet over the lead and wherever the
+    /// agent is one of another agent's; a badge saying this is an agent of
+    /// the lead's on the sheet; its state and title; and Close at its end
+    /// on the card beside the lead and wherever Back does not close it.
     pub(super) fn render_side_header(
         &self,
         window: &mut Window,
@@ -1306,14 +1307,21 @@ impl ChatView {
     ) -> Option<AnyElement> {
         let of = self.side_of.as_ref()?;
         let session = self.session_id.clone()?;
-        let (heading, title, lead_title) = {
+        // An agent another agent dispatched goes back to that one, beside
+        // the same lead; one of the lead's own goes back to the lead.
+        let (heading, title, up, up_title) = {
             let store = self.workspace_store.read(cx);
-            let agents = crate::agents_panel::Agents::of(store, &of.lead_session, cx);
+            let parent = store
+                .thread_meta(&session)
+                .and_then(|meta| meta.parent_session_id.clone())
+                .unwrap_or_else(|| of.lead_session.clone());
+            let agents = crate::agents_panel::Agents::of(store, &parent, cx);
             (
                 agents.heading(&session),
                 agents.title(store, &session),
+                (parent != of.lead_session).then(|| parent.clone()),
                 store
-                    .thread_meta(&of.lead_session)
+                    .thread_meta(&parent)
                     .map(|meta| meta.title.clone())
                     .filter(|title| !title.trim().is_empty()),
             )
@@ -1327,23 +1335,42 @@ impl ChatView {
                 let _ = lead.update(cx, |lead, cx| lead.close_side(window, cx));
             }
         };
+        let go_back = {
+            let lead = of.lead.clone();
+            let up = up.clone();
+            let close = close.clone();
+            move |event: &gpui::ClickEvent, window: &mut Window, cx: &mut App| match &up {
+                Some(up) => {
+                    let _ =
+                        lead.update(cx, |lead, cx| lead.open_side(up.clone(), None, window, cx));
+                }
+                None => close(event, window, cx),
+            }
+        };
         // Back and the badge on the sheet over the lead, Close on the card
         // beside it: one folds out as the other folds in when the body
-        // crosses between.
+        // crosses between. An agent of an agent's keeps both ways out.
         let on_sheet = of.mode == SideMode::Overlay;
+        let nested = up.is_some();
         let back = self
             .motion
-            .shown("side-back", on_sheet.then_some(()), SHOW, window, cx)
+            .shown(
+                "side-back",
+                (on_sheet || nested).then_some(()),
+                SHOW,
+                window,
+                cx,
+            )
             .map(|shown| {
-                let name: SharedString = match &lead_title {
+                let name: SharedString = match &up_title {
                     Some(title) => crate::tr!("agents.back_to_parent", title = title.as_str()),
                     None => crate::tr!("settings.back"),
                 }
                 .into_owned()
                 .into();
-                // The lead's title fades rather than pushing the agent's out
-                // of the header.
-                let label = lead_title.clone().map(|title| {
+                // The parent's title fades rather than pushing the agent's
+                // out of the header.
+                let label = up_title.clone().map(|title| {
                     div()
                         .debug_selector(|| "side-back-title".into())
                         .min_w_0()
@@ -1364,7 +1391,7 @@ impl ChatView {
                             .children(label)
                             .aria_label(name.clone())
                             .tooltip(name)
-                            .on_click(close.clone()),
+                            .on_click(go_back),
                     ),
                 )
             });
@@ -1381,7 +1408,7 @@ impl ChatView {
             .motion
             .shown(
                 "side-close",
-                (of.mode == SideMode::Slot).then_some(()),
+                (!on_sheet || nested).then_some(()),
                 SHOW,
                 window,
                 cx,
