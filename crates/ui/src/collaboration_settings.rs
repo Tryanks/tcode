@@ -678,6 +678,8 @@ pub(crate) struct PlanDialog {
     lead_picker: Entity<ProviderModelPicker>,
     /// Adds collaborators, from what Settings → Control lets a thread be started on.
     member_picker: Entity<ProviderModelPicker>,
+    /// The models picked since the dialog last drew, which become collaborators there.
+    joining: Vec<ModelRef>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -740,27 +742,19 @@ impl PlanDialog {
                         cx.notify();
                     },
                 ),
-                cx.subscribe_in(
+                // A pick reaches here without the window its mandate's field is made
+                // in, so the collaborator joins when the dialog next draws.
+                cx.subscribe(
                     &member_picker,
-                    window,
-                    |dialog: &mut PlanDialog, _, picked: &ModelSelected, window, cx| {
+                    |dialog: &mut PlanDialog, _, picked: &ModelSelected, cx| {
                         let model = model_ref(&picked.0);
                         // A model is a collaborator once.
-                        if dialog.members.iter().any(|member| member.model == model) {
+                        if dialog.joining.contains(&model)
+                            || dialog.members.iter().any(|member| member.model == model)
+                        {
                             return;
                         }
-                        let mandate = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 8));
-                        // It starts at the effort its model starts at.
-                        let efforts = effort_levels(dialog.store.read(cx), &model)
-                            .and_then(|efforts| efforts.default)
-                            .into_iter()
-                            .collect();
-                        dialog.members.push(MemberDraft {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            model,
-                            mandate,
-                            efforts,
-                        });
+                        dialog.joining.push(model);
                         dialog.members_changed(cx);
                     },
                 ),
@@ -802,6 +796,7 @@ impl PlanDialog {
                 templates,
                 lead_picker,
                 member_picker,
+                joining: Vec::new(),
                 _subscriptions: subscriptions,
             }
         });
@@ -821,7 +816,14 @@ impl PlanDialog {
 
     /// The collaborators changed: the picker that adds them offers what is left.
     fn members_changed(&mut self, cx: &mut Context<Self>) {
-        let taken = taken(&self.members);
+        let mut taken = taken(&self.members);
+        taken.extend(self.joining.iter().map(|model| {
+            (
+                model.provider,
+                model.model.clone(),
+                model.profile_id.clone(),
+            )
+        }));
         self.member_picker
             .update(cx, |picker, cx| picker.set_taken(taken, cx));
         cx.notify();
@@ -1085,7 +1087,21 @@ impl PlanDialog {
 }
 
 impl Render for PlanDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        for model in std::mem::take(&mut self.joining) {
+            let mandate = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 8));
+            // It starts at the effort its model starts at.
+            let efforts = effort_levels(self.store.read(cx), &model)
+                .and_then(|efforts| efforts.default)
+                .into_iter()
+                .collect();
+            self.members.push(MemberDraft {
+                id: uuid::Uuid::new_v4().to_string(),
+                model,
+                mandate,
+                efforts,
+            });
+        }
         let spacing = cx.theme().tokens.spacing;
         let store = self.store.read(cx);
         let now_secs = store.host_now_secs(cx);
