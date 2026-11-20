@@ -409,6 +409,30 @@ impl Glides {
         self.splits.remove(&node);
     }
 
+    /// The sizes that share the split `node` evenly among its slots, in
+    /// `tree` as it is drawn at `size`.
+    pub(crate) fn even(
+        &self,
+        tree: &PaneTree,
+        size: Size<Pixels>,
+        node: NodeId,
+    ) -> Option<Vec<Pixels>> {
+        let mut even = None;
+        self.visit(tree.root(), size, Held::default(), false, &mut |visit| {
+            if let Visit::Split {
+                node: split,
+                children,
+                extent,
+                ..
+            } = visit
+                && split == node
+            {
+                even = Some(vec![extent / children.len() as f32; children.len()]);
+            }
+        });
+        even
+    }
+
     fn frame(&self, tree: &PaneTree, size: Size<Pixels>, target: bool) -> GlideFrame {
         let mut frame = GlideFrame::default();
         self.visit(

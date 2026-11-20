@@ -38,8 +38,6 @@ pub struct TerminalWorkspace {
     next_context_id: u64,
 }
 
-pub const DEFAULT_TERMINAL_HEIGHT: f32 = 240.;
-
 /// Host-private index from terminal id to its live PTY, so command dispatch and
 /// the grid projection can reach a terminal without walking every workspace.
 /// No client ever sees this: the grid itself is replicated over the pipe.
@@ -75,7 +73,7 @@ impl Default for TerminalWorkspace {
             splits: Vec::new(),
             contexts: Vec::new(),
             open: false,
-            height: DEFAULT_TERMINAL_HEIGHT,
+            height: tcode_protocol::terminal::DEFAULT_TERMINAL_HEIGHT,
             next_context_id: 1,
         }
     }

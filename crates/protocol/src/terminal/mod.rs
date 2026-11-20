@@ -16,6 +16,10 @@ pub mod mappings;
 /// arbitrarily large grid.
 pub const MAX_TERMINAL_CELLS: u16 = 1000;
 
+/// The height, in points, of a thread's terminal drawer until its edge is
+/// dragged, and again once the edge is double clicked.
+pub const DEFAULT_TERMINAL_HEIGHT: f32 = 240.;
+
 bitflags::bitflags! {
     /// Mirror of rio's `crosswords::Mode`. The wire carries the raw bits;
     /// `term`'s projection tests assert both definitions still agree.

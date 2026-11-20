@@ -132,6 +132,15 @@ impl TerminalDrawer {
             gpui::Axis::Vertical => v_resizable("terminal-split-v"),
         }
         .with_state(&state)
+        // At rest the two panes share the body evenly.
+        .with_handle_appearance(crate::widgets::handle_reset::appearance({
+            let state = state.clone();
+            move |_, window, cx| {
+                state.update(cx, |state, cx| {
+                    state.resize_panel(0, state.container_size() / 2., window, cx)
+                });
+            }
+        }))
         .child(first)
         // Not `children`: the group's replaces the panels added before.
         .when_some(second, |group, second| group.child(second))

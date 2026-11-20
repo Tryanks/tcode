@@ -245,7 +245,9 @@ pub(crate) fn panel_state(ui: Option<&ConversationUiState>) -> PanelState {
         right_tab: ui.map_or_else(RightTab::default, |ui| ui.right_tab),
         right_panel_expanded: ui.is_some_and(|ui| ui.right_panel_expanded),
         terminal_open: ui.is_some_and(|ui| ui.terminal_open),
-        terminal_height: ui.map_or(240., |ui| ui.terminal_height),
+        terminal_height: ui.map_or(tcode_protocol::terminal::DEFAULT_TERMINAL_HEIGHT, |ui| {
+            ui.terminal_height
+        }),
     }
 }
 

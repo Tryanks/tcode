@@ -76,7 +76,7 @@ fn a_narrow_pane_is_covered_and_its_panel_takes_the_keyboard(cx: &mut TestAppCon
     let store = store_of(&shell, cx);
     side_by_side(&shell, || serve_thread(&host, "thread-2"), cx);
     // Narrow enough for a panel of 320 to leave no room for a conversation.
-    cx.update(|_, cx| crate::device::DevicePreferences::set_right_panel_width(320, cx));
+    cx.update(|_, cx| crate::device::DevicePreferences::set_right_panel_width(Some(320), cx));
     resize(cx, 1440.);
     crate::test_frames::draw_settled(cx);
     typing(&shell, cx);

@@ -807,9 +807,17 @@ impl AppShell {
             }
         });
         let split_handle_held = crate::panes::HandleHeld::default();
+        let even_split: crate::panes::EvenSplit = Rc::new({
+            let shell = cx.entity().downgrade();
+            move |axis, at, window, cx| {
+                if let Some(shell) = shell.upgrade() {
+                    shell.update(cx, |shell, cx| shell.even_split(axis, at, window, cx));
+                }
+            }
+        });
         let thread_panes = cx.new(|cx| {
             let mut area = DockArea::new("thread-panes", None, window, cx).with_renderer(Rc::new(
-                crate::panes::ThreadPanes::new(drop_target, split_handle_held.clone()),
+                crate::panes::ThreadPanes::new(drop_target, split_handle_held.clone(), even_split),
             ));
             area.set_center(DockLayout::tabs().panel(thread_panel.clone()), window, cx);
             area

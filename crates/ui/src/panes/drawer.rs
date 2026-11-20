@@ -647,13 +647,17 @@ impl Drawer {
         let chat_min = (pane_width - room).min(px(CONVERSATION_MIN_WIDTH));
         let group = h_resizable("right-panel-split")
             .with_state(&self.split)
+            // The room follows the preference, and the state the room.
+            .with_handle_appearance(crate::widgets::handle_reset::appearance(|_, _, cx| {
+                crate::device::DevicePreferences::set_right_panel_width(None, cx);
+            }))
             .on_resize(move |state, _, cx| {
                 if !expanded
                     && !covering
                     && let Some(width) = state.read(cx).sizes().get(1)
                 {
                     let width = f32::from(*width).round() as u32;
-                    crate::device::DevicePreferences::set_right_panel_width(width, cx);
+                    crate::device::DevicePreferences::set_right_panel_width(Some(width), cx);
                 }
             })
             .child(

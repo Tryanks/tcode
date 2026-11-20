@@ -1,6 +1,4 @@
-use core_graphics::event::{
-    CGEvent, CGEventFlags, CGEventType, CGMouseButton, EventField, ScrollEventUnit,
-};
+use core_graphics::event::{CGEvent, CGEventFlags, CGEventType, CGMouseButton, ScrollEventUnit};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
@@ -106,13 +104,10 @@ pub(super) fn click_events(
     let (down, up, cg_button) = mouse_types(button);
     (0..click_count)
         .map(|_| {
-            let down_event = mouse_event(down, point, cg_button)?;
-            down_event
-                .set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_count.into());
-            let up_event = mouse_event(up, point, cg_button)?;
-            up_event
-                .set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_count.into());
-            Ok((down_event, up_event))
+            Ok((
+                mouse_event(down, point, cg_button)?,
+                mouse_event(up, point, cg_button)?,
+            ))
         })
         .collect()
 }
