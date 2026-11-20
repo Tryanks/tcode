@@ -867,6 +867,33 @@ impl SessionStore {
         self.root.join(format!("commands-{name}.json"))
     }
 
+    fn acp_catalog_path(&self, agent_id: &str) -> PathBuf {
+        let encoded = agent_id
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        self.root.join(format!("acp-catalog-{encoded}.json"))
+    }
+
+    /// Load the last-probed model and option catalog for one ACP agent.
+    /// Empty when never probed or unreadable.
+    pub fn load_acp_catalog(&self, agent_id: &str) -> agent::AcpCatalog {
+        let Ok(bytes) = fs::read(self.acp_catalog_path(agent_id)) else {
+            return agent::AcpCatalog::default();
+        };
+        serde_json::from_slice(&bytes).unwrap_or_default()
+    }
+
+    /// Persist the freshly probed model and option catalog for one ACP agent.
+    pub fn save_acp_catalog(&self, agent_id: &str, catalog: &agent::AcpCatalog) -> io::Result<()> {
+        let path = self.acp_catalog_path(agent_id);
+        let tmp = path.with_extension("json.tmp");
+        let data = serde_json::to_vec_pretty(catalog).map_err(invalid_data)?;
+        fs::write(&tmp, data)?;
+        fs::rename(&tmp, path)
+    }
+
     /// Load the last-fetched model catalog for `provider` so the picker is
     /// instant offline. Empty when never fetched / unreadable.
     pub fn load_models(&self, provider: ProviderKind) -> Vec<ModelSpec> {

@@ -488,7 +488,7 @@ impl ProviderKind {
                 // Every option is the agent's own, with its `currentValue`.
                 confirmed_options: OptionIds::All,
                 background: None,
-                live_settings: false,
+                live_settings: true,
                 // ACP support is negotiated per agent; capable agents receive
                 // every tcode HTTP MCP registration in session/new or load.
                 mcp_servers: true,
@@ -1128,6 +1128,32 @@ pub struct AcpAgent {
     pub id: String,
     pub name: String,
     pub launch: AcpLaunch,
+}
+
+/// What an ACP agent advertises from a session: the models its model picker can
+/// choose and its non-model session options with their default selections.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AcpCatalog {
+    #[serde(default)]
+    pub models: Vec<ModelSpec>,
+    #[serde(default)]
+    pub options: Vec<OptionDescriptor>,
+    #[serde(default)]
+    pub selections: Vec<OptionSelection>,
+}
+
+impl AcpCatalog {
+    pub fn is_empty(&self) -> bool {
+        self.models.is_empty() && self.options.is_empty()
+    }
+
+    pub fn default_model_id(&self) -> Option<&str> {
+        self.models
+            .iter()
+            .find(|model| model.is_default)
+            .or_else(|| self.models.first())
+            .map(|model| model.id.as_str())
+    }
 }
 
 /// How to start an ACP agent process (ACP is JSON-RPC over the child's stdio).
@@ -2223,6 +2249,19 @@ pub async fn list_models(
         models,
         problems: Vec::new(),
     })
+}
+
+/// Probe an installed ACP agent (`initialize` → `session/new` → `session/close`)
+/// for the models and session options it offers before a user sends a message.
+#[cfg(feature = "process")]
+pub async fn probe_acp_catalog(
+    agent: AcpAgent,
+    cwd: PathBuf,
+    extra_args: Vec<String>,
+    launch_env: LaunchEnv,
+    processes: &SessionProcesses,
+) -> Result<AcpCatalog, AgentError> {
+    acp::probe_catalog(agent, cwd, extra_args, launch_env, processes).await
 }
 
 /// A provider's models, and what of the catalog they came from could not be

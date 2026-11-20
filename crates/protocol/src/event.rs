@@ -366,6 +366,18 @@ pub struct ImportFailure {
     pub error: String,
 }
 
+/// The probed model and option catalog of one installed ACP agent, with its
+/// latest probe state.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AcpCatalogStatus {
+    #[serde(default)]
+    pub catalog: agent::AcpCatalog,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub loading: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Full provider/settings-page read projection.
 ///
 /// Provider state changes infrequently and its pieces are consumed together,
@@ -382,6 +394,9 @@ pub struct ProvidersStatus {
     /// its models, one line each.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub model_problems: HashMap<ProviderKind, Vec<String>>,
+    /// Per-ACP-agent model/option catalogs and probe state, keyed by installed agent id.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub acp_catalogs: HashMap<String, AcpCatalogStatus>,
     pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
     pub update_run: Option<ProviderUpdateRun>,
     pub tcode_update: TcodeUpdateStatus,

@@ -111,6 +111,28 @@ impl WorkspaceStore {
             .unwrap_or_default()
     }
 
+    pub fn acp_model_catalog(&self, agent_id: &str) -> Vec<agent::ModelSpec> {
+        self.providers_replica
+            .acp_catalogs
+            .get(agent_id)
+            .map(|entry| entry.catalog.models.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn acp_models_loading(&self, agent_id: &str) -> bool {
+        self.providers_replica
+            .acp_catalogs
+            .get(agent_id)
+            .is_some_and(|entry| entry.loading && entry.catalog.models.is_empty())
+    }
+
+    pub(crate) fn acp_models_error(&self, agent_id: &str) -> Option<&str> {
+        self.providers_replica
+            .acp_catalogs
+            .get(agent_id)
+            .and_then(|entry| entry.error.as_deref())
+    }
+
     /// Why the latest listing of `provider`'s models failed.
     pub(crate) fn models_error(&self, provider: agent::ProviderKind) -> Option<&str> {
         self.providers_replica

@@ -45,7 +45,7 @@ use crate::{
 /// modes/models/config options through the existing traits picker, so each one
 /// needs a stable id that routes back to the right ACP method.
 pub(crate) use crate::ACP_MODE_OPTION_ID as MODE_OPTION_ID;
-const MODEL_OPTION_ID: &str = "acp:model";
+pub(crate) const MODEL_OPTION_ID: &str = "acp:model";
 use crate::EFFORT_OPTION_ID;
 const CONFIG_OPTION_PREFIX: &str = "acp:cfg:";
 
@@ -63,15 +63,24 @@ fn config_option_id(
 }
 
 /// What a session config option of `category` is: a thought level is the
-/// model's reasoning effort.
-fn config_option_role(category: Option<&acp::SessionConfigOptionCategory>) -> crate::OptionRole {
+/// model's reasoning effort; a mode is the permission control when the
+/// provider has no launch-time permission control of its own.
+fn config_option_role(
+    provider: ProviderKind,
+    category: Option<&acp::SessionConfigOptionCategory>,
+) -> crate::OptionRole {
     match category {
         Some(acp::SessionConfigOptionCategory::ThoughtLevel) => crate::OptionRole::Effort,
+        Some(acp::SessionConfigOptionCategory::Mode)
+            if crate::permission_control(provider).is_none() =>
+        {
+            crate::OptionRole::Permission
+        }
         _ => crate::OptionRole::Model,
     }
 }
 
-/// The persisted selection for the session config option `config_id` in
+/// The persisted string selection for the session config option `config_id` in
 /// `category`, as [`SessionOptions::option_selections`] carries it into a new
 /// process.
 pub(crate) fn config_selection<'a>(
@@ -79,11 +88,21 @@ pub(crate) fn config_selection<'a>(
     config_id: &str,
     category: Option<&acp::SessionConfigOptionCategory>,
 ) -> Option<&'a str> {
+    config_selection_value(selections, config_id, category).and_then(Value::as_str)
+}
+
+/// The persisted JSON value for the session config option `config_id` in
+/// `category`, covering both select and boolean config options.
+pub(crate) fn config_selection_value<'a>(
+    selections: &'a [OptionSelection],
+    config_id: &str,
+    category: Option<&acp::SessionConfigOptionCategory>,
+) -> Option<&'a Value> {
     let id = config_option_id(config_id, category);
     selections
         .iter()
         .find(|selection| selection.id == id)
-        .and_then(|selection| selection.value.as_str())
+        .map(|selection| &selection.value)
 }
 
 /// How long a [`query`], which no one can stop, may take. Generous: an `npm
@@ -328,6 +347,11 @@ impl Setup<'_> {
         let mut state = self.state.lock_recover();
         state.ingest_modes(modes);
         state.options.ingest(None, config_options);
+    }
+
+    /// Record a mode change applied during session setup.
+    pub(crate) fn select_mode(&self, mode: acp::SessionModeId) {
+        self.state.lock_recover().select_mode(mode);
     }
 }
 
@@ -685,6 +709,7 @@ async fn run_actor<D: Dialect>(
         .detach();
 
     let mut state = State::new(opts.cwd.clone());
+    state.options.provider = provider;
     state.owned_options = dialect.owned_config_options();
     let state = Arc::new(Mutex::new(state));
     let client = Client {
@@ -1268,8 +1293,115 @@ async fn handle_command<D: Dialect>(
                 })
                 .await;
         }
+        SessionCommand::ApplySettings {
+            model,
+            option_selections,
+        } => {
+            let mut applied = true;
+            if let Some(target_model) = model {
+                let (current, origin) = {
+                    let state = state.lock_recover();
+                    (
+                        state.options.current_model(),
+                        state.options.origin(MODEL_OPTION_ID),
+                    )
+                };
+                if current.as_deref() != Some(target_model.as_str()) {
+                    match origin {
+                        Some(origin) if origin != OptionOrigin::Launch => {
+                            match set_option(
+                                connection,
+                                session_id,
+                                &origin,
+                                &Value::String(target_model.clone()),
+                            )
+                            .await
+                            {
+                                Ok(config_options) => {
+                                    let confirmed_model = {
+                                        let mut state = state.lock_recover();
+                                        if let Some(options) = config_options.as_deref() {
+                                            state.options.ingest(None, Some(options));
+                                        }
+                                        state.options.current_model()
+                                    };
+                                    if let Some(model) = confirmed_model {
+                                        let _ =
+                                            events.send(AgentEvent::SessionModel { model }).await;
+                                    }
+                                    emit_provider_options(state, events, false).await;
+                                }
+                                Err(err) => {
+                                    applied = false;
+                                    let _ = events
+                                        .send(AgentEvent::Warning {
+                                            message: format!(
+                                                "could not switch model to `{target_model}`: {}",
+                                                describe(&err)
+                                            ),
+                                        })
+                                        .await;
+                                }
+                            }
+                        }
+                        _ => {
+                            applied = false;
+                        }
+                    }
+                }
+            }
+            if applied {
+                for selection in option_selections {
+                    if selection.id == MODEL_OPTION_ID {
+                        continue;
+                    }
+                    let (current, origin) = {
+                        let state = state.lock_recover();
+                        (
+                            state.options.value(&selection.id).cloned(),
+                            state.options.origin(&selection.id),
+                        )
+                    };
+                    if current.as_ref() == Some(&selection.value) {
+                        continue;
+                    }
+                    let Some(origin) = origin.filter(|origin| *origin != OptionOrigin::Launch)
+                    else {
+                        continue;
+                    };
+                    match set_option(connection, session_id, &origin, &selection.value).await {
+                        Ok(config_options) => {
+                            {
+                                let mut state = state.lock_recover();
+                                if let Some(options) = config_options.as_deref() {
+                                    state.options.ingest(None, Some(options));
+                                } else if origin == OptionOrigin::Mode
+                                    && let Some(mode) = selection.value.as_str()
+                                {
+                                    state.select_mode(acp::SessionModeId::new(mode));
+                                }
+                            }
+                            emit_provider_options(state, events, false).await;
+                        }
+                        Err(err) => {
+                            applied = false;
+                            let _ = events
+                                .send(AgentEvent::Warning {
+                                    message: format!(
+                                        "could not apply `{}`: {}",
+                                        selection.id,
+                                        describe(&err)
+                                    ),
+                                })
+                                .await;
+                            break;
+                        }
+                    }
+                }
+            }
+            let _ = events.send(AgentEvent::SettingsApplied { applied }).await;
+        }
         SessionCommand::RetryTurn { .. }
-        | SessionCommand::ApplySettings { .. }
         | SessionCommand::StopBackgroundTask { .. }
         | SessionCommand::MoveToBackground { .. }
         | SessionCommand::MoveTo { .. }
@@ -1629,9 +1761,18 @@ enum OptionOrigin {
 
 /// The agent's self-described modes and config options, mapped onto our
 /// [`OptionDescriptor`]s (which the composer's traits picker already renders).
-#[derive(Default)]
 struct OptionRegistry {
+    provider: ProviderKind,
     records: Vec<OptionRecord>,
+}
+
+impl Default for OptionRegistry {
+    fn default() -> Self {
+        Self {
+            provider: ProviderKind::Acp,
+            records: Vec::new(),
+        }
+    }
 }
 
 struct OptionRecord {
@@ -1646,6 +1787,7 @@ impl OptionRegistry {
         modes: Option<&acp::SessionModeState>,
         config: Option<&[acp::SessionConfigOption]>,
     ) {
+        let provider = self.provider;
         if let Some(modes) = modes {
             self.upsert(
                 OptionDescriptor::Select {
@@ -1661,15 +1803,14 @@ impl OptionRegistry {
                             unavailable: None,
                             speed: None,
                             summary: None,
-                            approval: crate::approval_class(
-                                ProviderKind::Acp,
-                                MODE_OPTION_ID,
-                                &mode.id.0,
-                            ),
+                            approval: crate::approval_class(provider, MODE_OPTION_ID, &mode.id.0),
                         })
                         .collect(),
                     default_value: Some(modes.current_mode_id.0.to_string()),
-                    role: crate::OptionRole::Model,
+                    role: config_option_role(
+                        provider,
+                        Some(&acp::SessionConfigOptionCategory::Mode),
+                    ),
                     apply: crate::ApplyTiming::Live,
                     recommended: None,
                     permissive: None,
@@ -1690,7 +1831,7 @@ impl OptionRegistry {
             // canonical ids (the runtime reads `acp:mode`); every option,
             // whatever its category, is set through `session/set_config_option`.
             let id = config_option_id(&option.id.0, option.category.as_ref());
-            let approval = |value: &str| crate::approval_class(ProviderKind::Acp, &id, value);
+            let approval = |value: &str| crate::approval_class(provider, &id, value);
             match &option.kind {
                 acp::SessionConfigKind::Select(select) => {
                     let options = match &select.options {
@@ -1728,7 +1869,7 @@ impl OptionRegistry {
                             label: option.name.clone(),
                             options,
                             default_value: Some(select.current_value.0.to_string()),
-                            role: config_option_role(option.category.as_ref()),
+                            role: config_option_role(provider, option.category.as_ref()),
                             apply: crate::ApplyTiming::Live,
                             recommended: None,
                             permissive: None,
@@ -1743,7 +1884,7 @@ impl OptionRegistry {
                         id,
                         label: option.name.clone(),
                         default_value: boolean.current_value,
-                        role: config_option_role(option.category.as_ref()),
+                        role: config_option_role(provider, option.category.as_ref()),
                         apply: crate::ApplyTiming::Live,
                         recommended: None,
                         permissive: None,
@@ -1793,11 +1934,65 @@ impl OptionRegistry {
             .map(|record| record.origin.clone())
     }
 
+    fn value(&self, id: &str) -> Option<&Value> {
+        self.records
+            .iter()
+            .find(|record| record.selection.id == id)
+            .map(|record| &record.selection.value)
+    }
+
     fn current_model(&self) -> Option<String> {
         self.records
             .iter()
             .find(|record| record.selection.id == MODEL_OPTION_ID)
             .and_then(|record| record.selection.value.as_str().map(str::to_string))
+    }
+}
+
+/// Extract the model catalog and non-model option descriptors an ACP session
+/// advertises in `session/new`.
+pub(crate) fn extract_catalog(
+    provider: ProviderKind,
+    modes: Option<&acp::SessionModeState>,
+    config_options: Option<&[acp::SessionConfigOption]>,
+) -> crate::AcpCatalog {
+    let mut registry = OptionRegistry {
+        provider,
+        records: Vec::new(),
+    };
+    registry.ingest(modes, config_options);
+
+    let mut models = Vec::new();
+    let mut options = Vec::new();
+    let mut selections = Vec::new();
+    for record in registry.records {
+        if record.selection.id == MODEL_OPTION_ID {
+            if let OptionDescriptor::Select {
+                options: model_options,
+                default_value,
+                ..
+            } = record.descriptor
+            {
+                models = model_options
+                    .into_iter()
+                    .map(|option| crate::ModelSpec {
+                        is_default: default_value.as_deref() == Some(option.value.as_str()),
+                        id: option.value,
+                        display_name: option.label,
+                        options: Vec::new(),
+                    })
+                    .collect();
+            }
+            continue;
+        }
+        options.push(record.descriptor);
+        selections.push(record.selection);
+    }
+
+    crate::AcpCatalog {
+        models,
+        options,
+        selections,
     }
 }
 
@@ -1980,8 +2175,11 @@ impl State {
     fn provider_options(&self) -> AgentEvent {
         let surfaced = || {
             self.options.records.iter().filter(|record| {
-                !matches!(&record.origin, OptionOrigin::Config(id)
-                    if self.owned_options.contains(&id.0.as_ref()))
+                let owned_by_config_id = matches!(&record.origin, OptionOrigin::Config(id)
+                    if self.owned_options.contains(&id.0.as_ref()));
+                let owned_by_canonical_id =
+                    self.owned_options.contains(&record.selection.id.as_str());
+                !owned_by_config_id && !owned_by_canonical_id
             })
         };
         AgentEvent::ProviderOptions {
@@ -2158,8 +2356,15 @@ impl State {
                 vec![self.provider_options()]
             }
             acp::SessionUpdate::ConfigOptionUpdate(update) => {
+                let previous_model = self.options.current_model();
                 self.options.ingest(None, Some(&update.config_options));
-                vec![self.provider_options()]
+                let mut events = vec![self.provider_options()];
+                if let Some(model) = self.options.current_model()
+                    && Some(model.as_str()) != previous_model.as_deref()
+                {
+                    events.push(AgentEvent::SessionModel { model });
+                }
+                events
             }
             acp::SessionUpdate::UsageUpdate(usage) => {
                 let usage = TokenUsage {

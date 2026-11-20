@@ -16,8 +16,8 @@ use crate::acp_session::{
     prompt_status,
 };
 use crate::{
-    AcpAgent, AcpLaunch, AgentError, AgentEvent, Attachment, ProviderKind, ResumeCursor,
-    SessionHandle, SessionOptions, TokenUsage,
+    AcpAgent, AcpCatalog, AcpLaunch, AgentError, AgentEvent, Attachment, LaunchEnv, ProviderKind,
+    ResumeCursor, SessionHandle, SessionOptions, TokenUsage,
 };
 
 /// Start (or resume) a session with an ACP agent.
@@ -33,6 +33,70 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         ));
     };
     acp_session::start(ProviderKind::Acp, Registry { agent }, opts).await
+}
+
+/// Probe an ACP agent's models and session options by running `initialize`,
+/// `session/new` (without interactive authentication or MCP servers), and
+/// `session/close` when the agent supports closing sessions.
+pub async fn probe_catalog(
+    agent: AcpAgent,
+    cwd: PathBuf,
+    extra_args: Vec<String>,
+    launch_env: LaunchEnv,
+    processes: &crate::SessionProcesses,
+) -> Result<AcpCatalog, AgentError> {
+    let probe_cwd = cwd.clone();
+    let probe_agent = agent.clone();
+    let opts = SessionOptions {
+        cwd,
+        model: None,
+        resume: None,
+        fork: None,
+        binary_path: None,
+        option_selections: Vec::new(),
+        mcp_servers: Vec::new(),
+        launch_env,
+        extra_args,
+        acp: Some(agent.clone()),
+        instructions: None,
+        processes: processes.clone(),
+        clock: Default::default(),
+        worktrees: Vec::new(),
+    };
+    acp_session::query(
+        ProviderKind::Acp,
+        Registry { agent },
+        opts,
+        async move |connection, init| {
+            let new = connection
+                .send_request(acp::NewSessionRequest::new(probe_cwd))
+                .block_task()
+                .await
+                .map_err(|err| {
+                    if is_auth_required(&err) {
+                        AgentError::Provider(auth_hint(&probe_agent, init))
+                    } else {
+                        AgentError::Protocol(format!(
+                            "`{}` could not list its models: {}",
+                            probe_agent.name,
+                            describe(&err)
+                        ))
+                    }
+                })?;
+            if init.agent_capabilities.session_capabilities.close.is_some() {
+                let _ = connection
+                    .send_request(acp::CloseSessionRequest::new(new.session_id.clone()))
+                    .block_task()
+                    .await;
+            }
+            Ok(acp_session::extract_catalog(
+                ProviderKind::Acp,
+                new.modes.as_ref(),
+                new.config_options.as_deref(),
+            ))
+        },
+    )
+    .await
 }
 
 /// An agent from the registry (or a custom command), driven by the generic
@@ -114,6 +178,14 @@ impl Dialect for Registry {
             }
         };
         setup.adopt(modes.as_ref(), config_options.as_deref());
+        let mut config_options = config_options.unwrap_or_default();
+        if let Some(model) = &opts.model
+            && let Some(selected) =
+                select_model(agent, setup, &session_id, model, &config_options).await?
+        {
+            config_options = selected;
+        }
+        restore_options(agent, setup, &session_id, modes.as_ref(), &config_options).await;
 
         Ok(Established {
             resume: ResumeCursor(json!({
@@ -177,6 +249,145 @@ impl Dialect for Registry {
         _text: String,
         _attachments: Vec<Attachment>,
     ) {
+    }
+
+    fn owned_config_options(&self) -> &'static [&'static str] {
+        &[acp_session::MODEL_OPTION_ID]
+    }
+}
+
+/// Apply the composer's selected model when the agent exposes a `model` config
+/// option and is not already on it.
+async fn select_model(
+    agent: &AcpAgent,
+    setup: &Setup<'_>,
+    session_id: &acp::SessionId,
+    model: &str,
+    config_options: &[acp::SessionConfigOption],
+) -> Result<Option<Vec<acp::SessionConfigOption>>, AgentError> {
+    let Some(option) = config_options
+        .iter()
+        .find(|option| option.category == Some(acp::SessionConfigOptionCategory::Model))
+    else {
+        return Ok(None);
+    };
+    let acp::SessionConfigKind::Select(select) = &option.kind else {
+        return Ok(None);
+    };
+    if select.current_value.0.as_ref() == model {
+        return Ok(None);
+    }
+    let response = setup
+        .connection
+        .send_request(acp::SetSessionConfigOptionRequest::new(
+            session_id.clone(),
+            option.id.clone(),
+            acp::SessionConfigOptionValue::value_id(acp::SessionConfigValueId::new(model)),
+        ))
+        .block_task()
+        .await
+        .map_err(|err| {
+            AgentError::Provider(format!(
+                "`{}` did not accept the model `{model}`: {}",
+                agent.name,
+                describe(&err)
+            ))
+        })?;
+    setup.adopt(None, Some(&response.config_options));
+    Ok(Some(response.config_options))
+}
+
+/// Re-apply the session options the user selected before launch (mode, effort,
+/// or agent-defined config options).
+async fn restore_options(
+    agent: &AcpAgent,
+    setup: &Setup<'_>,
+    session_id: &acp::SessionId,
+    modes: Option<&acp::SessionModeState>,
+    config_options: &[acp::SessionConfigOption],
+) {
+    let has_mode_config = config_options
+        .iter()
+        .any(|option| option.category == Some(acp::SessionConfigOptionCategory::Mode));
+    for option in config_options {
+        if option.category == Some(acp::SessionConfigOptionCategory::Model) {
+            continue;
+        }
+        let Some(chosen) = acp_session::config_selection_value(
+            &setup.opts.option_selections,
+            option.id.0.as_ref(),
+            option.category.as_ref(),
+        ) else {
+            continue;
+        };
+        let wire_value = match (&option.kind, chosen) {
+            (acp::SessionConfigKind::Select(select), Value::String(value))
+                if select.current_value.0.as_ref() != value.as_str() =>
+            {
+                acp::SessionConfigOptionValue::value_id(acp::SessionConfigValueId::new(
+                    value.as_str(),
+                ))
+            }
+            (acp::SessionConfigKind::Boolean(boolean), Value::Bool(value))
+                if boolean.current_value != *value =>
+            {
+                acp::SessionConfigOptionValue::boolean(*value)
+            }
+            _ => continue,
+        };
+        match setup
+            .connection
+            .send_request(acp::SetSessionConfigOptionRequest::new(
+                session_id.clone(),
+                option.id.clone(),
+                wire_value,
+            ))
+            .block_task()
+            .await
+        {
+            Ok(response) => setup.adopt(None, Some(&response.config_options)),
+            Err(err) => {
+                setup
+                    .warn(format!(
+                        "`{}` did not restore `{}`: {}",
+                        agent.name,
+                        option.name,
+                        describe(&err)
+                    ))
+                    .await;
+            }
+        }
+    }
+    if !has_mode_config
+        && let Some(modes) = modes
+        && let Some(chosen) = setup
+            .opts
+            .option_selections
+            .iter()
+            .find(|selection| selection.id == acp_session::MODE_OPTION_ID)
+            .and_then(|selection| selection.value.as_str())
+        && modes.current_mode_id.0.as_ref() != chosen
+    {
+        match setup
+            .connection
+            .send_request(acp::SetSessionModeRequest::new(
+                session_id.clone(),
+                acp::SessionModeId::new(chosen),
+            ))
+            .block_task()
+            .await
+        {
+            Ok(_) => setup.select_mode(acp::SessionModeId::new(chosen)),
+            Err(err) => {
+                setup
+                    .warn(format!(
+                        "`{}` did not restore mode `{chosen}`: {}",
+                        agent.name,
+                        describe(&err)
+                    ))
+                    .await;
+            }
+        }
     }
 }
 

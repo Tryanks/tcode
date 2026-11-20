@@ -350,18 +350,32 @@ impl ActiveSession {
     }
 
     pub(super) fn permission_descriptor(&self) -> Option<OptionDescriptor> {
-        let descriptor = permission_control(self.meta.provider)?;
-        let id = match &descriptor {
-            OptionDescriptor::Select { id, .. } | OptionDescriptor::Boolean { id, .. } => id,
-        };
-        self.provider_options
-            .iter()
-            .find(|option| match option {
-                OptionDescriptor::Select { id: option_id, .. }
-                | OptionDescriptor::Boolean { id: option_id, .. } => option_id == id,
-            })
-            .cloned()
-            .or(Some(descriptor))
+        if let Some(descriptor) = permission_control(self.meta.provider) {
+            let id = match &descriptor {
+                OptionDescriptor::Select { id, .. } | OptionDescriptor::Boolean { id, .. } => id,
+            };
+            self.provider_options
+                .iter()
+                .find(|option| match option {
+                    OptionDescriptor::Select { id: option_id, .. }
+                    | OptionDescriptor::Boolean { id: option_id, .. } => option_id == id,
+                })
+                .cloned()
+                .or(Some(descriptor))
+        } else {
+            self.provider_options
+                .iter()
+                .find(|option| {
+                    matches!(
+                        option,
+                        OptionDescriptor::Select {
+                            role: agent::OptionRole::Permission,
+                            ..
+                        }
+                    )
+                })
+                .cloned()
+        }
     }
 
     /// The permission selection changed in a way only a restart applies.

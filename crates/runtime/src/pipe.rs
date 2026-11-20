@@ -774,8 +774,12 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             args,
         } => app.add_custom_acp_agent(name, command, args, cx),
         Command::UpdateAcpAgent { id, patch } => app.update_acp_agent(&id, patch, cx),
-        Command::SetActiveAcpAgent { session_id, id } => {
-            app.set_active_acp_agent(&session_id, &id, cx);
+        Command::SetActiveAcpAgent {
+            session_id,
+            id,
+            model,
+        } => {
+            app.set_active_acp_agent(&session_id, &id, model, cx);
             app.release_policy_holds(&session_id, cx);
         }
         Command::RefreshProviderPlugins { profile_id, cwd } => {

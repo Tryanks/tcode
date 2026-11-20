@@ -2343,6 +2343,11 @@ impl AppState {
         ) {
             draft.meta.option_selections.push(selection);
         }
+        if provider == ProviderKind::Acp
+            && let Some(agent_id) = draft.meta.acp_agent_id.clone()
+        {
+            self.seed_acp_session(&mut draft, &agent_id);
+        }
         let selection = self.draft_model_selection(&draft.meta)?;
         self.restore_terminal_workspace(&mut draft);
         let session_id = draft.meta.id.clone();

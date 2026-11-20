@@ -38,9 +38,9 @@ pub use command::{
     TerminalSelection, ThreadExportFormat, TurnDue, UnsentMessage,
 };
 pub use event::{
-    AccountDiskUsage, AcpMarketplaceItem, AgentStatus, ArchivedSessions, BackgroundActivity,
-    BackgroundTaskStatus, ControlActivityEntry, ControlStatus, DiskUsage, DiskUsagePart,
-    DiskUsageState, EndpointDescription, EndpointPresetDescription, EventEnvelope,
+    AccountDiskUsage, AcpCatalogStatus, AcpMarketplaceItem, AgentStatus, ArchivedSessions,
+    BackgroundActivity, BackgroundTaskStatus, ControlActivityEntry, ControlStatus, DiskUsage,
+    DiskUsagePart, DiskUsageState, EndpointDescription, EndpointPresetDescription, EventEnvelope,
     ExternalImportState, ExternalImportStatus, ForkAvailability, ForkStatus, GitActionRequest,
     GitStatusStatus, HarnessDescription, HarnessPermission, ImportFailure, IndexSnapshot,
     IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools, LeftOrphan,
@@ -379,7 +379,8 @@ pub use wire::{
 // keeps only enabled, and the SetControlGrant and RespondControlGrant
 // commands and the ControlDefaultGrant and ControlProjectGrant patches go.
 // tcode_control records no reviews: the ReviewRecords query and
-// RuntimeNotice's review_recorded go.
+// RuntimeNotice's review_recorded go. ProvidersStatus gains per-ACP-agent
+// acp_catalogs, and SetActiveAcpAgent takes an optional model.
 pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]
