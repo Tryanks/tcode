@@ -608,7 +608,6 @@ fn installed_acp_duplicates_of_native_providers_only_serve_their_existing_sessio
             Command::SetActiveAcpAgent {
                 session_id: draft.clone(),
                 id: id.into(),
-                model: None,
             },
         );
         state.read(|state| {

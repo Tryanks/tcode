@@ -626,13 +626,6 @@ impl AppState {
                 model_catalogs.insert(provider, cached);
             }
         }
-        let mut acp_catalogs = HashMap::new();
-        for id in settings.acp_agents.keys() {
-            let cached = store.load_acp_catalog(id);
-            if !cached.is_empty() {
-                acp_catalogs.insert(id.clone(), cached);
-            }
-        }
         log::info!(
             "loaded {} stored session(s) in {} project(s) from {}",
             sessions.len(),
@@ -707,11 +700,7 @@ impl AppState {
             native_subagent_turns: HashMap::new(),
             native_subagent_streams: HashMap::new(),
             settings,
-            providers: {
-                let mut catalog = ProviderCatalog::new(model_catalogs, provider_secret_names);
-                catalog.acp_catalogs = acp_catalogs;
-                catalog.into()
-            },
+            providers: ProviderCatalog::new(model_catalogs, provider_secret_names).into(),
             next_terminal_spawn_id: 0,
             pending_terminal_spawns: HashMap::new(),
             next_start_generation: 0,

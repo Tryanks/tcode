@@ -170,7 +170,6 @@ impl AppState {
                         }
                         state.settings.acp_agents.insert(id.clone(), installed);
                         state.persist_settings(cx);
-                        state.refresh_acp_catalog(id, cx);
                         emit_runtime(
                             cx,
                             RuntimeEvent::Toast(RuntimeToast::AcpInstallSucceeded {
@@ -214,7 +213,6 @@ impl AppState {
             return;
         }
         self.settings.acp_agents.remove(id);
-        self.providers.clear_acp_catalog(id);
         self.persist_settings(cx);
         let data_dir = self.store.root().clone();
         let id = id.to_string();
@@ -257,7 +255,7 @@ impl AppState {
         self.settings.acp_agents.insert(
             id.clone(),
             InstalledAgent {
-                id: id.clone(),
+                id,
                 name,
                 version: String::new(),
                 icon: None,
@@ -272,7 +270,6 @@ impl AppState {
             },
         );
         self.persist_settings(cx);
-        self.refresh_acp_catalog(id, cx);
     }
 
     /// Update one installed ACP agent in place (enable switch, env rows, args).
@@ -280,32 +277,17 @@ impl AppState {
         if self.settings_change_refused(cx) {
             return;
         }
-        let mut refresh = false;
-        let mut cancel = false;
         if let Some(agent) = self.settings.acp_agents.get_mut(id) {
             match patch {
-                AcpAgentPatch::SetEnabled { enabled } => {
-                    agent.enabled = enabled;
-                    refresh = enabled && agent.offered_for_new_sessions();
-                    cancel = !enabled;
-                }
+                AcpAgentPatch::SetEnabled { enabled } => agent.enabled = enabled,
                 AcpAgentPatch::SetLaunchArgs { launch_args } => {
                     agent.launch_args = launch_args
                         .map(|args| args.trim().to_owned())
                         .filter(|args| !args.is_empty());
-                    refresh = agent.enabled && agent.offered_for_new_sessions();
                 }
-                AcpAgentPatch::SetEnv { env } => {
-                    agent.env = named(env);
-                    refresh = agent.enabled && agent.offered_for_new_sessions();
-                }
+                AcpAgentPatch::SetEnv { env } => agent.env = named(env),
             }
             self.persist_settings(cx);
-        }
-        if cancel {
-            self.providers.cancel_acp_model_refresh(id);
-        } else if refresh {
-            self.refresh_acp_catalog(id.to_owned(), cx);
         }
     }
 
@@ -321,112 +303,28 @@ impl AppState {
         self.persist_meta(&meta, cx);
     }
 
-    /// Seed an unsent ACP session's default model and pre-session option
-    /// descriptors from the agent's cached catalog, keeping any choices the
-    /// session already holds.
-    pub(super) fn seed_acp_session(&self, active: &mut ActiveSession, id: &str) {
-        let Some(catalog) = self.providers.acp_catalogs.get(id) else {
-            return;
-        };
-        if active.meta.model.is_none() {
-            active.meta.model = catalog.default_model_id().map(str::to_owned);
-        }
-        if active.provider_options.is_empty() && !catalog.options.is_empty() {
-            active.provider_options = catalog.options.clone();
-            for selection in &catalog.selections {
-                if !active
-                    .meta
-                    .option_selections
-                    .iter()
-                    .any(|existing| existing.id == selection.id)
-                {
-                    active.meta.option_selections.push(selection.clone());
-                }
-            }
-        }
-    }
-
-    /// Populate any open drafts already pointed at ACP agent `id` once its
-    /// background catalog probe lands.
-    pub(super) fn seed_acp_drafts(&mut self, id: &str) {
-        let Some(catalog) = self.providers.acp_catalogs.get(id).cloned() else {
-            return;
-        };
-        for active in self
-            .residents
-            .live
-            .values_mut()
-            .chain(self.residents.parked.values_mut())
-        {
-            if !active.draft
-                || active.meta.provider != ProviderKind::Acp
-                || active.meta.acp_agent_id.as_deref() != Some(id)
-            {
-                continue;
-            }
-            if active.meta.model.is_none() {
-                active.meta.model = catalog.default_model_id().map(str::to_owned);
-            }
-            if active.provider_options.is_empty() && !catalog.options.is_empty() {
-                active.provider_options = catalog.options.clone();
-                for selection in &catalog.selections {
-                    if !active
-                        .meta
-                        .option_selections
-                        .iter()
-                        .any(|existing| existing.id == selection.id)
-                    {
-                        active.meta.option_selections.push(selection.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    /// Point the active draft or thread at an installed ACP agent (and
-    /// optionally one of its models from the probed catalog).
-    pub fn set_active_acp_agent(
-        &mut self,
-        target_id: &str,
-        id: &str,
-        model: Option<String>,
-        cx: &mut HostCx,
-    ) {
+    /// Point the active draft at an installed ACP agent (the model picker's
+    /// provider rail). ACP agents have no model catalog: the agent publishes its
+    /// models over the wire once the session starts.
+    pub fn set_active_acp_agent(&mut self, target_id: &str, id: &str, cx: &mut HostCx) {
         let provider_commands = self.cached_provider_commands(ProviderKind::Acp, None, Some(id));
-        let catalog = self.providers.acp_catalogs.get(id).cloned();
-        let target_model = model.or_else(|| {
-            catalog
-                .as_ref()
-                .and_then(|catalog| catalog.default_model_id().map(str::to_owned))
-        });
         let Some(active) = self.resident_mut(target_id) else {
             return;
         };
         if matches!(active.meta.provider, ProviderKind::Acp)
             && active.meta.acp_agent_id.as_deref() == Some(id)
         {
-            if active.meta.model == target_model {
-                return;
-            }
-            active.meta.model = target_model;
-            if active.pending_relay.is_some() {
-                return;
-            }
-            self.preview_draft_or_persist_active(target_id, cx);
             return;
         }
-        if !active.draft {
+        if !active.draft && !matches!(active.meta.provider, ProviderKind::Acp) {
             let source = active.pending_relay.clone().unwrap_or(PendingRelay {
                 from_provider: active.meta.provider,
                 from_model: active.meta.model.clone(),
                 from_profile: active.meta.profile_id.clone(),
-                from_acp_agent: active.meta.acp_agent_id.clone(),
+                from_acp_agent: None,
                 from_options: active.meta.option_selections.clone(),
             });
-            if active.pending_relay.is_some()
-                && matches!(source.from_provider, ProviderKind::Acp)
-                && source.from_acp_agent.as_deref() == Some(id)
-            {
+            if active.pending_relay.is_some() && matches!(source.from_provider, ProviderKind::Acp) {
                 active.pending_relay = None;
             } else if has_meaningful_history(&active.timeline) {
                 active.pending_relay = Some(source);
@@ -436,15 +334,9 @@ impl AppState {
         }
         active.meta.provider = ProviderKind::Acp;
         active.meta.acp_agent_id = Some(id.to_string());
-        active.meta.profile_id = None;
-        active.meta.model = target_model;
+        active.meta.model = None;
         active.meta.option_selections.clear();
         active.provider_options.clear();
-        active.confirmed_option_selections.clear();
-        if let Some(catalog) = catalog {
-            active.provider_options = catalog.options;
-            active.meta.option_selections = catalog.selections;
-        }
         active.provider_commands = provider_commands;
         if active.pending_relay.is_some() {
             return;

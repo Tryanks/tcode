@@ -60,9 +60,6 @@ pub struct ProviderCatalog {
     /// What of each provider's catalog in `model_catalogs` could not be
     /// read and was left out.
     model_problems: HashMap<ProviderKind, Vec<String>>,
-    /// Per-ACP-agent model and default option catalogs, keyed by installed agent id.
-    pub acp_catalogs: HashMap<String, agent::AcpCatalog>,
-    acp_model_refreshes: HashMap<String, ModelRefresh>,
     pub provider_versions: HashMap<ProviderKind, ProviderVersionState>,
     version_rounds: HashMap<u64, VersionCheckRound>,
     next_version_round: u64,
@@ -101,8 +98,6 @@ impl ProviderCatalog {
             model_catalogs,
             model_refreshes: HashMap::new(),
             model_problems: HashMap::new(),
-            acp_catalogs: HashMap::new(),
-            acp_model_refreshes: HashMap::new(),
             provider_versions: HashMap::new(),
             version_rounds: HashMap::new(),
             next_version_round: 0,
@@ -153,47 +148,6 @@ impl ProviderCatalog {
         refresh.loading = false;
         refresh.failure = failure;
         true
-    }
-
-    pub(super) fn begin_acp_model_refresh(&mut self, id: &str) -> (u64, agent::SessionProcesses) {
-        let refresh = self.acp_model_refreshes.entry(id.to_owned()).or_default();
-        refresh.processes.stop();
-        *refresh = ModelRefresh {
-            generation: refresh.generation + 1,
-            loading: true,
-            failure: None,
-            processes: agent::SessionProcesses::default(),
-        };
-        (refresh.generation, refresh.processes.clone())
-    }
-
-    pub(super) fn finish_acp_model_refresh(
-        &mut self,
-        id: &str,
-        generation: u64,
-        failure: Option<String>,
-    ) -> bool {
-        let Some(refresh) = self
-            .acp_model_refreshes
-            .get_mut(id)
-            .filter(|refresh| refresh.generation == generation)
-        else {
-            return false;
-        };
-        refresh.loading = false;
-        refresh.failure = failure;
-        true
-    }
-
-    pub(super) fn cancel_acp_model_refresh(&mut self, id: &str) {
-        if let Some(refresh) = self.acp_model_refreshes.remove(id) {
-            refresh.processes.stop();
-        }
-    }
-
-    pub(super) fn clear_acp_catalog(&mut self, id: &str) {
-        self.cancel_acp_model_refresh(id);
-        self.acp_catalogs.remove(id);
     }
 
     /// A sign-in begun under the old configuration ends with it.
@@ -325,28 +279,6 @@ impl ProviderCatalog {
                 .filter_map(|(provider, refresh)| Some((*provider, refresh.failure.clone()?)))
                 .collect(),
             model_problems: self.model_problems.clone(),
-            acp_catalogs: {
-                let mut map: HashMap<String, tcode_protocol::AcpCatalogStatus> = self
-                    .acp_catalogs
-                    .iter()
-                    .map(|(id, catalog)| {
-                        (
-                            id.clone(),
-                            tcode_protocol::AcpCatalogStatus {
-                                catalog: catalog.clone(),
-                                loading: false,
-                                error: None,
-                            },
-                        )
-                    })
-                    .collect();
-                for (id, refresh) in &self.acp_model_refreshes {
-                    let entry = map.entry(id.clone()).or_default();
-                    entry.loading = refresh.loading;
-                    entry.error = refresh.failure.clone();
-                }
-                map
-            },
             provider_versions: self
                 .provider_versions
                 .iter()
@@ -495,93 +427,6 @@ impl AppState {
                 });
             });
         }
-        self.refresh_acp_catalogs(cx);
-    }
-
-    /// Probe every enabled installed ACP agent for its models and session options.
-    pub fn refresh_acp_catalogs(&mut self, cx: &mut HostCx) {
-        let ids: Vec<String> = self
-            .settings
-            .acp_agents
-            .values()
-            .filter(|agent| agent.enabled && agent.offered_for_new_sessions())
-            .map(|agent| agent.id.clone())
-            .collect();
-        for id in ids {
-            self.refresh_acp_catalog(id, cx);
-        }
-    }
-
-    /// Probe one installed ACP agent (`initialize` → `session/new` → `session/close`)
-    /// so its models and session options appear in the composer before the first message.
-    pub fn refresh_acp_catalog(&mut self, id: String, cx: &mut HostCx) {
-        let Some(installed) = self.settings.acp_agents.get(&id).cloned() else {
-            self.providers.clear_acp_catalog(&id);
-            return;
-        };
-        if !installed.enabled || !installed.offered_for_new_sessions() {
-            self.providers.cancel_acp_model_refresh(&id);
-            return;
-        }
-        let extra_args = match installed.extra_args() {
-            Ok(args) => args,
-            Err(err) => {
-                let (generation, _) = self.providers.begin_acp_model_refresh(&id);
-                self.providers.finish_acp_model_refresh(
-                    &id,
-                    generation,
-                    Some(format!("Launch arguments: {err}")),
-                );
-                return;
-            }
-        };
-        let (generation, processes) = self.providers.begin_acp_model_refresh(&id);
-        let launch_env = self.prepare_acp_env(&id, cx);
-        let cwd = self
-            .projects
-            .first()
-            .map(|project| project.root.clone())
-            .filter(|root| root.is_dir())
-            .unwrap_or_else(std::env::temp_dir);
-        let acp_agent = agent::AcpAgent {
-            id: installed.id.clone(),
-            name: installed.name.clone(),
-            launch: installed.launch.clone(),
-        };
-        let store = self.store.clone();
-        let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
-            let result = match launch_env.await {
-                Ok(launch_env) => {
-                    agent::probe_acp_catalog(acp_agent, cwd, extra_args, launch_env, &processes)
-                        .await
-                        .map_err(|error| error.to_string())
-                }
-                Err(error) => Err(error),
-            };
-            host_cx.enqueue(move |state, _cx| {
-                let failure = result.as_ref().err().cloned();
-                if !state
-                    .providers
-                    .finish_acp_model_refresh(&id, generation, failure)
-                {
-                    return;
-                }
-                if state.settings.acp_agents.get(&id) != Some(&installed) {
-                    return;
-                }
-                match result {
-                    Ok(catalog) => {
-                        if let Err(err) = store.save_acp_catalog(&id, &catalog) {
-                            log::warn!("failed to persist ACP catalog for {id}: {err}");
-                        }
-                        state.providers.acp_catalogs.insert(id.clone(), catalog);
-                        state.seed_acp_drafts(&id);
-                    }
-                    Err(err) => log::warn!("failed to probe ACP catalog for {id}: {err}"),
-                }
-            });
-        });
     }
 
     /// A profile's name wherever threads and pickers show it: an unnamed
@@ -1734,25 +1579,43 @@ impl AppState {
         )
     }
 
-    pub(super) fn prepare_acp_env(
+    pub(super) fn prepare_session_env(
         &self,
-        agent_id: &str,
+        meta: &SessionMeta,
         cx: &HostCx,
     ) -> impl std::future::Future<Output = Result<LaunchEnv, String>> + use<> {
-        let acp = self.settings.acp_agent(agent_id).map(|agent| {
-            let id = Settings::acp_secret_id(&agent.id);
-            let names = agent
-                .env
-                .iter()
-                .filter(|var| var.sensitive)
-                .map(|var| var.name.clone())
-                .collect();
-            let writes = self.pending_secret_writes(&id, &names);
-            (id, agent.env.clone(), writes)
+        let native = (meta.provider != ProviderKind::Acp).then(|| {
+            self.prepare_profile_env(
+                meta.profile_id
+                    .as_deref()
+                    .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider)),
+                cx,
+            )
         });
+        let acp = (meta.provider == ProviderKind::Acp)
+            .then(|| {
+                meta.acp_agent_id
+                    .as_deref()
+                    .and_then(|id| self.settings.acp_agent(id))
+            })
+            .flatten()
+            .map(|agent| {
+                let id = Settings::acp_secret_id(&agent.id);
+                let names = agent
+                    .env
+                    .iter()
+                    .filter(|var| var.sensitive)
+                    .map(|var| var.name.clone())
+                    .collect();
+                let writes = self.pending_secret_writes(&id, &names);
+                (id, agent.env.clone(), writes)
+            });
         let store = self.settings_store.clone();
         let host_cx = cx.clone();
         async move {
+            if let Some(env) = native {
+                return env.await;
+            }
             let Some((id, env, writes)) = acp else {
                 return Ok(LaunchEnv::default());
             };
@@ -1769,34 +1632,6 @@ impl AppState {
                 env: env_pairs(&env, &secrets),
                 home: None,
             })
-        }
-    }
-
-    pub(super) fn prepare_session_env(
-        &self,
-        meta: &SessionMeta,
-        cx: &HostCx,
-    ) -> impl std::future::Future<Output = Result<LaunchEnv, String>> + use<> {
-        let native = (meta.provider != ProviderKind::Acp).then(|| {
-            self.prepare_profile_env(
-                meta.profile_id
-                    .as_deref()
-                    .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider)),
-                cx,
-            )
-        });
-        let acp = (meta.provider == ProviderKind::Acp)
-            .then_some(meta.acp_agent_id.as_deref())
-            .flatten()
-            .map(|id| self.prepare_acp_env(id, cx));
-        async move {
-            if let Some(env) = native {
-                return env.await;
-            }
-            if let Some(env) = acp {
-                return env.await;
-            }
-            Ok(LaunchEnv::default())
         }
     }
 

@@ -304,11 +304,15 @@ impl Dialect for Cursor {
         setup.adopt(modes.as_ref(), config_options.as_deref());
         let mut config_options = config_options.unwrap_or_default();
         if let Some(model) = &opts.model
-            && let Some(selected) = select_model(setup, &session_id, model, &config_options).await?
+            && let Some(selected) = setup
+                .select_model(&session_id, model, &config_options)
+                .await
         {
             config_options = selected;
         }
-        restore_parameters(setup, &session_id, &config_options).await;
+        setup
+            .restore_options(&session_id, modes.as_ref(), &config_options)
+            .await;
         Ok(Established {
             resume: ResumeCursor(json!({ "session_id": session_id.0.to_string() })),
             session_id,
@@ -458,97 +462,6 @@ fn start_failure(err: &agent_client_protocol::Error, context: &str) -> AgentErro
     } else {
         AgentError::Protocol(format!("Cursor {context}: {}", describe(err)))
     }
-}
-
-/// Put the session on the composer's model, returning Cursor's options for
-/// it. Cursor resumes a loaded conversation on the model it last used, so
-/// this follows `session/load` as well as `session/new`.
-async fn select_model(
-    setup: &Setup<'_>,
-    session_id: &acp::SessionId,
-    model: &str,
-    config_options: &[acp::SessionConfigOption],
-) -> Result<Option<Vec<acp::SessionConfigOption>>, AgentError> {
-    let current = config_options
-        .iter()
-        .find(|option| option.id.0.as_ref() == MODEL_CONFIG_ID)
-        .and_then(select_value);
-    if current == Some(model) {
-        return Ok(None);
-    }
-    let selected = set_config_option(setup, session_id, MODEL_CONFIG_ID, model)
-        .await
-        .map_err(|err| {
-            AgentError::Provider(format!(
-                "Cursor did not accept the model `{model}`: {}",
-                describe(&err)
-            ))
-        })?;
-    Ok(Some(selected))
-}
-
-/// Re-select the model parameters this session chose before: a new process
-/// starts on the parameters Cursor last saved for the model, which another
-/// session may have changed. Cursor judges a choice the model no longer
-/// offers.
-async fn restore_parameters(
-    setup: &Setup<'_>,
-    session_id: &acp::SessionId,
-    config_options: &[acp::SessionConfigOption],
-) {
-    for option in config_options {
-        let id = option.id.0.as_ref();
-        if !matches!(option.kind, acp::SessionConfigKind::Select(_)) {
-            continue;
-        }
-        let Some(chosen) = acp_session::config_selection(
-            &setup.opts.option_selections,
-            id,
-            option.category.as_ref(),
-        ) else {
-            continue;
-        };
-        if id == MODEL_CONFIG_ID || select_value(option) == Some(chosen) {
-            continue;
-        }
-        if let Err(err) = set_config_option(setup, session_id, id, chosen).await {
-            setup
-                .warn(format!(
-                    "Cursor did not restore {} `{chosen}`: {}",
-                    option.name,
-                    describe(&err)
-                ))
-                .await;
-        }
-    }
-}
-
-fn select_value(option: &acp::SessionConfigOption) -> Option<&str> {
-    match &option.kind {
-        acp::SessionConfigKind::Select(select) => Some(select.current_value.0.as_ref()),
-        _ => None,
-    }
-}
-
-/// `session/set_config_option`, adopting the refreshed options it answers
-/// with.
-async fn set_config_option(
-    setup: &Setup<'_>,
-    session_id: &acp::SessionId,
-    config_id: &str,
-    value: &str,
-) -> Result<Vec<acp::SessionConfigOption>, agent_client_protocol::Error> {
-    let response = setup
-        .connection
-        .send_request(acp::SetSessionConfigOptionRequest::new(
-            session_id.clone(),
-            acp::SessionConfigId::new(config_id),
-            acp::SessionConfigOptionValue::value_id(acp::SessionConfigValueId::new(value)),
-        ))
-        .block_task()
-        .await?;
-    setup.adopt(None, Some(&response.config_options));
-    Ok(response.config_options)
 }
 
 /// The questions of a `cursor/ask_question` request. Canonical answers are

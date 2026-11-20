@@ -104,16 +104,12 @@ pub(crate) fn composer_state(
         |request: &agent::ApprovalRequest| matches!(request.kind, agent::ApprovalKind::Plan { .. });
     let active_model_spec = status.and_then(|status| {
         let model = status.requested_model.as_deref()?;
-        let catalog = if status.provider == agent::ProviderKind::Acp {
-            status
-                .acp_agent_id
-                .as_deref()
-                .and_then(|id| providers.acp_catalogs.get(id))
-                .map(|entry| entry.catalog.models.as_slice())?
-        } else {
-            providers.model_catalogs.get(&status.provider)?.as_slice()
-        };
-        catalog.iter().find(|spec| spec.id == model).cloned()
+        providers
+            .model_catalogs
+            .get(&status.provider)?
+            .iter()
+            .find(|spec| spec.id == model)
+            .cloned()
     });
     let checkout = status.and_then(|status| {
         let branch = status.git_branch.clone().or_else(|| {

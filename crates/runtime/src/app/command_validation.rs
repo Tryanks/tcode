@@ -192,7 +192,7 @@ impl AppState {
             {
                 return Err(error("unknown_acp_agent", "This agent is not installed."));
             }
-            Command::SetActiveAcpAgent { session_id, id, .. }
+            Command::SetActiveAcpAgent { session_id, id }
                 if self
                     .settings
                     .acp_agents

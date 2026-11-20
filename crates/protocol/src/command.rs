@@ -261,8 +261,6 @@ pub enum Command {
     SetActiveAcpAgent {
         session_id: String,
         id: String,
-        #[serde(default)]
-        model: Option<String>,
     },
     /// List a profile's native plugins as seen from `cwd` (a project
     /// directory), or from outside any project when `cwd` is `None`.

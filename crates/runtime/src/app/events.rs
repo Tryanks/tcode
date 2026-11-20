@@ -267,21 +267,12 @@ impl AppState {
                             active.provider_options.push(descriptor.clone());
                         }
                     }
-                    let restart_permission_id =
+                    let permission_id =
                         active
                             .permission_descriptor()
-                            .and_then(|descriptor| match descriptor {
-                                OptionDescriptor::Select {
-                                    id,
-                                    apply: ApplyTiming::Restart,
-                                    ..
-                                }
-                                | OptionDescriptor::Boolean {
-                                    id,
-                                    apply: ApplyTiming::Restart,
-                                    ..
-                                } => Some(id),
-                                _ => None,
+                            .map(|descriptor| match descriptor {
+                                OptionDescriptor::Select { id, .. }
+                                | OptionDescriptor::Boolean { id, .. } => id,
                             });
                     // An agent's own option is set by the agent, and the thread
                     // follows it. A catalog option is the user's choice, which
@@ -302,7 +293,7 @@ impl AppState {
                             .live_option_selections
                             .retain(|value| value.id != selection.id);
                         active.live_option_selections.push(selection.clone());
-                        if restart_permission_id.as_deref() != Some(selection.id.as_str()) {
+                        if permission_id.as_deref() != Some(selection.id.as_str()) {
                             active
                                 .meta
                                 .option_selections
@@ -321,19 +312,6 @@ impl AppState {
                         OptionDescriptors::Wire
                     )
                 }) {
-                    if meta.provider == ProviderKind::Acp
-                        && let Some(agent_id) = meta.acp_agent_id.as_deref()
-                    {
-                        let entry = self
-                            .providers
-                            .acp_catalogs
-                            .entry(agent_id.to_owned())
-                            .or_default();
-                        if entry.options != *descriptors || entry.selections != *selections {
-                            entry.options = descriptors.clone();
-                            entry.selections = selections.clone();
-                        }
-                    }
                     self.persist_meta(&meta, cx);
                 }
                 return;
