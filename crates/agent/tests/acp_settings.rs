@@ -146,7 +146,12 @@ fn run_fake_agent(port: u16) {
                 "params": msg["params"],
                 // Whether the agent runs in the directory the request names.
                 "in_cwd": msg["params"]["cwd"].as_str().is_some_and(|cwd| {
-                    std::fs::canonicalize(cwd).ok() == std::env::current_dir().ok()
+                    // Both sides canonical: Windows spells one directory
+                    // several ways (`\\?\`, 8.3 names).
+                    std::fs::canonicalize(cwd).ok()
+                        == std::env::current_dir()
+                            .and_then(std::fs::canonicalize)
+                            .ok()
                 }),
             })
         )
