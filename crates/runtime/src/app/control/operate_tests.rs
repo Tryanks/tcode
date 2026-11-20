@@ -53,6 +53,7 @@ fn start(project_id: &str) -> ControlOp {
         workspace: None,
         subagent: None,
         provider: "codex".into(),
+        acp_agent: None,
         model: None,
         profile: None,
         options: None,
@@ -306,6 +307,168 @@ fn a_subagent_is_a_child_that_owes_its_caller_a_report() {
     assert!(call(&state, cx, "caller", isolated).is_err());
     cx.run_until_parked();
     assert_eq!(started(cx).len(), before);
+}
+
+/// `start_thread` starts an enabled installed ACP agent (including as a subagent),
+/// refuses missing/disabled/native-duplicate ACP agents and `acp:mode`, and skips the
+/// `report_result` reminder when an ACP agent does not attach Tcode's MCP servers.
+#[test]
+fn start_thread_starts_an_acp_subagent_and_validates_acp_agent() {
+    let store = TestStore::new("tcode-control-start-acp");
+    let root = store.root().join("project");
+    stored_project(&store, "a", &root, |_| {});
+    stored(
+        &store,
+        "caller",
+        ProviderKind::ClaudeCode,
+        "a",
+        &root,
+        |_| {},
+    );
+    let mut settings = Settings::default();
+    let agent = |id: &str, name: &str, enabled: bool| InstalledAgent {
+        id: id.into(),
+        name: name.into(),
+        version: String::new(),
+        icon: None,
+        launch: agent::AcpLaunch::Custom {
+            command: id.into(),
+            args: Vec::new(),
+            env: Vec::new(),
+        },
+        enabled,
+        env: Vec::new(),
+        launch_args: None,
+    };
+    settings.acp_agents.insert(
+        "custom:antigravity".into(),
+        agent("custom:antigravity", "Antigravity", true),
+    );
+    settings.acp_agents.insert(
+        "custom:disabled".into(),
+        agent("custom:disabled", "Disabled", false),
+    );
+    settings
+        .acp_agents
+        .insert("cursor".into(), agent("cursor", "Cursor", true));
+    tcode_services::settings::SettingsStore::new(store.root().clone())
+        .save(&settings)
+        .unwrap();
+
+    let cx = &mut TestAppContext::default();
+    let (state, providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    state
+        .command(
+            cx,
+            Command::PatchSettings {
+                patch: SettingsPatch::OrchestrateChildWorktrees(false),
+            },
+        )
+        .unwrap();
+
+    let with = |request_id: &str, edit: &dyn Fn(&mut StartThreadParams)| {
+        let ControlOp::StartThread(mut params) = start("a") else {
+            unreachable!()
+        };
+        params.request_id = request_id.into();
+        params.subagent = Some(true);
+        edit(&mut params);
+        ControlOp::StartThread(params)
+    };
+
+    for op in [
+        // Missing acp_agent.
+        with("missing", &|p| p.provider = "acp".into()),
+        // Unknown acp_agent.
+        with("unknown", &|p| {
+            p.provider = "acp".into();
+            p.acp_agent = Some("custom:nope".into());
+        }),
+        // Disabled acp_agent.
+        with("disabled", &|p| {
+            p.provider = "acp".into();
+            p.acp_agent = Some("custom:disabled".into());
+        }),
+        // Native-duplicate acp_agent.
+        with("duplicate", &|p| {
+            p.provider = "acp".into();
+            p.acp_agent = Some("cursor".into());
+        }),
+        // acp_agent on a native provider.
+        with("native-with-acp", &|p| {
+            p.acp_agent = Some("custom:antigravity".into());
+        }),
+        // Approval-governing option on ACP.
+        with("acp-mode", &|p| {
+            p.provider = "acp".into();
+            p.acp_agent = Some("custom:antigravity".into());
+            p.options = Some(
+                [(
+                    agent::ACP_MODE_OPTION_ID.to_owned(),
+                    serde_json::json!("auto"),
+                )]
+                .into_iter()
+                .collect(),
+            );
+        }),
+    ] {
+        assert!(call(&state, cx, "caller", op).is_err());
+    }
+    cx.run_until_parked();
+    assert!(started(cx).is_empty());
+
+    let reply = call(
+        &state,
+        cx,
+        "caller",
+        with("acp-subagent", &|p| {
+            p.provider = "acp".into();
+            p.acp_agent = Some("custom:antigravity".into());
+            p.model = Some("gemini-4-neon".into());
+        }),
+    )
+    .unwrap();
+    assert_eq!(reply["subagent"], true, "{reply}");
+    let id = reply["thread_id"].as_str().unwrap().to_owned();
+    let meta = cx.seen().session(&id).unwrap().clone();
+    assert_eq!(meta.provider, ProviderKind::Acp);
+    assert_eq!(meta.acp_agent_id.as_deref(), Some("custom:antigravity"));
+    assert_eq!(meta.model.as_deref(), Some("gemini-4-neon"));
+    assert_eq!(meta.parent_session_id.as_deref(), Some("caller"));
+
+    // When an ACP subagent does not attach Tcode's MCP servers, completing the
+    // turn delivers its final message as a fallback immediately without sending
+    // a report_result reminder.
+    let child = providers.started(cx, 0);
+    let (delivery_id, text) = child.next_turn(cx);
+    assert!(text.starts_with(MESSAGE));
+    child.play([
+        AgentEvent::McpServersNotAttached,
+        AgentEvent::TurnAccepted { delivery_id },
+        AgentEvent::ItemCompleted(agent::ThreadItem {
+            id: "a1".into(),
+            parent_item_id: None,
+            content: agent::ItemContent::AssistantMessage {
+                text: "ACP investigation complete".into(),
+                summarized: false,
+            },
+        }),
+        turn_completed(),
+    ]);
+    cx.run_until_seen(|view| {
+        view.session(&id)
+            .is_some_and(|meta| meta.report() == tcode_core::settlement::AgentReport::Unreported)
+    });
+    let final_meta = cx.seen().session(&id).unwrap();
+    assert!(
+        !final_meta
+            .expectation
+            .as_ref()
+            .expect("child expectation")
+            .reminded,
+        "must not send a report_result reminder when MCP servers were not attached"
+    );
 }
 
 /// An untitled `start_thread` thread is titled from its first message once the provider

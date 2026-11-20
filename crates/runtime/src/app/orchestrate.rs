@@ -609,7 +609,11 @@ impl AppState {
         if !self.thread_quiescent(child_id) {
             return;
         }
-        if !expectation.reminded && child.provider.caps().mcp_servers {
+        let has_mcp = child.provider.caps().mcp_servers
+            && self
+                .resident(child_id)
+                .is_none_or(|resident| resident.mcp_servers_attached);
+        if !expectation.reminded && has_mcp {
             expectation.reminded = true;
             self.set_child_expectation(child_id, Some(expectation), cx);
             if let Err(error) = self.deliver_to_child(child_id, CHILD_REPORT_REMINDER.into(), cx) {
@@ -906,11 +910,12 @@ impl AppState {
     }
 }
 
-/// The native provider `list_providers` lists under `name`.
-pub(super) fn native_provider_named(name: &str) -> Option<ProviderKind> {
+/// The provider `list_providers` lists under `name` (any native provider or `acp`).
+pub(super) fn provider_named(name: &str) -> Option<ProviderKind> {
     let name = name.trim();
     ProviderKind::NATIVE
         .into_iter()
+        .chain([ProviderKind::Acp])
         .find(|kind| tcode_core::settings::provider_key(*kind) == name)
 }
 

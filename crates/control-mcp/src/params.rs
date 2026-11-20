@@ -362,9 +362,14 @@ pub struct StartThreadParams {
     )]
     pub subagent: Option<bool>,
     #[schemars(
-        description = "Provider name as list_providers lists it, for example claude or codex."
+        description = "Provider name as list_providers lists it, for example claude, codex or acp."
     )]
     pub provider: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Installed ACP agent id from list_providers' acp_agents (for example custom:antigravity); required when provider is acp and refused for native providers."
+    )]
+    pub acp_agent: Option<String>,
     #[serde(default)]
     #[schemars(description = "Model id from list_providers; omit for the provider's default.")]
     pub model: Option<String>,
