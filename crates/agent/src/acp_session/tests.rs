@@ -169,6 +169,29 @@ fn streamed_text_keeps_block_identity_across_reasoning_and_ignores_user_echoes()
 }
 
 #[test]
+fn restarted_sessions_assign_distinct_text_block_ids() {
+    let emit = |wire_kind: &str, text: &str| {
+        let mut state = state();
+        let events = state.apply_update(update(json!({
+            "sessionUpdate": wire_kind,
+            "content": { "type": "text", "text": text }
+        })));
+        match events.as_slice() {
+            [AgentEvent::Delta { item_id, .. }] => item_id.clone(),
+            other => panic!("expected one delta, got {other:?}"),
+        }
+    };
+    assert_ne!(
+        emit("agent_thought_chunk", "First"),
+        emit("agent_thought_chunk", "Second")
+    );
+    assert_ne!(
+        emit("agent_message_chunk", "First"),
+        emit("agent_message_chunk", "Second")
+    );
+}
+
+#[test]
 fn execute_tool_call_maps_to_a_command_execution() {
     let mut state = state();
     let events = state.apply_update(update(json!({

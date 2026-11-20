@@ -1602,9 +1602,18 @@ mod tests {
             &events[..started]
         );
 
-        assert_eq!(streamed(&events, "thought-1"), "Counting first.");
-        assert!(matches!(completed(&events, "thought-1"),
-            ItemContent::Reasoning { text } if text == "Counting first."));
+        let thought_id = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ItemCompleted(ThreadItem {
+                    id,
+                    content: ItemContent::Reasoning { text },
+                    ..
+                }) if text == "Counting first." => Some(id.as_str()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("reasoning never completed: {events:#?}"));
+        assert_eq!(streamed(&events, thought_id), "Counting first.");
 
         // Each shell update carries the whole output so far; the item shows
         // it, never the command's description or Grok's typed result.
@@ -1637,12 +1646,21 @@ mod tests {
             ItemContent::ToolCall { name, output: Some(output), status: ItemStatus::Completed, .. }
                 if name == "tcode_probe/echo_upper" && output == "HELLO MCP"));
 
+        let reply_id = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ItemCompleted(ThreadItem {
+                    id,
+                    content: ItemContent::AssistantMessage { text, .. },
+                    ..
+                }) if text == "Counted, edited, asked and echoed." => Some(id.as_str()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("reply never completed: {events:#?}"));
         assert_eq!(
-            streamed(&events, "msg-2"),
+            streamed(&events, reply_id),
             "Counted, edited, asked and echoed."
         );
-        assert!(matches!(completed(&events, "msg-2"),
-            ItemContent::AssistantMessage { text, .. } if text == "Counted, edited, asked and echoed."));
 
         assert!(events.iter().any(|event| matches!(event,
             AgentEvent::TokenUsage(usage) if usage.used_tokens == Some(1234))));
