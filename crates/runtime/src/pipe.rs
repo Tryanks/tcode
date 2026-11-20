@@ -780,6 +780,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             id,
             model,
         } => {
+            app.set_collaboration(&session_id, None, cx);
             app.set_active_acp_agent(&session_id, &id, model, cx);
             app.release_policy_holds(&session_id, cx);
         }
@@ -1215,24 +1216,36 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             // folding from its log: the switch waits for that.
             let target = session_id.clone();
             let switch = move |app: &mut AppState, cx: &mut HostCx| {
+                app.set_collaboration(&session_id, None, cx);
                 app.set_active_model(&session_id, provider, model, profile_id, cx);
                 app.release_policy_holds(&session_id, cx);
                 Ok(CommandResponse::Unit)
             };
-            let Some(settled) = app.timeline_settled(&target) else {
-                return CommandOutcome::Immediate(switch(app, cx));
+            return after_timeline_settles(app, &target, switch, cx);
+        }
+        Command::SetActiveCollaboration {
+            session_id,
+            collaboration_id,
+        } => {
+            let target = session_id.clone();
+            let switch = move |app: &mut AppState, cx: &mut HostCx| {
+                app.set_active_collaboration(&session_id, &collaboration_id, cx);
+                app.release_policy_holds(&session_id, cx);
+                Ok(CommandResponse::Unit)
             };
-            let host_cx = cx.clone();
+            return after_timeline_settles(app, &target, switch, cx);
+        }
+        Command::ResearchModel { model, lead } => {
+            let opened = app.research_model(model, lead, cx);
             return CommandOutcome::Pending(cx.spawn_background(async move {
-                let _ = settled.recv().await;
-                host_cx
-                    .enqueue_and_wait(switch)
-                    .await
-                    .map_err(|()| ProtocolError {
-                        code: "host_stopped".into(),
-                        message: "The host stopped before the model could change.".into(),
-                    })?
+                opened.await.map(|id| CommandResponse::SessionId(Some(id)))
             }));
+        }
+        Command::RefreshCollaborationTemplates => {
+            let refreshed = app.refresh_collaboration_templates(cx);
+            return CommandOutcome::Pending(
+                cx.spawn_background(async move { refreshed.await.map(|()| CommandResponse::Unit) }),
+            );
         }
         Command::SetActiveOption {
             session_id,
@@ -1339,6 +1352,33 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         }
     }
     CommandOutcome::Immediate(Ok(response))
+}
+
+/// Run a model switch once the thread's timeline has settled. Whether the switch hands the
+/// conversation over is read from that timeline, which a thread just opened may still be
+/// folding from its log.
+fn after_timeline_settles(
+    app: &mut AppState,
+    session_id: &str,
+    switch: impl FnOnce(&mut AppState, &mut HostCx) -> Result<CommandResponse, ProtocolError>
+    + Send
+    + 'static,
+    cx: &mut HostCx,
+) -> CommandOutcome {
+    let Some(settled) = app.timeline_settled(session_id) else {
+        return CommandOutcome::Immediate(switch(app, cx));
+    };
+    let host_cx = cx.clone();
+    CommandOutcome::Pending(cx.spawn_background(async move {
+        let _ = settled.recv().await;
+        host_cx
+            .enqueue_and_wait(switch)
+            .await
+            .map_err(|()| ProtocolError {
+                code: "host_stopped".into(),
+                message: "The host stopped before the model could change.".into(),
+            })?
+    }))
 }
 
 fn dispatch_query(
@@ -1592,6 +1632,10 @@ fn dispatch_query(
         Query::ControlActivity { limit, filter } => {
             let activity = app.control_activity(&filter, limit as usize);
             cx.spawn_background(async move { Ok(QueryResponse::ControlActivity(activity)) })
+        }
+        Query::CollaborationTemplates => {
+            let templates = app.collaboration_templates();
+            cx.spawn_background(async move { Ok(QueryResponse::CollaborationTemplates(templates)) })
         }
         Query::NativeMcpServers { profile_id } => {
             let servers = app.native_mcp_servers(profile_id, cx);

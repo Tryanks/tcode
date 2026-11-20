@@ -193,7 +193,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Providers, their models and profiles (without secrets), capabilities such as MCP, fork and manual compaction, status and usage. Reads only."
+        description = "Providers, their models and profiles (without secrets), capabilities such as MCP, fork and manual compaction, status and usage. Lists the profiles and ACP agents Settings → Control lets start_thread start threads on; a profile's startable_models, when present, are the only models it may start there. Reads only."
     )]
     async fn list_providers(
         &self,
@@ -257,7 +257,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Start a new thread with a first message, recorded as started by this thread and never blocking you; any provider list_providers lists (a native provider with its models, or acp with acp_agent naming an enabled installed agent from list_providers' acp_agents; for acp omit model and pass options such as acp:model or acp:cfg:<id>). By default it is an ordinary thread in a project's checkout, not a child of this thread, running with the project's default permission mode. With subagent: true it is this thread's subagent instead: listed in this thread's Subagents view rather than on its own, running with the permission Settings → Control subagent approvals chooses, optionally in a dedicated worktree. A subagent sees nothing of your transcript, so make its first message self-contained; Tcode appends the report contract to it. You receive its report_result as a message when its turn ends (if it never reports, Tcode reminds it once, then sends you its final message as a labelled fallback; a provider without MCP gets neither the contract nor the reminder, and an ACP agent that does not attach Tcode's MCP servers gets no reminder and falls back to its final message immediately), a failure if its turn fails, nothing if the user interrupts it, and its approval requests and questions as they come; settle it with update_threads once you accept its result, or cancel it with control_thread to stop it undelivered. The user's standing draft is never touched. request_id is stored on the thread, so a retry after a failure or restart returns the same thread. The message is sent as from this thread (origin agent) and never counts as the user's activity. options set provider options such as reasoningEffort (or acp:model and acp:cfg:<id> for acp), but never the permission mode or any other option that decides what runs without the user's approval. cwd is relative to the project root and must stay inside it. Attachments must already be in a thread's attachments folder, such as images the user attached here; other paths are refused."
+        description = "Start a new thread with a first message, recorded as started by this thread and never blocking you; any provider list_providers lists (a native provider with its models, or acp with acp_agent naming an enabled installed agent from list_providers' acp_agents; for acp omit model and pass options such as acp:model or acp:cfg:<id>). When this thread runs under a collaboration, subagent: true starts only the collaboration's collaborators, with provider, profile and model exactly as the collaboration lists them, and at a reasoningEffort it allows where it names any. By default it is an ordinary thread in a project's checkout, not a child of this thread, running with the project's default permission mode. With subagent: true it is this thread's subagent instead: listed in this thread's Subagents view rather than on its own, running with the permission Settings → Control subagent approvals chooses, optionally in a dedicated worktree. A subagent sees nothing of your transcript, so make its first message self-contained; Tcode appends the report contract to it. You receive its report_result as a message when its turn ends (if it never reports, Tcode reminds it once, then sends you its final message as a labelled fallback; a provider without MCP gets neither the contract nor the reminder, and an ACP agent that does not attach Tcode's MCP servers gets no reminder and falls back to its final message immediately), a failure if its turn fails, nothing if the user interrupts it, and its approval requests and questions as they come; settle it with update_threads once you accept its result, or cancel it with control_thread to stop it undelivered. The user's standing draft is never touched. request_id is stored on the thread, so a retry after a failure or restart returns the same thread. The message is sent as from this thread (origin agent) and never counts as the user's activity. options set provider options such as reasoningEffort (or acp:model and acp:cfg:<id> for acp), but never the permission mode or any other option that decides what runs without the user's approval. cwd is relative to the project root and must stay inside it. Attachments must already be in a thread's attachments folder, such as images the user attached here; other paths are refused."
     )]
     async fn start_thread(
         &self,
@@ -428,6 +428,17 @@ impl ControlTools {
         Parameters(p): Parameters<PatchSettingsParams>,
     ) -> CallToolResult {
         self.run(&ct, ControlOp::PatchSettings(p)).await
+    }
+
+    #[tool(
+        description = "Store the guide of the model the user opened this thread to research: what a decision model should know to get the best out of that model as a collaborator. The guide replaces the one Settings → Collaboration holds for the model, is recorded as written by this thread, and is given to every collaboration's decision model that hands the model work."
+    )]
+    async fn set_model_guide(
+        &self,
+        ct: CancellationToken,
+        Parameters(p): Parameters<SetModelGuideParams>,
+    ) -> CallToolResult {
+        self.run(&ct, ControlOp::SetModelGuide(p)).await
     }
 }
 

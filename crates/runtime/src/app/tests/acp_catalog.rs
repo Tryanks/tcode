@@ -284,7 +284,7 @@ fn a_space_refuses_an_acp_agents_default_model_it_does_not_allow() {
         device_id: "phone".into(),
         device_name: "Phone".into(),
         policy: tcode_protocol::SpacePolicy {
-            agents: tcode_protocol::SpaceAgents::Only(vec![tcode_protocol::AgentGrant {
+            agents: tcode_protocol::AgentScope::Only(vec![tcode_protocol::AgentGrant {
                 profile_id: Settings::builtin_profile_id(ProviderKind::Acp).into(),
                 models: tcode_protocol::ModelGrant::Only(vec!["model-b".into()]),
                 acp_agents: vec![AGENT.into()],

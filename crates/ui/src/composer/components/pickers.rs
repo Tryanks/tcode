@@ -31,8 +31,12 @@ struct ModelRow {
     profile_id: Option<String>,
     /// The installed ACP agent whose model this is.
     acp_agent_id: Option<String>,
-    /// Whether the model is starred; `None` for a row Favorites cannot hold.
+    /// Whether the model, or the collaboration, is starred; `None` for a row Favorites
+    /// cannot hold.
     favorite: Option<bool>,
+    /// The collaboration the row runs the thread under, on its decision model: the row is
+    /// named for the collaboration, and `summary` says who decides and how many collaborate.
+    collaboration: Option<(String, String)>,
 }
 
 /// The row a thread runs on, in a row's own terms. Its id alone names no row:
@@ -43,6 +47,7 @@ struct SelectedModel {
     provider: ProviderKind,
     profile_id: Option<String>,
     acp_agent_id: Option<String>,
+    collaboration_id: Option<String>,
 }
 
 /// The rows the picker marks, by [`OptionStates`]' rule: the model the thread
@@ -56,9 +61,17 @@ struct ModelMarks {
 }
 
 impl ModelRow {
-    /// A row that selects no model is the agent's, whatever model it runs.
+    fn collaboration_id(&self) -> Option<&str> {
+        self.collaboration.as_ref().map(|(id, _)| id.as_str())
+    }
+
+    /// A row that selects no model is the agent's, whatever model it runs. A collaboration's row
+    /// is the thread's while it runs under that collaboration, and a model's while under none.
     fn is_selected(&self, selected: &Option<SelectedModel>) -> bool {
         selected.as_ref().is_some_and(|selected| {
+            if selected.collaboration_id.is_some() || self.collaboration.is_some() {
+                return selected.collaboration_id.as_deref() == self.collaboration_id();
+            }
             (self.model.is_none() || selected.model == self.model)
                 && selected.provider == self.provider
                 && selected.profile_id == self.profile_id
@@ -74,6 +87,9 @@ impl ModelRow {
 
     /// Run thread `session_id` on this row's model.
     fn select(self, store: &mut WorkspaceStore, session_id: String) {
+        if let Some((collaboration_id, _)) = self.collaboration {
+            return store.set_active_collaboration_for(session_id, collaboration_id);
+        }
         match self.acp_agent_id {
             Some(agent) => store.set_active_acp_agent_for(session_id, agent, self.model),
             None => {
@@ -127,7 +143,7 @@ impl Composer {
         );
         // A thread that chose no model is named by its rail's row that
         // selects none, where there is one.
-        let display: gpui::SharedString = match current_model.as_deref() {
+        let display = match current_model.as_deref() {
             None => rail_rows(
                 store,
                 &thread_rail(provider, acp_agent_id.as_deref(), active_profile.as_deref()),
@@ -140,8 +156,20 @@ impl Composer {
         }
         .unwrap_or_else(|| {
             current_model_name_resolved(&resolved, catalog, current_model.as_deref())
-        })
+        });
+        // A thread under a collaboration is named for it; its model is the collaboration's row.
+        let active_collaboration = active_model
+            .collaboration_id
+            .as_deref()
+            .and_then(|id| store.settings_ref().collaboration(id));
+        let display: gpui::SharedString = match active_collaboration {
+            Some(collaboration) if !collaboration.name.trim().is_empty() => {
+                collaboration.name.clone()
+            }
+            _ => display,
+        }
         .into();
+        let collaboration_id = active_collaboration.map(|collaboration| collaboration.id.clone());
 
         // Build the filtered row list for the current frame. Favorites open
         // first when any exist. The favorites sweep covers every
@@ -160,18 +188,31 @@ impl Composer {
                 })
                 .collect()
         };
-        let has_favorites = fav_profiles.iter().any(|(id, _)| {
-            store
-                .picker_models_for_profile(id)
-                .iter()
-                .any(|m| m.favorite)
-        });
-        let rail = self.rail_for(
-            provider,
-            acp_agent_id.as_deref(),
-            active_profile.as_deref(),
-            has_favorites,
-        );
+        let collaborations = &store.settings_ref().collaborations;
+        // The collaborations have a rail where there is one to list, and where this
+        // window may write one.
+        let collaborations_rail = !collaborations.is_empty() || store.scope().is_full();
+        let has_favorites = collaborations
+            .iter()
+            .any(|collaboration| collaboration.favorite)
+            || fav_profiles.iter().any(|(id, _)| {
+                store
+                    .picker_models_for_profile(id)
+                    .iter()
+                    .any(|m| m.favorite)
+            });
+        // A thread under a collaboration that is no favorite opens on the collaborations.
+        let rail = match active_collaboration {
+            Some(collaboration) if self.picker_rail.is_none() && !collaboration.favorite => {
+                PickerRail::Collaborations
+            }
+            _ => self.rail_for(
+                provider,
+                acp_agent_id.as_deref(),
+                active_profile.as_deref(),
+                has_favorites,
+            ),
+        };
         let all_rows: Rc<[ModelRow]> = rail_rows(store, &rail, &fav_profiles).into();
         let rows: Rc<[ModelRow]> = all_rows
             .iter()
@@ -200,6 +241,7 @@ impl Composer {
                 .clone()
                 .filter(|id| !tcode_core::settings::Settings::is_builtin_profile_id(id)),
             acp_agent_id: acp_agent_id.clone(),
+            collaboration_id: collaboration_id.clone(),
         };
         let running_model = composer_state.running_model.clone();
         let selected = ModelMarks {
@@ -334,6 +376,7 @@ impl Composer {
                         all_rows,
                         &selected,
                         rail,
+                        collaborations_rail,
                         &acp_rail_agents,
                         pending_restart,
                         loading,
@@ -726,6 +769,44 @@ fn thread_rail(
     }
 }
 
+/// A row per collaboration, on its decision model.
+fn collaboration_rows(store: &WorkspaceStore) -> Vec<ModelRow> {
+    store
+        .settings_ref()
+        .collaborations
+        .iter()
+        .map(|collaboration| {
+            let lead = store
+                .picker_models_for_profile(collaboration.lead.profile())
+                .into_iter()
+                .find(|model| model.id == collaboration.lead.model)
+                .map_or_else(|| collaboration.lead.model.clone(), |model| model.name);
+            let summary = match collaboration.members.len() {
+                0 => crate::tr!("collaborations.summary_none", lead = lead),
+                1 => crate::tr!("collaborations.summary_one", lead = lead),
+                count => crate::tr!(
+                    "collaborations.summary_many",
+                    lead = lead,
+                    count = count.to_string()
+                ),
+            };
+            ModelRow {
+                model: Some(collaboration.lead.model.clone()),
+                name: if collaboration.name.trim().is_empty() {
+                    crate::tr!("collaborations.unnamed").into_owned()
+                } else {
+                    collaboration.name.clone()
+                },
+                provider: collaboration.lead.provider,
+                profile_id: collaboration.lead.profile_id.clone(),
+                acp_agent_id: None,
+                favorite: Some(collaboration.favorite),
+                collaboration: Some((collaboration.id.clone(), summary.into_owned())),
+            }
+        })
+        .collect()
+}
+
 /// The rows `rail` lists.
 fn rail_rows(
     store: &WorkspaceStore,
@@ -733,9 +814,11 @@ fn rail_rows(
     fav_profiles: &[(String, ProviderKind)],
 ) -> Vec<ModelRow> {
     match rail {
-        PickerRail::Favorites => fav_profiles
-            .iter()
-            .flat_map(|(id, kind)| {
+        PickerRail::Collaborations => collaboration_rows(store),
+        PickerRail::Favorites => collaboration_rows(store)
+            .into_iter()
+            .filter(|row| row.favorite == Some(true))
+            .chain(fav_profiles.iter().flat_map(|(id, kind)| {
                 let is_builtin = tcode_core::settings::Settings::is_builtin_profile_id(id);
                 let profile_id = (!is_builtin).then(|| id.clone());
                 let kind = *kind;
@@ -750,8 +833,9 @@ fn rail_rows(
                         profile_id: profile_id.clone(),
                         acp_agent_id: None,
                         favorite: Some(true),
+                        collaboration: None,
                     })
-            })
+            }))
             .collect(),
         // Each profile is its own rail and lists only its own models: the
         // built-in profiles and other accounts show the official catalog; a
@@ -770,6 +854,7 @@ fn rail_rows(
                         profile_id: (!is_builtin).then(|| id.clone()),
                         acp_agent_id: None,
                         favorite: Some(m.favorite),
+                        collaboration: None,
                     })
                     .collect()
             }
@@ -790,6 +875,7 @@ fn rail_rows(
                         profile_id: None,
                         acp_agent_id: Some(agent.id),
                         favorite: None,
+                        collaboration: None,
                     })
                     .collect()
             } else {
@@ -802,6 +888,7 @@ fn rail_rows(
                         profile_id: None,
                         acp_agent_id: Some(id.clone()),
                         favorite: None,
+                        collaboration: None,
                     })
                     .collect()
             }
@@ -863,6 +950,8 @@ fn render_model_pane(
     all_rows: Rc<[ModelRow]>,
     selected: &ModelMarks,
     rail: PickerRail,
+    // Whether the collaborations have a rail entry.
+    collaborations_rail: bool,
     // (id, name) of every installed+enabled ACP agent — one rail entry each.
     acp_agents: &[(String, String)],
     pending_restart: bool,
@@ -909,6 +998,15 @@ fn render_model_pane(
             rail == PickerRail::Favorites,
             PickerRail::Favorites,
         ));
+    if collaborations_rail {
+        rail_col = rail_col.item(rail_icon(
+            "rail-collaborations".into(),
+            crate::tr!("collaborations.rail").into_owned().into(),
+            Icon::empty().path("icons/users.svg"),
+            rail == PickerRail::Collaborations,
+            PickerRail::Collaborations,
+        ));
+    }
     // One entry per *enabled* native profile: every built-in plus any
     // user-created profiles whose switch is on. Each is its own rail.
     let profiles: Vec<(String, ProviderKind)> = {
@@ -945,6 +1043,9 @@ fn render_model_pane(
         ));
     }
     let show_source = rail == PickerRail::Favorites;
+    let lists_collaborations = rail == PickerRail::Collaborations;
+    // A window on the whole host writes collaborations; a space's member only runs them.
+    let writes_collaborations = lists_collaborations && store_entity.read(cx).scope().is_full();
     let rail = div()
         .id("model-provider-rail")
         .flex_none()
@@ -1053,6 +1154,7 @@ fn render_model_pane(
                     1 => crate::material::empty_row(
                         match &unlisted {
                             Some(error) => crate::tr!("composer.models_unlisted", error = error),
+                            None if lists_collaborations => crate::tr!("collaborations.empty"),
                             None => crate::tr!("composer.no_models"),
                         },
                         cx,
@@ -1090,17 +1192,38 @@ fn render_model_pane(
         .min_w_0()
         .min_h_0()
         .child(
-            div()
+            h_flex()
+                .items_center()
+                .gap_1()
                 .px_3()
                 .pt_2()
                 .pb_1()
                 .border_b_1()
                 .border_color(cx.theme().border)
                 .child(
-                    Input::new(model_search)
-                        .placeholder(crate::tr!("composer.search_models"))
-                        .appearance(false),
-                ),
+                    div().flex_1().min_w_0().child(
+                        Input::new(model_search)
+                            .placeholder(crate::tr!("composer.search_models"))
+                            .appearance(false),
+                    ),
+                )
+                .when(writes_collaborations, |header| {
+                    let (store, popover) = (store_entity.clone(), popover.clone());
+                    header.child(
+                        Button::new("collaboration-new")
+                            .debug_selector(|| "collaboration-new".into())
+                            .ghost()
+                            .xsmall()
+                            .touch(compact)
+                            .icon(IconName::Plus)
+                            .aria_label(crate::tr!("collaborations.new"))
+                            .tooltip(crate::tr!("collaborations.new"))
+                            .on_click(move |_, window, cx| {
+                                popover.update(cx, |state, cx| state.dismiss(window, cx));
+                                crate::collaboration_settings::open_plan(&store, None, window, cx);
+                            }),
+                    )
+                }),
         )
         .child(list);
     if let Some(note) = selected.note.clone() {
@@ -1323,9 +1446,16 @@ fn render_model_row(
     let is_pending = row.is_pending(selected);
     let name = row.name.clone();
     let provider = row.provider;
-    // Favorites holds the models of the native profiles.
+    // Favorites holds the models of the native profiles, and the collaborations.
     let favorite = row.favorite.zip(row.model.clone());
     let fav_profile_id = row.profile_id.clone();
+    let fav_collaboration = row.collaboration_id().map(str::to_owned);
+    // A window on the whole host writes collaborations; a space's member only runs them.
+    let edited = fav_collaboration
+        .clone()
+        .filter(|_| store_entity.read(cx).scope().is_full());
+    let store_edit = store_entity.clone();
+    let popover_edit = popover.clone();
     let selection = row.clone();
 
     let store_select = store_entity.clone();
@@ -1381,14 +1511,15 @@ fn render_model_row(
                             )
                         }),
                 )
-                .when(show_source, |this| {
+                .when(show_source || row.collaboration.is_some(), |this| {
                     // A third-party profile's row is attributed to that profile
                     // (its accent + display name), not the built-in provider.
                     let store = store_entity.read(cx);
                     let glyph = profile_glyph(store, row.provider, row.profile_id.as_deref());
-                    let label = match &row.profile_id {
-                        Some(id) => store.provider_profile_display_name(id).into(),
-                        None => gpui::SharedString::from(provider_label(row.provider)),
+                    let label = match (&row.collaboration, &row.profile_id) {
+                        (Some((_, summary)), _) => gpui::SharedString::from(summary.clone()),
+                        (None, Some(id)) => store.provider_profile_display_name(id).into(),
+                        (None, None) => gpui::SharedString::from(provider_label(row.provider)),
                     };
                     this.child(
                         h_flex()
@@ -1442,11 +1573,44 @@ fn render_model_row(
                         cx.stop_propagation();
                         let fav_id = fav_id.clone();
                         let fav_profile_id = fav_profile_id.clone();
-                        store_fav.update(cx, |store, cx| {
-                            store.toggle_favorite_model(provider, fav_profile_id, fav_id, cx)
+                        store_fav.update(cx, |store, cx| match &fav_collaboration {
+                            Some(id) => store.toggle_favorite_collaboration(id),
+                            None => {
+                                store.toggle_favorite_model(provider, fav_profile_id, fav_id, cx)
+                            }
                         });
                         // Refresh the open popover so the star + ordering update.
                         popover_fav.update(cx, |_, cx| cx.notify());
+                    }),
+            )
+        })
+        .when_some(edited, |this, id| {
+            this.child(
+                Button::new(("collaboration-edit", index))
+                    .debug_selector(move || format!("collaboration-edit-{index}"))
+                    .ghost()
+                    .xsmall()
+                    .touch(compact)
+                    .aria_label(crate::tr!("collaborations.dialog.edit"))
+                    .tooltip(crate::tr!("collaborations.dialog.edit"))
+                    .icon(Icon::new(IconName::Pencil).text_color(muted))
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        let Some(collaboration) = store_edit
+                            .read(cx)
+                            .settings_ref()
+                            .collaboration(&id)
+                            .cloned()
+                        else {
+                            return;
+                        };
+                        popover_edit.update(cx, |state, cx| state.dismiss(window, cx));
+                        crate::collaboration_settings::open_plan(
+                            &store_edit,
+                            Some(collaboration),
+                            window,
+                            cx,
+                        );
                     }),
             )
         })
@@ -2567,7 +2731,14 @@ fn folding_note(
 fn model_row_key(row: &ModelRow) -> u64 {
     use std::hash::{Hash as _, Hasher as _};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    (&row.model, &row.profile_id, &row.acp_agent_id, row.provider).hash(&mut hasher);
+    (
+        &row.model,
+        &row.profile_id,
+        &row.acp_agent_id,
+        row.provider,
+        row.collaboration_id(),
+    )
+        .hash(&mut hasher);
     hasher.finish()
 }
 

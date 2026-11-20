@@ -679,6 +679,15 @@ pub enum SettingsPatch {
     BrowserHomeUrl(Option<String>),
     BrowserAllowEvaluate(bool),
     ControlEnabled(bool),
+    /// The accounts and models a thread `tcode_control` starts may run.
+    ControlAgents(crate::control::AgentScope),
+    /// Add the collaboration, or replace the one of its id.
+    SaveCollaboration(crate::collaboration::Collaboration),
+    RemoveCollaboration {
+        id: String,
+    },
+    /// Write a model's usage guide; an empty text with no thread removes it.
+    ModelGuide(crate::collaboration::ModelGuide),
     SettlementAutomation(crate::control::SettlementAutomation),
     TitleGeneration(Option<TitleGenerationSettings>),
     SidebarLayout(SidebarLayout),
@@ -972,6 +981,13 @@ pub struct Settings {
         skip_serializing_if = "crate::control::ControlSettings::is_default"
     )]
     pub control: crate::control::ControlSettings,
+    /// The collaborations a thread can be run under, each a row of the model picker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collaborations: Vec<crate::collaboration::Collaboration>,
+    /// What is known of how each model is best used, given to a decision model with the
+    /// collaborators it may start.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_guides: Vec<crate::collaboration::ModelGuide>,
     #[serde(
         default,
         skip_serializing_if = "crate::control::SettlementAutomation::is_default"
@@ -1114,6 +1130,8 @@ impl Default for Settings {
             computer_use: ComputerUseSettings::default(),
             browser: BrowserSettings::default(),
             control: crate::control::ControlSettings::default(),
+            collaborations: Vec::new(),
+            model_guides: Vec::new(),
             settlement_automation: crate::control::SettlementAutomation::default(),
             title_generation: None,
             collapsed_projects: Vec::new(),
@@ -1140,6 +1158,19 @@ impl Settings {
         self.new_project_dir
             .as_deref()
             .unwrap_or(DEFAULT_NEW_PROJECT_DIR)
+    }
+
+    pub fn model_guide(
+        &self,
+        model: &crate::collaboration::ModelRef,
+    ) -> Option<&crate::collaboration::ModelGuide> {
+        self.model_guides.iter().find(|guide| &guide.model == model)
+    }
+
+    pub fn collaboration(&self, id: &str) -> Option<&crate::collaboration::Collaboration> {
+        self.collaborations
+            .iter()
+            .find(|collaboration| collaboration.id == id)
     }
 
     /// The folder Add Project's list opens on, `~` standing for the host's
@@ -1248,6 +1279,27 @@ impl Settings {
             SettingsPatch::BrowserHomeUrl(value) => self.browser.home_url = value,
             SettingsPatch::BrowserAllowEvaluate(value) => self.browser.allow_evaluate = value,
             SettingsPatch::ControlEnabled(value) => self.control.enabled = value,
+            SettingsPatch::ControlAgents(value) => self.control.agents = value,
+            SettingsPatch::SaveCollaboration(collaboration) => {
+                match self
+                    .collaborations
+                    .iter_mut()
+                    .find(|held| held.id == collaboration.id)
+                {
+                    Some(held) => *held = collaboration,
+                    None => self.collaborations.push(collaboration),
+                }
+            }
+            SettingsPatch::RemoveCollaboration { id } => {
+                self.collaborations
+                    .retain(|collaboration| collaboration.id != id);
+            }
+            SettingsPatch::ModelGuide(guide) => {
+                self.model_guides.retain(|held| held.model != guide.model);
+                if !guide.text.trim().is_empty() || guide.thread_id.is_some() {
+                    self.model_guides.push(guide);
+                }
+            }
             SettingsPatch::SettlementAutomation(value) => self.settlement_automation = value,
             SettingsPatch::TitleGeneration(value) => self.title_generation = value,
             SettingsPatch::SidebarLayout(value) => self.sidebar_layout = value,

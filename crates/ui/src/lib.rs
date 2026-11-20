@@ -8,6 +8,7 @@ mod attachments;
 mod attention;
 mod change_project_root_dialog;
 pub mod chat;
+mod collaboration_settings;
 mod commit_dialog;
 mod composer;
 mod composer_trigger;

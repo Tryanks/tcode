@@ -1387,6 +1387,7 @@ impl AppState {
             provider: meta.provider,
             requested_model: meta.model.clone(),
             requested_profile_id: meta.profile_id.clone(),
+            collaboration_id: meta.collaboration_id.clone(),
             acp_agent_id: meta.acp_agent_id.clone(),
             project_id: meta.project_id.clone(),
             background_tasks: session.background.statuses(&session.timeline),

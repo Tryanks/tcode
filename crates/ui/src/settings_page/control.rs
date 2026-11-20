@@ -1,7 +1,10 @@
 use super::*;
 use crate::control::ActivityDay;
+use crate::store::AgentChoice;
 use crate::widgets::radio::{RadioList, RadioOption};
 use gpui_base::StyledExt as _;
+use std::rc::Rc;
+use tcode_core::control::{AgentGrant, AgentScope, ModelGrant};
 use tcode_core::settings::ChildApprovalMode;
 use tcode_protocol::{ControlActivityEntry, ControlActivityFilter, ControlActivityPage};
 
@@ -30,6 +33,9 @@ pub(super) struct ControlSection {
     /// A page is the newest `limit` entries rather than the next ones, so a
     /// write arriving between two pages cannot shift one into the other.
     activity_limit: u32,
+    /// The search of each account's list of models to add, where the list is long enough
+    /// to want one, with what redraws the page as it is typed in.
+    agent_search: std::collections::HashMap<String, (Entity<InputState>, Subscription)>,
 }
 
 impl Default for ControlSection {
@@ -40,8 +46,209 @@ impl Default for ControlSection {
             activity_requested: false,
             activity_filter: ControlActivityFilter::default(),
             activity_limit: ACTIVITY_PAGE,
+            agent_search: Default::default(),
         }
     }
+}
+
+/// How far a capsule's cross reaches past its corner.
+const CROSS_OVERHANG: f32 = 5.;
+
+/// From how many models on an account's list of models to add has a search.
+const SEARCHED_FROM: usize = 9;
+
+impl AgentChoice {
+    /// What the choice lets be added one by one: its models, or for the ACP profile its
+    /// agents, each an id and a name.
+    fn items(&self) -> &[(String, String)] {
+        if self.acp() {
+            &self.acp_agents
+        } else {
+            &self.models
+        }
+    }
+
+    fn acp(&self) -> bool {
+        self.provider == agent::ProviderKind::Acp
+    }
+
+    /// The grant that holds all of it: for an account every model, those it lists later
+    /// included; for the ACP profile, the agents installed now.
+    fn whole(&self) -> AgentGrant {
+        AgentGrant {
+            profile_id: self.profile_id.clone(),
+            models: ModelGrant::Every,
+            acp_agents: self.acp_agents.iter().map(|(id, _)| id.clone()).collect(),
+        }
+    }
+
+    /// The grant that holds the items `ids` and no other.
+    fn only(&self, ids: Vec<String>) -> AgentGrant {
+        if self.acp() {
+            AgentGrant {
+                profile_id: self.profile_id.clone(),
+                models: ModelGrant::Every,
+                acp_agents: ids,
+            }
+        } else {
+            AgentGrant {
+                profile_id: self.profile_id.clone(),
+                models: ModelGrant::Only(ids),
+                acp_agents: Vec::new(),
+            }
+        }
+    }
+
+    /// The items `grant` names one by one, in the order they were added; none where it
+    /// holds every model.
+    fn added<'a>(&self, grant: &'a AgentGrant) -> &'a [String] {
+        match &grant.models {
+            _ if self.acp() => &grant.acp_agents,
+            ModelGrant::Only(models) => models,
+            ModelGrant::Every => &[],
+        }
+    }
+
+    /// Whether `grant` holds every model of the account, those it lists later included.
+    fn every_model(&self, grant: &AgentGrant) -> bool {
+        !self.acp() && grant.models == ModelGrant::Every
+    }
+}
+
+/// The grants a scope holds, one by one: every choice whole where it holds everything.
+fn held(scope: &AgentScope, choices: &[AgentChoice]) -> Vec<AgentGrant> {
+    match scope {
+        AgentScope::Every => choices.iter().map(AgentChoice::whole).collect(),
+        AgentScope::Only(grants) => grants.clone(),
+    }
+}
+
+/// The scope `grants` make: an account left with nothing added is not held, and with every
+/// choice whole the scope holds everything, accounts added later included.
+fn settled(grants: Vec<AgentGrant>, choices: &[AgentChoice]) -> AgentScope {
+    let choice = |grant: &AgentGrant| {
+        choices
+            .iter()
+            .find(|choice| choice.profile_id == grant.profile_id)
+    };
+    let grants: Vec<AgentGrant> = grants
+        .into_iter()
+        .filter(|grant| {
+            choice(grant)
+                .is_none_or(|choice| choice.every_model(grant) || !choice.added(grant).is_empty())
+        })
+        .collect();
+    let whole = choices.iter().all(|choice| {
+        grants
+            .iter()
+            .find(|grant| grant.profile_id == choice.profile_id)
+            .is_some_and(|grant| {
+                if choice.acp() {
+                    choice
+                        .acp_agents
+                        .iter()
+                        .all(|(id, _)| grant.acp_agents.contains(id))
+                } else {
+                    grant.models == ModelGrant::Every
+                }
+            })
+    });
+    if whole {
+        AgentScope::Every
+    } else {
+        AgentScope::Only(grants)
+    }
+}
+
+/// A model or agent an account holds: a capsule, with the cross that takes it out again.
+/// A pointer shows the cross over the capsule's corner while it is on the capsule; a touch
+/// layout, which has no hover, keeps it in the capsule. Out of sight the cross still takes
+/// a press, which is how a keyboard or an assistive tool reaches it.
+fn agent_pill(
+    id: SharedString,
+    label: String,
+    every: bool,
+    compact: bool,
+    remove: impl Fn(&mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let (bg, fg) = if every {
+        (theme.primary.opacity(0.12), theme.primary)
+    } else {
+        (theme.secondary, theme.foreground)
+    };
+    let cross = crate::material::accessible_clickable(
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(if compact { 18. } else { 15. }))
+            .rounded_full()
+            .bg(theme.muted_foreground)
+            .text_color(theme.background),
+        SharedString::from(format!("{id}-remove")),
+        Role::Button,
+        crate::tr!("control.agents.remove", name = label.as_str()).into_owned(),
+        cx,
+    )
+    .debug_selector({
+        let id = id.clone();
+        move || format!("{id}-remove")
+    })
+    .cursor_pointer()
+    .child(Icon::new(IconName::Close).xsmall())
+    .on_click(move |_, _, cx| {
+        cx.stop_propagation();
+        remove(cx)
+    });
+    let pill = gpui_base::h_flex()
+        .flex_none()
+        .items_center()
+        .gap_1p5()
+        .h(px(24.))
+        .px(px(10.))
+        .rounded_full()
+        .bg(bg)
+        .text_color(fg)
+        .text_secondary(compact, cx)
+        .when(every, |pill| pill.font_medium())
+        .child(label);
+    if compact {
+        return pill.pr(px(3.)).child(cross).into_any_element();
+    }
+    let (hovered, on_hover) = crate::motion::hovered(id.clone(), window, cx);
+    let shown = gpui_base::motion::transition(
+        (id.clone(), "remove-shown"),
+        if hovered { 1. } else { 0. },
+        gpui_base::motion::Transition::new(CHANGE),
+        window,
+        cx,
+    );
+    // The cross sits over the capsule's corner, half outside it. The capsule's hover takes
+    // that corner in, so the cross stays while the pointer is on it; the margins give the
+    // room back, leaving the capsule where it would be without it.
+    div()
+        .id(id)
+        .relative()
+        .flex_none()
+        .pt(px(CROSS_OVERHANG))
+        .pr(px(CROSS_OVERHANG))
+        .mt(px(-CROSS_OVERHANG))
+        .mr(px(-CROSS_OVERHANG))
+        .on_hover(on_hover)
+        .child(pill)
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .opacity(shown)
+                .child(cross),
+        )
+        .into_any_element()
 }
 
 impl ControlSection {
@@ -135,6 +342,7 @@ impl SettingsPage {
         );
         let below = v_flex()
             .gap(crate::material::section_gap(cx))
+            .child(self.control_agents_group(compact, window, cx))
             .child(self.subagent_group(compact, cx))
             .child(self.control_activity_group(compact, window, cx));
 
@@ -142,6 +350,391 @@ impl SettingsPage {
             .gap(crate::material::section_gap(cx))
             .child(crate::material::group(cx).child(enabled))
             .child(below.opacity(dim))
+    }
+
+    /// The accounts and models `tcode_control` may start a thread on. An account is a row;
+    /// what it lists is what a thread may be started on, each model a capsule its cross
+    /// takes out, and the plus beside the account adds to them.
+    fn control_agents_group(
+        &mut self,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let store = self.store.read(cx);
+        let scope = store.settings_ref().control.agents.clone();
+        let choices: Rc<[AgentChoice]> = store.agent_choices().into();
+        let grants: Rc<[AgentGrant]> = held(&scope, &choices).into();
+        let page = cx.entity();
+        // Hold `profile_id` as `grant`, or not at all.
+        let set = {
+            let (choices, grants, page) = (choices.clone(), grants.clone(), page.clone());
+            move |profile_id: &str, grant: Option<AgentGrant>, cx: &mut App| {
+                let mut grants: Vec<AgentGrant> = grants.to_vec();
+                match (
+                    grants
+                        .iter()
+                        .position(|other| other.profile_id == profile_id),
+                    grant,
+                ) {
+                    (Some(position), Some(grant)) => grants[position] = grant,
+                    (Some(position), None) => {
+                        grants.remove(position);
+                    }
+                    (None, Some(grant)) => grants.push(grant),
+                    (None, None) => {}
+                }
+                let scope = settled(grants, &choices);
+                page.update(cx, |page, cx| {
+                    page.dispatch_settings(move |store| store.set_control_agents(scope), cx)
+                })
+            }
+        };
+        let reset =
+            crate::settings_rows::reset_action("reset-control-agents", !scope.is_every(), {
+                let page = page.clone();
+                move |_, _, cx| {
+                    page.update(cx, |page, cx| {
+                        page.dispatch_settings(
+                            |store| store.set_control_agents(AgentScope::Every),
+                            cx,
+                        )
+                    })
+                }
+            });
+        for choice in choices.iter() {
+            if choice.items().len() >= SEARCHED_FROM
+                && !self.control.agent_search.contains_key(&choice.profile_id)
+            {
+                let search = cx.new(|cx| InputState::new(window, cx));
+                let typed = cx.subscribe(&search, |_, _, event, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        cx.notify();
+                    }
+                });
+                self.control
+                    .agent_search
+                    .insert(choice.profile_id.clone(), (search, typed));
+            }
+        }
+        let rows: Vec<AnyElement> = choices
+            .iter()
+            .map(|choice| {
+                let grant = grants
+                    .iter()
+                    .find(|grant| grant.profile_id == choice.profile_id)
+                    .cloned();
+                let every = grant
+                    .as_ref()
+                    .is_some_and(|grant| choice.every_model(grant));
+                let added: Vec<String> = grant
+                    .as_ref()
+                    .map(|grant| choice.added(grant).to_vec())
+                    .unwrap_or_default();
+                let glyph = crate::provider_card::profile_glyph(
+                    self.store.read(cx),
+                    choice.provider,
+                    Some(&choice.profile_id),
+                );
+                let mut pills: Vec<AnyElement> = Vec::new();
+                if every {
+                    let (set, profile_id) = (set.clone(), choice.profile_id.clone());
+                    pills.push(agent_pill(
+                        SharedString::from(format!("control-agent-{}-every", choice.profile_id)),
+                        crate::tr!("control.agents.every_model").into_owned(),
+                        true,
+                        compact,
+                        move |cx| set(&profile_id, None, cx),
+                        window,
+                        cx,
+                    ));
+                }
+                for id in &added {
+                    let name = choice
+                        .items()
+                        .iter()
+                        .find(|(item, _)| item == id)
+                        .map_or_else(|| id.clone(), |(_, name)| name.clone());
+                    let rest: Vec<String> =
+                        added.iter().filter(|other| *other != id).cloned().collect();
+                    let (set, choice) = (set.clone(), choice.clone());
+                    pills.push(agent_pill(
+                        SharedString::from(format!("control-agent-{}-{id}", choice.profile_id)),
+                        name,
+                        false,
+                        compact,
+                        move |cx| set(&choice.profile_id, Some(choice.only(rest.clone())), cx),
+                        window,
+                        cx,
+                    ));
+                }
+                let listed = if pills.is_empty() {
+                    div()
+                        .pt(cx.theme().tokens.spacing.xs)
+                        .text_secondary(compact, cx)
+                        .child(crate::tr!("control.agents.none"))
+                        .into_any_element()
+                } else {
+                    gpui_base::h_flex()
+                        .w_full()
+                        .flex_wrap()
+                        .gap_2()
+                        .pt(cx.theme().tokens.spacing.sm)
+                        .children(pills)
+                        .into_any_element()
+                };
+                let selector = format!("control-agent-{}", choice.profile_id);
+                v_flex()
+                    .debug_selector(move || selector.clone())
+                    .w_full()
+                    .px(px(crate::material::CARD_INSET))
+                    .py(px(10.))
+                    .child(
+                        gpui_base::h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_center()
+                            .child(div().flex_none().text_body(compact, cx).child(glyph))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_body(compact, cx)
+                                    .child(crate::widgets::fade_text(choice.name.clone())),
+                            )
+                            .child(self.control_agent_add(choice, every, set.clone(), cx)),
+                    )
+                    .child(listed)
+                    .into_any_element()
+            })
+            .collect();
+        v_flex()
+            .child(
+                gpui_base::h_flex()
+                    .items_center()
+                    .child(crate::material::group_caption(
+                        crate::tr!("control.agents.section"),
+                        cx,
+                    ))
+                    .child(reset),
+            )
+            .child(crate::material::grouped(rows, cx))
+            .child(crate::settings_rows::footnote(
+                crate::tr!("control.agents.footnote"),
+                compact,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// The plus beside an account: the list of what it does not hold yet, which stays open
+    /// as its rows are taken one by one, until a click beside it or on the plus again.
+    fn control_agent_add(
+        &self,
+        choice: &AgentChoice,
+        every: bool,
+        set: impl Fn(&str, Option<AgentGrant>, &mut App) + Clone + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let profile_id = choice.profile_id.clone();
+        let selector = format!("control-agent-add-{profile_id}");
+        let trigger = Button::new(SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
+            .ghost()
+            .outline()
+            .xsmall()
+            .icon(IconName::Plus)
+            .aria_label(crate::tr!(
+                "control.agents.add",
+                name = choice.name.as_str()
+            ))
+            .tooltip(if every {
+                crate::tr!("control.agents.every_model_held")
+            } else {
+                crate::tr!("control.agents.add", name = choice.name.as_str())
+            })
+            .disabled(every);
+        if every {
+            return trigger.into_any_element();
+        }
+        let (choice, store) = (choice.clone(), self.store.clone());
+        let search = self
+            .control
+            .agent_search
+            .get(&profile_id)
+            .map(|(search, _)| search.clone());
+        crate::material::overlay_popover(
+            SharedString::from(format!("control-agent-add-popover-{profile_id}")),
+            cx,
+        )
+        .anchor(gpui::Anchor::TopRight)
+        .trigger(trigger)
+        .content(move |_, window, cx| {
+            // The list is of what the settings hold now, so a row taken here leaves it.
+            let grant = held(
+                &store.read(cx).settings_ref().control.agents,
+                std::slice::from_ref(&choice),
+            )
+            .into_iter()
+            .find(|grant| grant.profile_id == choice.profile_id);
+            let added: Vec<String> = grant
+                .as_ref()
+                .map(|grant| choice.added(grant).to_vec())
+                .unwrap_or_default();
+            let left: Vec<(String, String)> = choice
+                .items()
+                .iter()
+                .filter(|(id, _)| !added.contains(id))
+                .cloned()
+                .collect();
+            let query = search
+                .as_ref()
+                .map(|search| search.read(cx).value().to_lowercase())
+                .unwrap_or_default();
+            let popover = cx.entity();
+            let row = |index: usize,
+                       label: String,
+                       detail: Option<String>,
+                       accent: bool,
+                       then_close: bool,
+                       next: AgentGrant| {
+                let (set, popover, profile_id) =
+                    (set.clone(), popover.clone(), choice.profile_id.clone());
+                crate::material::accessible_clickable(
+                    crate::material::menu_item_frame(false, crate::material::ItemFill::Hover, cx),
+                    ("control-agent-add-row", index),
+                    Role::MenuItem,
+                    label.clone(),
+                    cx,
+                )
+                .debug_selector(move || format!("control-agent-add-row-{index}"))
+                .flex_none()
+                .w_full()
+                .items_center()
+                .text_body(false, cx)
+                .cursor_pointer()
+                .when(accent, |row| row.text_color(cx.theme().primary))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .overflow_hidden()
+                                .child(crate::widgets::fade_text(label)),
+                        )
+                        .children(detail.map(|detail| {
+                            div()
+                                .overflow_hidden()
+                                .text_meta_mono(false, cx)
+                                .child(crate::widgets::fade_text(detail))
+                        })),
+                )
+                .when(!then_close, |row| {
+                    row.child(Icon::new(IconName::Plus).text_color(cx.theme().muted_foreground))
+                })
+                .on_click(move |_, window, cx| {
+                    set(&profile_id, Some(next.clone()), cx);
+                    popover.update(cx, |state, cx| {
+                        if then_close {
+                            state.dismiss(window, cx);
+                        } else {
+                            cx.notify();
+                        }
+                    });
+                })
+                .into_any_element()
+            };
+            let mut head = Vec::new();
+            if !choice.acp() {
+                head.push(row(
+                    0,
+                    crate::tr!("control.agents.use_every_model").into_owned(),
+                    Some(crate::tr!("control.agents.use_every_model_description").into_owned()),
+                    true,
+                    true,
+                    choice.whole(),
+                ));
+            }
+            if !left.is_empty() {
+                let all = added
+                    .iter()
+                    .cloned()
+                    .chain(left.iter().map(|(id, _)| id.clone()))
+                    .collect();
+                head.push(row(
+                    1,
+                    crate::tr!("control.agents.add_all", count = left.len().to_string())
+                        .into_owned(),
+                    None,
+                    false,
+                    false,
+                    choice.only(all),
+                ));
+            }
+            let matching: Vec<AnyElement> = left
+                .iter()
+                .filter(|(_, name)| query.is_empty() || name.to_lowercase().contains(&query))
+                .enumerate()
+                .map(|(index, (id, name))| {
+                    let mut ids = added.clone();
+                    ids.push(id.clone());
+                    row(
+                        index + 2,
+                        name.clone(),
+                        (!choice.acp()).then(|| id.clone()),
+                        false,
+                        false,
+                        choice.only(ids),
+                    )
+                })
+                .collect();
+            let none = matching.is_empty().then(|| {
+                crate::material::empty_row(
+                    if left.is_empty() {
+                        crate::tr!("control.agents.all_added")
+                    } else {
+                        crate::tr!("control.agents.no_match")
+                    },
+                    cx,
+                )
+            });
+            v_flex()
+                .w(crate::sizing::fit_viewport(
+                    280.,
+                    window.viewport_size().width,
+                ))
+                .children(search.as_ref().map(|search| {
+                    div()
+                        .px_3()
+                        .pt_2()
+                        .pb_1()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            Input::new(search)
+                                .placeholder(crate::tr!("control.agents.search"))
+                                .appearance(false),
+                        )
+                }))
+                .child(v_flex().p_1().gap_0p5().children(head))
+                .child(crate::material::faded_hairline(cx))
+                .child(
+                    v_flex()
+                        .id("control-agent-add-list")
+                        .max_h(crate::sizing::fit_viewport(
+                            260.,
+                            window.viewport_size().height,
+                        ))
+                        .overflow_y_scroll()
+                        .p_1()
+                        .gap_0p5()
+                        .children(matching)
+                        .children(none),
+                )
+                .into_any_element()
+        })
+        .into_any_element()
     }
 
     /// How `start_thread` with `subagent: true` starts a subagent.

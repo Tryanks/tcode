@@ -52,14 +52,17 @@ pub enum ControlOp {
     DeleteThreads(DeleteThreadsParams),
     Rewind(RewindParams),
     PatchSettings(PatchSettingsParams),
+    SetModelGuide(SetModelGuideParams),
 }
 
 /// What decides which tools a thread is offered: whether threads are given `tcode_control`
-/// at all, and whether another thread started this one as a subagent.
+/// at all, whether another thread started this one as a subagent, and whether the user
+/// opened it to research a model's guide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadAccess {
     pub enabled: bool,
     pub subagent: bool,
+    pub model_guide: bool,
 }
 
 impl ThreadAccess {
@@ -67,17 +70,24 @@ impl ThreadAccess {
         Self {
             enabled: false,
             subagent: false,
+            model_guide: false,
         }
     }
 
-    /// Every tool, and `report_result` only for a subagent: its one channel to the thread
-    /// that started it.
+    /// Every tool, but `report_result` only for a subagent, its one channel to the thread
+    /// that started it, and `set_model_guide` only for the thread that researches a guide.
     pub fn offers(&self, tool: &str) -> bool {
-        self.enabled && (tool != REPORT_RESULT || self.subagent)
+        self.enabled
+            && match tool {
+                REPORT_RESULT => self.subagent,
+                SET_MODEL_GUIDE => self.model_guide,
+                _ => true,
+            }
     }
 }
 
 const REPORT_RESULT: &str = "report_result";
+const SET_MODEL_GUIDE: &str = "set_model_guide";
 
 impl ControlOp {
     pub fn tool_name(&self) -> &'static str {
@@ -114,6 +124,7 @@ impl ControlOp {
             Self::DeleteThreads(_) => "delete_threads",
             Self::Rewind(_) => "rewind",
             Self::PatchSettings(_) => "patch_settings",
+            Self::SetModelGuide(_) => SET_MODEL_GUIDE,
         }
     }
 
@@ -180,6 +191,7 @@ impl ControlOp {
             | Self::CreateProject(_)
             | Self::CancelNotify(_)
             | Self::PatchSettings(_)
+            | Self::SetModelGuide(_)
             | Self::ReportResult(_) => Vec::new(),
         }
     }
@@ -218,6 +230,7 @@ impl ControlOp {
             | Self::CreateProject(_)
             | Self::CancelNotify(_)
             | Self::PatchSettings(_)
+            | Self::SetModelGuide(_)
             | Self::ReportResult(_) => Vec::new(),
         };
         for id in ids {

@@ -34,6 +34,7 @@ fn every_tool() -> Vec<String> {
     control_mcp::tool_descriptions(&control_mcp::ThreadAccess {
         enabled: true,
         subagent: false,
+        model_guide: false,
     })
     .into_iter()
     .map(|(name, _)| name)

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use agent::FileChange;
 use serde::{Deserialize, Serialize};
+pub use tcode_core::control::{AgentAccess, AgentGrant, AgentScope, ModelGrant};
 
 /// Which `tcode_control` writes a [`Query::ControlActivity`] asks for.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,6 +196,8 @@ pub enum Query {
         limit: u32,
         filter: ControlActivityFilter,
     },
+    /// The mandates collaborations are written from, as the host holds them.
+    CollaborationTemplates,
     /// The MCP servers a profile's harness is configured with in its own files.
     NativeMcpServers {
         profile_id: String,
@@ -277,6 +280,7 @@ pub enum QueryResponse {
     ThreadTurnMarks(Vec<tcode_core::turn_marks::TurnMark>),
     ArchivedSessions(crate::ArchivedSessions),
     ControlActivity(ControlActivityPage),
+    CollaborationTemplates(tcode_core::collaboration::Templates),
     NativeMcpServers(Vec<agent::NativeMcpServer>),
     PullRequest {
         response: Box<crate::PullRequestReadResponse>,
@@ -587,7 +591,7 @@ pub struct SpaceInfo {
 /// machine's account, from which none of it binds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpacePolicy {
-    pub agents: SpaceAgents,
+    pub agents: AgentScope,
     pub approval: SpaceApproval,
     /// Open, type into and restart terminals.
     pub terminals: bool,
@@ -607,7 +611,7 @@ impl SpacePolicy {
     /// without one keeps.
     pub fn unrestricted() -> Self {
         Self {
-            agents: SpaceAgents::Every,
+            agents: AgentScope::Every,
             approval: SpaceApproval::Any,
             terminals: true,
             git_remote: true,
@@ -621,7 +625,7 @@ impl SpacePolicy {
     /// approvals, and nothing beyond its threads.
     pub fn new_space() -> Self {
         Self {
-            agents: SpaceAgents::Only(Vec::new()),
+            agents: AgentScope::Only(Vec::new()),
             approval: SpaceApproval::NoUnrestricted,
             terminals: false,
             git_remote: false,
@@ -633,13 +637,7 @@ impl SpacePolicy {
 
     /// The grant for `profile_id`, when members may run that profile at all.
     pub fn agent(&self, profile_id: &str) -> Option<AgentAccess<'_>> {
-        match &self.agents {
-            SpaceAgents::Every => Some(AgentAccess::Every),
-            SpaceAgents::Only(grants) => grants
-                .iter()
-                .find(|grant| grant.profile_id == profile_id)
-                .map(AgentAccess::Granted),
-        }
+        self.agents.agent(profile_id)
     }
 
     /// Whether `provider` can run under this policy at all: it has a
@@ -669,34 +667,6 @@ impl SpacePolicy {
     }
 }
 
-/// The agents a space's members may run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "content", rename_all = "snake_case")]
-pub enum SpaceAgents {
-    /// Every enabled account profile and model, including ones added later.
-    Every,
-    /// Only these profiles; one added later is not among them.
-    Only(Vec<AgentGrant>),
-}
-
-/// One account profile a space's members may run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentGrant {
-    pub profile_id: String,
-    pub models: ModelGrant,
-    /// For the ACP profile, the registry ids of the agents members may run.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub acp_agents: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "content", rename_all = "snake_case")]
-pub enum ModelGrant {
-    /// Every model the profile offers, including ones it offers later.
-    Every,
-    Only(Vec<String>),
-}
-
 /// How a member's turn may settle what its harness would stop to ask.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -710,36 +680,6 @@ pub enum SpaceApproval {
     /// still asks during a member's turn is declined at once, and members
     /// answer no approval but leaving plan mode.
     ReviewedOnly,
-}
-
-/// What [`SpacePolicy::agent`] found for one profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentAccess<'a> {
-    Every,
-    Granted(&'a AgentGrant),
-}
-
-impl AgentAccess<'_> {
-    pub fn allows_model(&self, model: Option<&str>) -> bool {
-        match self {
-            Self::Every => true,
-            Self::Granted(grant) => match &grant.models {
-                ModelGrant::Every => true,
-                ModelGrant::Only(models) => {
-                    model.is_some_and(|model| models.iter().any(|allowed| allowed == model))
-                }
-            },
-        }
-    }
-
-    pub fn allows_acp_agent(&self, agent: Option<&str>) -> bool {
-        match self {
-            Self::Every => true,
-            Self::Granted(grant) => {
-                agent.is_some_and(|agent| grant.acp_agents.iter().any(|allowed| allowed == agent))
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

@@ -1950,6 +1950,7 @@ fn session_status(session: &str, cwd: &std::path::Path) -> tcode_protocol::Sessi
         provider: agent::ProviderKind::ClaudeCode,
         requested_model: None,
         requested_profile_id: None,
+        collaboration_id: None,
         acp_agent_id: None,
         project_id: None,
         queued_messages: Vec::new(),

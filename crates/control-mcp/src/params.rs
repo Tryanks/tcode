@@ -683,6 +683,14 @@ pub struct PatchSettingsParams {
     pub patch: serde_json::Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SetModelGuideParams {
+    #[schemars(
+        description = "The guide, in English: what work to give the model and what to keep from it, how to brief it, which options to start it with, and the sources it rests on."
+    )]
+    pub guide: String,
+}
+
 // ---- observe responses ----
 
 /// The keys `get_thread` and `review_candidates` name in a settlement explanation, one per

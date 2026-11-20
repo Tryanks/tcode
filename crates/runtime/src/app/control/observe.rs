@@ -5,7 +5,9 @@ use control_mcp::{
     ListProjectsParams, ListProvidersParams, ListThreadsParams, ReadTerminalParams,
     ReviewCandidatesParams, SearchParams, ThreadState, settlement_reason as reason,
 };
-use tcode_core::control::{FollowUp, SettlementAutomation, StartedBy};
+use tcode_core::control::{
+    AgentAccess, AgentGrant, FollowUp, ModelGrant, SettlementAutomation, StartedBy,
+};
 use tcode_core::pull_request::{PullRequestKey, PullRequestState, ThreadPullRequestLink};
 use tcode_core::settings::provider_key;
 use tcode_services::session_search::{SearchFilter, SearchKind, ThreadHits};
@@ -285,6 +287,10 @@ struct ProfileRow {
     env_names: Vec<String>,
     custom_models: Vec<String>,
     hidden_models: Vec<String>,
+    /// The only models `tcode_control` may start a thread on with this profile, where
+    /// Settings → Control names them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    startable_models: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1234,6 +1240,7 @@ impl AppState {
         _cx: &mut HostCx,
     ) -> Result<serde_json::Value, String> {
         let status = self.providers_status_snapshot();
+        let control_agents = &self.settings.control.agents;
         let providers: Vec<ProviderRow> = ProviderKind::NATIVE
             .into_iter()
             .chain([ProviderKind::Acp])
@@ -1283,6 +1290,7 @@ impl AppState {
                                 .space
                                 .as_ref()
                                 .is_none_or(|space| space.policy.agent(&profile.id).is_some())
+                                && control_agents.agent(&profile.id).is_some()
                         })
                         .map(|profile| ProfileRow {
                             display_name: self.profile_display_name(&profile.id),
@@ -1297,6 +1305,13 @@ impl AppState {
                                 .collect(),
                             custom_models: profile.settings.custom_models.clone(),
                             hidden_models: profile.settings.hidden_models.clone(),
+                            startable_models: match control_agents.agent(&profile.id) {
+                                Some(AgentAccess::Granted(AgentGrant {
+                                    models: ModelGrant::Only(models),
+                                    ..
+                                })) => Some(models.clone()),
+                                _ => None,
+                            },
                             id: profile.id,
                         })
                         .collect(),
@@ -1306,6 +1321,11 @@ impl AppState {
                             .values()
                             .filter(|agent| {
                                 agent.offered_for_new_sessions()
+                                    && control_agents
+                                        .agent(Settings::builtin_profile_id(ProviderKind::Acp))
+                                        .is_some_and(|access| {
+                                            access.allows_acp_agent(Some(&agent.id))
+                                        })
                                     && caller.space.as_ref().is_none_or(|space| {
                                         space
                                             .policy
@@ -1327,7 +1347,9 @@ impl AppState {
                     },
                 }
             })
-            .filter(|row| caller.space.is_none() || !row.profiles.is_empty())
+            .filter(|row| {
+                (caller.space.is_none() && control_agents.is_every()) || !row.profiles.is_empty()
+            })
             .collect();
         Ok(serde_json::json!({ "providers": to_value(&providers)? }))
     }

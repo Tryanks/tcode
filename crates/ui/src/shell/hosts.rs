@@ -1209,6 +1209,9 @@ impl AppShell {
         }
         if shown.asked {
             self.moved_on(cx);
+            // A thread asked for from the settings is what the window shows next.
+            self.window_state
+                .update(cx, |state, cx| state.close_settings(cx));
         }
         let thread = store.read(cx).thread_key(&shown.session_id);
         if self.compact(cx) {

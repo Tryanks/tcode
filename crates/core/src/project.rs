@@ -227,6 +227,14 @@ pub struct SessionMeta {
     /// absent in every index file written before ACP existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_agent_id: Option<String>,
+    /// The collaboration the thread runs under, by its id in settings: its model is the collaboration's
+    /// decision model, told the collaboration through the provider's instruction channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collaboration_id: Option<String>,
+    /// The model whose guide the user opened this thread to research: the thread alone is
+    /// given the tool that writes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guide_for: Option<crate::collaboration::ModelRef>,
     /// The thread that started this one as its subagent, or whose provider-native subagent
     /// this mirrors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -460,6 +468,8 @@ impl SessionMeta {
             imported_from: None,
             option_selections: Vec::new(),
             acp_agent_id: None,
+            collaboration_id: None,
+            guide_for: None,
             parent_session_id: None,
             native_subagent: None,
             cancelled_at: None,
