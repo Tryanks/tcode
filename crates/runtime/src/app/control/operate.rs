@@ -1,9 +1,7 @@
 use std::pin::Pin;
 
 use super::*;
-use crate::app::orchestrate::{
-    native_provider_named, resolve_child_permission, resolve_child_worktree,
-};
+use crate::app::orchestrate::{provider_named, resolve_child_permission, resolve_child_worktree};
 use crate::app::sessions::{directory_within, fork_refusal, read_attachments};
 use control_mcp::{
     ActionResponse, BatchResponse, BatchResult, ControlThreadParams, ControlThreadResponse,
@@ -354,17 +352,45 @@ impl AppState {
             Some(workspace) => workspace == Workspace::Worktree,
             None => subagent && self.settings.subagents.child_worktrees,
         };
-        let provider = native_provider_named(&params.provider).ok_or_else(|| {
+        let provider = provider_named(&params.provider).ok_or_else(|| {
             format!(
-                "unknown provider: {}; start_thread starts the native providers list_providers lists",
+                "unknown provider: {}; start_thread starts any provider list_providers lists",
                 params.provider.trim()
             )
         })?;
+        let acp_agent_id = params
+            .acp_agent
+            .map(|id| id.trim().to_owned())
+            .filter(|id| !id.is_empty());
+        if provider == ProviderKind::Acp {
+            let Some(id) = acp_agent_id.as_deref() else {
+                return Err(
+                    "acp_agent is required when provider is acp; pass an installed agent id from list_providers"
+                        .into(),
+                );
+            };
+            let Some(agent) = self.settings.acp_agent(id) else {
+                return Err(format!("unknown acp_agent: {id}"));
+            };
+            if !agent.enabled {
+                return Err(format!("acp_agent {id} is disabled"));
+            }
+            if !agent.offered_for_new_sessions() {
+                return Err(format!(
+                    "acp_agent {id} duplicates a native provider; use that native provider instead"
+                ));
+            }
+        } else if acp_agent_id.is_some() {
+            return Err("acp_agent is only valid when provider is acp".into());
+        }
         let profile_id = params
             .profile
             .map(|id| id.trim().to_owned())
             .filter(|id| !id.is_empty() && !Settings::is_builtin_profile_id(id));
         if let Some(id) = &profile_id {
+            if provider == ProviderKind::Acp {
+                return Err("profile is not valid when provider is acp".into());
+            }
             match self.settings.resolved_profile(id) {
                 None => return Err(format!("unknown profile: {id}")),
                 Some(profile) if profile.kind != provider => {
@@ -400,9 +426,16 @@ impl AppState {
             .model
             .map(|model| model.trim().to_owned())
             .filter(|model| !model.is_empty());
+        if provider == ProviderKind::Acp && model.is_some() {
+            return Err(
+                "model is not supported for acp; pass options: {\"acp:model\": \"...\"} instead"
+                    .into(),
+            );
+        }
         let mut meta = SessionMeta::new(provider, cwd, model);
         meta.project_id = Some(project.id.clone());
         meta.profile_id = profile_id;
+        meta.acp_agent_id = acp_agent_id;
         if let Some(title) = params
             .title
             .map(|title| title.trim().to_owned())

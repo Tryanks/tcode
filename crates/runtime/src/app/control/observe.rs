@@ -1304,6 +1304,17 @@ impl AppState {
                         self.settings
                             .acp_agents
                             .values()
+                            .filter(|agent| {
+                                agent.offered_for_new_sessions()
+                                    && caller.space.as_ref().is_none_or(|space| {
+                                        space
+                                            .policy
+                                            .agent(Settings::builtin_profile_id(ProviderKind::Acp))
+                                            .is_some_and(|access| {
+                                                access.allows_acp_agent(Some(&agent.id))
+                                            })
+                                    })
+                            })
                             .map(|agent| AcpAgentRow {
                                 id: agent.id.clone(),
                                 name: agent.name.clone(),
