@@ -30,7 +30,7 @@ jobs:
   linux-clippy:
     name: Linux x64 / clippy
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps: &clippy-steps
       - &checkout
@@ -62,12 +62,6 @@ jobs:
         name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |
-          # The Azure mirror has delivered packages at ~65 kB/s on these runners.
-          for source in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/apt-mirrors.txt; do
-            if [[ -f "$source" ]]; then
-              sudo sed -i 's|http://azure\.archive\.ubuntu\.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "$source"
-            fi
-          done
           apt_get=(sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3)
           "${apt_get[@]}" update
           "${apt_get[@]}" install -y --no-install-recommends \
@@ -126,7 +120,7 @@ jobs:
   linux-tests:
     name: Linux x64 / tests
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps: &test-steps
       - *checkout
@@ -226,7 +220,7 @@ jobs:
     name: Linux x64
     needs: [linux-clippy, linux-tests]
     if: ${{ always() && !github.event.pull_request.draft }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps: &require-platform
       - name: Require the platform's Clippy and tests
@@ -238,7 +232,7 @@ jobs:
     name: macOS arm64
     needs: [macos-clippy, macos-tests]
     if: ${{ always() && !github.event.pull_request.draft }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps: *require-platform
 
@@ -246,14 +240,14 @@ jobs:
     name: Windows x64
     needs: [windows-clippy, windows-tests]
     if: ${{ always() && !github.event.pull_request.draft }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps: *require-platform
 
   dependencies:
     name: Dependency hygiene
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -293,7 +287,7 @@ jobs:
   android:
     name: Android
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       RUSTFLAGS: -D warnings
@@ -340,7 +334,7 @@ jobs:
   web:
     name: Web
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       RUSTFLAGS: -D warnings

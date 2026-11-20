@@ -362,11 +362,18 @@ pub struct StartThreadParams {
     )]
     pub subagent: Option<bool>,
     #[schemars(
-        description = "Provider name as list_providers lists it, for example claude or codex."
+        description = "Provider name as list_providers lists it, for example claude, codex or acp."
     )]
     pub provider: String,
     #[serde(default)]
-    #[schemars(description = "Model id from list_providers; omit for the provider's default.")]
+    #[schemars(
+        description = "Installed ACP agent id from list_providers' acp_agents (for example custom:antigravity); required when provider is acp and refused for native providers."
+    )]
+    pub acp_agent: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Model id from list_providers; omit for the provider's default. Refused when provider is acp; pass options: {\"acp:model\": \"...\"} instead."
+    )]
     pub model: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -375,7 +382,7 @@ pub struct StartThreadParams {
     pub profile: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Provider option id → value, as list_providers describes them. The permission mode is not settable: the project's default applies, or for a subagent the one Settings → Control subagent approvals chooses."
+        description = "Provider option id → value, as list_providers describes them (for acp, pass acp:model for the model and acp:cfg:<id> for agent config options). The permission mode is not settable: the project's default applies, or for a subagent the one Settings → Control subagent approvals chooses."
     )]
     pub options: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]

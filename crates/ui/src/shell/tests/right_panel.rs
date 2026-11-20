@@ -127,9 +127,8 @@ fn opening_the_right_panel_keeps_the_reader_at_the_message_they_were_at(cx: &mut
 }
 
 /// The right panel comes back to the width the user chose by dragging
-/// its edge after the window narrows and widens again, after a sidebar
-/// drag, and after it was expanded to everything beside the sidebar and
-/// dragged there. In a narrow window the close button closes the panel.
+/// its edge after the window narrows and widens again, and to its own
+/// width once that edge is double clicked.
 #[gpui::test]
 fn the_right_panel_keeps_the_width_the_user_dragged_it_to(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -174,6 +173,29 @@ fn the_right_panel_keeps_the_width_the_user_dragged_it_to(cx: &mut TestAppContex
     assert!(chosen < panel.size.width, "the edge shrinks the panel");
     width_at(cx, 900.);
     assert_eq!(width_at(cx, 1600.), chosen, "after the window narrowed");
+
+    // A double click on the edge gives the panel its own width back.
+    let edge = gpui::point(cx.debug_bounds("right-panel").unwrap().left(), px(400.));
+    for click_count in [1, 2] {
+        cx.simulate_event(gpui::MouseDownEvent {
+            button: MouseButton::Left,
+            position: edge,
+            click_count,
+            ..Default::default()
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            button: MouseButton::Left,
+            position: edge,
+            click_count,
+            ..Default::default()
+        });
+        draw(cx);
+    }
+    assert_eq!(
+        width_at(cx, 1600.),
+        panel.size.width,
+        "after a double click on its edge"
+    );
 }
 
 /// A docked right panel leaves the keyboard where it was as it opens. A

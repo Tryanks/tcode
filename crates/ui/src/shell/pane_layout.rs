@@ -499,6 +499,48 @@ impl AppShell {
         }
     }
 
+    /// Share the split whose handle is at `at`, along `axis`, evenly among
+    /// its slots, which is how the column divides before any drag.
+    pub(super) fn even_split(
+        &mut self,
+        axis: gpui::Axis,
+        at: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(column) = self.column.as_mut() else {
+            return;
+        };
+        let area = column.thread_panes.clone();
+        let (tree, size) = {
+            let area = area.read(cx);
+            (
+                area.layout(DockPlacement::Center).cloned(),
+                area.bounds().size,
+            )
+        };
+        let Some(tree) = tree else {
+            return;
+        };
+        let panes = column.all_panes(cx);
+        let painted = |panel| {
+            panes
+                .iter()
+                .find(|pane| PanelId::from(pane.entity_id()) == panel)
+                .map(|pane| pane.read(cx).bounds())
+        };
+        let Some(split) = crate::panes::held_split(tree.root(), axis, at, &painted) else {
+            return;
+        };
+        let Some(sizes) = column.glides.even(&tree, size, split) else {
+            return;
+        };
+        column.glides.stop(split);
+        area.update(cx, |area, cx| {
+            area.set_split_sizes(split, sizes, window, cx)
+        });
+    }
+
     /// Land every glide at once and take out the panes closing, for an edit
     /// that does not divide what they leave: a zoom, a layout put in.
     pub(super) fn land_glides(&mut self, window: &mut Window, cx: &mut Context<Self>) {

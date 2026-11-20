@@ -592,7 +592,7 @@ impl AppState {
                 refused("cannot start a thread outside the space's projects")
             }
             ControlOp::StartThread(params) => {
-                let provider = super::orchestrate::native_provider_named(&params.provider)
+                let provider = super::orchestrate::provider_named(&params.provider)
                     .ok_or_else(|| format!("unknown provider: {}", params.provider.trim()))?;
                 let profile = params
                     .profile

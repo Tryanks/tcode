@@ -503,6 +503,17 @@ impl AppShell {
         let palette = self.palette.clone();
         let group = h_resizable("workspace-panels")
             .with_state(&split)
+            .with_handle_appearance(crate::widgets::handle_reset::appearance({
+                let (split, remembered_sidebar) = (split.clone(), remembered_sidebar.clone());
+                move |_, window, cx| {
+                    if collapsed {
+                        return;
+                    }
+                    let width = px(SIDEBAR_WIDTH);
+                    split.update(cx, |state, cx| state.resize_panel(0, width, window, cx));
+                    remembered_sidebar.set(width);
+                }
+            }))
             .on_resize(move |state, _, cx| {
                 if !collapsed && let Some(size) = state.read(cx).sizes().first() {
                     remembered_sidebar.set(*size);

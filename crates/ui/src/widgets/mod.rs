@@ -9,6 +9,7 @@ pub(crate) mod clock;
 mod collapsible;
 pub(crate) mod copy;
 mod fade_text;
+pub(crate) mod handle_reset;
 pub mod input;
 pub mod kbd;
 pub mod menu;
