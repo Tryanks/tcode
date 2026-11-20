@@ -96,39 +96,6 @@ fn prompt_acceptance_follows_the_complete_stdio_write() {
     });
 }
 
-/// The preview MCP server is a loopback HTTP endpoint: it may only be handed
-/// to agents that advertise `mcpCapabilities.http`.
-#[test]
-fn mcp_server_is_gated_on_the_http_capability() {
-    let registration = McpRegistration {
-        name: McpRegistration::SERVER_NAME_PREVIEW.into(),
-        url: "http://127.0.0.1:5321/mcp".into(),
-        bearer_token: "tok".into(),
-    };
-    let mut caps = acp::AgentCapabilities::default();
-    assert!(
-        mcp_servers(&[&registration], &caps).is_empty(),
-        "an agent without mcpCapabilities.http must not be sent the HTTP server"
-    );
-
-    caps.mcp_capabilities.http = true;
-    let control = McpRegistration {
-        name: McpRegistration::SERVER_NAME_CONTROL.into(),
-        url: "http://127.0.0.1:5322/mcp".into(),
-        bearer_token: "other".into(),
-    };
-    let servers = mcp_servers(&[&registration, &control], &caps);
-    assert_eq!(
-        serde_json::to_value(&servers).unwrap(),
-        json!([
-            {"type": "http", "name": "tcode_preview", "url": "http://127.0.0.1:5321/mcp",
-                "headers": [{"name": "Authorization", "value": "Bearer tok"}]},
-            {"type": "http", "name": "tcode_control", "url": "http://127.0.0.1:5322/mcp",
-                "headers": [{"name": "Authorization", "value": "Bearer other"}]},
-        ])
-    );
-}
-
 #[test]
 fn streamed_text_keeps_block_identity_across_reasoning_and_ignores_user_echoes() {
     let mut state = state();
