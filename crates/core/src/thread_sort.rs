@@ -10,9 +10,10 @@ pub enum ThreadSection {
 }
 
 /// Whether a thread is listed among the threads: archived threads, dispatched
-/// orchestrate children and provider-native subagents are not; forks are.
+/// orchestrate children, provider-native subagents and a new thread whose
+/// composer holds nothing are not; forks and drafts holding text are.
 pub fn in_roster(meta: &SessionMeta) -> bool {
-    meta.archived_at.is_none() && !meta.is_subagent()
+    meta.archived_at.is_none() && !meta.is_subagent() && meta.draft_text.as_deref() != Some("")
 }
 
 pub fn thread_section(meta: &SessionMeta) -> ThreadSection {
