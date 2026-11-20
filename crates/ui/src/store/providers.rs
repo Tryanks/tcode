@@ -111,6 +111,24 @@ impl WorkspaceStore {
             .unwrap_or_default()
     }
 
+    /// The models a thread on `provider` picks from
+    /// ([`tcode_protocol::ProvidersStatus::thread_models`]).
+    pub fn thread_models(
+        &self,
+        provider: agent::ProviderKind,
+        acp_agent_id: Option<&str>,
+    ) -> &[agent::ModelSpec] {
+        self.providers_replica.thread_models(provider, acp_agent_id)
+    }
+
+    /// Installed ACP agent `id`'s own models; none before it listed them.
+    pub(crate) fn acp_models(&self, id: &str) -> &[agent::ModelSpec] {
+        self.providers_replica
+            .acp_models
+            .get(id)
+            .map_or(&[], Vec::as_slice)
+    }
+
     /// Why the latest listing of `provider`'s models failed.
     pub(crate) fn models_error(&self, provider: agent::ProviderKind) -> Option<&str> {
         self.providers_replica

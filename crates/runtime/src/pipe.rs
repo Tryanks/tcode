@@ -294,6 +294,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             if services.background_startup_probes {
                 state.recover_orphaned_worktrees(&mut cx);
                 state.refresh_model_catalogs(&mut cx);
+                state.refresh_missing_acp_catalogs(&mut cx);
                 if state.provider_update_checks_enabled() {
                     state.check_provider_versions(&mut cx);
                 }
@@ -774,10 +775,15 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             args,
         } => app.add_custom_acp_agent(name, command, args, cx),
         Command::UpdateAcpAgent { id, patch } => app.update_acp_agent(&id, patch, cx),
-        Command::SetActiveAcpAgent { session_id, id } => {
-            app.set_active_acp_agent(&session_id, &id, cx);
+        Command::SetActiveAcpAgent {
+            session_id,
+            id,
+            model,
+        } => {
+            app.set_active_acp_agent(&session_id, &id, model, cx);
             app.release_policy_holds(&session_id, cx);
         }
+        Command::RefreshAcpCatalog { id } => app.refresh_acp_catalog(&id, cx),
         Command::RefreshProviderPlugins { profile_id, cwd } => {
             app.refresh_provider_plugins(&profile_id, cwd, cx)
         }

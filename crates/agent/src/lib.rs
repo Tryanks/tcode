@@ -1130,6 +1130,27 @@ pub struct AcpAgent {
     pub launch: AcpLaunch,
 }
 
+/// What an ACP agent offers a new session, as its `session/new` answered: the
+/// models of its model config option, and its other modes and config options,
+/// each defaulting to the value a session starts at.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AcpCatalog {
+    #[serde(default)]
+    pub models: Vec<ModelSpec>,
+    #[serde(default)]
+    pub options: Vec<OptionDescriptor>,
+}
+
+impl AcpCatalog {
+    /// The model a new session starts on.
+    pub fn default_model(&self) -> Option<&str> {
+        self.models
+            .iter()
+            .find(|model| model.is_default)
+            .map(|model| model.id.as_str())
+    }
+}
+
 /// How to start an ACP agent process (ACP is JSON-RPC over the child's stdio).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1741,6 +1762,11 @@ pub const EFFORT_OPTION_ID: &str = "reasoningEffort";
 /// approval modes.
 pub const ACP_MODE_OPTION_ID: &str = "acp:mode";
 
+/// The ACP session option that carries the agent's model. The model picker
+/// owns an ACP agent's model, so no adapter lists it as an option; a thread
+/// stored before that holds its model as this option's selection.
+pub const ACP_MODEL_OPTION_ID: &str = "acp:model";
+
 /// Whether option `id` of `provider` decides what runs without the user's approval: the
 /// provider's permission control, or an ACP session mode, which ACP agents use for their
 /// approval modes alongside anything else.
@@ -2215,8 +2241,7 @@ pub async fn list_models(
         ProviderKind::OpenCode => opencode::list_models(binary_path, launch_env, processes).await,
         ProviderKind::Cursor => cursor::list_models(binary_path, launch_env, processes).await,
         ProviderKind::Grok => grok::list_models(binary_path, launch_env, processes).await,
-        // ACP agents advertise their models over the wire at session start
-        // (`AgentEvent::ProviderOptions`), so there is no catalog to pre-fetch.
+        // Each ACP agent has its own models, which `acp::probe_catalog` lists.
         ProviderKind::Acp => Ok(Vec::new()),
     }?;
     Ok(ModelListing {

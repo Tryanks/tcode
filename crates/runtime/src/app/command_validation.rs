@@ -187,12 +187,14 @@ impl AppState {
                     "This agent is not in the registry.",
                 ));
             }
-            Command::UpdateAcpAgent { id, .. } | Command::SetActiveAcpAgent { id, .. }
+            Command::UpdateAcpAgent { id, .. }
+            | Command::RefreshAcpCatalog { id }
+            | Command::SetActiveAcpAgent { id, .. }
                 if !self.settings.acp_agents.contains_key(id) =>
             {
                 return Err(error("unknown_acp_agent", "This agent is not installed."));
             }
-            Command::SetActiveAcpAgent { session_id, id }
+            Command::SetActiveAcpAgent { session_id, id, .. }
                 if self
                     .settings
                     .acp_agents

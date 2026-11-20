@@ -358,13 +358,19 @@ impl AppState {
                     session(session_id)?;
                     self.option_allowed(policy, provider_of(session_id)?, id, value.as_ref())
                 }
-                Command::SetActiveAcpAgent { session_id, id } => {
+                Command::SetActiveAcpAgent {
+                    session_id,
+                    id,
+                    model,
+                } => {
                     session(session_id)?;
                     policy
                         .agent(Settings::builtin_profile_id(ProviderKind::Acp))
                         .is_some_and(|access| access.allows_acp_agent(Some(id)))
                         .then_some(())
-                        .ok_or_else(|| policy_error("this space does not allow that ACP agent"))
+                        .ok_or_else(|| policy_error("this space does not allow that ACP agent"))?;
+                    let model = model.as_deref().or_else(|| self.acp_default_model(id));
+                    self.model_allowed(policy, ProviderKind::Acp, None, model)
                 }
                 Command::RunGitAction {
                     session_id, action, ..
@@ -494,6 +500,7 @@ impl AppState {
                 | Command::UpdateProviders { .. }
                 | Command::CancelProviderUpdate
                 | Command::RefreshAcpRegistry
+                | Command::RefreshAcpCatalog { .. }
                 | Command::InstallAcpAgent { .. }
                 | Command::CancelAcpInstall { .. }
                 | Command::RemoveAcpAgent { .. }

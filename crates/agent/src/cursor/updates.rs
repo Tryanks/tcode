@@ -138,7 +138,7 @@ impl Updates {
                     subagent.to_string(),
                     Child {
                         spawn_item_id: id,
-                        state: State::new(self.cwd.clone()),
+                        state: State::new(crate::ProviderKind::Cursor, self.cwd.clone()),
                     },
                 );
                 vec![event]

@@ -28,6 +28,32 @@ struct ModelRefresh {
     processes: agent::SessionProcesses,
 }
 
+impl ModelRefresh {
+    /// A new listing, which replaces one still running: that one's harness
+    /// is stopped, and its answer is not taken.
+    fn begin(&mut self) -> (u64, agent::SessionProcesses) {
+        self.processes.stop();
+        *self = ModelRefresh {
+            generation: self.generation + 1,
+            loading: true,
+            failure: None,
+            processes: agent::SessionProcesses::default(),
+        };
+        (self.generation, self.processes.clone())
+    }
+
+    /// Ends the listing of `generation` with why it failed, if it did;
+    /// `false` when a later one replaced it.
+    fn finish(&mut self, generation: u64, failure: Option<String>) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        self.loading = false;
+        self.failure = failure;
+        true
+    }
+}
+
 struct SecretWrite {
     completion: smol::channel::Receiver<Result<(), String>>,
     result: Option<Result<(), String>>,
@@ -60,6 +86,10 @@ pub struct ProviderCatalog {
     /// What of each provider's catalog in `model_catalogs` could not be
     /// read and was left out.
     model_problems: HashMap<ProviderKind, Vec<String>>,
+    /// What each installed ACP agent offered a new session when last probed,
+    /// by agent id.
+    pub(super) acp_catalogs: HashMap<String, agent::AcpCatalog>,
+    acp_refreshes: HashMap<String, ModelRefresh>,
     pub provider_versions: HashMap<ProviderKind, ProviderVersionState>,
     version_rounds: HashMap<u64, VersionCheckRound>,
     next_version_round: u64,
@@ -85,6 +115,7 @@ pub struct ProviderCatalog {
 impl ProviderCatalog {
     pub(super) fn new(
         model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
+        acp_catalogs: HashMap<String, agent::AcpCatalog>,
         provider_secret_names: std::io::Result<HashMap<String, HashSet<String>>>,
     ) -> Self {
         let (provider_secret_names, secrets_unreadable) = match provider_secret_names {
@@ -98,6 +129,8 @@ impl ProviderCatalog {
             model_catalogs,
             model_refreshes: HashMap::new(),
             model_problems: HashMap::new(),
+            acp_catalogs,
+            acp_refreshes: HashMap::new(),
             provider_versions: HashMap::new(),
             version_rounds: HashMap::new(),
             next_version_round: 0,
@@ -116,38 +149,41 @@ impl ProviderCatalog {
         }
     }
 
-    /// A new listing of `provider`'s models, which replaces one still
-    /// running: that one's harness is stopped, and its answer is not taken.
+    /// [`ModelRefresh::begin`] for `provider`'s models.
     fn begin_model_refresh(&mut self, provider: ProviderKind) -> (u64, agent::SessionProcesses) {
-        let refresh = self.model_refreshes.entry(provider).or_default();
-        refresh.processes.stop();
-        *refresh = ModelRefresh {
-            generation: refresh.generation + 1,
-            loading: true,
-            failure: None,
-            processes: agent::SessionProcesses::default(),
-        };
-        (refresh.generation, refresh.processes.clone())
+        self.model_refreshes.entry(provider).or_default().begin()
     }
 
-    /// Ends the listing of `generation` with why it failed, if it did;
-    /// `false` when a later one replaced it.
+    /// [`ModelRefresh::finish`] for `provider`'s models.
     fn finish_model_refresh(
         &mut self,
         provider: ProviderKind,
         generation: u64,
         failure: Option<String>,
     ) -> bool {
-        let Some(refresh) = self
-            .model_refreshes
+        self.model_refreshes
             .get_mut(&provider)
-            .filter(|refresh| refresh.generation == generation)
-        else {
-            return false;
-        };
-        refresh.loading = false;
-        refresh.failure = failure;
-        true
+            .is_some_and(|refresh| refresh.finish(generation, failure))
+    }
+
+    /// [`ModelRefresh::begin`] for installed ACP agent `id`'s catalog.
+    pub(super) fn begin_acp_refresh(&mut self, id: &str) -> (u64, agent::SessionProcesses) {
+        self.acp_refreshes.entry(id.to_owned()).or_default().begin()
+    }
+
+    /// [`ModelRefresh::finish`] for installed ACP agent `id`'s catalog, whose
+    /// failures only the log tells.
+    pub(super) fn finish_acp_refresh(&mut self, id: &str, generation: u64) -> bool {
+        self.acp_refreshes
+            .get_mut(id)
+            .is_some_and(|refresh| refresh.finish(generation, None))
+    }
+
+    /// Stop listing ACP agent `id`'s catalog.
+    pub(super) fn cancel_acp_refresh(&mut self, id: &str) {
+        if let Some(refresh) = self.acp_refreshes.remove(id) {
+            refresh.processes.stop();
+        }
     }
 
     /// A sign-in begun under the old configuration ends with it.
@@ -279,6 +315,11 @@ impl ProviderCatalog {
                 .filter_map(|(provider, refresh)| Some((*provider, refresh.failure.clone()?)))
                 .collect(),
             model_problems: self.model_problems.clone(),
+            acp_models: self
+                .acp_catalogs
+                .iter()
+                .map(|(id, catalog)| (id.clone(), catalog.models.clone()))
+                .collect(),
             provider_versions: self
                 .provider_versions
                 .iter()
@@ -1596,26 +1637,41 @@ impl AppState {
             .then(|| {
                 meta.acp_agent_id
                     .as_deref()
-                    .and_then(|id| self.settings.acp_agent(id))
+                    .map(|id| self.prepare_acp_env(id, cx))
             })
-            .flatten()
-            .map(|agent| {
-                let id = Settings::acp_secret_id(&agent.id);
-                let names = agent
-                    .env
-                    .iter()
-                    .filter(|var| var.sensitive)
-                    .map(|var| var.name.clone())
-                    .collect();
-                let writes = self.pending_secret_writes(&id, &names);
-                (id, agent.env.clone(), writes)
-            });
-        let store = self.settings_store.clone();
-        let host_cx = cx.clone();
+            .flatten();
         async move {
             if let Some(env) = native {
                 return env.await;
             }
+            match acp {
+                Some(env) => env.await,
+                None => Ok(LaunchEnv::default()),
+            }
+        }
+    }
+
+    /// The environment installed ACP agent `agent_id` runs with: its own
+    /// variables, the saved secrets among them.
+    pub(super) fn prepare_acp_env(
+        &self,
+        agent_id: &str,
+        cx: &HostCx,
+    ) -> impl std::future::Future<Output = Result<LaunchEnv, String>> + use<> {
+        let acp = self.settings.acp_agent(agent_id).map(|agent| {
+            let id = Settings::acp_secret_id(&agent.id);
+            let names = agent
+                .env
+                .iter()
+                .filter(|var| var.sensitive)
+                .map(|var| var.name.clone())
+                .collect();
+            let writes = self.pending_secret_writes(&id, &names);
+            (id, agent.env.clone(), writes)
+        });
+        let store = self.settings_store.clone();
+        let host_cx = cx.clone();
+        async move {
             let Some((id, env, writes)) = acp else {
                 return Ok(LaunchEnv::default());
             };
@@ -2065,7 +2121,7 @@ mod provider_lifecycle_tests {
 
     #[test]
     fn failed_usage_fetch_keeps_the_last_windows_and_their_time() {
-        let mut catalog = ProviderCatalog::new(HashMap::new(), Ok(HashMap::new()));
+        let mut catalog = ProviderCatalog::new(HashMap::new(), HashMap::new(), Ok(HashMap::new()));
         let windows = tcode_core::usage::ProviderUsage {
             fetched_at: 1_700_000_000,
             plan: Some("max".into()),

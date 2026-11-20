@@ -852,19 +852,38 @@ impl SessionStore {
                 );
                 format!("{provider}-{home}")
             }
-            CommandsCacheKey::Acp { agent_id } => {
-                // Registry ids are external input and may contain path separators.
-                // Hex keeps the filename reversible and collision-free without
-                // allowing an id to escape the data directory.
-                let encoded = agent_id
-                    .as_bytes()
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>();
-                format!("acp-{encoded}")
-            }
+            CommandsCacheKey::Acp { agent_id } => format!("acp-{}", acp_file_key(agent_id)),
         };
         self.root.join(format!("commands-{name}.json"))
+    }
+
+    fn acp_catalog_path(&self, agent_id: &str) -> PathBuf {
+        self.root
+            .join(format!("acp-catalog-{}.json", acp_file_key(agent_id)))
+    }
+
+    /// What ACP agent `agent_id` offered a new session when last probed;
+    /// `None` when it never was or the file is unreadable.
+    pub fn load_acp_catalog(&self, agent_id: &str) -> Option<agent::AcpCatalog> {
+        let bytes = fs::read(self.acp_catalog_path(agent_id)).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    /// Persist what ACP agent `agent_id` offered a new session.
+    pub fn save_acp_catalog(&self, agent_id: &str, catalog: &agent::AcpCatalog) -> io::Result<()> {
+        let path = self.acp_catalog_path(agent_id);
+        let tmp = path.with_extension("json.tmp");
+        let data = serde_json::to_vec_pretty(catalog).map_err(invalid_data)?;
+        fs::write(&tmp, data)?;
+        fs::rename(&tmp, path)
+    }
+
+    /// Forget an uninstalled ACP agent's catalog.
+    pub fn remove_acp_catalog(&self, agent_id: &str) -> io::Result<()> {
+        match fs::remove_file(self.acp_catalog_path(agent_id)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
     }
 
     /// Load the last-fetched model catalog for `provider` so the picker is
@@ -1538,6 +1557,17 @@ fn stored_project(
 
 fn invalid_data(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+/// An ACP agent's id as a file name. Registry ids are external input and may
+/// contain path separators; hex keeps the name reversible and collision-free
+/// without letting an id escape the data directory.
+fn acp_file_key(agent_id: &str) -> String {
+    agent_id
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// One stored line: a timestamped envelope, or a bare event as builds before

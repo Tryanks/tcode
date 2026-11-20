@@ -1436,7 +1436,7 @@ mod tests {
     /// already has. Grok's requests to the user are left out.
     fn replay(fixture: &str) -> Vec<AgentEvent> {
         let grok = Grok::default();
-        let mut state = State::new(std::env::temp_dir());
+        let mut state = State::new(ProviderKind::Grok, std::env::temp_dir());
         let mut prompts = HashMap::new();
         let mut events = Vec::new();
         for (from_client, message) in records(fixture) {

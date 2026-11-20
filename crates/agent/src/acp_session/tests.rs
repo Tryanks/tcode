@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 
 fn state() -> State {
-    State::new(PathBuf::from("/tmp/tcode-acp-test"))
+    State::new(ProviderKind::Acp, PathBuf::from("/tmp/tcode-acp-test"))
 }
 
 fn update(json: Value) -> acp::SessionUpdate {
@@ -636,6 +636,46 @@ fn modes_and_categorized_config_become_provider_options() {
     }
 }
 
+/// An ACP agent's mode, from `modes` or a config option of category `mode`,
+/// says what runs without asking, so the composer's permission control
+/// carries it. Cursor and Grok have a permission control of their own,
+/// chosen at launch, and keep their mode among the model's traits.
+#[test]
+fn a_mode_is_the_permission_control_of_a_provider_without_one() {
+    let modes: acp::SessionModeState = serde_json::from_value(json!({
+        "currentModeId": "default",
+        "availableModes": [{ "id": "default", "name": "Default" }]
+    }))
+    .unwrap();
+    let config: Vec<acp::SessionConfigOption> = serde_json::from_value(json!([{
+        "id": "approvals",
+        "name": "Approvals",
+        "category": "mode",
+        "type": "select",
+        "currentValue": "ask",
+        "options": [{ "value": "ask", "name": "Ask" }]
+    }]))
+    .unwrap();
+    for (provider, role) in [
+        (ProviderKind::Acp, crate::OptionRole::Permission),
+        (ProviderKind::Cursor, crate::OptionRole::Model),
+        (ProviderKind::Grok, crate::OptionRole::Model),
+    ] {
+        for (modes, config) in [(Some(&modes), None), (None, Some(config.as_slice()))] {
+            let mut state = State::new(provider, PathBuf::from("/workspace"));
+            state.ingest_modes(modes);
+            state.options.ingest(None, config);
+            let AgentEvent::ProviderOptions { descriptors, .. } = state.provider_options() else {
+                unreachable!();
+            };
+            let [OptionDescriptor::Select { id, role: got, .. }] = descriptors.as_slice() else {
+                panic!("one mode select, got {descriptors:?}");
+            };
+            assert_eq!((id.as_str(), *got), (MODE_OPTION_ID, role), "{provider:?}");
+        }
+    }
+}
+
 /// Grok 1.0.46 asking to run a command, and Tcode's answer when the
 /// person allowed it once, as recorded (`tests/fixtures/grok/README.md`).
 #[test]
@@ -722,7 +762,7 @@ fn a_file_written_for_a_call_is_that_calls_change_once() {
         let (events, received) = smol::channel::unbounded();
         let client = Client {
             events,
-            state: Arc::new(Mutex::new(State::new(cwd.clone()))),
+            state: Arc::new(Mutex::new(State::new(ProviderKind::Acp, cwd.clone()))),
         };
         let apply = |update| client.state.lock_recover().apply_update(update);
         let write = async |text: &str| {
@@ -787,7 +827,10 @@ fn a_permission_request_ended_without_the_user_is_reported_resolved() {
         let (events, received) = smol::channel::unbounded();
         let client = Client {
             events,
-            state: Arc::new(Mutex::new(State::new(PathBuf::from("/workspace")))),
+            state: Arc::new(Mutex::new(State::new(
+                ProviderKind::Acp,
+                PathBuf::from("/workspace"),
+            ))),
         };
         let request = || {
             acp::RequestPermissionRequest::new(

@@ -1,17 +1,21 @@
-//! Wire-level ACP model/option setup and live `ApplySettings` tests using this
-//! `harness = false` binary as the subprocess agent so `libtest` writes nothing
-//! to its JSON-RPC stdout.
+//! Wire-level ACP catalog probe, model/option setup and live `ApplySettings`
+//! tests using this `harness = false` binary as the subprocess agent so
+//! `libtest` writes nothing to its JSON-RPC stdout.
 
 use std::io::{BufRead as _, BufReader, Write as _};
 
 use agent::{
-    ACP_MODE_OPTION_ID, AcpAgent, AcpLaunch, AgentEvent, EFFORT_OPTION_ID, LaunchEnv,
-    OptionDescriptor, OptionSelection, ProviderKind, SessionCommand, SessionOptions,
+    ACP_MODE_OPTION_ID, AcpAgent, AcpCatalog, AcpLaunch, AgentEvent, EFFORT_OPTION_ID, LaunchEnv,
+    OptionDescriptor, OptionRole, OptionSelection, ProviderKind, SessionCommand, SessionOptions,
     SessionProcesses, start_session,
 };
 use serde_json::{Value, json};
 
 const ROLE: &str = "TCODE_TEST_SETTINGS_ACP_AGENT";
+/// Set, the fake agent advertises `sessionCapabilities.close`.
+const CLOSES: &str = "TCODE_TEST_SETTINGS_ACP_CLOSES";
+/// Set, the fake agent answers `session/new` that it needs signing in.
+const SIGNED_OUT: &str = "TCODE_TEST_SETTINGS_ACP_SIGNED_OUT";
 
 fn main() {
     if let Ok(port) = std::env::var(ROLE) {
@@ -20,12 +24,16 @@ fn main() {
     }
     let tests: &[(&str, fn())] = &[
         (
-            "establish_applies_model_and_options_and_lists_the_model_option",
-            establish_applies_model_and_options_and_lists_the_model_option,
+            "establish_applies_model_and_options_and_leaves_the_model_to_the_model_picker",
+            establish_applies_model_and_options_and_leaves_the_model_to_the_model_picker,
         ),
         (
-            "a_chosen_model_option_wins_over_the_first_reported_model",
-            a_chosen_model_option_wins_over_the_first_reported_model,
+            "probe_reads_session_new_in_a_directory_of_its_own_and_closes_the_session",
+            probe_reads_session_new_in_a_directory_of_its_own_and_closes_the_session,
+        ),
+        (
+            "probe_of_a_signed_out_agent_fails_without_signing_in",
+            probe_of_a_signed_out_agent_fails_without_signing_in,
         ),
         (
             "stale_model_at_establish_warns_and_carries_on",
@@ -133,7 +141,14 @@ fn run_fake_agent(port: u16) {
         writeln!(
             log,
             "{}",
-            json!({ "method": method, "params": msg["params"] })
+            json!({
+                "method": method,
+                "params": msg["params"],
+                // Whether the agent runs in the directory the request names.
+                "in_cwd": msg["params"]["cwd"].as_str().is_some_and(|cwd| {
+                    std::fs::canonicalize(cwd).ok() == std::env::current_dir().ok()
+                }),
+            })
         )
         .unwrap();
         log.flush().unwrap();
@@ -145,8 +160,18 @@ fn run_fake_agent(port: u16) {
                 "id": id,
                 "result": {
                     "protocolVersion": 1,
-                    "agentCapabilities": {}
+                    "agentCapabilities": if std::env::var_os(CLOSES).is_some() {
+                        json!({ "sessionCapabilities": { "close": {} } })
+                    } else {
+                        json!({})
+                    },
+                    "authMethods": [{ "id": "browser", "name": "Sign in with a browser" }]
                 }
+            }),
+            "session/new" if std::env::var_os(SIGNED_OUT).is_some() => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": -32000, "message": "Authentication required" }
             }),
             "session/new" => json!({
                 "jsonrpc": "2.0",
@@ -279,11 +304,17 @@ fn descriptor_id(descriptor: &OptionDescriptor) -> &str {
     }
 }
 
+fn descriptor_role(descriptor: &OptionDescriptor) -> OptionRole {
+    match descriptor {
+        OptionDescriptor::Select { role, .. } | OptionDescriptor::Boolean { role, .. } => *role,
+    }
+}
+
 /// Establishing an ACP session sends `session/set_config_option` for the
-/// requested model and select/boolean options, `session/set_mode` for a
-/// non-config mode, and lists `acp:model` among `ProviderOptions`, where the
-/// traits picker offers the agent's models.
-fn establish_applies_model_and_options_and_lists_the_model_option() {
+/// requested model and select/boolean options and `session/set_mode` for a
+/// non-config mode. The model is the model picker's, so `ProviderOptions`
+/// leaves it out; the mode is the agent's permission control.
+fn establish_applies_model_and_options_and_leaves_the_model_to_the_model_picker() {
     let (handle, processes, mut wire) = spawn_session(
         Some("model-b"),
         vec![
@@ -333,18 +364,19 @@ fn establish_applies_model_and_options_and_lists_the_model_option() {
     }
     assert_eq!(session_model.as_deref(), Some("model-b"));
     let (options, selections) = provider_options.expect("ProviderOptions emitted");
-    let ids: Vec<&str> = options.iter().map(descriptor_id).collect();
-    assert!(ids.contains(&"acp:model"), "{ids:?}");
-    assert!(ids.contains(&ACP_MODE_OPTION_ID));
-    assert!(ids.contains(&EFFORT_OPTION_ID));
-    assert!(ids.contains(&"acp:cfg:web_search"));
+    let roles: Vec<(&str, OptionRole)> = options
+        .iter()
+        .map(|option| (descriptor_id(option), descriptor_role(option)))
+        .collect();
     assert_eq!(
-        selections
-            .iter()
-            .find(|s| s.id == "acp:model")
-            .map(|s| &s.value),
-        Some(&json!("model-b"))
+        roles,
+        [
+            (ACP_MODE_OPTION_ID, OptionRole::Permission),
+            (EFFORT_OPTION_ID, OptionRole::Effort),
+            ("acp:cfg:web_search", OptionRole::Model),
+        ]
     );
+    assert!(!selections.iter().any(|s| s.id == "acp:model"));
     assert_eq!(
         selections
             .iter()
@@ -371,45 +403,118 @@ fn establish_applies_model_and_options_and_lists_the_model_option() {
     drop(handle);
 }
 
-/// A thread's `acp:model` selection is the model it last chose; the model its
-/// first session reported does not override it.
-fn a_chosen_model_option_wins_over_the_first_reported_model() {
-    let (handle, processes, mut wire) = spawn_session(
-        Some("stale-model"),
-        vec![
-            OptionSelection {
-                id: "acp:model".into(),
-                value: json!("model-b"),
-            },
-            OptionSelection {
-                id: EFFORT_OPTION_ID.into(),
-                value: json!("high"),
-            },
-        ],
+/// Probe the fake agent, launched with `env`: what the probe returned and
+/// every request the agent was sent, read once the agent is gone.
+fn probe(env: &[&str]) -> (Result<AcpCatalog, agent::AgentError>, Vec<Value>) {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut env: Vec<(String, String)> = env
+        .iter()
+        .map(|name| ((*name).to_owned(), "1".to_owned()))
+        .collect();
+    env.push((ROLE.into(), port.to_string()));
+    let agent = AcpAgent {
+        id: "fake-settings".into(),
+        name: "Fake Settings".into(),
+        launch: AcpLaunch::Binary {
+            command: std::env::current_exe().unwrap(),
+            args: Vec::new(),
+            env,
+        },
+    };
+    let processes = SessionProcesses::default();
+    let probed = smol::spawn(async move {
+        agent::acp::probe_catalog(agent, Vec::new(), LaunchEnv::default(), &processes).await
+    });
+    let (stream, _) = listener.accept().unwrap();
+    let probed = smol::block_on(probed);
+    let requests = BufReader::new(stream)
+        .lines()
+        .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+        .collect();
+    (probed, requests)
+}
+
+/// An agent's models and options exist before its first message only as
+/// its `session/new` answer: the probe asks for one session, with no MCP
+/// servers, in a directory made for it and gone afterwards, so no project's
+/// configuration runs, and closes the session where the agent can.
+fn probe_reads_session_new_in_a_directory_of_its_own_and_closes_the_session() {
+    let (probed, requests) = probe(&[CLOSES]);
+    let catalog = probed.expect("the probe lists the agent's catalog");
+
+    let methods: Vec<&str> = requests
+        .iter()
+        .map(|request| request["method"].as_str().unwrap())
+        .collect();
+    assert_eq!(methods, ["initialize", "session/new", "session/close"]);
+    let new = &requests[1];
+    assert_eq!(new["params"]["mcpServers"], json!([]));
+    assert_eq!(new["in_cwd"], true, "the agent runs where its session is");
+    let cwd = std::path::PathBuf::from(new["params"]["cwd"].as_str().unwrap());
+    assert!(!cwd.exists(), "{} outlived the probe", cwd.display());
+    assert_eq!(requests[2]["params"]["sessionId"], "s1");
+
+    let models: Vec<(&str, &str, bool)> = catalog
+        .models
+        .iter()
+        .map(|model| {
+            (
+                model.id.as_str(),
+                model.display_name.as_str(),
+                model.is_default,
+            )
+        })
+        .collect();
+    assert_eq!(
+        models,
+        [("model-a", "Model A", true), ("model-b", "Model B", false)]
     );
+    assert_eq!(catalog.default_model(), Some("model-a"));
+    // Each option defaults to where a new session starts.
+    let options: Vec<(&str, OptionRole, Value)> = catalog
+        .options
+        .iter()
+        .map(|option| match option {
+            OptionDescriptor::Select {
+                id,
+                role,
+                default_value,
+                ..
+            } => (id.as_str(), *role, json!(default_value)),
+            OptionDescriptor::Boolean {
+                id,
+                role,
+                default_value,
+                ..
+            } => (id.as_str(), *role, json!(default_value)),
+        })
+        .collect();
+    assert_eq!(
+        options,
+        [
+            (ACP_MODE_OPTION_ID, OptionRole::Permission, json!("default")),
+            (EFFORT_OPTION_ID, OptionRole::Effort, json!("low")),
+            ("acp:cfg:web_search", OptionRole::Model, json!(false)),
+        ]
+    );
+}
 
-    let requests = read_requests(&mut wire, 4);
-    assert_eq!(requests[2]["method"], "session/set_config_option");
-    assert_eq!(requests[2]["params"]["configId"], "selected_model");
-    assert_eq!(requests[2]["params"]["value"], "model-b");
-    assert_eq!(requests[3]["method"], "session/set_config_option");
-    assert_eq!(requests[3]["params"]["configId"], "thought_level");
-    assert_eq!(requests[3]["params"]["value"], "high");
-
-    let mut warnings = Vec::new();
-    let mut session_model = None;
-    while let Ok(event) = handle.events.try_recv() {
-        match event {
-            AgentEvent::Warning { message } => warnings.push(message),
-            AgentEvent::SessionStarted { model, .. } => session_model = model,
-            _ => {}
-        }
-    }
-    assert!(warnings.is_empty(), "{warnings:?}");
-    assert_eq!(session_model.as_deref(), Some("model-b"));
-
-    processes.stop();
-    drop(handle);
+/// Signing in is the agent's interactive flow, which a thread the user
+/// starts runs; a probe in the background never begins it. An agent that
+/// cannot close sessions is not asked to.
+fn probe_of_a_signed_out_agent_fails_without_signing_in() {
+    let (probed, requests) = probe(&[SIGNED_OUT]);
+    let error = probed.expect_err("a signed-out agent lists nothing");
+    assert!(
+        error.to_string().contains("requires authentication"),
+        "{error}"
+    );
+    let methods: Vec<&str> = requests
+        .iter()
+        .map(|request| request["method"].as_str().unwrap())
+        .collect();
+    assert_eq!(methods, ["initialize", "session/new"]);
 }
 
 /// A stale or rejected model at establish warns and carries on instead of

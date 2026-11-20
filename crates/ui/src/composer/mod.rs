@@ -127,9 +127,8 @@ enum PickerRail {
     /// or a user-created third-party profile. Each profile is its own rail entry
     /// and lists only its own models.
     Profile(String),
-    /// One installed ACP agent (by registry id). ACP agents have no model
-    /// catalog — the agent publishes its models over the wire once the session
-    /// is up — so this rail lists the agent itself.
+    /// One installed ACP agent (by registry id), listing the models it
+    /// offered a new session, or the agent itself until it has.
     Acp(String),
 }
 

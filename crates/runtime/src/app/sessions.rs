@@ -2011,8 +2011,9 @@ impl AppState {
             cx,
         );
         let commands = self.cached_provider_commands_for(&meta);
-        self.residents
-            .park(ActiveSession::new(meta, true, commands));
+        let mut draft = ActiveSession::new(meta, true, commands);
+        self.seed_acp_session(&mut draft);
+        self.residents.park(draft);
     }
 
     /// The drafts the index lists beside the threads: those on a client's
@@ -2343,6 +2344,7 @@ impl AppState {
         ) {
             draft.meta.option_selections.push(selection);
         }
+        self.seed_acp_session(&mut draft);
         let selection = self.draft_model_selection(&draft.meta)?;
         self.restore_terminal_workspace(&mut draft);
         let session_id = draft.meta.id.clone();

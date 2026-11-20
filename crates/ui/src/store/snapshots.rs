@@ -105,8 +105,7 @@ pub(crate) fn composer_state(
     let active_model_spec = status.and_then(|status| {
         let model = status.requested_model.as_deref()?;
         providers
-            .model_catalogs
-            .get(&status.provider)?
+            .thread_models(status.provider, status.acp_agent_id.as_deref())
             .iter()
             .find(|spec| spec.id == model)
             .cloned()

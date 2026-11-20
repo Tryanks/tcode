@@ -349,8 +349,28 @@ impl ActiveSession {
         matches!(self.runtime, Runtime::Live(_)) && self.meta.model != self.live_model
     }
 
+    /// The thread's permission control: its provider's, as the provider last
+    /// described it, or for a provider without one (an ACP agent), the
+    /// option the agent itself gives that role.
     pub(super) fn permission_descriptor(&self) -> Option<OptionDescriptor> {
-        let descriptor = permission_control(self.meta.provider)?;
+        let Some(descriptor) = permission_control(self.meta.provider) else {
+            return self
+                .provider_options
+                .iter()
+                .find(|option| {
+                    matches!(
+                        option,
+                        OptionDescriptor::Select {
+                            role: agent::OptionRole::Permission,
+                            ..
+                        } | OptionDescriptor::Boolean {
+                            role: agent::OptionRole::Permission,
+                            ..
+                        }
+                    )
+                })
+                .cloned();
+        };
         let id = match &descriptor {
             OptionDescriptor::Select { id, .. } | OptionDescriptor::Boolean { id, .. } => id,
         };
