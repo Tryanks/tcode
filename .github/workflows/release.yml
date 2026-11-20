@@ -21,7 +21,7 @@ concurrency:
 # evict the main CI caches from the shared Actions quota.
 jobs:
   setup:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
@@ -66,7 +66,7 @@ jobs:
             platform: windows
             arch: arm64
           - label: Linux x64
-            os: ubuntu-24.04
+            os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             platform: linux
             arch: x64
@@ -452,7 +452,7 @@ jobs:
   web-bundle:
     name: Build embedded web bundle
     needs: setup
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -505,7 +505,7 @@ jobs:
             platform: windows
             arch: arm64
           - label: Linux x64
-            os: ubuntu-24.04
+            os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             platform: linux
             arch: x64
@@ -605,7 +605,7 @@ jobs:
             platform: windows
             arch: arm64
           - label: Linux x64
-            os: ubuntu-24.04
+            os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             platform: linux
             arch: x64
@@ -691,7 +691,7 @@ jobs:
         include:
           - arch: amd64
             archive_arch: x64
-            os: ubuntu-24.04
+            os: ubuntu-latest
           - arch: arm64
             archive_arch: arm64
             os: ubuntu-24.04-arm
@@ -812,7 +812,7 @@ jobs:
   publish-containers:
     name: Publish ${{ matrix.image }}
     needs: [setup, container-images]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       packages: write
       id-token: write
@@ -853,7 +853,7 @@ jobs:
   package-android:
     name: Android arm64
     needs: setup
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
       CARGO_NDK_PLATFORM: 30
@@ -950,7 +950,7 @@ jobs:
   finalize:
     name: Publish release checksums
     needs: [setup, package, package-headless, package-traverse, package-android]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
@@ -994,7 +994,7 @@ jobs:
     name: Publish to AUR
     needs: [setup, finalize]
     if: needs.setup.outputs.prerelease == 'false' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     container: archlinux:base-devel
     env:
       GIT_SSH_COMMAND: ssh -i ~/.ssh/aur -o StrictHostKeyChecking=accept-new
