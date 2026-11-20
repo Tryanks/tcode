@@ -309,22 +309,7 @@ fn a_subagent_is_a_child_that_owes_its_caller_a_report() {
     assert_eq!(started(cx).len(), before);
 }
 
-/// `start_thread` starts an enabled installed ACP agent (including as a subagent),
-/// refuses missing/disabled/native-duplicate ACP agents and `acp:mode`, and skips the
-/// `report_result` reminder when an ACP agent does not attach Tcode's MCP servers.
-#[test]
-fn start_thread_starts_an_acp_subagent_and_validates_acp_agent() {
-    let store = TestStore::new("tcode-control-start-acp");
-    let root = store.root().join("project");
-    stored_project(&store, "a", &root, |_| {});
-    stored(
-        &store,
-        "caller",
-        ProviderKind::ClaudeCode,
-        "a",
-        &root,
-        |_| {},
-    );
+fn acp_test_settings() -> Settings {
     let mut settings = Settings::default();
     let agent = |id: &str, name: &str, enabled: bool| InstalledAgent {
         id: id.into(),
@@ -351,8 +336,176 @@ fn start_thread_starts_an_acp_subagent_and_validates_acp_agent() {
     settings
         .acp_agents
         .insert("cursor".into(), agent("cursor", "Cursor", true));
+    settings
+}
+
+/// `list_providers` omits ACP native duplicates that `start_thread` refuses, and
+/// `start_thread` refuses invalid `acp_agent`, `profile`, `model` and approval
+/// options with the expected reason.
+#[test]
+fn start_thread_validates_acp_agent_and_list_providers_filters_duplicates() {
+    let store = TestStore::new("tcode-control-validate-acp");
+    let root = store.root().join("project");
+    stored_project(&store, "a", &root, |_| {});
+    stored(
+        &store,
+        "caller",
+        ProviderKind::ClaudeCode,
+        "a",
+        &root,
+        |_| {},
+    );
     tcode_services::settings::SettingsStore::new(store.root().clone())
-        .save(&settings)
+        .save(&acp_test_settings())
+        .unwrap();
+
+    let cx = &mut TestAppContext::default();
+    let (state, _providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    state
+        .command(
+            cx,
+            Command::PatchSettings {
+                patch: SettingsPatch::OrchestrateChildWorktrees(false),
+            },
+        )
+        .unwrap();
+
+    let listed = call(
+        &state,
+        cx,
+        "caller",
+        ControlOp::ListProviders(control_mcp::ListProvidersParams {}),
+    )
+    .unwrap();
+    let acp_row = listed["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["kind"] == "acp")
+        .expect("acp provider row");
+    let listed_ids: Vec<&str> = acp_row["acp_agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["id"].as_str())
+        .collect();
+    assert!(listed_ids.contains(&"custom:antigravity"), "{listed_ids:?}");
+    assert!(
+        !listed_ids.contains(&"cursor"),
+        "native duplicate must not appear in list_providers' acp_agents: {listed_ids:?}"
+    );
+
+    let with = |request_id: &str, edit: &dyn Fn(&mut StartThreadParams)| {
+        let ControlOp::StartThread(mut params) = start("a") else {
+            unreachable!()
+        };
+        params.request_id = request_id.into();
+        params.subagent = Some(true);
+        edit(&mut params);
+        ControlOp::StartThread(params)
+    };
+
+    for (label, op, expected_reason) in [
+        (
+            "missing acp_agent",
+            with("missing", &|p| p.provider = "acp".into()),
+            "acp_agent is required",
+        ),
+        (
+            "unknown acp_agent",
+            with("unknown", &|p| {
+                p.provider = "acp".into();
+                p.acp_agent = Some("custom:nope".into());
+            }),
+            "unknown acp_agent: custom:nope",
+        ),
+        (
+            "disabled acp_agent",
+            with("disabled", &|p| {
+                p.provider = "acp".into();
+                p.acp_agent = Some("custom:disabled".into());
+            }),
+            "acp_agent custom:disabled is disabled",
+        ),
+        (
+            "native-duplicate acp_agent",
+            with("duplicate", &|p| {
+                p.provider = "acp".into();
+                p.acp_agent = Some("cursor".into());
+            }),
+            "duplicates a native provider",
+        ),
+        (
+            "acp_agent on native provider",
+            with("native-with-acp", &|p| {
+                p.acp_agent = Some("custom:antigravity".into());
+            }),
+            "acp_agent is only valid when provider is acp",
+        ),
+        (
+            "profile on acp",
+            with("acp-profile", &|p| {
+                p.provider = "acp".into();
+                p.acp_agent = Some("custom:antigravity".into());
+                p.profile = Some("custom-profile".into());
+            }),
+            "profile is not valid when provider is acp",
+        ),
+        (
+            "model on acp",
+            with("acp-model", &|p| {
+                p.provider = "acp".into();
+                p.acp_agent = Some("custom:antigravity".into());
+                p.model = Some("gemini-4-neon".into());
+            }),
+            "acp:model",
+        ),
+        (
+            "approval-governing option on acp",
+            with("acp-mode", &|p| {
+                p.provider = "acp".into();
+                p.acp_agent = Some("custom:antigravity".into());
+                p.options = Some(
+                    [(
+                        agent::ACP_MODE_OPTION_ID.to_owned(),
+                        serde_json::json!("auto"),
+                    )]
+                    .into_iter()
+                    .collect(),
+                );
+            }),
+            "sets the permission mode",
+        ),
+    ] {
+        let error = call(&state, cx, "caller", op).expect_err(&format!("{label} must be refused"));
+        assert!(
+            error.contains(expected_reason),
+            "{label}: expected error containing `{expected_reason}`, got `{error}`"
+        );
+    }
+    cx.run_until_parked();
+    assert!(started(cx).is_empty());
+}
+
+/// An ACP subagent whose agent does not attach Tcode's MCP servers gets no
+/// `report_result` reminder turn; completing its turn delivers its final
+/// message to the parent as a labelled fallback immediately.
+#[test]
+fn acp_subagent_without_attached_mcp_falls_back_without_a_reminder() {
+    let store = TestStore::new("tcode-control-start-acp-fallback");
+    let root = store.root().join("project");
+    stored_project(&store, "a", &root, |_| {});
+    stored(
+        &store,
+        "caller",
+        ProviderKind::ClaudeCode,
+        "a",
+        &root,
+        |_| {},
+    );
+    tcode_services::settings::SettingsStore::new(store.root().clone())
+        .save(&acp_test_settings())
         .unwrap();
 
     let cx = &mut TestAppContext::default();
@@ -367,79 +520,39 @@ fn start_thread_starts_an_acp_subagent_and_validates_acp_agent() {
         )
         .unwrap();
 
-    let with = |request_id: &str, edit: &dyn Fn(&mut StartThreadParams)| {
-        let ControlOp::StartThread(mut params) = start("a") else {
-            unreachable!()
-        };
-        params.request_id = request_id.into();
-        params.subagent = Some(true);
-        edit(&mut params);
-        ControlOp::StartThread(params)
+    let ControlOp::StartThread(mut params) = start("a") else {
+        unreachable!()
     };
+    params.request_id = "acp-subagent".into();
+    params.subagent = Some(true);
+    params.provider = "acp".into();
+    params.acp_agent = Some("custom:antigravity".into());
+    params.options = Some(
+        [("acp:model".to_owned(), serde_json::json!("gemini-4-neon"))]
+            .into_iter()
+            .collect(),
+    );
 
-    for op in [
-        // Missing acp_agent.
-        with("missing", &|p| p.provider = "acp".into()),
-        // Unknown acp_agent.
-        with("unknown", &|p| {
-            p.provider = "acp".into();
-            p.acp_agent = Some("custom:nope".into());
-        }),
-        // Disabled acp_agent.
-        with("disabled", &|p| {
-            p.provider = "acp".into();
-            p.acp_agent = Some("custom:disabled".into());
-        }),
-        // Native-duplicate acp_agent.
-        with("duplicate", &|p| {
-            p.provider = "acp".into();
-            p.acp_agent = Some("cursor".into());
-        }),
-        // acp_agent on a native provider.
-        with("native-with-acp", &|p| {
-            p.acp_agent = Some("custom:antigravity".into());
-        }),
-        // Approval-governing option on ACP.
-        with("acp-mode", &|p| {
-            p.provider = "acp".into();
-            p.acp_agent = Some("custom:antigravity".into());
-            p.options = Some(
-                [(
-                    agent::ACP_MODE_OPTION_ID.to_owned(),
-                    serde_json::json!("auto"),
-                )]
-                .into_iter()
-                .collect(),
-            );
-        }),
-    ] {
-        assert!(call(&state, cx, "caller", op).is_err());
-    }
-    cx.run_until_parked();
-    assert!(started(cx).is_empty());
-
-    let reply = call(
-        &state,
-        cx,
-        "caller",
-        with("acp-subagent", &|p| {
-            p.provider = "acp".into();
-            p.acp_agent = Some("custom:antigravity".into());
-            p.model = Some("gemini-4-neon".into());
-        }),
-    )
-    .unwrap();
+    let reply = call(&state, cx, "caller", ControlOp::StartThread(params)).unwrap();
     assert_eq!(reply["subagent"], true, "{reply}");
     let id = reply["thread_id"].as_str().unwrap().to_owned();
+    state.subscribe(
+        cx,
+        Topic::SessionStatus {
+            session_id: id.clone(),
+        },
+    );
     let meta = cx.seen().session(&id).unwrap().clone();
     assert_eq!(meta.provider, ProviderKind::Acp);
     assert_eq!(meta.acp_agent_id.as_deref(), Some("custom:antigravity"));
-    assert_eq!(meta.model.as_deref(), Some("gemini-4-neon"));
+    assert_eq!(meta.model, None);
+    assert!(
+        meta.option_selections
+            .iter()
+            .any(|s| s.id == "acp:model" && s.value == serde_json::json!("gemini-4-neon"))
+    );
     assert_eq!(meta.parent_session_id.as_deref(), Some("caller"));
 
-    // When an ACP subagent does not attach Tcode's MCP servers, completing the
-    // turn delivers its final message as a fallback immediately without sending
-    // a report_result reminder.
     let child = providers.started(cx, 0);
     let (delivery_id, text) = child.next_turn(cx);
     assert!(text.starts_with(MESSAGE));
@@ -456,18 +569,28 @@ fn start_thread_starts_an_acp_subagent_and_validates_acp_agent() {
         }),
         turn_completed(),
     ]);
-    cx.run_until_seen(|view| {
-        view.session(&id)
-            .is_some_and(|meta| meta.report() == tcode_core::settlement::AgentReport::Unreported)
-    });
-    let final_meta = cx.seen().session(&id).unwrap();
+
+    // The parent receives the labelled fallback right away, and the child
+    // receives no reminder turn.
+    let parent = providers.started(cx, 1);
+    let (_, callback) = parent.next_turn(cx);
     assert!(
-        !final_meta
-            .expectation
-            .as_ref()
-            .expect("child expectation")
-            .reminded,
-        "must not send a report_result reminder when MCP servers were not attached"
+        callback.contains(tcode_core::notice::ORCHESTRATE_FALLBACK_LABEL),
+        "parent must receive a labelled fallback: {callback}"
+    );
+    assert!(
+        callback.contains("ACP investigation complete"),
+        "fallback must carry the child's final message: {callback}"
+    );
+    cx.run_until_parked();
+    assert!(
+        next_command(&child.commands).is_err(),
+        "child must receive no reminder turn when MCP servers were not attached"
+    );
+    assert!(cx.seen().status(&id).queued_messages.is_empty());
+    assert_eq!(
+        cx.seen().session(&id).unwrap().report(),
+        tcode_core::settlement::AgentReport::Unreported
     );
 }
 

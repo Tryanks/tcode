@@ -553,6 +553,7 @@ impl AppState {
         }
         let timeline = &resident.timeline;
         let usage = timeline.usage;
+        let mcp_servers_attached = resident.mcp_servers_attached;
         // A report made before the lead's latest message answers an earlier one. The
         // expectation may have opened before the child's log was loaded, so its time decides
         // as well as the item delivered last.
@@ -609,10 +610,7 @@ impl AppState {
         if !self.thread_quiescent(child_id) {
             return;
         }
-        let has_mcp = child.provider.caps().mcp_servers
-            && self
-                .resident(child_id)
-                .is_none_or(|resident| resident.mcp_servers_attached);
+        let has_mcp = child.provider.caps().mcp_servers && mcp_servers_attached;
         if !expectation.reminded && has_mcp {
             expectation.reminded = true;
             self.set_child_expectation(child_id, Some(expectation), cx);

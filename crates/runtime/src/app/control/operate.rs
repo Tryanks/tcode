@@ -426,6 +426,12 @@ impl AppState {
             .model
             .map(|model| model.trim().to_owned())
             .filter(|model| !model.is_empty());
+        if provider == ProviderKind::Acp && model.is_some() {
+            return Err(
+                "model is not supported for acp; pass options: {\"acp:model\": \"...\"} instead"
+                    .into(),
+            );
+        }
         let mut meta = SessionMeta::new(provider, cwd, model);
         meta.project_id = Some(project.id.clone());
         meta.profile_id = profile_id;

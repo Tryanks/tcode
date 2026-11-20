@@ -600,21 +600,7 @@ impl AppState {
                     .map(str::trim)
                     .filter(|id| !id.is_empty());
                 self.model_allowed(policy, provider, profile, params.model.as_deref())
-                    .map_err(refusal)?;
-                if provider == ProviderKind::Acp {
-                    let acp_agent = params
-                        .acp_agent
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|id| !id.is_empty());
-                    if !policy
-                        .agent(Settings::builtin_profile_id(ProviderKind::Acp))
-                        .is_some_and(|access| access.allows_acp_agent(acp_agent))
-                    {
-                        return refused("this space does not allow that ACP agent");
-                    }
-                }
-                Ok(())
+                    .map_err(refusal)
             }
             ControlOp::RespondApproval(params)
                 if policy.approval == tcode_protocol::SpaceApproval::ReviewedOnly =>
