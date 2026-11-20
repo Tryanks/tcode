@@ -105,9 +105,12 @@ impl BackgroundDispatcher {
             .into_iter()
             .enumerate()
         {
-            self.post_mouse(&down, point, i64::from(click_count), 1.0);
+            // Each press of a run carries its own place in it, as a pointer's
+            // do: an app that acts on a double click then acts once.
+            let click_state = index as i64 + 1;
+            self.post_mouse(&down, point, click_state, 1.0);
             thread::sleep(Duration::from_millis(30));
-            self.post_mouse(&up, point, i64::from(click_count), 0.0);
+            self.post_mouse(&up, point, click_state, 0.0);
             if index + 1 < click_count as usize {
                 thread::sleep(Duration::from_millis(45));
             }
