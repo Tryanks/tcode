@@ -76,7 +76,7 @@ agent = { path = "../agent", default-features = false }
 tcode-client = { path = "../client" }
 tcode-core = { path = "../core", default-features = false }
 tcode-protocol = { path = "../protocol", default-features = false }
-qrcode = { version = "0.14", default-features = false }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 gpui = { package = "gpui-fast", version = "0.1.16", default-features = false }
 gpui-base = { version = "0.10.0", features = ["gpui-fast"] }
 # The stroke cap and join styles of GPUI's `PathBuilder`, which GPUI does not re-export.
