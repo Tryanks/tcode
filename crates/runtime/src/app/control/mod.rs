@@ -154,11 +154,13 @@ impl AppState {
     }
 
     /// What the control server offers `meta`'s thread: nothing with the feature off,
-    /// otherwise every tool and, for a subagent, `report_result`.
+    /// otherwise every tool and, for a subagent, `report_result`, and for the thread the
+    /// user opened to research a model's guide, `set_model_guide`.
     pub(super) fn control_access(&self, meta: &SessionMeta) -> ThreadAccess {
         ThreadAccess {
             enabled: self.settings.control.enabled,
             subagent: meta.is_dispatched(),
+            model_guide: meta.guide_for.is_some(),
         }
     }
 
@@ -434,6 +436,7 @@ impl AppState {
             ControlOp::DeleteThreads(p) => return self.op_delete_threads(caller, p, cx),
             ControlOp::Rewind(p) => return self.op_rewind(caller, p, cx),
             ControlOp::PatchSettings(p) => self.op_patch_settings(caller, p, cx),
+            ControlOp::SetModelGuide(p) => self.op_set_model_guide(caller, p, cx),
         };
         Answer::Now(now)
     }
@@ -567,6 +570,7 @@ impl AppState {
         match op {
             ControlOp::GetSettings(_)
             | ControlOp::PatchSettings(_)
+            | ControlOp::SetModelGuide(_)
             | ControlOp::CreateProject(_)
             | ControlOp::DeleteThreads(_) => refused("is not available"),
             ControlOp::Terminal(_) | ControlOp::ReadTerminal(_) if !policy.terminals => {

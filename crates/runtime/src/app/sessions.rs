@@ -1216,6 +1216,7 @@ impl AppState {
         let control_changed = self.settings.control != settings.control;
         self.settings = settings;
         self.executions.settings_changed(&self.settings);
+        self.refresh_collaboration_briefs();
         self.resume_provider_queues(cx);
         if control_changed {
             self.refresh_control_access();
@@ -2305,6 +2306,8 @@ impl AppState {
         if let Some(session_id) = standing {
             if let Some(standing) = self.resident_mut(&session_id) {
                 standing.meta.updated_at = tcode_core::project::now_secs();
+                // The new thread page is nobody's research.
+                standing.meta.guide_for = None;
             }
             let selection = self
                 .draft_model_selection(self.current_meta(&session_id).expect("standing draft"))?;

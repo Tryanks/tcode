@@ -349,6 +349,21 @@ impl AppState {
                     session(session_id)?;
                     self.model_allowed(policy, *provider, profile_id.as_deref(), model.as_deref())
                 }
+                Command::SetActiveCollaboration {
+                    session_id,
+                    collaboration_id,
+                } => {
+                    session(session_id)?;
+                    match self.settings.collaboration(collaboration_id) {
+                        Some(collaboration) => self.model_allowed(
+                            policy,
+                            collaboration.lead.provider,
+                            collaboration.lead.profile_id.as_deref(),
+                            Some(&collaboration.lead.model),
+                        ),
+                        None => Err(refusal("collaboration")),
+                    }
+                }
                 Command::SetActiveOption {
                     session_id,
                     id,
@@ -471,6 +486,8 @@ impl AppState {
                     session_id: None, ..
                 }
                 | Command::PatchSettings { .. }
+                | Command::ResearchModel { .. }
+                | Command::RefreshCollaborationTemplates
                 | Command::ResetSettings
                 | Command::SetSidebarCollapsed { .. }
                 | Command::CycleProjectSort
@@ -567,6 +584,7 @@ impl AppState {
                 Query::Hosting { .. }
                 | Query::ComputerUsePermissions
                 | Query::ControlActivity { .. }
+                | Query::CollaborationTemplates
                 | Query::NativeMcpServers { .. }
                 | Query::ScanExternalHistory
                 | Query::BrowseDirectories { .. } => Err(refusal("query")),

@@ -88,6 +88,7 @@ pub(crate) fn action_label(key: &str) -> String {
         action::DELETE_THREADS => "control.action.delete_threads",
         action::REWIND => "control.action.rewind",
         action::PATCH_SETTINGS => "control.action.patch_settings",
+        action::SET_MODEL_GUIDE => "control.action.set_model_guide",
         action::START_THREAD => "control.action.start_thread",
         action::SEND_QUEUED => "control.action.send_queued",
         action::SEND_STEERED => "control.action.send_steered",

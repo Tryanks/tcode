@@ -911,6 +911,9 @@ pub struct SessionStatus {
     pub requested_model: Option<String>,
     pub requested_profile_id: Option<String>,
     pub acp_agent_id: Option<String>,
+    /// The collaboration the thread runs under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collaboration_id: Option<String>,
     pub project_id: Option<String>,
     pub queued_messages: Vec<QueuedMessageStatus>,
     /// The thread's background work: what its harness lists, then calls
@@ -1120,6 +1123,8 @@ pub struct InjectedInstructions {
 pub enum InjectedChannel {
     /// The pull request linking instructions, through the provider's own channel.
     Linking(agent::InstructionChannel),
+    /// The brief of the collaboration the thread runs under, through the provider's own channel.
+    Collaboration(agent::InstructionChannel),
     /// An MCP server's `instructions`, by server name.
     McpServer(String),
     /// Codex's thread `developerInstructions`.

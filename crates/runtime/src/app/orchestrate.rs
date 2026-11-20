@@ -98,6 +98,16 @@ impl AppState {
                 text: self.pull_request_instructions(id),
             });
         }
+        let collaboration_brief = match session.runtime {
+            Runtime::Idle => self.collaboration_brief(meta),
+            _ => session.live_collaboration_brief.clone(),
+        };
+        if let Some(text) = collaboration_brief.filter(|_| attached) {
+            instructions.push(InjectedInstructions {
+                channel: InjectedChannel::Collaboration(channel),
+                text,
+            });
+        }
         if provider == ProviderKind::Codex {
             instructions.push(InjectedInstructions {
                 channel: InjectedChannel::DeveloperInstructions,

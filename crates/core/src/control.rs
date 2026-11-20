@@ -28,12 +28,92 @@ impl ControlScope {
     }
 }
 
-/// Whether a thread's model is given `tcode_control`. What it then does with it is the
-/// harness's to allow or ask about, as with any other tool.
+/// The account profiles and models something may run: a space's members, or the threads
+/// `tcode_control` starts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum AgentScope {
+    /// Every enabled account profile and model, including ones added later.
+    #[default]
+    Every,
+    /// Only these profiles; one added later is not among them.
+    Only(Vec<AgentGrant>),
+}
+
+impl AgentScope {
+    pub fn is_every(&self) -> bool {
+        *self == Self::Every
+    }
+
+    /// The grant for `profile_id`, when the scope holds that profile at all.
+    pub fn agent(&self, profile_id: &str) -> Option<AgentAccess<'_>> {
+        match self {
+            Self::Every => Some(AgentAccess::Every),
+            Self::Only(grants) => grants
+                .iter()
+                .find(|grant| grant.profile_id == profile_id)
+                .map(AgentAccess::Granted),
+        }
+    }
+}
+
+/// One account profile an [`AgentScope`] holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentGrant {
+    pub profile_id: String,
+    pub models: ModelGrant,
+    /// For the ACP profile, the registry ids of the agents the scope holds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acp_agents: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum ModelGrant {
+    /// Every model the profile offers, including ones it offers later.
+    Every,
+    Only(Vec<String>),
+}
+
+/// What [`AgentScope::agent`] found for one profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentAccess<'a> {
+    Every,
+    Granted(&'a AgentGrant),
+}
+
+impl AgentAccess<'_> {
+    pub fn allows_model(&self, model: Option<&str>) -> bool {
+        match self {
+            Self::Every => true,
+            Self::Granted(grant) => match &grant.models {
+                ModelGrant::Every => true,
+                ModelGrant::Only(models) => {
+                    model.is_some_and(|model| models.iter().any(|allowed| allowed == model))
+                }
+            },
+        }
+    }
+
+    pub fn allows_acp_agent(&self, agent: Option<&str>) -> bool {
+        match self {
+            Self::Every => true,
+            Self::Granted(grant) => {
+                agent.is_some_and(|agent| grant.acp_agents.iter().any(|allowed| allowed == agent))
+            }
+        }
+    }
+}
+
+/// Whether a thread's model is given `tcode_control`, and which accounts and models the
+/// threads it starts may run. What it then does with it is the harness's to allow or ask
+/// about, as with any other tool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlSettings {
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "AgentScope::is_every")]
+    pub agents: AgentScope,
 }
 
 const fn default_true() -> bool {
@@ -42,7 +122,10 @@ const fn default_true() -> bool {
 
 impl Default for ControlSettings {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            agents: AgentScope::Every,
+        }
     }
 }
 
@@ -180,6 +263,8 @@ pub mod action {
     pub const REWIND: &str = "rewind";
     /// Detail: the setting's key.
     pub const PATCH_SETTINGS: &str = "patch_settings";
+    /// Detail: the model's id.
+    pub const SET_MODEL_GUIDE: &str = "set_model_guide";
     pub const START_THREAD: &str = "start_thread";
     /// Detail: the target project's name and root.
     pub const MOVE: &str = "move";

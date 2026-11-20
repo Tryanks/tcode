@@ -2,7 +2,9 @@
 //!
 //! The profile tabs (one per provider profile, built-in or user-created),
 //! resolved model catalog, offline/custom-model handling, and selection event
-//! live here so settings surfaces do not grow subtly different pickers.
+//! live here so settings surfaces do not grow subtly different pickers. One
+//! picker holds a single selection; another adds models to a list its owner
+//! keeps, one pick after another.
 
 use std::rc::Rc;
 
@@ -10,18 +12,20 @@ use std::rc::Rc;
 const OPTIONS: std::time::Duration = std::time::Duration::from_millis(200);
 
 use crate::icon::{Icon, IconName};
+use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::tabs::{TabBar, TabItem};
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{PopoverState, h_flex, v_flex};
 
 use agent::ProviderKind;
+use tcode_core::control::AgentScope;
 use tcode_core::settings::Settings;
 
 use crate::provider_card::profile_glyph;
@@ -49,6 +53,15 @@ pub(crate) struct ProviderModelPicker {
     /// The active tab: a profile id (built-in or user-created).
     selected_profile: String,
     selected: Option<(ProviderKind, String, Option<String>)>,
+    /// What the trigger reads while nothing is chosen.
+    unchosen: SharedString,
+    /// The picker adds to a list its owner keeps: this names its trigger, a
+    /// pick leaves it open, and it offers what the list does not hold yet.
+    adding: Option<SharedString>,
+    /// What the owner's list holds already.
+    taken: Vec<(ProviderKind, String, Option<String>)>,
+    /// Only what Settings → Control lets a thread be started on is offered.
+    startable: bool,
     _store_subscription: Subscription,
 }
 
@@ -77,7 +90,50 @@ impl ProviderModelPicker {
                 })
                 .unwrap_or_default(),
             selected,
+            unchosen: crate::tr!("model_picker.automatic").into_owned().into(),
+            adding: None,
+            taken: Vec::new(),
+            startable: false,
             _store_subscription: store_subscription,
+        }
+    }
+
+    /// A picker that adds to a list its owner keeps: each pick is emitted and
+    /// the picker stays open for the next. `label` names its trigger.
+    pub fn adding(
+        store: Entity<WorkspaceStore>,
+        popover_id: &'static str,
+        trigger_id: &'static str,
+        label: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            adding: Some(label.into()),
+            ..Self::selection(store, popover_id, trigger_id, None, cx)
+        }
+    }
+
+    /// What the trigger reads while nothing is chosen, in place of "Automatic".
+    pub fn unchosen(mut self, label: impl Into<SharedString>) -> Self {
+        self.unchosen = label.into();
+        self
+    }
+
+    /// Offer only what Settings → Control lets a thread be started on.
+    pub fn startable(mut self) -> Self {
+        self.startable = true;
+        self
+    }
+
+    /// What the owner's list holds, which an adding picker leaves out.
+    pub fn set_taken(
+        &mut self,
+        taken: Vec<(ProviderKind, String, Option<String>)>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.taken != taken {
+            self.taken = taken;
+            cx.notify();
         }
     }
 
@@ -95,10 +151,24 @@ impl ProviderModelPicker {
         }
     }
 
+    /// The models a profile tab lists now: what it offers, less what the
+    /// owner's list holds already.
+    fn profile_options(&self, profile_id: &str, cx: &App) -> Vec<ModelOption> {
+        let mut options = self.profile_offer(profile_id, cx);
+        options.retain(|option| {
+            !self.taken.iter().any(|(provider, model, profile_id)| {
+                *provider == option.provider
+                    && model == &option.id
+                    && profile_id == &option.profile_id
+            })
+        });
+        options
+    }
+
     /// The models a profile tab offers. Only enabled profiles are offered for
     /// new selections; a disabled profile stays configurable in Settings but
     /// never reaches the picker.
-    fn profile_options(&self, profile_id: &str, cx: &App) -> Vec<ModelOption> {
+    fn profile_offer(&self, profile_id: &str, cx: &App) -> Vec<ModelOption> {
         let store = self.store.read(cx);
         let Some(profile) = store
             .enabled_profiles()
@@ -109,9 +179,19 @@ impl ProviderModelPicker {
         };
         let option_profile =
             (!Settings::is_builtin_profile_id(&profile.id)).then_some(profile.id.clone());
+        let every = AgentScope::Every;
+        let scope = if self.startable {
+            &store.settings_ref().control.agents
+        } else {
+            &every
+        };
+        let Some(access) = scope.agent(&profile.id) else {
+            return Vec::new();
+        };
         store
             .picker_models_for_profile(&profile.id)
             .into_iter()
+            .filter(|model| access.allows_model(Some(&model.id)))
             .map(|model| ModelOption {
                 provider: profile.kind,
                 id: model.id,
@@ -128,7 +208,7 @@ impl ProviderModelPicker {
         profile_id: Option<&str>,
         cx: &App,
     ) -> String {
-        self.profile_options(&selection_profile_id(provider, profile_id), cx)
+        self.profile_offer(&selection_profile_id(provider, profile_id), cx)
             .into_iter()
             .find(|option| {
                 option.provider == provider
@@ -140,6 +220,14 @@ impl ProviderModelPicker {
     }
 
     fn trigger(&self, cx: &Context<Self>) -> Button {
+        if let Some(label) = &self.adding {
+            return Button::new(self.trigger_id)
+                .ghost()
+                .outline()
+                .xsmall()
+                .icon(IconName::Plus)
+                .aria_label(label.clone());
+        }
         let (display, glyph) = match &self.selected {
             Some((provider, model, profile_id)) => (
                 self.display_name(*provider, model, profile_id.as_deref(), cx),
@@ -149,7 +237,7 @@ impl ProviderModelPicker {
                     profile_id.as_deref(),
                 )),
             ),
-            None => (crate::tr!("model_picker.automatic").into_owned(), None),
+            None => (self.unchosen.to_string(), None),
         };
         Button::new(self.trigger_id)
             .ghost()
@@ -178,18 +266,45 @@ impl ProviderModelPicker {
 impl Render for ProviderModelPicker {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let picker = cx.entity();
-        crate::material::overlay_popover(self.popover_id, cx)
+        let popover = crate::material::overlay_popover(self.popover_id, cx);
+        // The plus sits at the right of its list's heading, so its models open
+        // under it leftwards.
+        let popover = if self.adding.is_some() {
+            popover.anchor(gpui::Anchor::TopRight)
+        } else {
+            popover
+        };
+        popover
             .trigger(self.trigger(cx))
             .content(move |_, window, cx| {
-                let (profiles, selected_profile, selected) = {
+                let (mut profiles, selected_profile, startable) = {
                     let picker = picker.read(cx);
                     (
                         picker.store.read(cx).enabled_profiles(),
                         picker.selected_profile.clone(),
-                        picker.selected.clone(),
+                        picker.startable,
                     )
                 };
                 let store = picker.read(cx).store.clone();
+                if startable {
+                    // A profile Control leaves nothing of has no tab.
+                    profiles.retain(|profile| {
+                        !picker.read(cx).profile_offer(&profile.id, cx).is_empty()
+                    });
+                    if profiles.is_empty() {
+                        return v_flex()
+                            .w(crate::sizing::fit_viewport(
+                                390.,
+                                window.viewport_size().width,
+                            ))
+                            .p_1()
+                            .child(crate::material::empty_row(
+                                crate::tr!("model_picker.none_startable"),
+                                cx,
+                            ))
+                            .into_any_element();
+                    }
+                }
                 // A deleted profile falls back to the first tab (built-ins
                 // always exist, so the list is never empty).
                 let current_profile = if profiles.iter().any(|p| p.id == selected_profile) {
@@ -226,9 +341,7 @@ impl Render for ProviderModelPicker {
                             .then(|| store.read(cx).models_error(profile.kind))
                             .flatten()
                             .map(str::to_owned);
-                        let list = option_list(
-                            tab, options, unlisted, &selected, &picker, &store, &popover, cx,
-                        );
+                        let list = option_list(tab, options, unlisted, &picker, &popover, cx);
                         (tab, list)
                     })
                     .collect();
@@ -284,24 +397,35 @@ impl Render for ProviderModelPicker {
                     })
                     .child(crate::material::faded_hairline(cx))
                     .child(rows)
+                    .when(startable, |this| {
+                        this.child(crate::material::faded_hairline(cx)).child(
+                            div()
+                                .px_2()
+                                .py_1p5()
+                                .text_caption(cx)
+                                .child(crate::tr!("model_picker.startable_only")),
+                        )
+                    })
+                    .into_any_element()
             })
     }
 }
 
 /// One profile's options: an option the catalog adds or drops folds into or
 /// out of the list as the others glide.
-#[allow(clippy::too_many_arguments)]
 fn option_list(
     tab: usize,
     options: Rc<[ModelOption]>,
     // Why the profile's catalog could not be listed.
     unlisted: Option<String>,
-    selected: &Option<(ProviderKind, String, Option<String>)>,
     picker: &Entity<ProviderModelPicker>,
-    store: &Entity<WorkspaceStore>,
     popover: &Entity<PopoverState>,
     cx: &App,
 ) -> AnyElement {
+    let (selected, adding) = {
+        let picker = picker.read(cx);
+        (picker.selected.clone(), picker.adding.is_some())
+    };
     let available = options.clone();
     if available.is_empty() {
         return div()
@@ -310,6 +434,7 @@ fn option_list(
             .child(crate::material::empty_row(
                 match &unlisted {
                     Some(error) => crate::tr!("model_picker.models_unlisted", error = error),
+                    None if adding => crate::tr!("model_picker.all_added"),
                     None => crate::tr!("model_picker.no_models"),
                 },
                 cx,
@@ -324,12 +449,7 @@ fn option_list(
     };
     let keys: Rc<[u64]> = available.iter().map(key).collect();
     let row = {
-        let (selected, picker, store, popover) = (
-            selected.clone(),
-            picker.clone(),
-            store.clone(),
-            popover.clone(),
-        );
+        let (selected, picker, popover) = (selected.clone(), picker.clone(), popover.clone());
         move |index: usize, option: &ModelOption, cx: &App| {
             let is_selected = selected
                 .as_ref()
@@ -344,8 +464,8 @@ fn option_list(
                     index,
                     option,
                     is_selected,
+                    adding,
                     &picker,
-                    &store,
                     &popover,
                     cx,
                 ))
@@ -378,8 +498,8 @@ fn option_row(
     index: usize,
     option: &ModelOption,
     is_selected: bool,
+    adding: bool,
     picker: &Entity<ProviderModelPicker>,
-    store: &Entity<WorkspaceStore>,
     popover: &Entity<PopoverState>,
     cx: &App,
 ) -> AnyElement {
@@ -401,7 +521,7 @@ fn option_row(
     .text_body(false, cx)
     .cursor_pointer()
     .child(profile_glyph(
-        store.read(cx),
+        picker.read(cx).store.read(cx),
         option.provider,
         option.profile_id.as_deref(),
     ))
@@ -422,17 +542,30 @@ fn option_row(
             ),
     )
     .when(is_selected, |row| row.child(Icon::new(IconName::Check)))
+    .when(adding, |row| {
+        row.child(Icon::new(IconName::Plus).text_color(cx.theme().muted_foreground))
+    })
     .on_click(move |_, window, cx| {
         picker.update(cx, |picker, cx| {
             picker.selected_profile = option_profile_id(&selected);
-            picker.selected = Some((
-                selected.provider,
-                selected.id.clone(),
-                selected.profile_id.clone(),
-            ));
+            if !adding {
+                picker.selected = Some((
+                    selected.provider,
+                    selected.id.clone(),
+                    selected.profile_id.clone(),
+                ));
+            }
             cx.emit(ModelSelected(selected.clone()));
         });
-        popover.update(cx, |state, cx| state.dismiss(window, cx));
+        // An adding picker stays open for the next pick, and draws again
+        // without the one its owner just took.
+        popover.update(cx, |state, cx| {
+            if adding {
+                cx.notify();
+            } else {
+                state.dismiss(window, cx);
+            }
+        });
     })
     .into_any_element()
 }

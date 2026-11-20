@@ -1096,3 +1096,208 @@ fn move_thread_moves_the_caller_and_keeps_its_turn() {
         "its turn over, the provider leaves the old directory"
     );
 }
+
+/// A thread put under a collaboration runs on its decision model, whose provider is told the
+/// collaboration at launch: each collaborator's mandate, and what is known of how its model
+/// is best used. The thread's status discloses that text as delivered. As subagents it
+/// starts the collaborators and no other model, each at a reasoning effort the collaboration
+/// allows it, and `tcode_control` starts and lists nothing that Settings → Control leaves
+/// out.
+#[test]
+fn a_thread_under_a_collaboration_is_told_it_and_starts_its_collaborators_only() {
+    use tcode_core::collaboration::{Collaboration, CollaborationMember, ModelGuide, ModelRef};
+    use tcode_core::control::{AgentGrant, AgentScope, ModelGrant};
+    use tcode_protocol::InjectedChannel;
+
+    let store = TestStore::new("tcode-control-collaboration");
+    let root = store.root().join("project");
+    stored_project(&store, "a", &root, |_| {});
+    stored(&store, "lead", ProviderKind::Codex, "a", &root, |_| {});
+    let cx = &mut TestAppContext::default();
+    let (state, providers) = controlled_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    let set = |cx: &mut TestAppContext, patch: SettingsPatch| {
+        state.command(cx, Command::PatchSettings { patch }).unwrap();
+    };
+    let model = |provider, model: &str| ModelRef {
+        provider,
+        profile_id: None,
+        model: model.into(),
+    };
+    set(
+        cx,
+        SettingsPatch::SaveCollaboration(Collaboration {
+            id: "delivery".into(),
+            name: "Delivery".into(),
+            lead: model(ProviderKind::ClaudeCode, "decider"),
+            lead_mandate: String::new(),
+            members: vec![CollaborationMember {
+                id: "m".into(),
+                model: model(ProviderKind::Codex, "executor"),
+                mandate: "Implements what it is handed.".into(),
+                efforts: vec!["high".into()],
+            }],
+            favorite: false,
+        }),
+    );
+    set(
+        cx,
+        SettingsPatch::ModelGuide(ModelGuide {
+            model: model(ProviderKind::Codex, "executor"),
+            text: "Brief it one change at a time.".into(),
+            thread_id: None,
+            researched_at: None,
+        }),
+    );
+
+    state.open(cx, "lead");
+    state
+        .command(
+            cx,
+            Command::SetActiveCollaboration {
+                session_id: "lead".into(),
+                collaboration_id: "delivery".into(),
+            },
+        )
+        .unwrap();
+    let lead = first_turn(&state, cx, &providers, "lead", 0);
+    assert_eq!(lead.provider, ProviderKind::ClaudeCode);
+    assert_eq!(lead.options.model.as_deref(), Some("decider"));
+    let brief = lead
+        .options
+        .instructions
+        .clone()
+        .expect("the decision model is told the collaboration");
+    assert!(brief.contains("Implements what it is handed."), "{brief}");
+    assert!(brief.contains("Brief it one change at a time."), "{brief}");
+    lead.fence(cx, "lead");
+    let disclosed = cx.seen().status("lead").injected_tools.clone().unwrap();
+    assert!(
+        disclosed.instructions.iter().any(|told| {
+            told.channel == InjectedChannel::Collaboration(agent::InstructionChannel::SessionAppend)
+                && told.text == brief
+        }),
+        "{:?}",
+        disclosed.instructions
+    );
+
+    let with = |request_id: &str, subagent: bool, model: &str| {
+        let ControlOp::StartThread(mut params) = start("a") else {
+            unreachable!()
+        };
+        params.request_id = request_id.into();
+        params.subagent = subagent.then_some(true);
+        params.model = Some(model.into());
+        ControlOp::StartThread(params)
+    };
+    let collaborator = call(&state, cx, "lead", with("collaborator", true, "executor")).unwrap();
+    assert_eq!(collaborator["subagent"], true, "{collaborator}");
+    // It runs at the one effort the collaboration allows it, and at no other.
+    let effort = |meta: &SessionMeta| {
+        meta.option_selections
+            .iter()
+            .find(|selection| selection.id == agent::EFFORT_OPTION_ID)
+            .map(|selection| selection.value.clone())
+    };
+    let started = cx
+        .seen()
+        .session(collaborator["thread_id"].as_str().unwrap())
+        .unwrap()
+        .clone();
+    assert_eq!(effort(&started), Some(serde_json::json!("high")));
+    let ControlOp::StartThread(mut lighter) = with("lighter", true, "executor") else {
+        unreachable!()
+    };
+    lighter.options = Some(
+        [(agent::EFFORT_OPTION_ID.to_owned(), serde_json::json!("low"))]
+            .into_iter()
+            .collect(),
+    );
+    assert!(call(&state, cx, "lead", ControlOp::StartThread(lighter)).is_err());
+    // Another model is refused as a subagent only: the collaboration is what refuses it.
+    assert!(call(&state, cx, "lead", with("other-subagent", true, "another")).is_err());
+    assert!(call(&state, cx, "lead", with("other-thread", false, "another")).is_ok());
+
+    set(
+        cx,
+        SettingsPatch::ControlAgents(AgentScope::Only(vec![AgentGrant {
+            profile_id: "codex".into(),
+            models: ModelGrant::Only(vec!["executor".into()]),
+            acp_agents: Vec::new(),
+        }])),
+    );
+    assert!(call(&state, cx, "lead", with("withheld", false, "another")).is_err());
+    assert!(call(&state, cx, "lead", with("let", false, "executor")).is_ok());
+    let listed = call(
+        &state,
+        cx,
+        "lead",
+        ControlOp::ListProviders(Default::default()),
+    )
+    .unwrap();
+    let listed: Vec<(&str, &serde_json::Value)> = listed["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["kind"].as_str().unwrap(),
+                &row["profiles"][0]["startable_models"],
+            )
+        })
+        .collect();
+    assert_eq!(listed, [("codex", &serde_json::json!(["executor"]))]);
+}
+
+/// The thread the user opened to research a model's guide is the one thread offered
+/// `set_model_guide`, and its call writes that model's guide as that thread's. Another
+/// thread is neither offered the tool nor writes a guide by calling it.
+#[test]
+fn only_the_thread_researching_a_guide_is_given_the_tool_that_writes_it() {
+    use control_mcp::SetModelGuideParams;
+    use tcode_core::collaboration::ModelRef;
+
+    let store = TestStore::new("tcode-control-model-guide");
+    let root = store.root().join("project");
+    stored_project(&store, "a", &root, |_| {});
+    let researched = ModelRef {
+        provider: ProviderKind::Codex,
+        profile_id: None,
+        model: "executor".into(),
+    };
+    stored(
+        &store,
+        "research",
+        ProviderKind::Codex,
+        "a",
+        &root,
+        |meta| meta.guide_for = Some(researched.clone()),
+    );
+    stored(&store, "other", ProviderKind::Codex, "a", &root, |_| {});
+    let cx = &mut TestAppContext::default();
+    let (state, _providers) = controlled_host(cx, &store);
+    state.open(cx, "research");
+    state.open(cx, "other");
+    let offered = |cx: &TestAppContext, id: &str| {
+        let disclosed = cx.seen().status(id).injected_tools.clone().unwrap();
+        disclosed
+            .tools
+            .iter()
+            .any(|(name, _)| name == "set_model_guide")
+    };
+    assert!(offered(cx, "research"));
+    assert!(!offered(cx, "other"));
+
+    let write = || {
+        ControlOp::SetModelGuide(SetModelGuideParams {
+            guide: "Brief it one change at a time.".into(),
+        })
+    };
+    assert!(call(&state, cx, "other", write()).is_err());
+    call(&state, cx, "research", write()).unwrap();
+    let guides = state.read(|state| state.settings.model_guides.clone());
+    assert_eq!(guides.len(), 1, "{guides:?}");
+    assert_eq!(guides[0].model, researched);
+    assert_eq!(guides[0].text, "Brief it one change at a time.");
+    assert_eq!(guides[0].thread_id.as_deref(), Some("research"));
+}

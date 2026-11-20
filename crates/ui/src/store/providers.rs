@@ -1,6 +1,57 @@
 use super::*;
 
+/// One account profile, or the ACP agents, that an agent scope may hold: a space's, or
+/// what `tcode_control` starts threads on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentChoice {
+    pub profile_id: String,
+    pub provider: agent::ProviderKind,
+    pub name: String,
+    /// Model id and display name.
+    pub models: Vec<(String, String)>,
+    /// For the ACP profile: agent id and name.
+    pub acp_agents: Vec<(String, String)>,
+}
+
 impl WorkspaceStore {
+    /// The host's agents a scope may hold: every enabled account profile with its models,
+    /// and its ACP agents.
+    pub(crate) fn agent_choices(&self) -> Vec<AgentChoice> {
+        let settings = self.settings_ref();
+        let mut choices: Vec<AgentChoice> = self
+            .enabled_profiles()
+            .into_iter()
+            .map(|profile| AgentChoice {
+                provider: profile.kind,
+                name: settings.profile_display_name(&profile.id),
+                models: self
+                    .profile_catalog(&profile.id)
+                    .into_iter()
+                    .map(|model| (model.id, model.display_name))
+                    .collect(),
+                acp_agents: Vec::new(),
+                profile_id: profile.id,
+            })
+            .collect();
+        let acp = self.settings_installed_acp_agents();
+        if !acp.is_empty() {
+            choices.push(AgentChoice {
+                profile_id: tcode_core::settings::Settings::builtin_profile_id(
+                    agent::ProviderKind::Acp,
+                )
+                .to_owned(),
+                provider: agent::ProviderKind::Acp,
+                name: crate::tr!("space_policy.acp_agents").into_owned(),
+                models: Vec::new(),
+                acp_agents: acp
+                    .into_iter()
+                    .map(|agent| (agent.id, agent.name))
+                    .collect(),
+            });
+        }
+        choices
+    }
+
     pub fn all_provider_profiles(&self) -> Vec<ResolvedProfile> {
         if !self.scope.is_full() {
             return self

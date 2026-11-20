@@ -113,6 +113,8 @@ enum Section {
     Browser,
     ComputerUse,
     Control,
+    /// The collaborations a thread can be run under.
+    Collaboration,
     Plugins,
     #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
     Remote,
@@ -138,7 +140,7 @@ enum Section {
 /// manages that machine's shared spaces, first of its settings. Choosing a
 /// machine lives in `crate::remote`.
 #[cfg(feature = "remote-hosting")]
-const SECTIONS: [Section; 16] = [
+const SECTIONS: [Section; 17] = [
     Section::General,
     Section::Remote,
     Section::Spaces,
@@ -147,6 +149,7 @@ const SECTIONS: [Section; 16] = [
     Section::MachineSpaces,
     Section::Threads,
     Section::Control,
+    Section::Collaboration,
     Section::Providers,
     Section::SourceControl,
     Section::Usage,
@@ -157,13 +160,14 @@ const SECTIONS: [Section; 16] = [
     Section::Maintenance,
 ];
 #[cfg(all(target_family = "wasm", not(feature = "remote-hosting")))]
-const SECTIONS: [Section; 14] = [
+const SECTIONS: [Section; 15] = [
     Section::General,
     Section::Remote,
     Section::Spaces,
     Section::Group,
     Section::Threads,
     Section::Control,
+    Section::Collaboration,
     Section::Providers,
     Section::SourceControl,
     Section::Usage,
@@ -174,10 +178,11 @@ const SECTIONS: [Section; 14] = [
     Section::Maintenance,
 ];
 #[cfg(not(any(feature = "remote-hosting", target_family = "wasm")))]
-const SECTIONS: [Section; 11] = [
+const SECTIONS: [Section; 12] = [
     Section::General,
     Section::Threads,
     Section::Control,
+    Section::Collaboration,
     Section::Providers,
     Section::SourceControl,
     Section::Usage,
@@ -319,6 +324,7 @@ impl Section {
             | Self::Browser
             | Self::ComputerUse
             | Self::Control
+            | Self::Collaboration
             | Self::Plugins
             | Self::Archived
             | Self::Maintenance => SectionGroup::Machine,
@@ -354,6 +360,7 @@ impl Section {
             | Self::Usage
             | Self::ComputerUse
             | Self::Control
+            | Self::Collaboration
             | Self::Plugins
             | Self::Archived
             | Self::Maintenance => true,
@@ -380,6 +387,7 @@ impl Section {
             Self::Browser => "settings-nav-browser",
             Self::ComputerUse => "settings-nav-computer-use",
             Self::Control => "settings-nav-control",
+            Self::Collaboration => "settings-nav-collaboration",
             Self::Plugins => "settings-nav-plugins",
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => "settings-nav-remote",
@@ -406,6 +414,7 @@ impl Section {
             Self::Browser => IconName::Globe,
             Self::ComputerUse => IconName::LayoutDashboard,
             Self::Control => IconName::Layers,
+            Self::Collaboration => IconName::GitMerge,
             Self::Plugins => IconName::Puzzle,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => IconName::Network,
@@ -434,6 +443,7 @@ impl Section {
             Self::Browser => crate::tr!("settings.browser"),
             Self::ComputerUse => crate::tr!("settings.computer_use"),
             Self::Control => crate::tr!("control.title"),
+            Self::Collaboration => crate::tr!("collaborations.title"),
             Self::Plugins => crate::tr!("settings.plugins"),
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => crate::tr!("settings.remote"),
@@ -517,6 +527,8 @@ pub struct SettingsPage {
     /// Editable main-model identities and child-model routing matrix.
     /// Each enabled profile's native plugin catalog.
     plugins_panel: Entity<PluginsSettingsPanel>,
+    /// Settings → Collaboration: the collaborations and the editor of the open one.
+    collaborations_panel: Entity<crate::collaboration_settings::CollaborationsPanel>,
     source_control_panel: Entity<crate::source_control_settings::SourceControlPanel>,
     /// The remote sections. Absent where the client cannot listen at all.
     #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
@@ -628,6 +640,7 @@ impl SettingsPage {
             "browser" => Section::Browser,
             "computer_use" => Section::ComputerUse,
             "control" => Section::Control,
+            "collaboration" => Section::Collaboration,
             "plugins" => Section::Plugins,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             "remote" => Section::Remote,
@@ -737,6 +750,9 @@ impl SettingsPage {
         ];
 
         let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window, cx));
+        let collaborations_panel = cx.new(|cx| {
+            crate::collaboration_settings::CollaborationsPanel::new(store.clone(), window, cx)
+        });
         let content_scroll = ScrollHandle::new();
         let plugins_panel = cx.new(|cx| {
             PluginsSettingsPanel::new(
@@ -800,6 +816,7 @@ impl SettingsPage {
             harness_subscriptions: Vec::new(),
             acp_panel,
             plugins_panel,
+            collaborations_panel,
             source_control_panel,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             remote,
@@ -1293,6 +1310,7 @@ impl SettingsPage {
             Section::Browser => self.render_browser(cx),
             Section::ComputerUse => self.render_computer_use(cx),
             Section::Control => self.render_control(window, cx),
+            Section::Collaboration => v_flex().child(self.collaborations_panel.clone()),
             Section::Plugins => v_flex().child(self.plugins_panel.clone()),
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Section::Remote => v_flex().child(self.remote.remote.clone()),
