@@ -826,6 +826,9 @@ impl HarnessDialog {
             store.refresh_provider_status();
             store.check_provider_versions();
             store.refresh_acp_registry();
+            if let HarnessId::Acp(id) = &self.harness {
+                store.refresh_acp_catalog(id.clone());
+            }
         });
     }
 

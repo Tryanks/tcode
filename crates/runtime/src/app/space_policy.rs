@@ -31,11 +31,15 @@ impl AppState {
         policy: &SpacePolicy,
         meta: &SessionMeta,
     ) -> Result<(), ProtocolError> {
+        let acp_default = meta
+            .acp_agent_id
+            .as_deref()
+            .and_then(|id| self.acp_default_model(id));
         self.model_allowed(
             policy,
             meta.provider,
             meta.profile_id.as_deref(),
-            meta.model.as_deref(),
+            meta.model.as_deref().or(acp_default),
         )?;
         let profile = meta
             .profile_id

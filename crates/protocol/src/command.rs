@@ -258,8 +258,16 @@ pub enum Command {
         id: String,
         patch: AcpAgentPatch,
     },
+    /// Run the thread on installed ACP agent `id`, on `model` of its own
+    /// models, or with none on its default one.
     SetActiveAcpAgent {
         session_id: String,
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
+    /// List installed ACP agent `id`'s models and options again.
+    RefreshAcpCatalog {
         id: String,
     },
     /// List a profile's native plugins as seen from `cwd` (a project
@@ -888,6 +896,7 @@ impl Command {
                 | Self::CheckProviderVersions
                 | Self::MeasureDiskUsage
                 | Self::RefreshAcpRegistry
+                | Self::RefreshAcpCatalog { .. }
                 | Self::RefreshProviderPlugins { .. }
                 | Self::LoadBranches { .. }
         )

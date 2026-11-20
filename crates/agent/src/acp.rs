@@ -16,8 +16,8 @@ use crate::acp_session::{
     prompt_status,
 };
 use crate::{
-    AcpAgent, AcpLaunch, AgentError, AgentEvent, Attachment, ProviderKind, ResumeCursor,
-    SessionHandle, SessionOptions, TokenUsage,
+    AcpAgent, AcpCatalog, AcpLaunch, AgentError, AgentEvent, Attachment, LaunchEnv, ProviderKind,
+    ResumeCursor, SessionHandle, SessionOptions, SessionProcesses, TokenUsage,
 };
 
 /// Start (or resume) a session with an ACP agent.
@@ -33,6 +33,92 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         ));
     };
     acp_session::start(ProviderKind::Acp, Registry { agent }, opts).await
+}
+
+/// What `agent` offers a new session, which it says only in `session/new`:
+/// `initialize`, then `session/new` with no MCP servers, then `session/close`
+/// when the agent can close sessions. The agent runs in a directory made for
+/// the probe and removed after it, so no project's own configuration (its
+/// hooks, its MCP servers) is loaded. An agent that needs signing in is not
+/// asked to: its interactive sign-in belongs to a thread the user starts.
+/// The processes it starts are held in `processes`, which stops them.
+pub async fn probe_catalog(
+    agent: AcpAgent,
+    extra_args: Vec<String>,
+    launch_env: LaunchEnv,
+    processes: &SessionProcesses,
+) -> Result<AcpCatalog, AgentError> {
+    let cwd = std::env::temp_dir().join(format!("tcode-acp-probe-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&cwd).map_err(|err| {
+        AgentError::Spawn(format!(
+            "could not make a directory to ask `{}` for its models: {err}",
+            agent.name
+        ))
+    })?;
+    let opts = SessionOptions {
+        cwd: cwd.clone(),
+        model: None,
+        resume: None,
+        fork: None,
+        binary_path: None,
+        option_selections: Vec::new(),
+        mcp_servers: Vec::new(),
+        launch_env,
+        extra_args,
+        acp: Some(agent.clone()),
+        instructions: None,
+        processes: processes.clone(),
+        clock: Default::default(),
+        worktrees: Vec::new(),
+    };
+    let session_cwd = cwd.clone();
+    let probed = acp_session::query(
+        ProviderKind::Acp,
+        Registry {
+            agent: agent.clone(),
+        },
+        opts,
+        async move |connection, init| {
+            let new = connection
+                .send_request(acp::NewSessionRequest::new(session_cwd))
+                .block_task()
+                .await
+                .map_err(|err| {
+                    if is_auth_required(&err) {
+                        AgentError::Provider(auth_hint(&agent, init))
+                    } else {
+                        AgentError::Protocol(format!(
+                            "`{}` could not start a session to list its models: {}",
+                            agent.name,
+                            describe(&err)
+                        ))
+                    }
+                })?;
+            if init.agent_capabilities.session_capabilities.close.is_some()
+                && let Err(err) = connection
+                    .send_request(acp::CloseSessionRequest::new(new.session_id.clone()))
+                    .block_task()
+                    .await
+            {
+                log::debug!(
+                    "acp[{}]: session/close after the probe failed: {}",
+                    agent.id,
+                    describe(&err)
+                );
+            }
+            Ok(acp_session::catalog(
+                ProviderKind::Acp,
+                new.modes.as_ref(),
+                new.config_options.as_deref(),
+            ))
+        },
+    )
+    .await;
+    // The agent is gone by now: `query` waits for it, or stopped it.
+    if let Err(err) = crate::process::unblock(move || std::fs::remove_dir_all(&cwd)).await {
+        log::warn!("could not remove the ACP probe's directory: {err}");
+    }
+    probed
 }
 
 /// An agent from the registry (or a custom command), driven by the generic
@@ -115,15 +201,7 @@ impl Dialect for Registry {
         };
         setup.adopt(modes.as_ref(), config_options.as_deref());
         let mut config_options = config_options.unwrap_or_default();
-        // `opts.model` is the model the thread's first session reported; a
-        // later choice lives in its `acp:model` selection, which
-        // `restore_options` applies.
-        let model_selected = opts
-            .option_selections
-            .iter()
-            .any(|selection| selection.id == acp_session::MODEL_OPTION_ID);
-        if !model_selected
-            && let Some(model) = &opts.model
+        if let Some(model) = &opts.model
             && let Some(selected) = setup
                 .select_model(&session_id, model, &config_options)
                 .await
@@ -196,6 +274,12 @@ impl Dialect for Registry {
         _text: String,
         _attachments: Vec<Attachment>,
     ) {
+    }
+
+    /// The model picker lists the agent's models ([`probe_catalog`]), so its
+    /// model option is the thread's model rather than one of its options.
+    fn owned_config_options(&self) -> &'static [&'static str] {
+        &[acp_session::MODEL_OPTION_ID]
     }
 }
 
@@ -343,7 +427,7 @@ mod tests {
                 },
             },
         };
-        let mut state = State::new(PathBuf::from("/workspace"));
+        let mut state = State::new(ProviderKind::Acp, PathBuf::from("/workspace"));
         state.apply_update(
             serde_json::from_value(
                 json!({"sessionUpdate": "usage_update", "used": 1200, "size": 200000}),

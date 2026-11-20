@@ -20,28 +20,29 @@ const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 #[derive(Clone)]
 /// One selectable model in the picker (a catalog [`ModelSpec`] row).
 struct ModelRow {
-    /// Provider-native model id (the selection value), or the ACP agent's
-    /// registry id when `acp` is set.
-    id: String,
+    /// The model the row selects; `None` for the one row of an ACP agent
+    /// that has listed no models, which runs the agent on its own.
+    model: Option<String>,
     name: String,
     provider: ProviderKind,
     /// Which provider profile this row belongs to (`None` = the built-in profile
     /// for `provider`). Lets a native provider expose several profiles — e.g.
     /// official Claude and a third-party endpoint — in one rail.
     profile_id: Option<String>,
-    /// This row starts a session with an installed ACP agent rather than
-    /// selecting a model (ACP agents own their model list).
-    acp: bool,
-    favorite: bool,
+    /// The installed ACP agent whose model this is.
+    acp_agent_id: Option<String>,
+    /// Whether the model is starred; `None` for a row Favorites cannot hold.
+    favorite: Option<bool>,
 }
 
 /// The row a thread runs on, in a row's own terms. Its id alone names no row:
 /// two accounts of one CLI list the same ids, and Favorites spans providers.
 #[derive(Clone)]
 struct SelectedModel {
-    id: String,
+    model: Option<String>,
     provider: ProviderKind,
     profile_id: Option<String>,
+    acp_agent_id: Option<String>,
 }
 
 /// The rows the picker marks, by [`OptionStates`]' rule: the model the thread
@@ -55,12 +56,30 @@ struct ModelMarks {
 }
 
 impl ModelRow {
+    /// A row that selects no model is the agent's, whatever model it runs.
     fn is_selected(&self, selected: &Option<SelectedModel>) -> bool {
         selected.as_ref().is_some_and(|selected| {
-            selected.id == self.id
+            (self.model.is_none() || selected.model == self.model)
                 && selected.provider == self.provider
                 && selected.profile_id == self.profile_id
+                && selected.acp_agent_id == self.acp_agent_id
         })
+    }
+
+    /// The thread waits to run this row's model; a row that selects none
+    /// has none to wait for.
+    fn is_pending(&self, marks: &ModelMarks) -> bool {
+        self.model.is_some() && self.is_selected(&marks.pending)
+    }
+
+    /// Run thread `session_id` on this row's model.
+    fn select(self, store: &mut WorkspaceStore, session_id: String) {
+        match self.acp_agent_id {
+            Some(agent) => store.set_active_acp_agent_for(session_id, agent, self.model),
+            None => {
+                store.set_active_model_for(session_id, self.provider, self.model, self.profile_id)
+            }
+        }
     }
 }
 
@@ -77,15 +96,10 @@ impl Composer {
         if let Some(rail) = self.picker_rail.clone() {
             return rail;
         }
-        match (provider, agent_id) {
-            (ProviderKind::Acp, Some(id)) => PickerRail::Acp(id.to_string()),
-            _ if has_favorites => PickerRail::Favorites,
-            // A native session's rail is its selected profile, defaulting to the
-            // built-in profile for the provider.
-            _ => PickerRail::Profile(profile_id.map(str::to_string).unwrap_or_else(|| {
-                tcode_core::settings::Settings::builtin_profile_id(provider).to_string()
-            })),
+        if has_favorites && agent_id.is_none() {
+            return PickerRail::Favorites;
         }
+        thread_rail(provider, agent_id, profile_id)
     }
 
     /// The model-picker button + popover (anchored above, ~360px), with the
@@ -101,7 +115,7 @@ impl Composer {
         let current_model = active_model.model;
         let acp_agent_id = active_model.acp_agent_id;
         let active_profile = active_model.profile_id;
-        let catalog = store.provider_model_catalog(provider);
+        let catalog = store.thread_models(provider, acp_agent_id.as_deref());
         // The picker honors the provider card's Models section: hidden models
         // are gone, custom slugs are present, and the persisted order (plus
         // favorites-first) decides the sequence. When a third-party profile is
@@ -111,8 +125,23 @@ impl Composer {
                 .as_deref()
                 .unwrap_or_else(|| tcode_core::settings::Settings::builtin_profile_id(provider)),
         );
-        let display: gpui::SharedString =
-            current_model_name_resolved(&resolved, &catalog, current_model.as_deref()).into();
+        // A thread that chose no model is named by its rail's row that
+        // selects none, where there is one.
+        let display: gpui::SharedString = match current_model.as_deref() {
+            None => rail_rows(
+                store,
+                &thread_rail(provider, acp_agent_id.as_deref(), active_profile.as_deref()),
+                &[],
+            )
+            .into_iter()
+            .find(|row| row.model.is_none())
+            .map(|row| row.name),
+            Some(_) => None,
+        }
+        .unwrap_or_else(|| {
+            current_model_name_resolved(&resolved, catalog, current_model.as_deref())
+        })
+        .into();
 
         // Build the filtered row list for the current frame. Favorites open
         // first when any exist. The favorites sweep covers every
@@ -143,66 +172,7 @@ impl Composer {
             active_profile.as_deref(),
             has_favorites,
         );
-        let all_rows: Vec<ModelRow> = match &rail {
-            PickerRail::Favorites => fav_profiles
-                .iter()
-                .flat_map(|(id, kind)| {
-                    let is_builtin = tcode_core::settings::Settings::is_builtin_profile_id(id);
-                    let profile_id = (!is_builtin).then(|| id.clone());
-                    let kind = *kind;
-                    store
-                        .picker_models_for_profile(id)
-                        .into_iter()
-                        .filter(|m| m.favorite)
-                        .map(move |m| ModelRow {
-                            id: m.id,
-                            name: m.name,
-                            provider: kind,
-                            profile_id: profile_id.clone(),
-                            acp: false,
-                            favorite: true,
-                        })
-                })
-                .collect(),
-            // Each profile is its own rail and lists only its own models: the
-            // built-in profiles and other accounts show the official catalog; a
-            // third-party profile (e.g. Klaude Kode → Kimi) shows only the models
-            // added to its card.
-            PickerRail::Profile(id) => match store.provider_profile_kind(id) {
-                Some(kind) => {
-                    let is_builtin = tcode_core::settings::Settings::is_builtin_profile_id(id);
-                    let profile_id = id.clone();
-                    store
-                        .picker_models_for_profile(id)
-                        .into_iter()
-                        .map(move |m| ModelRow {
-                            id: m.id,
-                            name: m.name,
-                            provider: kind,
-                            profile_id: (!is_builtin).then(|| profile_id.clone()),
-                            acp: false,
-                            favorite: m.favorite,
-                        })
-                        .collect()
-                }
-                None => Vec::new(),
-            },
-            // One row: "use this agent". Its models arrive as ProviderOptions
-            // once the session starts and render in the traits picker.
-            PickerRail::Acp(id) => store
-                .installed_acp_agent(id)
-                .into_iter()
-                .map(|agent| ModelRow {
-                    id: agent.id,
-                    name: agent.name,
-                    provider: ProviderKind::Acp,
-                    profile_id: None,
-                    acp: true,
-                    favorite: false,
-                })
-                .collect(),
-        };
-        let all_rows: Rc<[ModelRow]> = all_rows.into();
+        let all_rows: Rc<[ModelRow]> = rail_rows(store, &rail, &fav_profiles).into();
         let rows: Rc<[ModelRow]> = all_rows
             .iter()
             .filter(|r| query.is_empty() || r.name.to_lowercase().contains(&query))
@@ -223,31 +193,24 @@ impl Composer {
         let store_entity = self.workspace_store.clone();
         let model_search = self.model_search.clone();
         let pending_restart = composer_state.model_pending_restart;
-        let mark = |id| SelectedModel {
-            id,
+        let mark = |model| SelectedModel {
+            model,
             provider,
             profile_id: active_profile
                 .clone()
                 .filter(|id| !tcode_core::settings::Settings::is_builtin_profile_id(id)),
+            acp_agent_id: acp_agent_id.clone(),
         };
-        // On an ACP rail the "selected" row is the agent itself.
         let running_model = composer_state.running_model.clone();
-        let selected = match provider {
-            ProviderKind::Acp => ModelMarks {
-                running: acp_agent_id.clone().map(mark),
-                pending: None,
-                note: None,
-            },
-            _ => ModelMarks {
-                running: running_model.clone().map(mark),
-                pending: current_model
-                    .clone()
-                    .filter(|model| Some(model) != running_model.as_ref())
-                    .map(mark),
-                note: composer_state.model_unconfirmed.then(|| {
-                    crate::tr!("composer.option_sent", harness = provider.display_name()).into()
-                }),
-            },
+        let selected = ModelMarks {
+            running: Some(mark(running_model.clone())),
+            pending: current_model
+                .clone()
+                .filter(|model| Some(model) != running_model.as_ref())
+                .map(|model| mark(Some(model))),
+            note: composer_state.model_unconfirmed.then(|| {
+                crate::tr!("composer.option_sent", harness = provider.display_name()).into()
+            }),
         };
         let pending = selected.pending.is_some();
         let acp_rail_agents: Vec<(String, String)> = store
@@ -748,6 +711,104 @@ impl Composer {
     }
 }
 
+/// The rail that lists the models a thread runs on: its ACP agent's, else its
+/// profile's, defaulting to the built-in profile for the provider.
+fn thread_rail(
+    provider: ProviderKind,
+    agent_id: Option<&str>,
+    profile_id: Option<&str>,
+) -> PickerRail {
+    match agent_id {
+        Some(id) => PickerRail::Acp(id.to_string()),
+        None => PickerRail::Profile(profile_id.map(str::to_string).unwrap_or_else(|| {
+            tcode_core::settings::Settings::builtin_profile_id(provider).to_string()
+        })),
+    }
+}
+
+/// The rows `rail` lists.
+fn rail_rows(
+    store: &WorkspaceStore,
+    rail: &PickerRail,
+    fav_profiles: &[(String, ProviderKind)],
+) -> Vec<ModelRow> {
+    match rail {
+        PickerRail::Favorites => fav_profiles
+            .iter()
+            .flat_map(|(id, kind)| {
+                let is_builtin = tcode_core::settings::Settings::is_builtin_profile_id(id);
+                let profile_id = (!is_builtin).then(|| id.clone());
+                let kind = *kind;
+                store
+                    .picker_models_for_profile(id)
+                    .into_iter()
+                    .filter(|m| m.favorite)
+                    .map(move |m| ModelRow {
+                        model: Some(m.id),
+                        name: m.name,
+                        provider: kind,
+                        profile_id: profile_id.clone(),
+                        acp_agent_id: None,
+                        favorite: Some(true),
+                    })
+            })
+            .collect(),
+        // Each profile is its own rail and lists only its own models: the
+        // built-in profiles and other accounts show the official catalog; a
+        // third-party profile (e.g. Klaude Kode → Kimi) shows only the models
+        // added to its card.
+        PickerRail::Profile(id) => match store.provider_profile_kind(id) {
+            Some(kind) => {
+                let is_builtin = tcode_core::settings::Settings::is_builtin_profile_id(id);
+                store
+                    .picker_models_for_profile(id)
+                    .into_iter()
+                    .map(|m| ModelRow {
+                        model: Some(m.id),
+                        name: m.name,
+                        provider: kind,
+                        profile_id: (!is_builtin).then(|| id.clone()),
+                        acp_agent_id: None,
+                        favorite: Some(m.favorite),
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
+        },
+        // The agent's own models; until it lists any, the agent itself,
+        // which runs on whichever model it starts with.
+        PickerRail::Acp(id) => {
+            let models = store.acp_models(id);
+            if models.is_empty() {
+                store
+                    .installed_acp_agent(id)
+                    .into_iter()
+                    .map(|agent| ModelRow {
+                        model: None,
+                        name: agent.name,
+                        provider: ProviderKind::Acp,
+                        profile_id: None,
+                        acp_agent_id: Some(agent.id),
+                        favorite: None,
+                    })
+                    .collect()
+            } else {
+                models
+                    .iter()
+                    .map(|m| ModelRow {
+                        model: Some(m.id.clone()),
+                        name: m.display_name.clone(),
+                        provider: ProviderKind::Acp,
+                        profile_id: None,
+                        acp_agent_id: Some(id.clone()),
+                        favorite: None,
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
 /// The model's descriptors the traits pane lists, as its spec. The
 /// permission has a picker of its own and the context window is the context
 /// meter's, so neither is among them.
@@ -1091,19 +1152,7 @@ fn render_model_pane(
             {
                 let row = key_rows[n - 1].clone();
                 store_key.update(cx, |store, _cx| {
-                    if row.acp {
-                        store.set_active_acp_agent_for(
-                            key_session.clone().unwrap_or_default(),
-                            row.id,
-                        );
-                    } else {
-                        store.set_active_model_for(
-                            key_session.clone().unwrap_or_default(),
-                            row.provider,
-                            Some(row.id),
-                            row.profile_id,
-                        );
-                    }
+                    row.select(store, key_session.clone().unwrap_or_default())
                 });
                 popover_key.update(cx, |st, cx| st.dismiss(window, cx));
             }
@@ -1271,15 +1320,13 @@ fn render_model_row(
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let is_current = row.is_selected(&selected.running);
-    let is_pending = row.is_selected(&selected.pending);
-    let is_acp = row.acp;
-    let is_fav = !is_acp && row.favorite;
+    let is_pending = row.is_pending(selected);
     let name = row.name.clone();
-    let id = row.id.clone();
     let provider = row.provider;
-    let profile_id = row.profile_id.clone();
-    let fav_id = row.id.clone();
+    // Favorites holds the models of the native profiles.
+    let favorite = row.favorite.zip(row.model.clone());
     let fav_profile_id = row.profile_id.clone();
+    let selection = row.clone();
 
     let store_select = store_entity.clone();
     let popover_select = popover.clone();
@@ -1302,19 +1349,9 @@ fn render_model_row(
         .cursor_pointer()
         .when(is_current, |row| row.bg(cx.theme().list_active))
         .on_click(move |_, window, cx| {
-            let id = id.clone();
-            let profile_id = profile_id.clone();
+            let selection = selection.clone();
             store_select.update(cx, |store, _cx| {
-                if is_acp {
-                    store.set_active_acp_agent_for(session_id.clone().unwrap_or_default(), id);
-                } else {
-                    store.set_active_model_for(
-                        session_id.clone().unwrap_or_default(),
-                        provider,
-                        Some(id),
-                        profile_id,
-                    );
-                }
+                selection.select(store, session_id.clone().unwrap_or_default())
             });
             popover_select.update(cx, |st, cx| st.dismiss(window, cx));
         })
@@ -1373,44 +1410,46 @@ fn render_model_row(
                 .outline(),
             )
         })
-        .child(
-            Button::new(("model-fav", index))
-                .debug_selector(move || format!("model-fav-{index}"))
-                .ghost()
-                .xsmall()
-                .touch(compact)
-                .aria_label(if is_fav {
-                    crate::tr!("composer.remove_favorite")
-                } else {
-                    crate::tr!("composer.add_favorite")
-                })
-                .icon(
-                    Icon::new(if is_fav {
-                        IconName::StarFill
+        .when_some(favorite, |this, (is_fav, fav_id)| {
+            this.child(
+                Button::new(("model-fav", index))
+                    .debug_selector(move || format!("model-fav-{index}"))
+                    .ghost()
+                    .xsmall()
+                    .touch(compact)
+                    .aria_label(if is_fav {
+                        crate::tr!("composer.remove_favorite")
                     } else {
-                        IconName::Star
+                        crate::tr!("composer.add_favorite")
                     })
-                    .text_color(if is_fav {
-                        rgb(
-                            tcode_core::settings::builtin_provider_color(ProviderKind::ClaudeCode)
-                                .expect("Claude has a brand color"),
-                        )
-                        .into()
-                    } else {
-                        muted
+                    .icon(
+                        Icon::new(if is_fav {
+                            IconName::StarFill
+                        } else {
+                            IconName::Star
+                        })
+                        .text_color(if is_fav {
+                            rgb(tcode_core::settings::builtin_provider_color(
+                                ProviderKind::ClaudeCode,
+                            )
+                            .expect("Claude has a brand color"))
+                            .into()
+                        } else {
+                            muted
+                        }),
+                    )
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        let fav_id = fav_id.clone();
+                        let fav_profile_id = fav_profile_id.clone();
+                        store_fav.update(cx, |store, cx| {
+                            store.toggle_favorite_model(provider, fav_profile_id, fav_id, cx)
+                        });
+                        // Refresh the open popover so the star + ordering update.
+                        popover_fav.update(cx, |_, cx| cx.notify());
                     }),
-                )
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    let fav_id = fav_id.clone();
-                    let fav_profile_id = fav_profile_id.clone();
-                    store_fav.update(cx, |store, cx| {
-                        store.toggle_favorite_model(provider, fav_profile_id, fav_id, cx)
-                    });
-                    // Refresh the open popover so the star + ordering update.
-                    popover_fav.update(cx, |_, cx| cx.notify());
-                }),
-        )
+            )
+        })
         .into_any_element()
 }
 
@@ -2528,7 +2567,7 @@ fn folding_note(
 fn model_row_key(row: &ModelRow) -> u64 {
     use std::hash::{Hash as _, Hasher as _};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    (&row.id, &row.profile_id, row.acp, row.provider).hash(&mut hasher);
+    (&row.model, &row.profile_id, &row.acp_agent_id, row.provider).hash(&mut hasher);
     hasher.finish()
 }
 

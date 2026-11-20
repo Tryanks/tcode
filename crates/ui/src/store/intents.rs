@@ -1399,8 +1399,20 @@ impl WorkspaceStore {
     pub fn update_acp_agent(&mut self, id: String, patch: AcpAgentPatch) {
         self.dispatch(Command::UpdateAcpAgent { id, patch });
     }
-    pub fn set_active_acp_agent_for(&mut self, session_id: String, id: String) {
-        self.dispatch(Command::SetActiveAcpAgent { session_id, id });
+    pub fn set_active_acp_agent_for(
+        &mut self,
+        session_id: String,
+        id: String,
+        model: Option<String>,
+    ) {
+        self.dispatch(Command::SetActiveAcpAgent {
+            session_id,
+            id,
+            model,
+        });
+    }
+    pub fn refresh_acp_catalog(&mut self, id: String) {
+        self.dispatch(Command::RefreshAcpCatalog { id });
     }
 }
 

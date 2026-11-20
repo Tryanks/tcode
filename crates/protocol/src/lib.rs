@@ -379,7 +379,9 @@ pub use wire::{
 // keeps only enabled, and the SetControlGrant and RespondControlGrant
 // commands and the ControlDefaultGrant and ControlProjectGrant patches go.
 // tcode_control records no reviews: the ReviewRecords query and
-// RuntimeNotice's review_recorded go.
+// RuntimeNotice's review_recorded go. ProvidersStatus gains acp_models, each
+// installed ACP agent's own models; SetActiveAcpAgent gains model, and the
+// RefreshAcpCatalog command lists an agent's models and options again.
 pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]

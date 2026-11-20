@@ -267,12 +267,23 @@ impl AppState {
                             active.provider_options.push(descriptor.clone());
                         }
                     }
-                    let permission_id =
+                    // A permission chosen at launch is the thread's until a
+                    // restart applies it, whatever the running process says.
+                    let launch_permission_id =
                         active
                             .permission_descriptor()
-                            .map(|descriptor| match descriptor {
-                                OptionDescriptor::Select { id, .. }
-                                | OptionDescriptor::Boolean { id, .. } => id,
+                            .and_then(|descriptor| match descriptor {
+                                OptionDescriptor::Select {
+                                    id,
+                                    apply: ApplyTiming::Restart,
+                                    ..
+                                }
+                                | OptionDescriptor::Boolean {
+                                    id,
+                                    apply: ApplyTiming::Restart,
+                                    ..
+                                } => Some(id),
+                                _ => None,
                             });
                     // An agent's own option is set by the agent, and the thread
                     // follows it. A catalog option is the user's choice, which
@@ -293,7 +304,7 @@ impl AppState {
                             .live_option_selections
                             .retain(|value| value.id != selection.id);
                         active.live_option_selections.push(selection.clone());
-                        if permission_id.as_deref() != Some(selection.id.as_str()) {
+                        if launch_permission_id.as_deref() != Some(selection.id.as_str()) {
                             active
                                 .meta
                                 .option_selections

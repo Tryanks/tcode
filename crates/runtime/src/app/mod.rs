@@ -585,10 +585,13 @@ impl AppState {
     ) -> std::io::Result<Self> {
         store.open()?;
         let file = store.read_file()?;
-        let (drafts, mut sessions): (Vec<_>, Vec<_>) = file
+        let (mut drafts, mut sessions): (Vec<_>, Vec<_>) = file
             .sessions
             .into_iter()
             .partition(|meta| meta.draft_text.is_some());
+        for meta in drafts.iter_mut().chain(&mut sessions) {
+            acp::adopt_stored_acp_model(meta);
+        }
         sessions.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         let mut projects = file.projects;
         let scratch_root = user_directories.scratch_root().ok();
@@ -626,6 +629,11 @@ impl AppState {
                 model_catalogs.insert(provider, cached);
             }
         }
+        let acp_catalogs: HashMap<_, _> = settings
+            .acp_agents
+            .keys()
+            .filter_map(|id| Some((id.clone(), store.load_acp_catalog(id)?)))
+            .collect();
         log::info!(
             "loaded {} stored session(s) in {} project(s) from {}",
             sessions.len(),
@@ -700,7 +708,8 @@ impl AppState {
             native_subagent_turns: HashMap::new(),
             native_subagent_streams: HashMap::new(),
             settings,
-            providers: ProviderCatalog::new(model_catalogs, provider_secret_names).into(),
+            providers: ProviderCatalog::new(model_catalogs, acp_catalogs, provider_secret_names)
+                .into(),
             next_terminal_spawn_id: 0,
             pending_terminal_spawns: HashMap::new(),
             next_start_generation: 0,
@@ -744,9 +753,9 @@ impl AppState {
                 .thread_activity
                 .insert(meta.id.clone(), Default::default());
             let commands = state.cached_provider_commands_for(&meta);
-            state
-                .residents
-                .park(ActiveSession::new(meta, true, commands));
+            let mut draft = ActiveSession::new(meta, true, commands);
+            state.seed_acp_session(&mut draft);
+            state.residents.park(draft);
         }
         Ok(state)
     }

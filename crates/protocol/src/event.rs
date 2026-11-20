@@ -382,6 +382,10 @@ pub struct ProvidersStatus {
     /// its models, one line each.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub model_problems: HashMap<ProviderKind, Vec<String>>,
+    /// Each installed ACP agent's own models, by agent id, as it last listed
+    /// them; an agent that never did is absent.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub acp_models: HashMap<String, Vec<agent::ModelSpec>>,
     pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
     pub update_run: Option<ProviderUpdateRun>,
     pub tcode_update: TcodeUpdateStatus,
@@ -416,6 +420,22 @@ pub struct ProvidersStatus {
     /// What each harness is, as clients present it: every native one, then
     /// every installed ACP agent.
     pub harnesses: Vec<HarnessDescription>,
+}
+
+impl ProvidersStatus {
+    /// The models a thread on `provider` picks from: its ACP agent's own when
+    /// it runs one, else its harness's catalog.
+    pub fn thread_models(
+        &self,
+        provider: ProviderKind,
+        acp_agent_id: Option<&str>,
+    ) -> &[agent::ModelSpec] {
+        match acp_agent_id {
+            Some(id) => self.acp_models.get(id),
+            None => self.model_catalogs.get(&provider),
+        }
+        .map_or(&[], Vec::as_slice)
+    }
 }
 
 /// One harness as its host describes it to clients: which sections and

@@ -159,7 +159,7 @@ fn catalog_ids_are_the_model_values_cursor_accepts() {
 fn tool_results_are_judged_by_their_raw_output_and_cursors_failure_text_fails_the_turn() {
     let opts = options();
     let cursor = Cursor::new(&opts);
-    let mut state = State::new(opts.cwd.clone());
+    let mut state = State::new(crate::ProviderKind::Cursor, opts.cwd.clone());
     let events = turn(&cursor, &mut state, own(source("turn_tools")));
 
     match &last_item(&events, "call_shell_1").content {
@@ -322,7 +322,7 @@ fn questions_and_todos_are_answered_in_cursors_nested_shapes() {
 fn subagent_sessions_become_subagent_items_with_their_own_activity() {
     let opts = options();
     let cursor = Cursor::new(&opts);
-    let mut state = State::new(opts.cwd.clone());
+    let mut state = State::new(crate::ProviderKind::Cursor, opts.cwd.clone());
     let notifications = source("subagent_turn").as_array().unwrap().clone();
     let events = turn(
         &cursor,

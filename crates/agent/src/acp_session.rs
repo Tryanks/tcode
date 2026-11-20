@@ -41,11 +41,11 @@ use crate::{
     UserInputDelivery, UserInputQuestion,
 };
 
-/// Option-descriptor ids. The composer renders an ACP agent's own
-/// modes/models/config options through the existing traits picker, so each one
-/// needs a stable id that routes back to the right ACP method.
+/// Option-descriptor ids. An ACP agent's own modes, models and config options
+/// reach the composer as option descriptors, so each one needs a stable id
+/// that routes back to the right ACP method.
 pub(crate) use crate::ACP_MODE_OPTION_ID as MODE_OPTION_ID;
-pub(crate) const MODEL_OPTION_ID: &str = "acp:model";
+pub(crate) use crate::ACP_MODEL_OPTION_ID as MODEL_OPTION_ID;
 use crate::EFFORT_OPTION_ID;
 const CONFIG_OPTION_PREFIX: &str = "acp:cfg:";
 
@@ -62,11 +62,20 @@ fn config_option_id(
     }
 }
 
-/// What a session config option of `category` is: a thought level is the
-/// model's reasoning effort.
-fn config_option_role(category: Option<&acp::SessionConfigOptionCategory>) -> crate::OptionRole {
+/// What a session config option of `category` is on `provider`: a thought
+/// level is the model's reasoning effort, and a mode is what runs without
+/// asking unless the provider has a permission control of its own.
+fn config_option_role(
+    provider: ProviderKind,
+    category: Option<&acp::SessionConfigOptionCategory>,
+) -> crate::OptionRole {
     match category {
         Some(acp::SessionConfigOptionCategory::ThoughtLevel) => crate::OptionRole::Effort,
+        Some(acp::SessionConfigOptionCategory::Mode)
+            if crate::permission_control(provider).is_none() =>
+        {
+            crate::OptionRole::Permission
+        }
         _ => crate::OptionRole::Model,
     }
 }
@@ -225,12 +234,20 @@ pub(crate) trait Dialect: Send + Sync + 'static {
         true
     }
 
-    /// Session config options, by `configId`, that tcode already controls
-    /// elsewhere (the composer's model picker), so they are not surfaced again
-    /// in [`AgentEvent::ProviderOptions`].
+    /// Session config options that tcode already controls elsewhere (the
+    /// composer's model picker), so they are neither surfaced again in
+    /// [`AgentEvent::ProviderOptions`] nor restored from the thread's option
+    /// selections. Each is named by its `configId` or by its option id, which
+    /// names an agent's model option whatever its `configId` is.
     fn owned_config_options(&self) -> &'static [&'static str] {
         &[]
     }
+}
+
+/// Whether the config option `config_id`, whose option id is `option_id`, is
+/// one of the dialect's [`Dialect::owned_config_options`].
+fn owned(owned: &[&str], config_id: &str, option_id: &str) -> bool {
+    owned.contains(&config_id) || owned.contains(&option_id)
 }
 
 /// The process a dialect runs and its `initialize` introduction.
@@ -396,12 +413,16 @@ impl Setup<'_> {
         modes: Option<&acp::SessionModeState>,
         config_options: &[acp::SessionConfigOption],
     ) {
-        let owned = self.state.lock_recover().owned_options;
+        let owned_options = self.state.lock_recover().owned_options;
         let has_mode_config = config_options
             .iter()
             .any(|option| option.category == Some(acp::SessionConfigOptionCategory::Mode));
         for option in config_options {
-            if owned.contains(&option.id.0.as_ref()) {
+            if owned(
+                owned_options,
+                &option.id.0,
+                &config_option_id(&option.id.0, option.category.as_ref()),
+            ) {
                 continue;
             }
             let Some(chosen) = config_selection_value(
@@ -847,7 +868,7 @@ async fn run_actor<D: Dialect>(
         })
         .detach();
 
-    let mut state = State::new(opts.cwd.clone());
+    let mut state = State::new(provider, opts.cwd.clone());
     state.owned_options = dialect.owned_config_options();
     let state = Arc::new(Mutex::new(state));
     let client = Client {
@@ -1908,9 +1929,9 @@ enum OptionOrigin {
 }
 
 /// The agent's self-described modes and config options, mapped onto our
-/// [`OptionDescriptor`]s (which the composer's traits picker already renders).
-#[derive(Default)]
+/// [`OptionDescriptor`]s, which the composer places by their role.
 struct OptionRegistry {
+    provider: ProviderKind,
     records: Vec<OptionRecord>,
 }
 
@@ -1921,6 +1942,13 @@ struct OptionRecord {
 }
 
 impl OptionRegistry {
+    fn new(provider: ProviderKind) -> Self {
+        Self {
+            provider,
+            records: Vec::new(),
+        }
+    }
+
     fn ingest(
         &mut self,
         modes: Option<&acp::SessionModeState>,
@@ -1949,7 +1977,10 @@ impl OptionRegistry {
                         })
                         .collect(),
                     default_value: Some(modes.current_mode_id.0.to_string()),
-                    role: crate::OptionRole::Model,
+                    role: config_option_role(
+                        self.provider,
+                        Some(&acp::SessionConfigOptionCategory::Mode),
+                    ),
                     apply: crate::ApplyTiming::Live,
                     recommended: None,
                     permissive: None,
@@ -2008,7 +2039,7 @@ impl OptionRegistry {
                             label: option.name.clone(),
                             options,
                             default_value: Some(select.current_value.0.to_string()),
-                            role: config_option_role(option.category.as_ref()),
+                            role: config_option_role(self.provider, option.category.as_ref()),
                             apply: crate::ApplyTiming::Live,
                             recommended: None,
                             permissive: None,
@@ -2023,7 +2054,7 @@ impl OptionRegistry {
                         id,
                         label: option.name.clone(),
                         default_value: boolean.current_value,
-                        role: config_option_role(option.category.as_ref()),
+                        role: config_option_role(self.provider, option.category.as_ref()),
                         apply: crate::ApplyTiming::Live,
                         recommended: None,
                         permissive: None,
@@ -2086,6 +2117,39 @@ impl OptionRegistry {
             .find(|record| record.selection.id == MODEL_OPTION_ID)
             .and_then(|record| record.selection.value.as_str().map(str::to_string))
     }
+}
+
+/// What `session/new` offered an ACP agent's sessions on `provider`: the
+/// choices of its model option become the models, everything else the options.
+pub(crate) fn catalog(
+    provider: ProviderKind,
+    modes: Option<&acp::SessionModeState>,
+    config_options: Option<&[acp::SessionConfigOption]>,
+) -> crate::AcpCatalog {
+    let mut registry = OptionRegistry::new(provider);
+    registry.ingest(modes, config_options);
+    let mut catalog = crate::AcpCatalog::default();
+    for record in registry.records {
+        match record.descriptor {
+            OptionDescriptor::Select {
+                options,
+                default_value,
+                ..
+            } if record.selection.id == MODEL_OPTION_ID => {
+                catalog.models = options
+                    .into_iter()
+                    .map(|option| crate::ModelSpec {
+                        is_default: default_value.as_deref() == Some(option.value.as_str()),
+                        id: option.value,
+                        display_name: option.label,
+                        options: Vec::new(),
+                    })
+                    .collect();
+            }
+            descriptor => catalog.options.push(descriptor),
+        }
+    }
+    catalog
 }
 
 fn descriptor_id(descriptor: &OptionDescriptor) -> &str {
@@ -2160,7 +2224,7 @@ pub(crate) struct State {
 }
 
 impl State {
-    pub(crate) fn new(cwd: PathBuf) -> Self {
+    pub(crate) fn new(provider: ProviderKind, cwd: PathBuf) -> Self {
         Self {
             cwd,
             turn: None,
@@ -2175,7 +2239,7 @@ impl State {
             terminal_seq: 0,
             terminals: HashMap::new(),
             usage: None,
-            options: OptionRegistry::default(),
+            options: OptionRegistry::new(provider),
             owned_options: &[],
             next_turn: None,
             modes: None,
@@ -2268,7 +2332,7 @@ impl State {
         let surfaced = || {
             self.options.records.iter().filter(|record| {
                 !matches!(&record.origin, OptionOrigin::Config(id)
-                    if self.owned_options.contains(&id.0.as_ref()))
+                    if owned(self.owned_options, &id.0, &record.selection.id))
             })
         };
         AgentEvent::ProviderOptions {

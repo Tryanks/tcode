@@ -1376,6 +1376,7 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
     );
 }
 
+mod acp_catalog;
 mod background;
 mod drafts;
 mod handoff;
