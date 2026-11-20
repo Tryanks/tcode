@@ -358,7 +358,7 @@ fn canceling_inline_rename_on_the_phone_discards_the_unsaved_title(cx: &mut Test
     touch(cx, gpui::TouchPhase::Started, rename);
     touch(cx, gpui::TouchPhase::Ended, rename);
     crate::test_frames::draw_settled(cx);
-    cx.simulate_input(" edited");
+    cx.simulate_input("Edited");
     assert_eq!(
         sidebar.read_with(cx, |sidebar, cx| sidebar
             .renaming
@@ -368,8 +368,8 @@ fn canceling_inline_rename_on_the_phone_discards_the_unsaved_title(cx: &mut Test
             .read(cx)
             .value()
             .to_string()),
-        "Original title edited",
-        "Rename mounts a usable input on the phone"
+        "Edited",
+        "Rename starts with the whole title selected, so typing replaces it"
     );
     let caret = sidebar.read_with(cx, |sidebar, cx| {
         sidebar
