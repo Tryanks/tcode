@@ -16,7 +16,20 @@ fn main() {
         run_fake_agent(&spec);
         return;
     }
+    const TEST_NAME: &str = "session_new_sends_http_mcp_servers_by_capability_or_agent_info";
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let ignored_only = args.iter().any(|arg| arg == "--ignored");
+    if args.iter().any(|arg| arg == "--list") {
+        if !ignored_only {
+            println!("{TEST_NAME}: test");
+        }
+        return;
+    }
+    if ignored_only {
+        return;
+    }
     session_new_sends_http_mcp_servers_by_capability_or_agent_info();
+    println!("test {TEST_NAME} ... ok");
 }
 
 fn run_fake_agent(spec: &str) {
