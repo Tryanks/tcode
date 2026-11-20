@@ -833,17 +833,28 @@ pub(crate) type DropTarget = Rc<dyn Fn(&Window, &App) -> Option<Bounds<Pixels>>>
 pub(crate) struct ThreadPanes {
     drop_target: DropTarget,
     handle_held: HandleHeld,
+    even_split: EvenSplit,
 }
 
 /// Set in every frame that draws a split's handle held by the pointer: the
 /// handle's axis and where the pointer was, for [`held_split`].
 pub(crate) type HandleHeld = Rc<Cell<Option<(Axis, Point<Pixels>)>>>;
 
+/// Called when a split's handle is double clicked, with the handle's axis
+/// and where the pointer was, for [`held_split`]: the split's slots go back
+/// to even shares.
+pub(crate) type EvenSplit = Rc<dyn Fn(Axis, Point<Pixels>, &mut Window, &mut App)>;
+
 impl ThreadPanes {
-    pub(crate) fn new(drop_target: DropTarget, handle_held: HandleHeld) -> Self {
+    pub(crate) fn new(
+        drop_target: DropTarget,
+        handle_held: HandleHeld,
+        even_split: EvenSplit,
+    ) -> Self {
         Self {
             drop_target,
             handle_held,
+            even_split,
         }
     }
 }
@@ -866,19 +877,25 @@ impl DockAreaRenderer for ThreadPanes {
         Rc::new(ThreadTabs)
     }
 
-    /// Base's own line. A handle the pointer holds takes its split's sizes
-    /// over, so the shell stops that split's glide (see [`Glides::stop`]).
+    /// Base's own line, which a double click evens its split's slots from.
+    /// A handle the pointer holds takes its split's sizes over, so the shell
+    /// stops that split's glide (see [`Glides::stop`]).
     fn render_split_handle(
         &self,
         handle: &ResizeHandleContext,
         window: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) -> Option<AnyElement> {
         if handle.is_active() {
             self.handle_held
                 .set(Some((handle.axis(), window.mouse_position())));
         }
-        None
+        let (axis, even_split) = (handle.axis(), self.even_split.clone());
+        Some(crate::widgets::handle_reset::line(
+            handle,
+            Rc::new(move |event, window, cx| even_split(axis, event.position(), window, cx)),
+            cx,
+        ))
     }
 }
 

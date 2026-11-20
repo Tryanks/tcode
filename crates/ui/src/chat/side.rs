@@ -19,7 +19,9 @@ use gpui::{
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
     WeakEntity, Window, div, prelude::FluentBuilder as _, px, relative,
 };
-use gpui_base::{FocusTrapElement as _, ResizeHandleContext, ResizeHandleState};
+use gpui_base::{
+    FocusTrapElement as _, InteractiveElementExt as _, ResizeHandleContext, ResizeHandleState,
+};
 
 use super::ChatView;
 use crate::icon::IconName;
@@ -73,7 +75,7 @@ gpui::actions!(tcode_chat, [CloseSide]);
 pub(crate) const SIDE_CONTEXT: &str = "ChatSide";
 
 /// The share of the body an agent's card beside its lead takes until its
-/// edge is dragged.
+/// edge is dragged, and again once the edge is double clicked.
 const SIDE_SHARE: f32 = 1. / 3.;
 
 /// How long the agent takes to slide over the lead, or off it.
@@ -1162,6 +1164,12 @@ impl ChatView {
                         cx.stop_propagation();
                         cx.new(|_| *drag)
                     })
+                    .on_double_click(cx.listener(|this, _, _, cx| {
+                        if this.side.share != SIDE_SHARE {
+                            this.side.share = SIDE_SHARE;
+                            cx.notify();
+                        }
+                    }))
                     .on_scroll(cx.listener(
                         |this, event: &gpui::ScrollEvent, window, cx| {
                             let delta = event.delta.pixel_delta(window.line_height());

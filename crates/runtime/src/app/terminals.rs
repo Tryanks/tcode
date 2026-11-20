@@ -1,6 +1,6 @@
 use super::*;
 use crate::terminal::{TerminalProjection, TerminalUpdate};
-use tcode_protocol::terminal::MAX_TERMINAL_CELLS;
+use tcode_protocol::terminal::{DEFAULT_TERMINAL_HEIGHT, MAX_TERMINAL_CELLS};
 use term::TermEvent;
 
 impl AppState {
@@ -504,7 +504,7 @@ impl AppState {
         }
         if workspace.terminals.is_empty() {
             workspace.open = false;
-            workspace.height = crate::terminal::DEFAULT_TERMINAL_HEIGHT;
+            workspace.height = DEFAULT_TERMINAL_HEIGHT;
         }
         self.cancel_pending_terminal_spawns(&session_id);
     }

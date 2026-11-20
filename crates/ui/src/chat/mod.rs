@@ -1351,17 +1351,25 @@ impl ChatView {
         });
         let drawer_resize = self.terminal_drawer.clone();
         let width = f32::from(window.bounds().size.width);
+        let resized = move |state: &Entity<gpui_base::ResizableState>, cx: &mut App| {
+            let height = state.read(cx).sizes().get(1).copied();
+            if let Some(height) = height {
+                drawer_resize.update(cx, |drawer, cx| drawer.resize(width, f32::from(height), cx));
+            }
+        };
         // One group whether or not the drawer is open, so the conversation
         // keeps its place in the tree as the drawer comes and goes.
         gpui_base::v_resizable("chat-terminal-panels")
             .with_state(&self.terminal_split)
-            .on_resize(move |state, _, cx| {
-                let height = state.read(cx).sizes().get(1).copied();
-                if let Some(height) = height {
-                    drawer_resize
-                        .update(cx, |drawer, cx| drawer.resize(width, f32::from(height), cx));
+            .with_handle_appearance(crate::widgets::handle_reset::appearance({
+                let (state, resized) = (self.terminal_split.clone(), resized.clone());
+                move |_, window, cx| {
+                    let height = px(tcode_protocol::terminal::DEFAULT_TERMINAL_HEIGHT);
+                    state.update(cx, |state, cx| state.resize_panel(1, height, window, cx));
+                    resized(&state, cx);
                 }
-            })
+            }))
+            .on_resize(move |state, _, cx| resized(state, cx))
             .child(
                 gpui_base::resizable_panel()
                     .size_range(glide.range(0, gpui_base::PANEL_MIN_SIZE..gpui::Pixels::MAX))

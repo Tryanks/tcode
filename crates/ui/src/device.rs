@@ -237,9 +237,10 @@ impl DevicePreferences {
         Self::saved(cx)?.right_panel_width
     }
 
-    pub(crate) fn set_right_panel_width(width: u32, cx: &mut App) {
-        if Self::right_panel_width(cx) != Some(width) {
-            Self::update(cx, |saved| saved.right_panel_width = Some(width));
+    /// `None` for the panel's own width, as before any drag.
+    pub(crate) fn set_right_panel_width(width: Option<u32>, cx: &mut App) {
+        if Self::right_panel_width(cx) != width {
+            Self::update(cx, |saved| saved.right_panel_width = width);
         }
     }
 
