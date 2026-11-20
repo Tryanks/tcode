@@ -143,6 +143,7 @@ impl SessionsSidebar {
         let input = cx.new(|cx| InputState::new(window, cx));
         input.update(cx, |state, cx| {
             state.set_value(&title, window, cx);
+            state.select_all(window, cx);
             state.focus(window, cx);
         });
         let sub = cx.subscribe_in(
