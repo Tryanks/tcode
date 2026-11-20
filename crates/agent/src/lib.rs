@@ -488,7 +488,7 @@ impl ProviderKind {
                 // Every option is the agent's own, with its `currentValue`.
                 confirmed_options: OptionIds::All,
                 background: None,
-                live_settings: false,
+                live_settings: true,
                 // ACP support is negotiated per agent; capable agents receive
                 // every tcode HTTP MCP registration in session/new or load.
                 mcp_servers: true,

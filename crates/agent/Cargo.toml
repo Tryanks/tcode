@@ -54,6 +54,11 @@ name = "probe"
 required-features = ["process"]
 
 [[test]]
+name = "acp_settings"
+required-features = ["process"]
+harness = false
+
+[[test]]
 name = "acp_wire"
 required-features = ["process"]
 harness = false

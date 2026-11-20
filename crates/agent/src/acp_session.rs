@@ -45,7 +45,7 @@ use crate::{
 /// modes/models/config options through the existing traits picker, so each one
 /// needs a stable id that routes back to the right ACP method.
 pub(crate) use crate::ACP_MODE_OPTION_ID as MODE_OPTION_ID;
-const MODEL_OPTION_ID: &str = "acp:model";
+pub(crate) const MODEL_OPTION_ID: &str = "acp:model";
 use crate::EFFORT_OPTION_ID;
 const CONFIG_OPTION_PREFIX: &str = "acp:cfg:";
 
@@ -71,7 +71,7 @@ fn config_option_role(category: Option<&acp::SessionConfigOptionCategory>) -> cr
     }
 }
 
-/// The persisted selection for the session config option `config_id` in
+/// The persisted string selection for the session config option `config_id` in
 /// `category`, as [`SessionOptions::option_selections`] carries it into a new
 /// process.
 pub(crate) fn config_selection<'a>(
@@ -79,11 +79,21 @@ pub(crate) fn config_selection<'a>(
     config_id: &str,
     category: Option<&acp::SessionConfigOptionCategory>,
 ) -> Option<&'a str> {
+    config_selection_value(selections, config_id, category).and_then(Value::as_str)
+}
+
+/// The persisted JSON value for the session config option `config_id` in
+/// `category`, covering both select and boolean config options.
+fn config_selection_value<'a>(
+    selections: &'a [OptionSelection],
+    config_id: &str,
+    category: Option<&acp::SessionConfigOptionCategory>,
+) -> Option<&'a Value> {
     let id = config_option_id(config_id, category);
     selections
         .iter()
         .find(|selection| selection.id == id)
-        .and_then(|selection| selection.value.as_str())
+        .map(|selection| &selection.value)
 }
 
 /// How long a [`query`], which no one can stop, may take. Generous: an `npm
@@ -329,6 +339,159 @@ impl Setup<'_> {
         state.ingest_modes(modes);
         state.options.ingest(None, config_options);
     }
+
+    fn select_mode(&self, mode: acp::SessionModeId) {
+        self.state.lock_recover().select_mode(mode);
+    }
+
+    /// Apply the composer's selected model when the session exposes a model
+    /// config option and is not already on it. A rejected model warns and
+    /// carries on so a stale or removed model does not block starting or
+    /// resuming a thread.
+    pub(crate) async fn select_model(
+        &self,
+        session_id: &acp::SessionId,
+        model: &str,
+        config_options: &[acp::SessionConfigOption],
+    ) -> Option<Vec<acp::SessionConfigOption>> {
+        let option = model_config_option(config_options)?;
+        let acp::SessionConfigKind::Select(select) = &option.kind else {
+            return None;
+        };
+        if select.current_value.0.as_ref() == model {
+            return None;
+        }
+        match self
+            .connection
+            .send_request(acp::SetSessionConfigOptionRequest::new(
+                session_id.clone(),
+                option.id.clone(),
+                acp::SessionConfigOptionValue::value_id(acp::SessionConfigValueId::new(model)),
+            ))
+            .block_task()
+            .await
+        {
+            Ok(response) => {
+                self.adopt(None, Some(&response.config_options));
+                Some(response.config_options)
+            }
+            Err(err) => {
+                self.warn(format!(
+                    "{} did not accept the model `{model}`: {}",
+                    self.name,
+                    describe(&err)
+                ))
+                .await;
+                None
+            }
+        }
+    }
+
+    /// Re-apply the session options selected before launch (model, mode,
+    /// effort, or agent-defined config options), except those the dialect
+    /// owns.
+    pub(crate) async fn restore_options(
+        &self,
+        session_id: &acp::SessionId,
+        modes: Option<&acp::SessionModeState>,
+        config_options: &[acp::SessionConfigOption],
+    ) {
+        let owned = self.state.lock_recover().owned_options;
+        let has_mode_config = config_options
+            .iter()
+            .any(|option| option.category == Some(acp::SessionConfigOptionCategory::Mode));
+        for option in config_options {
+            if owned.contains(&option.id.0.as_ref()) {
+                continue;
+            }
+            let Some(chosen) = config_selection_value(
+                &self.opts.option_selections,
+                option.id.0.as_ref(),
+                option.category.as_ref(),
+            ) else {
+                continue;
+            };
+            let wire_value = match (&option.kind, chosen) {
+                (acp::SessionConfigKind::Select(select), Value::String(value))
+                    if select.current_value.0.as_ref() != value.as_str() =>
+                {
+                    acp::SessionConfigOptionValue::value_id(acp::SessionConfigValueId::new(
+                        value.as_str(),
+                    ))
+                }
+                (acp::SessionConfigKind::Boolean(boolean), Value::Bool(value))
+                    if boolean.current_value != *value =>
+                {
+                    acp::SessionConfigOptionValue::boolean(*value)
+                }
+                _ => continue,
+            };
+            match self
+                .connection
+                .send_request(acp::SetSessionConfigOptionRequest::new(
+                    session_id.clone(),
+                    option.id.clone(),
+                    wire_value,
+                ))
+                .block_task()
+                .await
+            {
+                Ok(response) => self.adopt(None, Some(&response.config_options)),
+                Err(err) => {
+                    self.warn(format!(
+                        "{} did not restore `{}`: {}",
+                        self.name,
+                        option.name,
+                        describe(&err)
+                    ))
+                    .await;
+                }
+            }
+        }
+        if !has_mode_config
+            && let Some(modes) = modes
+            && let Some(chosen) = self
+                .opts
+                .option_selections
+                .iter()
+                .find(|selection| selection.id == MODE_OPTION_ID)
+                .and_then(|selection| selection.value.as_str())
+            && modes.current_mode_id.0.as_ref() != chosen
+        {
+            match self
+                .connection
+                .send_request(acp::SetSessionModeRequest::new(
+                    session_id.clone(),
+                    acp::SessionModeId::new(chosen),
+                ))
+                .block_task()
+                .await
+            {
+                Ok(_) => self.select_mode(acp::SessionModeId::new(chosen)),
+                Err(err) => {
+                    self.warn(format!(
+                        "{} did not restore mode `{chosen}`: {}",
+                        self.name,
+                        describe(&err)
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
+}
+
+fn model_config_option(
+    config_options: &[acp::SessionConfigOption],
+) -> Option<&acp::SessionConfigOption> {
+    config_options
+        .iter()
+        .find(|option| option.category == Some(acp::SessionConfigOptionCategory::Model))
+        .or_else(|| {
+            config_options
+                .iter()
+                .find(|option| option.id.0.as_ref() == "model")
+        })
 }
 
 /// A live session as dialect hooks see it.
@@ -1268,8 +1431,115 @@ async fn handle_command<D: Dialect>(
                 })
                 .await;
         }
+        SessionCommand::ApplySettings {
+            model,
+            option_selections,
+        } => {
+            let mut applied = true;
+            if let Some(target_model) = model {
+                let (current, origin) = {
+                    let state = state.lock_recover();
+                    (
+                        state.options.current_model(),
+                        state.options.origin(MODEL_OPTION_ID),
+                    )
+                };
+                if current.as_deref() != Some(target_model.as_str()) {
+                    match origin {
+                        Some(origin) if origin != OptionOrigin::Launch => {
+                            match set_option(
+                                connection,
+                                session_id,
+                                &origin,
+                                &Value::String(target_model.clone()),
+                            )
+                            .await
+                            {
+                                Ok(config_options) => {
+                                    let confirmed_model = {
+                                        let mut state = state.lock_recover();
+                                        if let Some(options) = config_options.as_deref() {
+                                            state.options.ingest(None, Some(options));
+                                        }
+                                        state.options.current_model()
+                                    };
+                                    if let Some(model) = confirmed_model {
+                                        let _ =
+                                            events.send(AgentEvent::SessionModel { model }).await;
+                                    }
+                                    emit_provider_options(state, events, false).await;
+                                }
+                                Err(err) => {
+                                    applied = false;
+                                    let _ = events
+                                        .send(AgentEvent::Warning {
+                                            message: format!(
+                                                "could not switch model to `{target_model}`: {}",
+                                                describe(&err)
+                                            ),
+                                        })
+                                        .await;
+                                }
+                            }
+                        }
+                        _ => {
+                            applied = false;
+                        }
+                    }
+                }
+            }
+            if applied {
+                for selection in option_selections {
+                    if selection.id == MODEL_OPTION_ID {
+                        continue;
+                    }
+                    let (current, origin) = {
+                        let state = state.lock_recover();
+                        (
+                            state.options.value(&selection.id).cloned(),
+                            state.options.origin(&selection.id),
+                        )
+                    };
+                    if current.as_ref() == Some(&selection.value) {
+                        continue;
+                    }
+                    let Some(origin) = origin.filter(|origin| *origin != OptionOrigin::Launch)
+                    else {
+                        continue;
+                    };
+                    match set_option(connection, session_id, &origin, &selection.value).await {
+                        Ok(config_options) => {
+                            {
+                                let mut state = state.lock_recover();
+                                if let Some(options) = config_options.as_deref() {
+                                    state.options.ingest(None, Some(options));
+                                } else if origin == OptionOrigin::Mode
+                                    && let Some(mode) = selection.value.as_str()
+                                {
+                                    state.select_mode(acp::SessionModeId::new(mode));
+                                }
+                            }
+                            emit_provider_options(state, events, false).await;
+                        }
+                        Err(err) => {
+                            applied = false;
+                            let _ = events
+                                .send(AgentEvent::Warning {
+                                    message: format!(
+                                        "could not apply `{}`: {}",
+                                        selection.id,
+                                        describe(&err)
+                                    ),
+                                })
+                                .await;
+                            break;
+                        }
+                    }
+                }
+            }
+            let _ = events.send(AgentEvent::SettingsApplied { applied }).await;
+        }
         SessionCommand::RetryTurn { .. }
-        | SessionCommand::ApplySettings { .. }
         | SessionCommand::StopBackgroundTask { .. }
         | SessionCommand::MoveToBackground { .. }
         | SessionCommand::MoveTo { .. }
@@ -1803,6 +2073,13 @@ impl OptionRegistry {
             .map(|record| record.origin.clone())
     }
 
+    fn value(&self, id: &str) -> Option<&Value> {
+        self.records
+            .iter()
+            .find(|record| record.selection.id == id)
+            .map(|record| &record.selection.value)
+    }
+
     fn current_model(&self) -> Option<String> {
         self.records
             .iter()
@@ -2168,8 +2445,15 @@ impl State {
                 vec![self.provider_options()]
             }
             acp::SessionUpdate::ConfigOptionUpdate(update) => {
+                let previous_model = self.options.current_model();
                 self.options.ingest(None, Some(&update.config_options));
-                vec![self.provider_options()]
+                let mut events = vec![self.provider_options()];
+                if let Some(model) = self.options.current_model()
+                    && Some(model.as_str()) != previous_model.as_deref()
+                {
+                    events.push(AgentEvent::SessionModel { model });
+                }
+                events
             }
             acp::SessionUpdate::UsageUpdate(usage) => {
                 let usage = TokenUsage {

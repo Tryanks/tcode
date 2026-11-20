@@ -114,6 +114,25 @@ impl Dialect for Registry {
             }
         };
         setup.adopt(modes.as_ref(), config_options.as_deref());
+        let mut config_options = config_options.unwrap_or_default();
+        // `opts.model` is the model the thread's first session reported; a
+        // later choice lives in its `acp:model` selection, which
+        // `restore_options` applies.
+        let model_selected = opts
+            .option_selections
+            .iter()
+            .any(|selection| selection.id == acp_session::MODEL_OPTION_ID);
+        if !model_selected
+            && let Some(model) = &opts.model
+            && let Some(selected) = setup
+                .select_model(&session_id, model, &config_options)
+                .await
+        {
+            config_options = selected;
+        }
+        setup
+            .restore_options(&session_id, modes.as_ref(), &config_options)
+            .await;
 
         Ok(Established {
             resume: ResumeCursor(json!({
