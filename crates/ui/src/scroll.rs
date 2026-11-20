@@ -29,11 +29,11 @@ use crate::motion::{ListScroll, ScrollTarget};
 use crate::widgets::scrollbar::Scrollbar;
 
 use gpui::{
-    AnyElement, App, Axis, Div, Element, ElementId, InteractiveElement, IntoElement, ListAlignment,
-    ListOffset, ListSizingBehavior, ListState, ParentElement, Pixels, Refineable as _, RenderOnce,
-    ScrollHandle, ScrollStrategy, Stateful, StatefulInteractiveElement, StyleRefinement, Styled,
-    UniformListScrollHandle, Window, canvas, div, list, prelude::FluentBuilder as _, px,
-    uniform_list,
+    AnyElement, App, Axis, Bounds, Div, Element, ElementId, Hsla, InteractiveElement, IntoElement,
+    ListAlignment, ListOffset, ListSizingBehavior, ListState, ParentElement, Pixels,
+    Refineable as _, RenderOnce, ScrollHandle, ScrollStrategy, Stateful,
+    StatefulInteractiveElement, StyleRefinement, Styled, UniformListScrollHandle, Window, canvas,
+    div, list, prelude::FluentBuilder as _, px, uniform_list,
 };
 use gpui_base::{InteractiveElementExt as _, ScrollBounce, ScrollbarHandle, StyledExt as _};
 
@@ -291,6 +291,8 @@ pub(crate) struct ScrollArea<E: InteractiveElement + Styled + ParentElement + El
     axis: Axis,
     element: E,
     handle: Option<ScrollHandle>,
+    wheel_sideways: bool,
+    edge_fades: Option<(Hsla, Pixels)>,
 }
 
 impl<E> ScrollArea<E>
@@ -305,7 +307,26 @@ where
             axis,
             element,
             handle: None,
+            wheel_sideways: false,
+            edge_fades: None,
         }
+    }
+
+    /// A horizontal strip a mouse wheel moves too: its notches have the one axis, so
+    /// they move the strip sideways while it has room that way and go on to the scroller
+    /// around it at its end. For a strip that is a control of its own (a row of tabs),
+    /// not content a page is read through.
+    pub(crate) fn wheel_sideways(mut self) -> Self {
+        self.wheel_sideways = true;
+        self
+    }
+
+    /// Fade a horizontal strip's content into `surface`, the fill behind it, at each
+    /// edge that has more past it; `radius` is the strip's corner radius, which the
+    /// fade keeps. gpui-base has no scroll-edge cue.
+    pub(crate) fn edge_fades(mut self, surface: Hsla, radius: Pixels) -> Self {
+        self.edge_fades = Some((surface, radius));
+        self
     }
 
     /// Scroll through `handle` instead of the area's own, for an owner that
@@ -382,8 +403,72 @@ where
             .relative()
             .refine_style(&root_style)
             .child(viewport)
-            .child(AreaMask::new(self.axis, &scroll_handle, (self.id, "mask")))
+            .children(
+                self.edge_fades
+                    .map(|(surface, radius)| edge_fades(scroll_handle.clone(), surface, radius)),
+            )
+            .child(
+                AreaMask::new(self.axis, &scroll_handle, (self.id, "mask"))
+                    .wheel_sideways(self.wheel_sideways),
+            )
     }
+}
+
+/// How far a strip's content fades into its surface at an edge with more past it.
+const EDGE_FADE: f32 = 24.;
+
+/// The fades of [`ScrollArea::edge_fades`], over the viewport `handle` scrolls.
+fn edge_fades(handle: ScrollHandle, surface: Hsla, radius: Pixels) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let (offset, max) = (handle.offset().x, handle.max_offset().x);
+            let clear = surface.opacity(0.);
+            let fade = px(EDGE_FADE).min(bounds.size.width / 2.);
+            let none = px(0.);
+            let edges = [
+                (
+                    offset < px(0.),
+                    bounds.origin,
+                    270.,
+                    gpui::Corners {
+                        top_left: radius,
+                        bottom_left: radius,
+                        top_right: none,
+                        bottom_right: none,
+                    },
+                ),
+                (
+                    -offset < max,
+                    gpui::point(bounds.right() - fade, bounds.top()),
+                    90.,
+                    gpui::Corners {
+                        top_left: none,
+                        bottom_left: none,
+                        top_right: radius,
+                        bottom_right: radius,
+                    },
+                ),
+            ];
+            for (shown, origin, angle, corners) in edges {
+                if shown {
+                    window.paint_quad(
+                        gpui::fill(
+                            Bounds::new(origin, gpui::size(fade, bounds.size.height)),
+                            gpui::linear_gradient(
+                                angle,
+                                gpui::linear_color_stop(surface, 1.),
+                                gpui::linear_color_stop(clear, 0.),
+                            ),
+                        )
+                        .corner_radii(corners),
+                    );
+                }
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
 }
 
 /// Give `state`'s unmeasured rows `row_height` once the list has laid out, so
@@ -1110,6 +1195,111 @@ mod tests {
         let (page, area) = offsets(&view, cx);
         assert_eq!(area, px(-300.), "the area runs to its end");
         assert_eq!(page, px(0.), "and keeps the rest of its flick there");
+    }
+
+    /// A page whose content begins with a 100 px wide strip of 400 px.
+    struct Strip {
+        page: ScrollHandle,
+        strip: ScrollHandle,
+        wheel_sideways: bool,
+    }
+
+    impl Render for Strip {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let strip = div()
+                .id("strip")
+                .flex()
+                .flex_none()
+                .w(px(100.))
+                .h(px(40.))
+                .overflow_x_scroll_area()
+                .track_scroll(&self.strip)
+                .child(div().w(px(400.)).h_full().flex_none());
+            let strip = if self.wheel_sideways {
+                strip.wheel_sideways()
+            } else {
+                strip
+            };
+            div()
+                .w(px(200.))
+                .h(px(300.))
+                .flex()
+                .flex_col()
+                .child(gesture_recorder())
+                .child(page_viewport(
+                    "strip-page-bounce",
+                    &self.page,
+                    div()
+                        .id("strip-page")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .lock_scroll_axis()
+                        .track_scroll(&self.page)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(strip)
+                                .child(div().h(px(1000.)).flex_none()),
+                        ),
+                ))
+        }
+    }
+
+    fn strip(
+        cx: &mut TestAppContext,
+        wheel_sideways: bool,
+    ) -> (gpui::Entity<Strip>, &mut VisualTestContext) {
+        cx.update(crate::test_client::init);
+        let (view, cx) = cx.add_window_view(|_, _| Strip {
+            page: ScrollHandle::new(),
+            strip: ScrollHandle::new(),
+            wheel_sideways,
+        });
+        crate::test_frames::draw_settled(cx);
+        (view, cx)
+    }
+
+    /// A mouse wheel has one axis. Over a strip that is a control of its own (a row of
+    /// tabs) its notches move the strip sideways, and go on to the page once the strip is
+    /// at its end; over any other strip they move the page, which is read through it.
+    #[gpui::test]
+    fn a_wheel_moves_a_strip_sideways_only_where_the_strip_asks(cx: &mut TestAppContext) {
+        let notch = |cx: &mut VisualTestContext| {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: point(px(50.), px(20.)),
+                delta: gpui::ScrollDelta::Lines(point(0., -1.)),
+                ..Default::default()
+            });
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            crate::test_frames::draw(cx);
+        };
+        let offsets = |view: &gpui::Entity<Strip>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, _| (view.page.offset().y, view.strip.offset().x))
+        };
+
+        let (view, cx) = strip(cx, true);
+        notch(cx);
+        let (page, first) = offsets(&view, cx);
+        assert!(first < px(0.), "the strip moves sideways: {first:?}");
+        assert_eq!(page, px(0.), "and the page stays");
+        for _ in 0..100 {
+            notch(cx);
+            if offsets(&view, cx).0 < px(0.) {
+                break;
+            }
+        }
+        let (page, strip_offset) = offsets(&view, cx);
+        assert_eq!(strip_offset, px(-300.), "the strip ran to its end");
+        assert!(page < px(0.), "where a notch went on to the page: {page:?}");
+
+        let (view, cx) = strip(cx, false);
+        notch(cx);
+        let (page, strip_offset) = offsets(&view, cx);
+        assert_eq!(strip_offset, px(0.), "a strip that did not ask stays");
+        assert!(page < px(0.), "and the page moves under it: {page:?}");
     }
 
     /// A pull past the page's top over an area at its own top stretches the

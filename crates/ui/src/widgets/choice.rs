@@ -143,7 +143,7 @@ impl RenderOnce for ChoiceGroup {
             .child(glide.pill(dim, cx))
             .children(radios)
             .relative();
-        segmented_track(id.clone(), segment_list(group, cx), compact)
+        segmented_track(id.clone(), segment_list(group), compact, cx)
             .debug_selector(|| id.to_string())
             .refine_style(&style)
     }

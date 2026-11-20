@@ -1240,55 +1240,13 @@ impl PullRequestView {
             .when_some(chip_row.filter(|_| drawn), |header, chip_row| {
                 // The row grows open with its first chip and folds with its last.
                 header.child(chip_row.fold(if compact {
-                    let handle = self.chips_scroll.clone();
-                    let surface = material::content_surface(cx);
-                    div()
-                        .relative()
+                    h_flex()
+                        .id("pr-detail-chips")
                         .w_full()
-                        .child(
-                            h_flex()
-                                .id("pr-detail-chips")
-                                .w_full()
-                                .overflow_x_scroll_area()
-                                .track_scroll(&self.chips_scroll)
-                                .child(chips.flex_none()),
-                        )
-                        // gpui-base has no scroll-edge cue: an edge with more chips past it fades.
-                        .child(
-                            gpui::canvas(
-                                |_, _, _| {},
-                                move |bounds, _, window, _| {
-                                    let (offset, max) = (handle.offset().x, handle.max_offset().x);
-                                    let clear = surface.opacity(0.);
-                                    let fade = px(24.).min(bounds.size.width / 2.);
-                                    let edges = [
-                                        (offset < px(0.), bounds.origin, 270.),
-                                        (
-                                            -offset < max,
-                                            gpui::point(bounds.right() - fade, bounds.top()),
-                                            90.,
-                                        ),
-                                    ];
-                                    for (shown, origin, angle) in edges {
-                                        if shown {
-                                            window.paint_quad(gpui::fill(
-                                                gpui::Bounds::new(
-                                                    origin,
-                                                    gpui::size(fade, bounds.size.height),
-                                                ),
-                                                gpui::linear_gradient(
-                                                    angle,
-                                                    gpui::linear_color_stop(surface, 1.),
-                                                    gpui::linear_color_stop(clear, 0.),
-                                                ),
-                                            ));
-                                        }
-                                    }
-                                },
-                            )
-                            .absolute()
-                            .inset_0(),
-                        )
+                        .overflow_x_scroll_area()
+                        .track_scroll(&self.chips_scroll)
+                        .edge_fades(material::content_surface(cx), px(0.))
+                        .child(chips.flex_none())
                         .into_any_element()
                 } else {
                     chips.flex_wrap().into_any_element()
