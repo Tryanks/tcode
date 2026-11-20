@@ -340,7 +340,6 @@ impl Setup<'_> {
         state.options.ingest(None, config_options);
     }
 
-    /// Record a mode change applied during session setup.
     fn select_mode(&self, mode: acp::SessionModeId) {
         self.state.lock_recover().select_mode(mode);
     }
@@ -388,21 +387,21 @@ impl Setup<'_> {
         }
     }
 
-    /// Re-apply the session options selected before launch (mode, effort, or
-    /// agent-defined config options).
+    /// Re-apply the session options selected before launch (model, mode,
+    /// effort, or agent-defined config options), except those the dialect
+    /// owns.
     pub(crate) async fn restore_options(
         &self,
         session_id: &acp::SessionId,
         modes: Option<&acp::SessionModeState>,
         config_options: &[acp::SessionConfigOption],
     ) {
-        let model_option_id =
-            model_config_option(config_options).map(|option| option.id.0.as_ref());
+        let owned = self.state.lock_recover().owned_options;
         let has_mode_config = config_options
             .iter()
             .any(|option| option.category == Some(acp::SessionConfigOptionCategory::Mode));
         for option in config_options {
-            if model_option_id == Some(option.id.0.as_ref()) {
+            if owned.contains(&option.id.0.as_ref()) {
                 continue;
             }
             let Some(chosen) = config_selection_value(
@@ -2268,11 +2267,8 @@ impl State {
     fn provider_options(&self) -> AgentEvent {
         let surfaced = || {
             self.options.records.iter().filter(|record| {
-                let owned_by_config_id = matches!(&record.origin, OptionOrigin::Config(id)
-                    if self.owned_options.contains(&id.0.as_ref()));
-                let owned_by_canonical_id =
-                    self.owned_options.contains(&record.selection.id.as_str());
-                !owned_by_config_id && !owned_by_canonical_id
+                !matches!(&record.origin, OptionOrigin::Config(id)
+                    if self.owned_options.contains(&id.0.as_ref()))
             })
         };
         AgentEvent::ProviderOptions {

@@ -20,8 +20,12 @@ fn main() {
     }
     let tests: &[(&str, fn())] = &[
         (
-            "establish_applies_model_options_and_hides_owned_model",
-            establish_applies_model_options_and_hides_owned_model,
+            "establish_applies_model_and_options_and_lists_the_model_option",
+            establish_applies_model_and_options_and_lists_the_model_option,
+        ),
+        (
+            "a_chosen_model_option_wins_over_the_first_reported_model",
+            a_chosen_model_option_wins_over_the_first_reported_model,
         ),
         (
             "stale_model_at_establish_warns_and_carries_on",
@@ -277,9 +281,9 @@ fn descriptor_id(descriptor: &OptionDescriptor) -> &str {
 
 /// Establishing an ACP session sends `session/set_config_option` for the
 /// requested model and select/boolean options, `session/set_mode` for a
-/// non-config mode, reports `SessionModel`, and hides `acp:model` from
-/// `ProviderOptions`.
-fn establish_applies_model_options_and_hides_owned_model() {
+/// non-config mode, and lists `acp:model` among `ProviderOptions`, where the
+/// traits picker offers the agent's models.
+fn establish_applies_model_and_options_and_lists_the_model_option() {
     let (handle, processes, mut wire) = spawn_session(
         Some("model-b"),
         vec![
@@ -330,13 +334,17 @@ fn establish_applies_model_options_and_hides_owned_model() {
     assert_eq!(session_model.as_deref(), Some("model-b"));
     let (options, selections) = provider_options.expect("ProviderOptions emitted");
     let ids: Vec<&str> = options.iter().map(descriptor_id).collect();
-    assert!(
-        !ids.contains(&"acp:model"),
-        "Registry owns acp:model so it must not appear in ProviderOptions: {ids:?}"
-    );
+    assert!(ids.contains(&"acp:model"), "{ids:?}");
     assert!(ids.contains(&ACP_MODE_OPTION_ID));
     assert!(ids.contains(&EFFORT_OPTION_ID));
     assert!(ids.contains(&"acp:cfg:web_search"));
+    assert_eq!(
+        selections
+            .iter()
+            .find(|s| s.id == "acp:model")
+            .map(|s| &s.value),
+        Some(&json!("model-b"))
+    );
     assert_eq!(
         selections
             .iter()
@@ -358,6 +366,47 @@ fn establish_applies_model_options_and_hides_owned_model() {
             .map(|s| &s.value),
         Some(&json!("auto"))
     );
+
+    processes.stop();
+    drop(handle);
+}
+
+/// A thread's `acp:model` selection is the model it last chose; the model its
+/// first session reported does not override it.
+fn a_chosen_model_option_wins_over_the_first_reported_model() {
+    let (handle, processes, mut wire) = spawn_session(
+        Some("stale-model"),
+        vec![
+            OptionSelection {
+                id: "acp:model".into(),
+                value: json!("model-b"),
+            },
+            OptionSelection {
+                id: EFFORT_OPTION_ID.into(),
+                value: json!("high"),
+            },
+        ],
+    );
+
+    let requests = read_requests(&mut wire, 4);
+    assert_eq!(requests[2]["method"], "session/set_config_option");
+    assert_eq!(requests[2]["params"]["configId"], "selected_model");
+    assert_eq!(requests[2]["params"]["value"], "model-b");
+    assert_eq!(requests[3]["method"], "session/set_config_option");
+    assert_eq!(requests[3]["params"]["configId"], "thought_level");
+    assert_eq!(requests[3]["params"]["value"], "high");
+
+    let mut warnings = Vec::new();
+    let mut session_model = None;
+    while let Ok(event) = handle.events.try_recv() {
+        match event {
+            AgentEvent::Warning { message } => warnings.push(message),
+            AgentEvent::SessionStarted { model, .. } => session_model = model,
+            _ => {}
+        }
+    }
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(session_model.as_deref(), Some("model-b"));
 
     processes.stop();
     drop(handle);
