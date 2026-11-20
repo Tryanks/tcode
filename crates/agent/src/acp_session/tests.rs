@@ -50,7 +50,6 @@ fn a_start_its_agent_never_answers_ends_when_the_session_stops() {
                 args: vec!["--exact".into(), NAME.into(), "--quiet".into()],
                 env: vec![(ROLE.into(), port)],
             },
-            http_mcp: false,
         }),
         instructions: None,
         processes: processes.clone(),
@@ -95,45 +94,6 @@ fn prompt_acceptance_follows_the_complete_stdio_write() {
             AgentEvent::TurnAccepted { delivery_id: 41 }
         ));
     });
-}
-
-/// Tcode's MCP servers are loopback HTTP endpoints: they are handed to an
-/// agent that advertises `mcpCapabilities.http`, or whose user says it takes
-/// them anyway, and to no other.
-#[test]
-fn mcp_servers_go_to_an_agent_that_declares_http_or_is_set_to_take_it() {
-    let registration = McpRegistration {
-        name: McpRegistration::SERVER_NAME_PREVIEW.into(),
-        url: "http://127.0.0.1:5321/mcp".into(),
-        bearer_token: "tok".into(),
-    };
-    let control = McpRegistration {
-        name: McpRegistration::SERVER_NAME_CONTROL.into(),
-        url: "http://127.0.0.1:5322/mcp".into(),
-        bearer_token: "other".into(),
-    };
-    let offered = json!([
-        {"type": "http", "name": "tcode_preview", "url": "http://127.0.0.1:5321/mcp",
-            "headers": [{"name": "Authorization", "value": "Bearer tok"}]},
-        {"type": "http", "name": "tcode_control", "url": "http://127.0.0.1:5322/mcp",
-            "headers": [{"name": "Authorization", "value": "Bearer other"}]},
-    ]);
-    let mut caps = acp::AgentCapabilities::default();
-    assert!(
-        mcp_servers(&[&registration, &control], &caps, false).is_empty(),
-        "an agent without mcpCapabilities.http must not be sent the HTTP servers"
-    );
-    assert_eq!(
-        serde_json::to_value(mcp_servers(&[&registration, &control], &caps, true)).unwrap(),
-        offered,
-        "the user's setting offers them without the declaration"
-    );
-
-    caps.mcp_capabilities.http = true;
-    assert_eq!(
-        serde_json::to_value(mcp_servers(&[&registration, &control], &caps, false)).unwrap(),
-        offered
-    );
 }
 
 #[test]

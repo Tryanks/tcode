@@ -265,16 +265,10 @@ impl Setup<'_> {
 
     /// The `mcpServers` for `session/new`, `load` or `resume`. tcode's MCP
     /// servers are loopback streamable-HTTP endpoints, so they are only
-    /// offered to agents that speak MCP over HTTP, by their declaration or by
-    /// the user's word for an installed agent; the instructions go with them.
+    /// offered to agents that speak MCP over HTTP; the instructions go with them.
     pub(crate) async fn mcp_servers(&self) -> Vec<acp::McpServer> {
         let registrations: Vec<_> = self.opts.mcp_servers.iter().collect();
-        let http_by_setting = self.opts.acp.as_ref().is_some_and(|agent| agent.http_mcp);
-        let servers = mcp_servers(
-            &registrations,
-            &self.init.agent_capabilities,
-            http_by_setting,
-        );
+        let servers = mcp_servers(&registrations, self.init);
         self.state.lock_recover().instructions = if servers.is_empty() {
             None
         } else {
@@ -286,16 +280,8 @@ impl Setup<'_> {
                 "acp[{}]: no mcpCapabilities.http; Tcode MCP servers are not registered",
                 self.name
             );
-            let hint = if self.opts.acp.is_some() {
-                format!(
-                    ". If it accepts them anyway, turn on \"Offer Tcode MCP servers\" in Settings → Harnesses → {}",
-                    self.name
-                )
-            } else {
-                String::new()
-            };
             self.warn(format!(
-                "{} does not support HTTP MCP servers; Tcode MCP tools are unavailable in this session{hint}",
+                "{} does not support HTTP MCP servers; Tcode MCP tools are unavailable in this session",
                 self.name
             ))
             .await;
@@ -1483,13 +1469,22 @@ pub(crate) fn describe(err: &sdk::Error) -> String {
     }
 }
 
-/// The `mcpServers` array for `session/new`, gated on `mcpCapabilities.http`.
+/// `agy acp` (Antigravity ACP Server, observed in 1.5.12 and 1.5.13) omits
+/// `mcpCapabilities.http` from its `initialize` response yet connects to HTTP
+/// `mcpServers` passed in `session/new` and `session/load`.
+fn accepts_undeclared_http_mcp(init: &acp::InitializeResponse) -> bool {
+    init.agent_info
+        .as_ref()
+        .is_some_and(|info| info.name == "Antigravity ACP Server")
+}
+
+/// The `mcpServers` array for `session/new`, gated on `mcpCapabilities.http`
+/// (plus known agents that accept HTTP MCP servers without declaring it).
 fn mcp_servers(
     registrations: &[&McpRegistration],
-    caps: &acp::AgentCapabilities,
-    http_by_setting: bool,
+    init: &acp::InitializeResponse,
 ) -> Vec<acp::McpServer> {
-    if !caps.mcp_capabilities.http && !http_by_setting {
+    if !init.agent_capabilities.mcp_capabilities.http && !accepts_undeclared_http_mcp(init) {
         return Vec::new();
     }
     registrations

@@ -322,7 +322,6 @@ mod tests {
                     args: Vec::new(),
                     env: Vec::new(),
                 },
-                http_mcp: false,
             },
         };
         let mut state = State::new(PathBuf::from("/workspace"));

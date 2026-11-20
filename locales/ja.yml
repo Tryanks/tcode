@@ -814,8 +814,6 @@ providers:
     custom_help: "標準入出力で ACP 通信を行う任意のコマンドを使用できます。"
     add: "ハーネスを追加"
     name_placeholder: "マイハーネス"
-    http_mcp: "Tcode の MCP サーバーを渡す"
-    http_mcp_help: "このハーネスが HTTP MCP への対応を宣言していなくても、Tcode の MCP ツールを HTTP で渡します。実際に受け付けるハーネスでのみオンにしてください。次にセッションを開始したときから有効になります。"
   # Native provider plugins (claude plugin …), managed on the host.
   plugins:
     no_providers: "Tcode でプラグインを管理できる有効なハーネスがありません。"

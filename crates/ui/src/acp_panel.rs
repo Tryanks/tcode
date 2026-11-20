@@ -557,7 +557,6 @@ mod tests {
             enabled: true,
             env: Vec::new(),
             launch_args: None,
-            http_mcp: false,
         };
         let mut settings = crate::settings::Settings::default();
         settings.acp_agents.insert(agent.id.clone(), agent);

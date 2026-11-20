@@ -364,7 +364,6 @@ fn main() {
                 args: launch.collect(),
                 env: Vec::new(),
             },
-            http_mcp: false,
         })
     } else {
         if !remaining.is_empty() {

@@ -403,7 +403,6 @@ fn a_stop_while_the_provider_starts_hands_the_message_back_and_force_quit_ends_t
                 args: vec!["--exact".into(), NAME.into(), "--quiet".into()],
                 env: vec![(ROLE.into(), "1".into())],
             },
-            http_mcp: false,
         });
         let ended = ended_tx.clone();
         Box::pin(async move {

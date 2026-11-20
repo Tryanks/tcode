@@ -2035,7 +2035,6 @@ pub(super) fn session_options(
             id: agent.id.clone(),
             name: agent.name.clone(),
             launch: agent.launch.clone(),
-            http_mcp: agent.http_mcp,
         }),
         instructions: None,
         worktrees: meta
