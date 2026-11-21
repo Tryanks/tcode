@@ -9,6 +9,29 @@
     :root { color-scheme: light dark; background: #111318; color: #f2f3f5; font: 14px system-ui, sans-serif; }
     html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
     canvas { position: absolute; inset: 0; display: block; width: 100% !important; height: 100% !important; outline: none; }
+    /* gpui-fast-web appends its hidden IME mirror as a 1x1 16px textarea on
+       body without nowrap or initial pointer-events: none. At 1px wide every
+       character wraps onto a new line, increasing scrollTop by a line height
+       per keystroke and shifting Wayland's set_cursor_rectangle anchor upward
+       with fcitx5; without pointer-events: none before first move, clicks can
+       also land on it directly. Collapsing its visual transform to its
+       top-left origin on fine-pointer devices pins the cursor rectangle to
+       the caret coordinates gpui-fast-web writes without shrinking font-size
+       below 16px on touch devices (which would trigger viewport zoom). */
+    body > textarea {
+      pointer-events: none !important;
+      padding: 0 !important;
+      border: 0 !important;
+      white-space: pre !important;
+      overflow: hidden !important;
+      line-height: 1px !important;
+    }
+    @media (pointer: fine) {
+      body > textarea {
+        transform: scale(0.001);
+        transform-origin: 0 0;
+      }
+    }
     [hidden] { display: none !important; }
     #auth { position: absolute; inset: 0; margin: auto; height: fit-content; max-height: calc(100% - 48px); overflow-y: auto; max-width: 360px; padding: 24px; display: grid; gap: 16px; }
     #auth h1, #auth p { margin: 0; }
@@ -26,15 +49,66 @@
       #auth button { background: #272b35; color: white; } #auth [role=alert] { color: #a52424; }
     }
     #loading, noscript { position: absolute; inset: 0; display: grid; place-content: center; white-space: pre-wrap; padding: 24px; }
+    #crash { position: fixed; inset: 0; z-index: 9999; display: grid; place-content: center; padding: 24px; background: rgba(17, 19, 24, 0.88); }
+    #crash .card { max-width: 440px; width: 100%; padding: 24px; border-radius: 12px; background: #1b1e24; border: 1px solid #353944; display: grid; gap: 12px; }
+    #crash h1, #crash p, #crash pre { margin: 0; }
+    #crash h1 { font-size: 18px; }
+    #crash p { line-height: 1.5; color: #a9abb5; }
+    #crash pre { max-height: 160px; overflow: auto; padding: 10px 12px; border-radius: 8px; background: #111318; color: #ffa8a8; font: 12px/1.45 ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
+    #crash button { justify-self: start; min-height: 40px; padding: 8px 16px; border-radius: 8px; border: 1px solid #555963; background: #e9edf5; color: #111318; font: inherit; cursor: pointer; }
+    @media (prefers-color-scheme: light) {
+      #crash { background: rgba(247, 246, 242, 0.88); }
+      #crash .card { background: white; border-color: #d6d8df; }
+      #crash p { color: #60636b; }
+      #crash pre { background: #f4f3ef; color: #a52424; }
+      #crash button { background: #272b35; color: white; }
+    }
   </style>
 </head>
 <body>
   <canvas id="tcode-canvas"></canvas>
   <p id="loading" role="status">Loading Tcode…</p>
+  <div id="crash" role="alertdialog" aria-labelledby="crash-title" hidden>
+    <div class="card">
+      <h1 id="crash-title">Tcode stopped unexpectedly</h1>
+      <p>The client hit a runtime error while rendering. Reload to return to the thread list.</p>
+      <pre id="crash-detail"></pre>
+      <button id="crash-reload" type="button">Reload</button>
+    </div>
+  </div>
   <noscript>Enable JavaScript to use Tcode.</noscript>
   <script type="module">
     import init, { start } from './tcode_web.js';
     import { authorizeBrowser } from './auth.mjs';
+    let lastPanic = '';
+    const originalConsoleError = console.error.bind(console);
+    console.error = (...args) => {
+      const first = typeof args[0] === 'string' ? args[0] : '';
+      if (first.includes('panicked at')) {
+        lastPanic = first.split('\n\nStack:')[0];
+      }
+      return originalConsoleError(...args);
+    };
+    const showCrash = detail => {
+      const overlay = document.getElementById('crash');
+      if (!overlay || !overlay.hidden) return;
+      document.getElementById('crash-detail').textContent = lastPanic || String(detail || 'WebAssembly runtime error');
+      overlay.hidden = false;
+    };
+    document.getElementById('crash-reload')?.addEventListener('click', () => location.reload());
+    const isWasmTrap = value =>
+      value instanceof WebAssembly.RuntimeError ||
+      (value && value.name === 'RuntimeError' && /unreachable/i.test(String(value.message || '')));
+    window.addEventListener('error', event => {
+      if (isWasmTrap(event.error) || /RuntimeError:\s*unreachable/i.test(String(event.message || ''))) {
+        showCrash(event.error || event.message);
+      }
+    });
+    window.addEventListener('unhandledrejection', event => {
+      if (isWasmTrap(event.reason)) {
+        showCrash(event.reason);
+      }
+    });
     // gpui-fast-web copies through navigator.clipboard without checking for
     // it, and outside a secure context (http on a LAN address) there is none:
     // the exception aborts the shell mid-event and freezes it. The copy

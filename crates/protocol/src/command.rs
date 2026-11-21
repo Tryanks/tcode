@@ -649,6 +649,22 @@ pub enum Command {
         model: Option<String>,
         profile_id: Option<String>,
     },
+    /// Run the thread under a collaboration: on its decision model, told the collaboration. Choosing
+    /// any other model or agent for the thread takes it out from under the collaboration.
+    SetActiveCollaboration {
+        session_id: String,
+        collaboration_id: String,
+    },
+    /// Open the quick thread's new-thread page on `lead`, a collaboration's decision model,
+    /// as the thread that researches `model`'s guide: it alone is given `tcode_control`'s
+    /// `set_model_guide`. Nothing is sent. Answers `SessionId` with the draft.
+    ResearchModel {
+        model: tcode_core::collaboration::ModelRef,
+        lead: tcode_core::collaboration::ModelRef,
+    },
+    /// Fetch the collaboration templates from the repository; a newer file takes the place
+    /// of the one in effect.
+    RefreshCollaborationTemplates,
     SetActiveOption {
         session_id: String,
         id: String,
@@ -664,6 +680,8 @@ pub enum Command {
     ToggleFavoriteModel {
         provider: ProviderKind,
         profile_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        acp_agent_id: Option<String>,
         model: String,
     },
     /// Rewind the thread to before the prompt that opened absolute turn
@@ -842,6 +860,7 @@ impl Command {
             | Self::RespondApproval { session_id, .. }
             | Self::RespondUserInput { session_id, .. }
             | Self::SetActiveModel { session_id, .. }
+            | Self::SetActiveCollaboration { session_id, .. }
             | Self::SetActiveOption { session_id, .. }
             | Self::LoadBranches { session_id, .. }
             | Self::CheckoutBranch { session_id, .. }

@@ -169,6 +169,29 @@ fn streamed_text_keeps_block_identity_across_reasoning_and_ignores_user_echoes()
 }
 
 #[test]
+fn restarted_sessions_assign_distinct_text_block_ids() {
+    let emit = |wire_kind: &str, text: &str| {
+        let mut state = state();
+        let events = state.apply_update(update(json!({
+            "sessionUpdate": wire_kind,
+            "content": { "type": "text", "text": text }
+        })));
+        match events.as_slice() {
+            [AgentEvent::Delta { item_id, .. }] => item_id.clone(),
+            other => panic!("expected one delta, got {other:?}"),
+        }
+    };
+    assert_ne!(
+        emit("agent_thought_chunk", "First"),
+        emit("agent_thought_chunk", "Second")
+    );
+    assert_ne!(
+        emit("agent_message_chunk", "First"),
+        emit("agent_message_chunk", "Second")
+    );
+}
+
+#[test]
 fn execute_tool_call_maps_to_a_command_execution() {
     let mut state = state();
     let events = state.apply_update(update(json!({
@@ -656,10 +679,23 @@ fn a_mode_is_the_permission_control_of_a_provider_without_one() {
         "options": [{ "value": "ask", "name": "Ask" }]
     }]))
     .unwrap();
-    for (provider, role) in [
-        (ProviderKind::Acp, crate::OptionRole::Permission),
-        (ProviderKind::Cursor, crate::OptionRole::Model),
-        (ProviderKind::Grok, crate::OptionRole::Model),
+    for (provider, expected_id, role) in [
+        (
+            ProviderKind::Acp,
+            MODE_OPTION_ID,
+            crate::OptionRole::Permission,
+        ),
+        (
+            ProviderKind::Antigravity,
+            "mode",
+            crate::OptionRole::Permission,
+        ),
+        (
+            ProviderKind::Cursor,
+            MODE_OPTION_ID,
+            crate::OptionRole::Model,
+        ),
+        (ProviderKind::Grok, MODE_OPTION_ID, crate::OptionRole::Model),
     ] {
         for (modes, config) in [(Some(&modes), None), (None, Some(config.as_slice()))] {
             let mut state = State::new(provider, PathBuf::from("/workspace"));
@@ -671,7 +707,7 @@ fn a_mode_is_the_permission_control_of_a_provider_without_one() {
             let [OptionDescriptor::Select { id, role: got, .. }] = descriptors.as_slice() else {
                 panic!("one mode select, got {descriptors:?}");
             };
-            assert_eq!((id.as_str(), *got), (MODE_OPTION_ID, role), "{provider:?}");
+            assert_eq!((id.as_str(), *got), (expected_id, role), "{provider:?}");
         }
     }
 }
@@ -760,9 +796,11 @@ fn a_file_written_for_a_call_is_that_calls_change_once() {
     };
     smol::block_on(async {
         let (events, received) = smol::channel::unbounded();
+        let (turn_tx, _turn_done) = smol::channel::unbounded();
         let client = Client {
             events,
             state: Arc::new(Mutex::new(State::new(ProviderKind::Acp, cwd.clone()))),
+            turn_tx,
         };
         let apply = |update| client.state.lock_recover().apply_update(update);
         let write = async |text: &str| {
@@ -825,12 +863,14 @@ fn a_file_written_for_a_call_is_that_calls_change_once() {
 fn a_permission_request_ended_without_the_user_is_reported_resolved() {
     smol::block_on(async {
         let (events, received) = smol::channel::unbounded();
+        let (turn_tx, _turn_done) = smol::channel::unbounded();
         let client = Client {
             events,
             state: Arc::new(Mutex::new(State::new(
                 ProviderKind::Acp,
                 PathBuf::from("/workspace"),
             ))),
+            turn_tx,
         };
         let request = || {
             acp::RequestPermissionRequest::new(

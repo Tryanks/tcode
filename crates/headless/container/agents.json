@@ -4,5 +4,6 @@
   "pi": { "package": "@earendil-works/pi-coding-agent", "commands": ["pi"] },
   "opencode": { "package": "@opencode/cli", "commands": ["opencode"], "replaces": ["opencode-ai"] },
   "cursor": { "installer": "https://cursor.com/install", "commands": ["cursor-agent", "agent"] },
-  "grok": { "package": "@xai-official/grok", "commands": ["grok"], "current": ".grok/bin/grok" }
+  "grok": { "package": "@xai-official/grok", "commands": ["grok"], "current": ".grok/bin/grok" },
+  "antigravity": { "installer": "https://antigravity.google/cli/install.sh", "commands": ["agy"] }
 }

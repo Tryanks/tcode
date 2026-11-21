@@ -356,16 +356,17 @@ impl AppState {
         outcome
     }
 
-    /// Toggle a model on one account in the persisted favorites list.
+    /// Toggle a model on one account or ACP agent in the persisted favorites list.
     pub fn toggle_favorite_model(
         &mut self,
         provider: ProviderKind,
         profile_id: Option<String>,
+        acp_agent_id: Option<String>,
         model: String,
         cx: &mut HostCx,
     ) {
         let mut settings = self.settings.clone();
-        settings.toggle_favorite_model(provider, profile_id, model);
+        settings.toggle_favorite_model(provider, profile_id, acp_agent_id, model);
         self.update_settings(settings, cx);
     }
 }

@@ -54,16 +54,16 @@ pub use event::{
     TerminalSplitStatus, TerminalStatus, ThreadWakes, Topic,
 };
 pub use query::{
-    AgentAccess, AgentGrant, ControlActivityFilter, ControlActivityPage, ControlActivityThread,
-    DeviceAccess, DirectoryListing, ExternalHistory, ExternalThread, GitDiffResult, GitDiffScope,
-    GitFileText, GroupAction, GroupInfo, GroupMachineInfo, HostedDevice, HostingAction,
-    HostingState, IconImageEntry, MAX_STORED_OUTPUT_COLS, MAX_THREAD_EXPORT_BYTES, ModelGrant,
-    OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo, PathKind, Query, QueryResponse, RecentDir,
-    SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, STORED_OUTPUT_BYTES, STORED_OUTPUT_HISTORY,
-    STORED_OUTPUT_ROWS, SessionContentHits, SessionSearchHit, SourceTool, SpaceAction, SpaceAgents,
-    SpaceApproval, SpaceInfo, SpacePolicy, TraverseLookupState, TraverseLookupStatus,
-    TraverseManifestState, TraverseManifestStatus, TraverseRelayStatus, TraverseSourceStatus,
-    WorkspaceListing,
+    AgentAccess, AgentGrant, AgentScope, ControlActivityFilter, ControlActivityPage,
+    ControlActivityThread, DeviceAccess, DirectoryListing, ExternalHistory, ExternalThread,
+    GitDiffResult, GitDiffScope, GitFileText, GroupAction, GroupInfo, GroupMachineInfo,
+    HostedDevice, HostingAction, HostingState, IconImageEntry, MAX_STORED_OUTPUT_COLS,
+    MAX_THREAD_EXPORT_BYTES, ModelGrant, OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo, PathKind,
+    Query, QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES,
+    STORED_OUTPUT_BYTES, STORED_OUTPUT_HISTORY, STORED_OUTPUT_ROWS, SessionContentHits,
+    SessionSearchHit, SourceTool, SpaceAction, SpaceApproval, SpaceInfo, SpacePolicy,
+    TraverseLookupState, TraverseLookupStatus, TraverseManifestState, TraverseManifestStatus,
+    TraverseRelayStatus, TraverseSourceStatus, WorkspaceListing,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
@@ -382,6 +382,17 @@ pub use wire::{
 // RuntimeNotice's review_recorded go. ProvidersStatus gains acp_models, each
 // installed ACP agent's own models; SetActiveAcpAgent gains model, and the
 // RefreshAcpCatalog command lists an agent's models and options again.
+// Collaborations: Settings gains collaborations, model_guides and control's
+// agents, with the control_agents, save_collaboration, remove_collaboration
+// and model_guide patches; thread metadata and SessionStatus gain
+// collaboration_id, and thread metadata guide_for; the protocol adds the
+// SetActiveCollaboration, ResearchModel and RefreshCollaborationTemplates
+// commands and the CollaborationTemplates query; and InjectedChannel gains
+// collaboration.
+// FavoriteModel::Row and ToggleFavoriteModel gain acp_agent_id so ACP models
+// can be starred per agent.
+// ProviderKind gains Antigravity (wire name `antigravity`), which an older peer
+// cannot decode because ProviderKind has no unknown fallback.
 pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]

@@ -62,6 +62,7 @@ impl AppState {
             .checked_add(1)
             .expect("provider start generation overflow");
         let generation = self.next_start_generation;
+        let collaboration_brief = self.collaboration_brief(&meta);
         let active = self.resident_mut(session_id).unwrap();
         if active.meta.moved_from.is_some() {
             // The native session belongs to the directory the thread left.
@@ -78,6 +79,8 @@ impl AppState {
         active.live_cwd = active.meta.cwd.clone();
         active.live_profile_id = active.meta.profile_id.clone();
         active.live_option_selections = active.meta.option_selections.clone();
+        active.collaboration_brief = collaboration_brief.clone();
+        active.live_collaboration_brief = collaboration_brief.clone();
         active.confirmed_option_selections.clear();
         active.confirmed_model = None;
         active.settings_refused = None;
@@ -105,9 +108,13 @@ impl AppState {
         } else {
             None
         };
-        let instructions = pull_request_registration
+        let instructions: Vec<String> = pull_request_registration
             .is_some()
-            .then(|| self.pull_request_instructions(&meta.id));
+            .then(|| self.pull_request_instructions(&meta.id))
+            .into_iter()
+            .chain(collaboration_brief)
+            .collect();
+        let instructions = (!instructions.is_empty()).then(|| instructions.concat());
         let computer_use_registration = if computer_use_attaches(meta.provider, &self.settings) {
             self.computer_use_registration_for(&meta)
         } else {

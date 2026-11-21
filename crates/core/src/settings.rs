@@ -219,6 +219,7 @@ pub fn provider_key(provider: ProviderKind) -> &'static str {
         ProviderKind::OpenCode => "opencode",
         ProviderKind::Cursor => "cursor",
         ProviderKind::Grok => "grok",
+        ProviderKind::Antigravity => "antigravity",
         // ACP agents are not one provider but many: their per-agent settings
         // live in `Settings::acp_agents`, keyed by registry id. This bucket only
         // ever holds the shared fallbacks (it is never written by the ACP card).
@@ -472,7 +473,8 @@ impl ResolvedProfile {
                     || (endpoint.backend_switches.contains(&var.name.as_str())
                         && var.value != "0"
                         && var.value != "false")
-                    || (var.name == endpoint.base_url_env
+                    || (!endpoint.base_url_env.is_empty()
+                        && var.name == endpoint.base_url_env
                         && (var.sensitive
                             || var.value.trim().trim_end_matches('/').to_ascii_lowercase()
                                 != endpoint.native_base_url)))
@@ -487,7 +489,8 @@ impl ResolvedProfile {
         };
         !Settings::is_builtin_profile_id(&self.id)
             && self.settings.env.iter().any(|var| {
-                var.name == endpoint.base_url_env || endpoint.key_envs.contains(&var.name.as_str())
+                (!endpoint.base_url_env.is_empty() && var.name == endpoint.base_url_env)
+                    || endpoint.key_envs.contains(&var.name.as_str())
             })
     }
 }
@@ -524,12 +527,15 @@ impl SubagentSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum FavoriteModel {
-    /// One model under one account: `profile_id` is `None` on the provider's
-    /// built-in profile, as on a thread.
+    /// One model under one account or installed ACP agent: `profile_id` is
+    /// `None` on the provider's built-in profile and on ACP agents, and
+    /// `acp_agent_id` is `Some` on ACP agents, as on a thread.
     Row {
         provider: ProviderKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        acp_agent_id: Option<String>,
         model: String,
     },
     /// An id saved before stars named an account. Nothing records which
@@ -539,14 +545,22 @@ pub enum FavoriteModel {
 }
 
 impl FavoriteModel {
-    /// The model id this star lights on an account, if any.
-    fn id_on(&self, provider: ProviderKind, profile_id: Option<&str>) -> Option<&str> {
+    /// The model id this star lights on an account or ACP agent, if any.
+    fn id_on(
+        &self,
+        provider: ProviderKind,
+        profile_id: Option<&str>,
+        acp_agent_id: Option<&str>,
+    ) -> Option<&str> {
         match self {
             Self::Row {
                 provider: starred_provider,
                 profile_id: starred_profile,
+                acp_agent_id: starred_acp_agent,
                 model,
-            } => (*starred_provider == provider && starred_profile.as_deref() == profile_id)
+            } => (*starred_provider == provider
+                && starred_profile.as_deref() == profile_id
+                && starred_acp_agent.as_deref() == acp_agent_id)
                 .then_some(model),
             Self::Id(id) => Some(id),
         }
@@ -679,6 +693,15 @@ pub enum SettingsPatch {
     BrowserHomeUrl(Option<String>),
     BrowserAllowEvaluate(bool),
     ControlEnabled(bool),
+    /// The accounts and models a thread `tcode_control` starts may run.
+    ControlAgents(crate::control::AgentScope),
+    /// Add the collaboration, or replace the one of its id.
+    SaveCollaboration(crate::collaboration::Collaboration),
+    RemoveCollaboration {
+        id: String,
+    },
+    /// Write a model's usage guide; an empty text with no thread removes it.
+    ModelGuide(crate::collaboration::ModelGuide),
     SettlementAutomation(crate::control::SettlementAutomation),
     TitleGeneration(Option<TitleGenerationSettings>),
     SidebarLayout(SidebarLayout),
@@ -972,6 +995,13 @@ pub struct Settings {
         skip_serializing_if = "crate::control::ControlSettings::is_default"
     )]
     pub control: crate::control::ControlSettings,
+    /// The collaborations a thread can be run under, each a row of the model picker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collaborations: Vec<crate::collaboration::Collaboration>,
+    /// What is known of how each model is best used, given to a decision model with the
+    /// collaborators it may start.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_guides: Vec<crate::collaboration::ModelGuide>,
     #[serde(
         default,
         skip_serializing_if = "crate::control::SettlementAutomation::is_default"
@@ -1114,6 +1144,8 @@ impl Default for Settings {
             computer_use: ComputerUseSettings::default(),
             browser: BrowserSettings::default(),
             control: crate::control::ControlSettings::default(),
+            collaborations: Vec::new(),
+            model_guides: Vec::new(),
             settlement_automation: crate::control::SettlementAutomation::default(),
             title_generation: None,
             collapsed_projects: Vec::new(),
@@ -1140,6 +1172,19 @@ impl Settings {
         self.new_project_dir
             .as_deref()
             .unwrap_or(DEFAULT_NEW_PROJECT_DIR)
+    }
+
+    pub fn model_guide(
+        &self,
+        model: &crate::collaboration::ModelRef,
+    ) -> Option<&crate::collaboration::ModelGuide> {
+        self.model_guides.iter().find(|guide| &guide.model == model)
+    }
+
+    pub fn collaboration(&self, id: &str) -> Option<&crate::collaboration::Collaboration> {
+        self.collaborations
+            .iter()
+            .find(|collaboration| collaboration.id == id)
     }
 
     /// The folder Add Project's list opens on, `~` standing for the host's
@@ -1248,6 +1293,27 @@ impl Settings {
             SettingsPatch::BrowserHomeUrl(value) => self.browser.home_url = value,
             SettingsPatch::BrowserAllowEvaluate(value) => self.browser.allow_evaluate = value,
             SettingsPatch::ControlEnabled(value) => self.control.enabled = value,
+            SettingsPatch::ControlAgents(value) => self.control.agents = value,
+            SettingsPatch::SaveCollaboration(collaboration) => {
+                match self
+                    .collaborations
+                    .iter_mut()
+                    .find(|held| held.id == collaboration.id)
+                {
+                    Some(held) => *held = collaboration,
+                    None => self.collaborations.push(collaboration),
+                }
+            }
+            SettingsPatch::RemoveCollaboration { id } => {
+                self.collaborations
+                    .retain(|collaboration| collaboration.id != id);
+            }
+            SettingsPatch::ModelGuide(guide) => {
+                self.model_guides.retain(|held| held.model != guide.model);
+                if !guide.text.trim().is_empty() || guide.thread_id.is_some() {
+                    self.model_guides.push(guide);
+                }
+            }
             SettingsPatch::SettlementAutomation(value) => self.settlement_automation = value,
             SettingsPatch::TitleGeneration(value) => self.title_generation = value,
             SettingsPatch::SidebarLayout(value) => self.sidebar_layout = value,
@@ -1294,6 +1360,7 @@ impl Settings {
         match kind {
             ProviderKind::Cursor => "native:cursor",
             ProviderKind::Grok => "native:grok",
+            ProviderKind::Antigravity => "native:antigravity",
             ProviderKind::ClaudeCode
             | ProviderKind::Codex
             | ProviderKind::Pi
@@ -1307,28 +1374,40 @@ impl Settings {
         let profile_id = Some(profile_id).filter(|id| !Self::is_builtin_profile_id(id));
         self.favorite_models
             .iter()
-            .filter_map(|favorite| favorite.id_on(provider, profile_id))
+            .filter_map(|favorite| favorite.id_on(provider, profile_id, None))
             .map(str::to_owned)
             .collect()
     }
 
-    /// Star a model on one account, or take the star off. Taking off a star
-    /// saved as a bare id takes it off every account it lit.
+    /// The model ids starred on one installed ACP agent.
+    pub fn acp_favorite_ids(&self, agent_id: &str) -> Vec<String> {
+        self.favorite_models
+            .iter()
+            .filter_map(|favorite| favorite.id_on(ProviderKind::Acp, None, Some(agent_id)))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Star a model on one account or ACP agent, or take the star off. Taking
+    /// off a star saved as a bare id takes it off every account it lit.
     pub fn toggle_favorite_model(
         &mut self,
         provider: ProviderKind,
         profile_id: Option<String>,
+        acp_agent_id: Option<String>,
         model: String,
     ) {
         let profile_id = profile_id.filter(|id| !Self::is_builtin_profile_id(id));
         let starred = self.favorite_models.len();
         self.favorite_models.retain(|favorite| {
-            favorite.id_on(provider, profile_id.as_deref()) != Some(model.as_str())
+            favorite.id_on(provider, profile_id.as_deref(), acp_agent_id.as_deref())
+                != Some(model.as_str())
         });
         if self.favorite_models.len() == starred {
             self.favorite_models.push(FavoriteModel::Row {
                 provider,
                 profile_id,
+                acp_agent_id,
                 model,
             });
         }
@@ -1852,7 +1931,7 @@ mod tests {
             ])
         );
 
-        settings.toggle_favorite_model(ProviderKind::ClaudeCode, None, "opus".into());
+        settings.toggle_favorite_model(ProviderKind::ClaudeCode, None, None, "opus".into());
         assert_eq!(
             settings.favorite_ids(ProviderKind::ClaudeCode, "second-claude"),
             Vec::<String>::new(),
@@ -1863,11 +1942,23 @@ mod tests {
     #[test]
     fn a_favorite_stars_one_account() {
         let mut settings = Settings::default();
-        settings.toggle_favorite_model(ProviderKind::Codex, Some("second".into()), "model".into());
+        settings.toggle_favorite_model(
+            ProviderKind::Codex,
+            Some("second".into()),
+            None,
+            "model".into(),
+        );
         settings.toggle_favorite_model(
             ProviderKind::Codex,
             Some("codex".into()),
+            None,
             "built-in".into(),
+        );
+        settings.toggle_favorite_model(
+            ProviderKind::Acp,
+            None,
+            Some("custom:alpha".into()),
+            "model".into(),
         );
         assert_eq!(
             settings.favorite_ids(ProviderKind::Codex, "second"),
@@ -1881,9 +1972,33 @@ mod tests {
             settings.favorite_ids(ProviderKind::ClaudeCode, "claude"),
             Vec::<String>::new()
         );
+        assert_eq!(settings.acp_favorite_ids("custom:alpha"), ["model"]);
+        assert_eq!(
+            settings.acp_favorite_ids("custom:beta"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            serde_json::to_value(&settings).unwrap()["favorite_models"][2],
+            serde_json::json!({
+                "provider": "acp",
+                "acp_agent_id": "custom:alpha",
+                "model": "model"
+            })
+        );
 
-        settings.toggle_favorite_model(ProviderKind::Codex, Some("second".into()), "model".into());
-        settings.toggle_favorite_model(ProviderKind::Codex, None, "built-in".into());
+        settings.toggle_favorite_model(
+            ProviderKind::Codex,
+            Some("second".into()),
+            None,
+            "model".into(),
+        );
+        settings.toggle_favorite_model(ProviderKind::Codex, None, None, "built-in".into());
+        settings.toggle_favorite_model(
+            ProviderKind::Acp,
+            None,
+            Some("custom:alpha".into()),
+            "model".into(),
+        );
         assert!(settings.favorite_models.is_empty());
     }
 

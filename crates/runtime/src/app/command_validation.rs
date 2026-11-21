@@ -209,6 +209,14 @@ impl AppState {
                     "This agent duplicates a native provider; use that provider for new sessions.",
                 ));
             }
+            Command::SetActiveCollaboration {
+                collaboration_id, ..
+            } if self.settings.collaboration(collaboration_id).is_none() => {
+                return Err(error(
+                    "unknown_collaboration",
+                    "That collaboration is no longer there.",
+                ));
+            }
             Command::MergeWorktree { session_id } => {
                 return match self.find_meta(session_id) {
                     None => Err(error(

@@ -1892,6 +1892,15 @@ pub(crate) fn agent_sees_body(
                     InjectedChannel::Linking(
                         InstructionChannel::PerPromptUserBlock | InstructionChannel::None,
                     ) => crate::tr!("pull_requests.channel_per_turn_block").into_owned(),
+                    InjectedChannel::Collaboration(InstructionChannel::SessionAppend) => {
+                        crate::tr!("collaborations.channel_system").into_owned()
+                    }
+                    InjectedChannel::Collaboration(InstructionChannel::DeveloperContext) => {
+                        crate::tr!("collaborations.channel_developer_context").into_owned()
+                    }
+                    InjectedChannel::Collaboration(
+                        InstructionChannel::PerPromptUserBlock | InstructionChannel::None,
+                    ) => crate::tr!("collaborations.channel_per_turn_block").into_owned(),
                     InjectedChannel::McpServer(name) => {
                         crate::tr!("pull_requests.channel_mcp_server", name = name).into_owned()
                     }

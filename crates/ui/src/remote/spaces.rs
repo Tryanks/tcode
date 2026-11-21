@@ -72,18 +72,8 @@ pub(crate) struct ToggleShare {
 #[action(namespace = tcode_spaces, no_json)]
 pub(crate) struct NewSpaceAndShare(pub HostKey, pub String);
 
-/// One account profile, or the ACP agents, a space's policy may allow.
 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AgentChoice {
-    pub profile_id: String,
-    pub provider: agent::ProviderKind,
-    pub name: String,
-    /// Model id and display name.
-    pub models: Vec<(String, String)>,
-    /// For the ACP profile: agent id and name.
-    pub acp_agents: Vec<(String, String)>,
-}
+use crate::store::AgentChoice;
 
 /// Replace a space's policy.
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
@@ -310,40 +300,7 @@ impl Spaces {
         let Some(store) = store else {
             return Vec::new();
         };
-        let store = store.read(cx);
-        let settings = store.settings();
-        let mut choices: Vec<AgentChoice> = store
-            .enabled_profiles()
-            .into_iter()
-            .map(|profile| AgentChoice {
-                provider: profile.kind,
-                name: settings.profile_display_name(&profile.id),
-                models: store
-                    .profile_catalog(&profile.id)
-                    .into_iter()
-                    .map(|model| (model.id, model.display_name))
-                    .collect(),
-                acp_agents: Vec::new(),
-                profile_id: profile.id,
-            })
-            .collect();
-        let acp = store.settings_installed_acp_agents();
-        if !acp.is_empty() {
-            choices.push(AgentChoice {
-                profile_id: tcode_core::settings::Settings::builtin_profile_id(
-                    agent::ProviderKind::Acp,
-                )
-                .to_owned(),
-                provider: agent::ProviderKind::Acp,
-                name: crate::tr!("space_policy.acp_agents").into_owned(),
-                models: Vec::new(),
-                acp_agents: acp
-                    .into_iter()
-                    .map(|agent| (agent.id, agent.name))
-                    .collect(),
-            });
-        }
-        choices
+        store.read(cx).agent_choices()
     }
 
     #[cfg(feature = "remote-hosting")]
@@ -1489,7 +1446,7 @@ mod section {
             compact: bool,
             cx: &mut Context<Self>,
         ) -> AnyElement {
-            use tcode_protocol::{AgentGrant, ModelGrant, SpaceAgents, SpaceApproval, SpacePolicy};
+            use tcode_protocol::{AgentGrant, AgentScope, ModelGrant, SpaceApproval, SpacePolicy};
             let space_id = space.id.clone();
             let policy = space.policy.clone();
             let set = {
@@ -1501,11 +1458,11 @@ mod section {
             };
             let mut agent_rows: Vec<AnyElement> = Vec::new();
             match &policy.agents {
-                SpaceAgents::Every => {
+                AgentScope::Every => {
                     // A space from before policies keeps every agent until
                     // its owner chooses; choosing starts from all of today's.
                     let chosen = SpacePolicy {
-                        agents: SpaceAgents::Only(
+                        agents: AgentScope::Only(
                             agents
                                 .iter()
                                 .map(|choice| AgentGrant {
@@ -1548,7 +1505,7 @@ mod section {
                             .into_any_element(),
                     );
                 }
-                SpaceAgents::Only(grants) => {
+                AgentScope::Only(grants) => {
                     if agents.is_empty() {
                         agent_rows.push(
                             row_frame(compact, cx)
@@ -1573,7 +1530,7 @@ mod section {
                                 .collect();
                             grants.extend(grant);
                             SpacePolicy {
-                                agents: SpaceAgents::Only(grants),
+                                agents: AgentScope::Only(grants),
                                 ..policy.clone()
                             }
                         };

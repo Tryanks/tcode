@@ -169,6 +169,7 @@ fn mount_restored_with_outbox<'a>(
             addrs: vec!["127.0.0.1:47503".into()],
             last_connected_unix: Some(1),
             group_id: None,
+            group_name: None,
             space_id: None,
             space_name: None,
         },
@@ -187,6 +188,9 @@ fn mount_restored_with_outbox<'a>(
                 "panel": panel
             })),
             workspace: Some(tcode_client::host::WorkspacePreference {
+                scope: Some(tcode_client::host::WorkspaceScope::Host {
+                    host_id: "last-host".into(),
+                }),
                 hosts: vec![tcode_client::host::WorkspaceHost {
                     host_id: "last-host".into(),
                     collapsed: false,
@@ -438,6 +442,7 @@ fn saved_machine(host_id: &str, group: bool) -> tcode_client::pairing::PairedHos
         addrs: vec!["127.0.0.1:47503".into()],
         last_connected_unix: None,
         group_id: group.then(|| "group".into()),
+        group_name: group.then(|| "Home".into()),
         space_id: None,
         space_name: None,
     }
@@ -1950,6 +1955,7 @@ fn session_status(session: &str, cwd: &std::path::Path) -> tcode_protocol::Sessi
         provider: agent::ProviderKind::ClaudeCode,
         requested_model: None,
         requested_profile_id: None,
+        collaboration_id: None,
         acp_agent_id: None,
         project_id: None,
         queued_messages: Vec::new(),

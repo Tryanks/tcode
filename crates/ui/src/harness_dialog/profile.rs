@@ -351,6 +351,7 @@ impl HarnessDialog {
                             store.toggle_favorite_model(
                                 kind,
                                 Some(fav_profile.clone()),
+                                None,
                                 fav_id.clone(),
                                 cx,
                             )

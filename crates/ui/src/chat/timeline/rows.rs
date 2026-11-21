@@ -185,17 +185,20 @@ impl TurnIndexCache {
             }
         }
 
-        let suffix = if reindex_from == 0 {
+        if !must_reset && reindex_from == turn_count {
+            return ListSync::None;
+        }
+
+        let mut suffix = if reindex_from == 0 {
             index_rows(turns, entries, expanded)
         } else {
-            if reindex_from < turn_count {
-                index_rows_from(turns, entries, expanded, reindex_from)
-            } else {
-                Vec::new()
-            }
+            index_rows_from(turns, entries, expanded, reindex_from)
         };
         // Rows of the turns before `reindex_from` are kept as they are.
         let kept = rows_of_turn(items, reindex_from).start;
+        if reindex_from > 0 {
+            disambiguate_identities(&mut suffix, &items[..kept]);
+        }
         let item_count = kept + suffix.len();
         let sync = list_sync_with(items, item_count, continuity, |index| {
             if index < kept {
@@ -232,7 +235,55 @@ pub(crate) fn index_rows(
     entries: &[Arc<TimelineEntry>],
     expanded: &HashSet<String>,
 ) -> Vec<TimelineRow> {
-    index_rows_from(turns, entries, expanded, 0)
+    let mut rows = index_rows_from(turns, entries, expanded, 0);
+    disambiguate_identities(&mut rows, &[]);
+    rows
+}
+
+/// Providers can reuse an item id in a later turn (restarted sessions,
+/// replayed tool calls); give every row a distinct identity so `list_sync_with`
+/// aligns rows incrementally instead of resetting the list to its tail.
+///
+/// Full reindexes walk newest-to-oldest so prepending an earlier page with a
+/// duplicate id keeps the already-rendered newer rows' identities unchanged.
+/// Incremental tail syncs keep `preserved` untouched and only disambiguate the
+/// newly indexed suffix against it.
+fn disambiguate_identities(rows: &mut [TimelineRow], preserved: &[TimelineRow]) {
+    let mut used = HashSet::with_capacity(preserved.len() + rows.len());
+    for row in preserved {
+        used.insert(row.identity);
+    }
+    let mut seen: HashMap<u64, u64> = HashMap::new();
+    if preserved.is_empty() {
+        for row in rows.iter_mut().rev() {
+            row.identity = unique_identity(row.identity, &mut seen, &mut used);
+        }
+    } else {
+        for row in rows.iter_mut() {
+            row.identity = unique_identity(row.identity, &mut seen, &mut used);
+        }
+    }
+}
+
+fn unique_identity(base: u64, seen: &mut HashMap<u64, u64>, used: &mut HashSet<u64>) -> u64 {
+    let count = seen.entry(base).or_insert(0);
+    let id = if *count == 0 && !used.contains(&base) {
+        base
+    } else {
+        let mut occurrence = (*count).max(1);
+        loop {
+            let mut hasher = DefaultHasher::new();
+            ("duplicate-row", base, occurrence).hash(&mut hasher);
+            let candidate = hasher.finish();
+            if !used.contains(&candidate) {
+                break candidate;
+            }
+            occurrence += 1;
+        }
+    };
+    *count += 1;
+    used.insert(id);
+    id
 }
 
 fn index_rows_from(
@@ -302,16 +353,18 @@ fn index_rows_from(
                 }
                 match &part {
                     RowPart::WorkLogActivity => {
-                        ("worklog-activity", &entries[entry_range.end - 1].id).hash(&mut identity);
+                        let entry = &entries[entry_range.end - 1];
+                        ("worklog-activity", &entry.id, entry.ts).hash(&mut identity);
                     }
                     RowPart::WorkLogLive => {
-                        ("worklog-live", &entries[segment_range.start].id).hash(&mut identity);
+                        let entry = &entries[segment_range.start];
+                        ("worklog-live", &entry.id, entry.ts).hash(&mut identity);
                         // The window slides over activities of the same shape.
                         entries[entry_range.start].id.hash(&mut content);
                     }
                     RowPart::Segment | RowPart::WorkLogHeader { .. } => {
                         if let Some(entry) = entries[shape_range.clone()].first() {
-                            entry.id.hash(&mut identity);
+                            (&entry.id, entry.ts).hash(&mut identity);
                         }
                     }
                 }

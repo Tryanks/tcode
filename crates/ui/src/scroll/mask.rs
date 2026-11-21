@@ -25,6 +25,7 @@ pub(crate) struct AreaMask<H: ScrollbarHandle + Clone> {
     axis: Axis,
     id: ElementId,
     handle: H,
+    wheel_sideways: bool,
 }
 
 impl<H: ScrollbarHandle + Clone> AreaMask<H> {
@@ -34,7 +35,16 @@ impl<H: ScrollbarHandle + Clone> AreaMask<H> {
             axis,
             id: id.into(),
             handle: handle.clone(),
+            wheel_sideways: false,
         }
+    }
+
+    /// A horizontal mask that also moves for a mouse wheel's notches, which have the one
+    /// axis: sideways while it has room that way, and not at all at its end, where the
+    /// notch goes on to what is around it.
+    pub(crate) fn wheel_sideways(mut self, wheel_sideways: bool) -> Self {
+        self.wheel_sideways = wheel_sideways;
+        self
     }
 }
 
@@ -106,6 +116,7 @@ impl<H: ScrollbarHandle + Clone + 'static> Element for AreaMask<H> {
                 (state.clone(), state)
             });
         let horizontal = self.axis == Axis::Horizontal;
+        let wheel_sideways = self.wheel_sideways;
         let line_height = window.line_height();
         let bounds = hitbox.bounds;
         let hitbox = hitbox.id;
@@ -151,7 +162,17 @@ impl<H: ScrollbarHandle + Clone + 'static> Element for AreaMask<H> {
                     }
                 }
                 let mut offset = handle.offset();
-                let moved = if horizontal {
+                let moved = if horizontal
+                    && wheel_sideways
+                    && !event.delta.precise()
+                    && delta.x.is_zero()
+                {
+                    let max = (handle.content_size().width - handle.viewport_bounds().size.width)
+                        .max(px(0.));
+                    let current = offset.x.clamp(-max, px(0.));
+                    offset.x = (current + delta.y).clamp(-max, px(0.));
+                    offset.x != current
+                } else if horizontal {
                     // `set_offset` does not clamp (the viewport clamps as it
                     // lays out), so a sideways packet is taken even at an
                     // edge rather than handed to the page.

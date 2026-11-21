@@ -123,6 +123,8 @@ const CONTROL_ROW_COMPACT_BELOW: f32 = 520.;
 #[derive(Clone, PartialEq, Eq)]
 enum PickerRail {
     Favorites,
+    /// The collaborations. Favorites lists the starred ones too, ahead of its models.
+    Collaborations,
     /// One provider profile (by profile id) — a built-in (`"claude"`/`"codex"`)
     /// or a user-created third-party profile. Each profile is its own rail entry
     /// and lists only its own models.

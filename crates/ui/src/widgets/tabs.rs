@@ -658,6 +658,7 @@ impl RenderOnce for TabBar {
                     .flex()
                     .h(px(m.bar))
                     .overflow_x_scroll_area()
+                    .wheel_sideways()
                     .child(tabs.followed_by(underline).render(list));
                 div()
                     .debug_selector(|| id.to_string())
@@ -682,8 +683,8 @@ impl RenderOnce for TabBar {
                     .into_any_element()
             }
             Form::Segmented => {
-                let list = tabs.render(segment_list(list, cx));
-                segmented_track(id.clone(), list, compact)
+                let list = tabs.render(segment_list(list));
+                segmented_track(id.clone(), list, compact, cx)
                     .debug_selector(|| id.to_string())
                     .refine_style(&style)
                     .into_any_element()
@@ -960,7 +961,7 @@ fn segment_radius(cx: &App) -> Pixels {
 /// The list of segments of a [`TabBar::segmented`] or a
 /// [`ChoiceGroup`](super::choice::ChoiceGroup), for [`segmented_track`]: a
 /// pill track whose segments divide the width it is given.
-pub(crate) fn segment_list<E: Styled>(list: E, cx: &App) -> E {
+pub(crate) fn segment_list<E: Styled>(list: E) -> E {
     list.flex()
         .items_center()
         .h_full()
@@ -968,26 +969,31 @@ pub(crate) fn segment_list<E: Styled>(list: E, cx: &App) -> E {
         .flex_shrink_0()
         .gap(px(SEGMENT_GAP))
         .p(px(TRACK_INSET))
-        .rounded(material::radius_input(cx))
-        .bg(cx.theme().secondary)
 }
 
-/// The viewport of a [`segment_list`], which scrolls sideways once its
-/// segments no longer fit.
+/// The viewport of a [`segment_list`]: the pill track itself, which stays where it is
+/// while its segments scroll sideways once they no longer fit, under a mouse wheel too,
+/// fading into the track at an edge with more past it.
 pub(crate) fn segmented_track(
     id: impl Into<ElementId>,
     list: impl IntoElement,
     compact: bool,
+    cx: &App,
 ) -> ScrollArea<Stateful<Div>> {
     let id = id.into();
     let height = segment_height(compact) + 2. * TRACK_INSET;
+    let (track, radius) = (cx.theme().secondary, material::radius_input(cx));
     div()
         .id((id, "viewport"))
         .flex()
         .h(px(height))
         .min_h(px(height))
         .min_w_0()
+        .rounded(radius)
+        .bg(track)
         .overflow_x_scroll_area()
+        .wheel_sideways()
+        .edge_fades(track, radius)
         .child(list)
 }
 

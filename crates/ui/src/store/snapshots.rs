@@ -16,6 +16,8 @@ pub struct ComposerActiveModel {
     pub model: Option<String>,
     pub acp_agent_id: Option<String>,
     pub profile_id: Option<String>,
+    /// The collaboration the thread runs under.
+    pub collaboration_id: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -167,6 +169,7 @@ pub(crate) fn composer_state(
             model: status.requested_model.clone(),
             acp_agent_id: status.acp_agent_id.clone(),
             profile_id: status.requested_profile_id.clone(),
+            collaboration_id: status.collaboration_id.clone(),
         }),
         model_pending_restart: status.is_some_and(|status| status.model_pending_restart),
         active_model_spec,
@@ -264,6 +267,7 @@ mod tests {
             provider: agent::ProviderKind::Codex,
             requested_model: Some("gpt-test".into()),
             requested_profile_id: None,
+            collaboration_id: None,
             acp_agent_id: None,
             project_id: Some("project-1".into()),
             queued_messages: Vec::new(),

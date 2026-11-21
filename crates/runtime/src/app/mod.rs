@@ -259,6 +259,7 @@ mod active_session;
 mod approvals;
 mod authorization;
 mod background;
+mod collaborations;
 mod command_output;
 mod command_validation;
 mod control;
@@ -440,6 +441,9 @@ pub struct AppState {
     /// item id): their streamed deltas carry no parent and follow them there.
     native_subagent_streams: HashMap<(String, String), String>,
     pub settings: Settings,
+    /// The mandates collaborations are written from: the newest of those the app ships
+    /// with and those last fetched from the repository.
+    collaboration_templates: tcode_core::collaboration::Templates,
     executions: ProviderExecutions,
     pub providers: Revisioned<ProviderCatalog>,
     next_terminal_spawn_id: u64,
@@ -658,6 +662,7 @@ impl AppState {
         let (store_writes, store_write_receiver) = smol::channel::unbounded();
         let (store_write_failures, store_write_failure_receiver) = smol::channel::unbounded();
         let session_search = Arc::new(SessionSearch::new(store.clone()));
+        let collaboration_templates = tcode_services::collaboration_templates::stored(store.root());
         let mut state = Self {
             store,
             user_directories,
@@ -708,6 +713,7 @@ impl AppState {
             native_subagent_turns: HashMap::new(),
             native_subagent_streams: HashMap::new(),
             settings,
+            collaboration_templates,
             providers: ProviderCatalog::new(model_catalogs, acp_catalogs, provider_secret_names)
                 .into(),
             next_terminal_spawn_id: 0,

@@ -96,6 +96,14 @@ struct MoveHost {
 #[action(namespace = tcode_hosts, no_json)]
 struct ForgetHost(String);
 
+/// Show a previously hidden group member again in its group's multi-host view.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_hosts, no_json)]
+struct IncludeHostInGroup {
+    group_id: String,
+    host_id: String,
+}
+
 /// The name of the machine this process hosts, where it hosts one.
 pub(crate) fn local_machine_name(cx: &App) -> Option<String> {
     #[cfg(feature = "remote-hosting")]
@@ -258,7 +266,7 @@ pub(crate) fn open_host_path_in_zed(
 }
 
 /// Whether `path` is a Windows drive path, `C:\...` or `C:/...`.
-fn windows_drive_path(path: &str) -> bool {
+pub(crate) fn windows_drive_path(path: &str) -> bool {
     matches!(path.as_bytes(), [drive, b':', b'\\' | b'/', ..] if drive.is_ascii_alphabetic())
 }
 
@@ -515,6 +523,14 @@ fn submit_actions(
     )
 }
 
+struct GroupHeader<'a> {
+    id: &'a str,
+    name: SharedString,
+    total: usize,
+    includes_local: bool,
+    active: bool,
+}
+
 type Row = crate::material::Clickable<gpui::Div>;
 
 /// A [`panel_row`] inside one of the page's groups. Compact, a panel row is a
@@ -733,11 +749,7 @@ impl RemotePanel {
             }
             let attachment = cx.global::<ClientAttachment>();
             let request = attachment.requester();
-            request(
-                HostRequest::Open(AttachmentTarget::Remote(Box::new(host))),
-                window,
-                cx,
-            );
+            request(HostRequest::Paired(host), window, cx);
         }
         cx.notify();
     }
@@ -783,12 +795,19 @@ impl RemotePanel {
 
     /// This machine: one target among the saved machines, offered only where
     /// bootstrap actually gave this window a local host to attach to. Being
-    /// on it is not a connection, so the row carries a check, not a dot. A
-    /// host that did not start says why, and offers starting it again or
-    /// quitting.
-    fn local_row(&self, compact: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<Row> {
+    /// on it alone is not a connection, so the row carries a check, not a dot.
+    /// When the window is viewing a machine group that includes this machine,
+    /// the group's row carries the check instead. A host that did not start
+    /// says why, and offers starting it again or quitting.
+    fn local_row(
+        &self,
+        viewing_group: bool,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Row> {
         cx.global::<ClientAttachment>().can_attach_local().then(|| {
-            let current = self.store_of(&HostKey::Local, cx).is_some();
+            let current = self.store_of(&HostKey::Local, cx).is_some() && !viewing_group;
             let failure = self.local_failure.clone();
             let failed = failure.is_some();
             let failure = crate::motion::shown("hosts-local-failure", failure, SHOW, window, cx)
@@ -874,11 +893,76 @@ impl RemotePanel {
         })
     }
 
+    /// Top entry of a machine group card: clicking it switches the window to
+    /// the multi-host view of that group.
+    fn group_header_row(
+        &self,
+        group: GroupHeader<'_>,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let subtitle: SharedString = if group.includes_local {
+            crate::tr!("hosts.group_machines_with_local", count = group.total)
+                .into_owned()
+                .into()
+        } else if group.total == 1 {
+            crate::tr!("hosts.group_machine_one").into_owned().into()
+        } else {
+            crate::tr!("hosts.group_machines", count = group.total)
+                .into_owned()
+                .into()
+        };
+        let current = crate::motion::shown(
+            SharedString::from(format!("host-group-current-{}", group.id)),
+            group.active.then_some(()),
+            SHOW,
+            window,
+            cx,
+        )
+        .map(|shown| shown.fade(Self::current_glyph(cx)));
+        let open_id = group.id.to_owned();
+        let selector = format!("host-group-{}", group.id);
+        group_entry(
+            SharedString::from(selector.clone()),
+            group.name.clone(),
+            compact,
+            cx,
+        )
+        .debug_selector(move || selector.clone())
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(cx.theme().tokens.spacing.xxs)
+                .child(
+                    div()
+                        .text_title(cx)
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(group.name)),
+                )
+                .child(
+                    div()
+                        .text_secondary(compact, cx)
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(subtitle)),
+                ),
+        )
+        .children(current)
+        .on_click(move |_, window, cx| {
+            let request = cx.global::<ClientAttachment>().requester();
+            request(HostRequest::OpenGroup(open_id.clone()), window, cx);
+        })
+        .into_any_element()
+    }
+
     /// Saved machines offer pairing again when authorization is rejected.
+    /// Clicking any machine opens that machine alone.
     fn host_row(
         &self,
         host: &PairedHost,
         current: bool,
+        hidden_in_group: bool,
         compact: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -960,17 +1044,11 @@ impl RemotePanel {
                         ),
                     ))
                 })
-                .when(
-                    host.space_name.is_none() && host.group_id.is_some(),
-                    |column| {
-                        column.child(
-                            div()
-                                .text_secondary(compact, cx)
-                                .overflow_hidden()
-                                .child(crate::widgets::fade_text(crate::tr!("hosts.in_group"))),
-                        )
-                    },
-                )
+                .when(hidden_in_group, |column| {
+                    column.child(div().text_secondary(compact, cx).overflow_hidden().child(
+                        crate::widgets::fade_text(crate::tr!("hosts.hidden_in_group")),
+                    ))
+                })
                 .children(reason),
         )
         .children(status)
@@ -986,14 +1064,20 @@ impl RemotePanel {
             })
         })
         // The row must keep its hover fill while the child menu is hovered.
-        .child(self.host_menu(host, current, cx));
+        .child(self.host_menu(host, current, hidden_in_group, cx));
         row.into_any_element()
     }
 
-    fn host_menu(&self, host: &PairedHost, current: bool, cx: &App) -> AnyElement {
+    fn host_menu(
+        &self,
+        host: &PairedHost,
+        current: bool,
+        hidden_in_group: bool,
+        cx: &App,
+    ) -> AnyElement {
         let host_id = host.host_id.clone();
-        // Where the host stands among the workspace's, which a space's
-        // host, reached alone, is not one of.
+        let include_group = hidden_in_group.then(|| host.group_id.clone()).flatten();
+        // Where the host stands among the active group view's hosts.
         let key = HostKey::Remote(host.host_id.clone());
         let place = self
             .stores
@@ -1017,6 +1101,15 @@ impl RemotePanel {
                     .aria_label(label)
                     .dropdown_menu(move |menu, _window, _cx| {
                         let menu = menu
+                            .when_some(include_group.clone(), |menu, group_id| {
+                                menu.menu(
+                                    crate::tr!("hosts.include_in_group").into_owned(),
+                                    Box::new(IncludeHostInGroup {
+                                        group_id,
+                                        host_id: host_id.clone(),
+                                    }),
+                                )
+                            })
                             .when(place.is_some_and(|place| place > 0), |menu| {
                                 menu.menu(
                                     crate::tr!("hosts.move_up").into_owned(),
@@ -1051,22 +1144,46 @@ impl RemotePanel {
     }
 
     /// The whole Hosts surface, one captioned group each: this machine and
-    /// the invitation it offers other devices, its shared spaces, the saved
-    /// machines and, where the client can pair, the ways to add another.
+    /// the invitation it offers other devices, its shared spaces, each machine
+    /// group with its members, standalone saved machines and spaces, and,
+    /// where the client can pair, the ways to add another.
     pub(crate) fn render_hosts(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
-        let (hosts, unreadable) = match self.client(cx).load_hosts() {
+        let client = self.client(cx);
+        let (hosts, unreadable) = match client.load_hosts() {
             Ok(hosts) => (hosts, None),
             Err(error) => (Vec::new(), Some(error)),
         };
+        let preference = crate::device::DevicePreferences::workspace(cx);
+        let local_machine_id = client.local_machine_id().ok().flatten();
+        let local_group = client.local_machine_group().ok().flatten();
+        let can_local = cx.global::<ClientAttachment>().can_attach_local();
+        let last_host_id = client.last_host_id();
+        let active_scope = crate::workspace::active_scope(&crate::workspace::Device {
+            saved: &hosts,
+            preference: preference.as_ref(),
+            last_host_id: last_host_id.as_deref(),
+            local: can_local,
+            local_machine_id: local_machine_id.as_deref(),
+            local_group_id: local_group.as_ref().map(|(id, _)| id.as_str()),
+            fixed_machine: self.fixed_machine,
+        });
+        let viewing_group = matches!(
+            active_scope,
+            tcode_client::host::WorkspaceScope::Group { .. }
+        );
+        let left: &[String] = preference
+            .as_ref()
+            .map_or(&[], |preference| preference.left.as_slice());
+
         let mut column = v_flex().gap(section_gap(cx));
 
         let mut this_machine: Vec<AnyElement> = Vec::new();
-        if let Some(local) = self.local_row(compact, window, cx) {
+        if let Some(local) = self.local_row(viewing_group, compact, window, cx) {
             this_machine.push(local.into_any_element());
         }
         // Only a host running in this process can offer an invitation.
@@ -1086,63 +1203,143 @@ impl RemotePanel {
             column = column.children(self.space_links(compact, window, cx));
         }
 
-        // The empty row is one more key, which leaves as the first machine
-        // arrives and comes back after the last one goes.
-        // The workspace's hosts first, in its order, then the others.
-        let mut hosts = hosts;
-        hosts.sort_by_key(|host| {
-            let key = HostKey::Remote(host.host_id.clone());
-            self.stores
-                .iter()
-                .position(|store| store.read(cx).host_key() == key)
-                .unwrap_or(self.stores.len())
-        });
-        let saved: Vec<(SharedString, Option<(PairedHost, bool)>)> = if hosts.is_empty() {
-            let key = if unreadable.is_some() {
-                "hosts-unreadable"
-            } else {
-                "hosts-empty"
-            };
-            vec![(key.into(), None)]
-        } else {
-            hosts
+        // Partition saved machines into machine groups (full-access members
+        // sharing a group_id) and standalone machines / shared spaces.
+        let mut group_order: Vec<String> = Vec::new();
+        let mut grouped: std::collections::HashMap<String, Vec<PairedHost>> =
+            std::collections::HashMap::new();
+        let mut standalone: Vec<PairedHost> = Vec::new();
+        for host in hosts {
+            if host.space_id.is_none()
+                && let Some(group_id) = host.group_id.clone()
+                && Some(host.host_id.as_str()) != local_machine_id.as_deref()
+            {
+                if !grouped.contains_key(&group_id) {
+                    group_order.push(group_id.clone());
+                }
+                grouped.entry(group_id).or_default().push(host);
+            } else if Some(host.host_id.as_str()) != local_machine_id.as_deref() {
+                standalone.push(host);
+            }
+        }
+
+        for group_id in &group_order {
+            let mut members = grouped.remove(group_id).unwrap_or_default();
+            let active = active_scope
+                == tcode_client::host::WorkspaceScope::Group {
+                    group_id: group_id.clone(),
+                };
+            if active {
+                members.sort_by_key(|host| {
+                    let key = HostKey::Remote(host.host_id.clone());
+                    self.stores
+                        .iter()
+                        .position(|store| store.read(cx).host_key() == key)
+                        .unwrap_or(self.stores.len())
+                });
+            }
+            let includes_local =
+                can_local && local_group.as_ref().is_some_and(|(id, _)| id == group_id);
+            let total = members.len() + usize::from(includes_local);
+            let group_name: SharedString =
+                crate::workspace::group_name(group_id, &members, local_group.as_ref())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| crate::tr!("group.section").into_owned())
+                    .into();
+            let header = self.group_header_row(
+                GroupHeader {
+                    id: group_id,
+                    name: group_name,
+                    total,
+                    includes_local,
+                    active,
+                },
+                compact,
+                window,
+                cx,
+            );
+            let member_items: Vec<(SharedString, (PairedHost, bool, bool))> = members
                 .into_iter()
                 .map(|host| {
                     let current = self
                         .store_of(&HostKey::Remote(host.host_id.clone()), cx)
                         .is_some();
+                    let hidden = left.iter().any(|id| id == &host.host_id);
                     (
                         format!("host-{}", host.host_id).into(),
-                        Some((host, current)),
+                        (host, current, hidden),
                     )
                 })
-                .collect()
-        };
-        let saved = crate::motion::keyed(
-            "hosts-saved",
-            saved,
-            ROWS,
-            window,
-            cx,
-            |_, row, window, cx| match row {
-                Some((host, current)) => self.host_row(host, *current, compact, window, cx),
-                None => match &unreadable {
-                    Some(error) => crate::material::empty_row(
-                        crate::tr!("errors.file_unreadable", error = error.to_string()),
-                        cx,
-                    )
-                    .debug_selector(|| "hosts-unreadable".into()),
-                    None => crate::material::empty_row(crate::tr!("hosts.empty"), cx),
-                }
-                .text_secondary(compact, cx)
-                .into_any_element(),
-            },
-        );
-        column = column.child(settings_group(
-            crate::tr!("hosts.saved"),
-            vec![saved.render(v_flex().w_full())],
-            cx,
-        ));
+                .collect();
+            let member_rows = crate::motion::keyed(
+                SharedString::from(format!("hosts-group-{group_id}")),
+                member_items,
+                ROWS,
+                window,
+                cx,
+                |_, (host, current, hidden), window, cx| {
+                    self.host_row(host, *current, *hidden, compact, window, cx)
+                },
+            );
+            column = column.child(settings_group(
+                crate::tr!("hosts.group_section"),
+                vec![header, member_rows.render(v_flex().w_full())],
+                cx,
+            ));
+        }
+
+        // Show standalone machines & shared spaces; also keep the section when
+        // there are no saved machines at all (empty or unreadable state).
+        if !standalone.is_empty() || group_order.is_empty() || unreadable.is_some() {
+            let saved: Vec<(SharedString, Option<(PairedHost, bool)>)> = if standalone.is_empty() {
+                let key = if unreadable.is_some() {
+                    "hosts-unreadable"
+                } else {
+                    "hosts-empty"
+                };
+                vec![(key.into(), None)]
+            } else {
+                standalone
+                    .into_iter()
+                    .map(|host| {
+                        let current = self
+                            .store_of(&HostKey::Remote(host.host_id.clone()), cx)
+                            .is_some();
+                        (
+                            format!("host-{}", host.host_id).into(),
+                            Some((host, current)),
+                        )
+                    })
+                    .collect()
+            };
+            let saved = crate::motion::keyed(
+                "hosts-saved",
+                saved,
+                ROWS,
+                window,
+                cx,
+                |_, row, window, cx| match row {
+                    Some((host, current)) => {
+                        self.host_row(host, *current, false, compact, window, cx)
+                    }
+                    None => match &unreadable {
+                        Some(error) => crate::material::empty_row(
+                            crate::tr!("errors.file_unreadable", error = error.to_string()),
+                            cx,
+                        )
+                        .debug_selector(|| "hosts-unreadable".into()),
+                        None => crate::material::empty_row(crate::tr!("hosts.empty"), cx),
+                    }
+                    .text_secondary(compact, cx)
+                    .into_any_element(),
+                },
+            );
+            column = column.child(settings_group(
+                crate::tr!("hosts.saved"),
+                vec![saved.render(v_flex().w_full())],
+                cx,
+            ));
+        }
         if !self.fixed_machine {
             column = column.child(self.add_machine(compact, window, cx));
         }
@@ -1601,6 +1798,7 @@ impl RemotePanel {
                 .lock_scroll_axis()
                 .track_scroll(scroll)
                 .on_action(cx.listener(Self::on_disconnect))
+                .on_action(cx.listener(Self::on_include_in_group))
                 .on_action(cx.listener(Self::on_move))
                 .on_action(cx.listener(Self::on_forget))
                 .child(crate::settings_rows::content_column(
@@ -1647,6 +1845,23 @@ impl RemotePanel {
         let request = cx.global::<ClientAttachment>().requester();
         request(
             HostRequest::Leave(HostKey::Remote(action.0.clone())),
+            window,
+            cx,
+        );
+    }
+
+    fn on_include_in_group(
+        &mut self,
+        action: &IncludeHostInGroup,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let request = cx.global::<ClientAttachment>().requester();
+        request(
+            HostRequest::IncludeInGroup {
+                group_id: action.group_id.clone(),
+                host_id: action.host_id.clone(),
+            },
             window,
             cx,
         );

@@ -175,6 +175,12 @@ pub struct ActiveSession {
     /// another account restarts it before the next turn.
     pub(super) live_profile_id: Option<String>,
     pub(super) live_option_selections: Vec<OptionSelection>,
+    /// The brief of the collaboration the thread runs under, as its collaboration and the settings give
+    /// it now ([`AppState::collaboration_brief`]).
+    pub(super) collaboration_brief: Option<String>,
+    /// The brief the live provider process was started with; another one restarts it
+    /// before the next turn.
+    pub(super) live_collaboration_brief: Option<String>,
     /// What the live process reported of the option values in effect, by
     /// [`AgentEvent::ProviderOptions`].
     pub(super) confirmed_option_selections: Vec<OptionSelection>,
@@ -307,6 +313,8 @@ impl ActiveSession {
             live_cwd,
             live_profile_id,
             live_option_selections: Vec::new(),
+            collaboration_brief: None,
+            live_collaboration_brief: None,
             confirmed_option_selections: Vec::new(),
             confirmed_model: None,
             settings_apply_in_flight: None,
@@ -466,6 +474,14 @@ impl ActiveSession {
             || self.options_changed_while_live()
             || self.cwd_changed_while_live()
             || self.profile_changed_while_live()
+            || self.collaboration_changed_while_live()
+    }
+
+    /// Whether the live provider was told another collaboration brief than the thread's now: a
+    /// provider takes its instructions when it starts.
+    fn collaboration_changed_while_live(&self) -> bool {
+        matches!(self.runtime, Runtime::Live(_))
+            && self.collaboration_brief != self.live_collaboration_brief
     }
 
     fn selected_settings(&self) -> LiveSettings {
@@ -482,6 +498,7 @@ impl ActiveSession {
             && (self.model_changed_while_live() || self.options_changed_while_live())
             && !self.cwd_changed_while_live()
             && !self.profile_changed_while_live()
+            && !self.collaboration_changed_while_live()
             && !self.permission_restart_pending()
             && !matches!(&self.runtime, Runtime::Live(commands) if commands.configuration_changed())
             && self.settings_refused.as_ref() != Some(&self.selected_settings())

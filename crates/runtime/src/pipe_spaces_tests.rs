@@ -5,7 +5,7 @@ use tcode_core::project::{Project, SessionMeta};
 use tcode_core::session::Author;
 use tcode_core::settings::{EnvVar, ProviderProfile, ProviderSettings, Settings};
 use tcode_protocol::{
-    AgentGrant, IndexSnapshot, ModelGrant, Scope, SpaceAgents, SpaceApproval, SpacePolicy,
+    AgentGrant, AgentScope, IndexSnapshot, ModelGrant, Scope, SpaceApproval, SpacePolicy,
 };
 use tcode_services::settings::SettingsStore;
 use tcode_services::store::Mutation;
@@ -920,7 +920,7 @@ fn space_policy_refuses_what_it_withholds() {
         },
     );
     let policy = SpacePolicy {
-        agents: SpaceAgents::Only(vec![
+        agents: AgentScope::Only(vec![
             AgentGrant {
                 profile_id: "codex".into(),
                 models: ModelGrant::Every,
@@ -1177,7 +1177,7 @@ fn a_members_draft_starts_on_what_the_space_allows() {
         "one",
         1,
         SpacePolicy {
-            agents: SpaceAgents::Only(vec![AgentGrant {
+            agents: AgentScope::Only(vec![AgentGrant {
                 profile_id: "shared-profile".into(),
                 models: ModelGrant::Only(vec!["team-model".into()]),
                 acp_agents: Vec::new(),

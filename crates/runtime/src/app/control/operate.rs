@@ -8,11 +8,13 @@ use control_mcp::{
     CreateProjectParams, CreateProjectResponse, GitOp, GitParams, MoveThreadParams,
     MoveThreadResponse, Outcome, PatchSettingsParams, PullRequestOp, PullRequestParams,
     RewindParams, RewindScope, RunChange, RunOp, RunResult, SendMessageParams, SendMode,
-    StartThreadParams, StartThreadResponse, TerminalOp, TerminalParams, Workspace,
+    SetModelGuideParams, StartThreadParams, StartThreadResponse, TerminalOp, TerminalParams,
+    Workspace,
 };
 use tcode_core::control::{StartedBy, action};
 use tcode_core::project::ChildExpectation;
 use tcode_core::pull_request::{PullRequestKey, PullRequestSource};
+use tcode_core::settings::provider_key;
 use tcode_protocol::{Command, CommandResponse, PullRequestAction, PullRequestActionResult};
 
 type ActionWork = Pin<Box<dyn Future<Output = Result<Option<serde_json::Value>, String>> + Send>>;
@@ -101,7 +103,7 @@ fn approval_option_refusal(provider: ProviderKind, id: &str) -> Option<String> {
     })
 }
 
-/// The settings an agent may change, as display preferences only. Everything else touches
+/// The settings an agent may change: display preferences. Everything else touches
 /// authority (approvals, computer use, browser evaluation, plugins, child approval, whether
 /// threads are given `tcode_control`, hosting, credentials), automation (settlement rules and tiers, resuming, the title model)
 /// or UI state (sidebar, last project), and stays the user's. The match is exhaustive so a
@@ -137,6 +139,10 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::BrowserHomeUrl(_)
         | SettingsPatch::BrowserAllowEvaluate(_)
         | SettingsPatch::ControlEnabled(_)
+        | SettingsPatch::ControlAgents(_)
+        | SettingsPatch::ModelGuide(_)
+        | SettingsPatch::SaveCollaboration(_)
+        | SettingsPatch::RemoveCollaboration { .. }
         | SettingsPatch::SettlementAutomation(_)
         | SettingsPatch::TitleGeneration(_)
         | SettingsPatch::SidebarLayout(_)
@@ -415,7 +421,7 @@ impl AppState {
                 cwd.display()
             ));
         }
-        let options = params.options.unwrap_or_default();
+        let mut options = params.options.unwrap_or_default();
         if let Some(refusal) = options
             .keys()
             .find_map(|id| approval_option_refusal(provider, id))
@@ -431,6 +437,21 @@ impl AppState {
                 "model is not supported for acp; pass options: {\"acp:model\": \"...\"} instead"
                     .into(),
             );
+        }
+        self.control_agents_allow(
+            provider,
+            profile_id.as_deref(),
+            acp_agent_id.as_deref(),
+            model.as_deref(),
+        )?;
+        if subagent {
+            self.collaboration_allows_collaborator(
+                caller,
+                provider,
+                profile_id.as_deref(),
+                model.as_deref(),
+                &mut options,
+            )?;
         }
         let mut meta = SessionMeta::new(provider, cwd, model);
         meta.project_id = Some(project.id.clone());
@@ -471,6 +492,77 @@ impl AppState {
             attachments: read_attachments(attachment_paths)?,
             isolate,
         })
+    }
+
+    /// A thread under a collaboration starts as subagents the collaboration's collaborators
+    /// only, each at a reasoning effort the collaboration allows it: the one it allows is
+    /// written into `options` when the start names none.
+    fn collaboration_allows_collaborator(
+        &self,
+        caller: &Caller,
+        provider: ProviderKind,
+        profile_id: Option<&str>,
+        model: Option<&str>,
+        options: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        let Some(collaboration) = self
+            .current_meta(&caller.thread_id)
+            .and_then(|meta| meta.collaboration_id.as_deref())
+            .and_then(|id| self.settings.collaboration(id))
+        else {
+            return Ok(());
+        };
+        if let Some(member) = model.and_then(|model| {
+            collaboration
+                .members
+                .iter()
+                .find(|member| member.model.is(provider, profile_id, model))
+        }) {
+            let asked = options
+                .get(agent::EFFORT_OPTION_ID)
+                .and_then(serde_json::Value::as_str);
+            return match member.effort(asked) {
+                Ok(Some(effort)) if asked.is_none() => {
+                    options.insert(agent::EFFORT_OPTION_ID.to_owned(), effort.into());
+                    Ok(())
+                }
+                Ok(_) => Ok(()),
+                Err(allowed) => Err(format!(
+                    "refused: the collaboration \"{}\" starts {} with options {{\"{}\": …}} set to \
+                     one of: {}. The user changes them in Settings → Collaboration.",
+                    collaboration.name,
+                    member.model.model,
+                    agent::EFFORT_OPTION_ID,
+                    allowed.join(", ")
+                )),
+            };
+        }
+        let collaborators: Vec<String> = collaboration
+            .members
+            .iter()
+            .map(|member| {
+                let profile = match &member.model.profile_id {
+                    Some(profile) => format!(", profile {profile}"),
+                    None => String::new(),
+                };
+                format!(
+                    "provider {}{profile}, model {}",
+                    provider_key(member.model.provider),
+                    member.model.model
+                )
+            })
+            .collect();
+        Err(format!(
+            "refused: this thread runs under the collaboration \"{}\", which starts as subagents only \
+             its collaborators, with provider, profile and model exactly as listed: {}. The user \
+             changes them in Settings → Collaboration.",
+            collaboration.name,
+            if collaborators.is_empty() {
+                "none yet".to_owned()
+            } else {
+                collaborators.join("; ")
+            }
+        ))
     }
 
     /// The thread an earlier `start_thread` call with this `request_id` started.
@@ -971,6 +1063,8 @@ impl AppState {
                 profile_id,
                 ..
             } => {
+                self.control_agents_allow(provider, profile_id.as_deref(), None, model.as_deref())
+                    .map_err(skipped)?;
                 self.set_active_model(target, provider, model, profile_id, cx);
                 self.release_policy_holds(target, cx);
                 "model set; it takes effect from the next turn"
@@ -1576,6 +1670,43 @@ impl AppState {
             cx,
         );
         Ok(serde_json::json!({ "applied": name }))
+    }
+
+    /// Write the guide of the model the calling thread was opened to research, as that
+    /// thread's and now. Which models a collaboration names and what it has them do stay
+    /// the user's.
+    pub(super) fn op_set_model_guide(
+        &mut self,
+        caller: &Caller,
+        params: SetModelGuideParams,
+        cx: &mut HostCx,
+    ) -> Result<serde_json::Value, String> {
+        let model = self
+            .current_meta(&caller.thread_id)
+            .and_then(|meta| meta.guide_for.clone())
+            .ok_or("refused: this thread was not opened to research a model's guide")?;
+        let guide = params.guide.trim().to_owned();
+        if guide.is_empty() {
+            return Err("guide must not be empty".into());
+        }
+        let stored = model.model.clone();
+        self.patch_settings(
+            SettingsPatch::ModelGuide(tcode_core::collaboration::ModelGuide {
+                model,
+                text: guide,
+                thread_id: Some(caller.thread_id.clone()),
+                researched_at: Some(cx.clock().unix_secs()),
+            }),
+            cx,
+        );
+        self.audit(
+            caller,
+            &caller.thread_id,
+            action::SET_MODEL_GUIDE,
+            Some(stored.clone()),
+            cx,
+        );
+        Ok(serde_json::json!({ "stored": stored }))
     }
 }
 

@@ -19,6 +19,7 @@ pub fn builtin_provider_color(kind: ProviderKind) -> Option<u32> {
         ProviderKind::OpenCode => Some(0x22A06B),
         ProviderKind::Cursor => Some(0x9CA3AF),
         ProviderKind::Grok => Some(0x71717A),
+        ProviderKind::Antigravity => Some(0x4285F4),
         ProviderKind::Acp => None,
     }
 }

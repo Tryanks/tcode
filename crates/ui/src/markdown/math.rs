@@ -54,10 +54,18 @@ fn formula(source: &str, display: bool) -> Formula {
                     } else {
                         MathStyle::Text
                     };
-                    let node = parse(source).map_err(|error| error.to_string())?;
-                    layout(&node, font, style)
-                        .map(Arc::new)
-                        .map_err(|error| error.to_string().into())
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let node = parse(source).map_err(|error| error.to_string())?;
+                        layout(&node, font, style)
+                            .map(Arc::new)
+                            .map_err(|error| SharedString::from(error.to_string()))
+                    })) {
+                        Ok(result) => result,
+                        Err(_) => {
+                            log::error!("latex-rust panicked laying out formula; showing source");
+                            Err("formula layout failed".into())
+                        }
+                    }
                 })
             })
     })

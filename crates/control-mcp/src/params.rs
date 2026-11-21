@@ -367,7 +367,7 @@ pub struct StartThreadParams {
     pub provider: String,
     #[serde(default)]
     #[schemars(
-        description = "Installed ACP agent id from list_providers' acp_agents (for example custom:antigravity); required when provider is acp and refused for native providers."
+        description = "Installed ACP agent id from list_providers' acp_agents (for example gemini); required when provider is acp and refused for native providers."
     )]
     pub acp_agent: Option<String>,
     #[serde(default)]
@@ -681,6 +681,14 @@ pub struct PatchSettingsParams {
         description = "A settings patch as {\"type\": <patch>, \"content\": <value>}, as get_settings shows the fields. Credentials, hosting, whether threads are given tcode_control and the settlement automation tier are always refused."
     )]
     pub patch: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SetModelGuideParams {
+    #[schemars(
+        description = "The guide, in English: what work to give the model and what to keep from it, how to brief it, which options to start it with, and the sources it rests on."
+    )]
+    pub guide: String,
 }
 
 // ---- observe responses ----

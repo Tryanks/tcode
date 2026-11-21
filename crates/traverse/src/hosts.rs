@@ -73,6 +73,7 @@ pub fn apply_roster(
     let Some(roster) = roster else {
         if let Some(host) = hosts.iter_mut().find(|host| host.host_id == from) {
             host.group_id = None;
+            host.group_name = None;
         }
         return;
     };
@@ -83,6 +84,7 @@ pub fn apply_roster(
         match hosts.iter_mut().find(|host| host.host_id == machine.id) {
             Some(host) if machine.member => {
                 host.group_id = Some(roster.id.clone());
+                host.group_name = Some(roster.name.clone());
                 host.name.clone_from(&machine.name);
                 if host.traverse.is_empty() {
                     host.traverse.clone_from(&machine.traverse);
@@ -99,6 +101,7 @@ pub fn apply_roster(
             Some(host) => {
                 if host.group_id.as_deref() == Some(roster.id.as_str()) {
                     host.group_id = None;
+                    host.group_name = None;
                 }
             }
             None if machine.member => hosts.push(PairedHost {
@@ -111,6 +114,7 @@ pub fn apply_roster(
                 addrs: machine.addrs.iter().take(MAX_ADDRS).cloned().collect(),
                 last_connected_unix: None,
                 group_id: Some(roster.id.clone()),
+                group_name: Some(roster.name.clone()),
             }),
             None => {}
         }
@@ -172,6 +176,10 @@ pub fn watch(data_dir: &Path) -> async_channel::Receiver<()> {
     receiver
 }
 
+pub(crate) fn notify(data_dir: &Path) {
+    changed(data_dir);
+}
+
 fn changed(data_dir: &Path) {
     WATCHERS.lock().unwrap().retain(|(watched, sender)| {
         if watched == data_dir {
@@ -215,6 +223,7 @@ mod tests {
             addrs: vec!["192.168.1.5:47420".into()],
             last_connected_unix: None,
             group_id: None,
+            group_name: None,
         }
     }
 

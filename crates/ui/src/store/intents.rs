@@ -5,6 +5,7 @@ use gpui::{App, Context, Task};
 use tcode_client::ConnectionState;
 use tcode_core::{
     acp::AcpAgentPatch,
+    collaboration::{Collaboration, ModelGuide, ModelRef, Templates},
     control::SettlementAutomation,
     git::GitAction,
     session::ReviewComment,
@@ -55,10 +56,12 @@ impl WorkspaceStore {
                 Command::ToggleFavoriteModel {
                     provider,
                     profile_id,
+                    acp_agent_id,
                     model,
                 } => self.settings_replica.toggle_favorite_model(
                     *provider,
                     profile_id.clone(),
+                    acp_agent_id.clone(),
                     model.clone(),
                 ),
                 Command::MarkSessionRead {
@@ -337,6 +340,52 @@ impl WorkspaceStore {
     }
     pub fn set_control_enabled(&mut self, enabled: bool) {
         self.patch_settings(SettingsPatch::ControlEnabled(enabled));
+    }
+    pub fn set_control_agents(&mut self, agents: tcode_core::control::AgentScope) {
+        self.patch_settings(SettingsPatch::ControlAgents(agents));
+    }
+    pub fn save_collaboration(&mut self, collaboration: Collaboration) {
+        self.patch_settings(SettingsPatch::SaveCollaboration(collaboration));
+    }
+    /// Put the collaboration among the model picker's favorites, or take it out.
+    pub fn toggle_favorite_collaboration(&mut self, id: &str) {
+        if let Some(mut collaboration) = self.settings_ref().collaboration(id).cloned() {
+            collaboration.favorite = !collaboration.favorite;
+            self.save_collaboration(collaboration);
+        }
+    }
+    pub fn remove_collaboration(&mut self, id: String) {
+        self.patch_settings(SettingsPatch::RemoveCollaboration { id });
+    }
+    pub fn set_model_guide(&mut self, guide: ModelGuide) {
+        self.patch_settings(SettingsPatch::ModelGuide(guide));
+    }
+    /// Ask the host for the draft that researches `model`'s guide on the decision model
+    /// `lead`; answers its id.
+    pub fn research_model(
+        &self,
+        model: ModelRef,
+        lead: ModelRef,
+        cx: &mut App,
+    ) -> Task<Result<CommandResponse, ProtocolError>> {
+        self.command(Command::ResearchModel { model, lead }, cx)
+    }
+    pub fn refresh_collaboration_templates(
+        &self,
+        cx: &mut App,
+    ) -> Task<Result<CommandResponse, ProtocolError>> {
+        self.command(Command::RefreshCollaborationTemplates, cx)
+    }
+    /// The mandates collaborations are written from, as the host holds them.
+    pub fn collaboration_templates(&self, cx: &mut App) -> Task<Result<Templates, String>> {
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::CollaborationTemplates).await {
+                Ok(QueryResponse::CollaborationTemplates(templates)) => Ok(templates),
+                Ok(_) => Err("unexpected collaboration templates response".into()),
+                Err(error) => Err(error.message),
+            },
+        )
     }
     pub fn set_settlement_automation(&mut self, value: SettlementAutomation) {
         self.patch_settings(SettingsPatch::SettlementAutomation(value));
@@ -1348,16 +1397,24 @@ impl WorkspaceStore {
             profile_id,
         });
     }
+    pub fn set_active_collaboration_for(&mut self, session_id: String, collaboration_id: String) {
+        self.dispatch(Command::SetActiveCollaboration {
+            session_id,
+            collaboration_id,
+        });
+    }
     pub fn toggle_favorite_model(
         &mut self,
         provider: agent::ProviderKind,
         profile_id: Option<String>,
+        acp_agent_id: Option<String>,
         model: String,
         cx: &mut Context<Self>,
     ) {
         self.dispatch(Command::ToggleFavoriteModel {
             provider,
             profile_id,
+            acp_agent_id,
             model,
         });
         self.local_settings_changed(cx);

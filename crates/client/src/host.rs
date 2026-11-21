@@ -191,14 +191,30 @@ pub struct ClientPreferences {
     pub workspace: Option<WorkspacePreference>,
 }
 
-/// The hosts this device's window lists side by side.
+/// Which view the window is open on: no host, this machine alone, one saved
+/// machine (standalone, a group member viewed alone, or a space), or one
+/// machine group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkspaceScope {
+    Empty,
+    Local,
+    Host { host_id: String },
+    Group { group_id: String },
+}
+
+/// Which view this device's window shows, plus the order, fold state and
+/// hidden members kept for machine-group views.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspacePreference {
-    /// In the order the window lists them.
+    /// What this device's window currently shows. `None` on a preference
+    /// written before scopes existed; derived once on launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<WorkspaceScope>,
+    /// Preferred order and fold state of hosts in a group view.
     #[serde(default)]
     pub hosts: Vec<WorkspaceHost>,
-    /// Group members this device took out of its workspace. Every other
-    /// member of a group joins it by default.
+    /// Group members this device hid from their group's view.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub left: Vec<String>,
 }
@@ -338,6 +354,12 @@ pub trait ClientHost: 'static {
     /// The id of the machine hosted from this client's own data, which is
     /// never also one of its remote machines.
     fn local_machine_id(&self) -> Result<Option<String>, FileFailure> {
+        Ok(None)
+    }
+
+    /// The machine group `(id, name)` that the host sharing this client's data
+    /// belongs to, if any.
+    fn local_machine_group(&self) -> Result<Option<(String, String)>, FileFailure> {
         Ok(None)
     }
 

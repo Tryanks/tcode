@@ -36,8 +36,18 @@ pub fn flattened_theme_json() -> String {
 }
 
 /// The host a client's window shows first at launch: the one it was last
-/// on, if that record still exists.
+/// on, if that record still exists and the workspace was not explicitly
+/// emptied.
 pub fn last_host_target(host: &dyn ClientHost) -> Option<AttachmentTarget> {
+    if matches!(
+        host.load_preferences()
+            .ok()
+            .and_then(|preferences| preferences.workspace)
+            .and_then(|workspace| workspace.scope),
+        Some(tcode_client::host::WorkspaceScope::Empty)
+    ) {
+        return None;
+    }
     let id = host.last_host_id()?;
     // Saved machines that cannot be read are none here; the window says why.
     host.load_hosts()

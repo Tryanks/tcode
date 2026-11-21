@@ -347,19 +347,29 @@ fn render_root_item(
         }
         RootItemLayout::Visible(width) => width,
     };
-    let content = match (&children[item.block], item.span.clone()) {
-        (BlockNode::CodeBlock(code), Some(span)) => {
-            render_code_block(code, Some(span), &options, state, window, cx)
+    let content = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match (&children[item.block], item.span.clone()) {
+            (BlockNode::CodeBlock(code), Some(span)) => {
+                render_code_block(code, Some(span), &options, state, window, cx)
+            }
+            (
+                BlockNode::List {
+                    children,
+                    ordered,
+                    start,
+                },
+                Some(span),
+            ) => render_list(children, *ordered, *start, span, options, state, window, cx),
+            (block, _) => render_block(block, options, state, window, cx),
         }
-        (
-            BlockNode::List {
-                children,
-                ordered,
-                start,
-            },
-            Some(span),
-        ) => render_list(children, *ordered, *start, span, options, state, window, cx),
-        (block, _) => render_block(block, options, state, window, cx),
+    })) {
+        Ok(content) => content,
+        Err(_) => {
+            log::error!("markdown block render panicked; falling back to plain text");
+            state.read(cx).mark_render_fallback();
+            window.refresh();
+            div().into_any_element()
+        }
     };
     div()
         .w_full()
@@ -894,7 +904,7 @@ fn render_paragraph(
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
                             if let Some(link) = &link {
-                                view.read(cx).resolve_link(&link.url).open(window, cx);
+                                MarkdownState::open_link(&view, &link.url, window, cx);
                             } else {
                                 crate::image_viewer::open(
                                     opened.clone(),
@@ -932,6 +942,22 @@ fn render_paragraph(
     .into_any_element()
 }
 
+fn extend_links(
+    links: &mut LinkRuns,
+    more: impl IntoIterator<Item = (Range<usize>, super::nodes::LinkMark)>,
+) {
+    for (range, link) in more {
+        if let Some((last_range, last_link)) = links.last_mut()
+            && last_range.end == range.start
+            && *last_link == link
+        {
+            last_range.end = range.end;
+        } else {
+            links.push((range, link));
+        }
+    }
+}
+
 fn paragraph_text_style(paragraph: &Paragraph, cx: &mut App) -> ParagraphTextStyle {
     let mut text = String::new();
     let mut links = Vec::new();
@@ -941,7 +967,7 @@ fn paragraph_text_style(paragraph: &Paragraph, cx: &mut App) -> ParagraphTextSty
         let offset = text.len();
         text.push_str(&child.text);
         let (node_links, node_highlights, node_fonts) = marks_for_node(&child.marks, offset, cx);
-        links.extend(node_links);
+        extend_links(&mut links, node_links);
         highlights = gpui::combine_highlights(highlights, node_highlights).collect();
         fonts.extend(node_fonts);
     }
@@ -1074,33 +1100,92 @@ fn inline_flow_items(paragraph: &Paragraph, id: &str, cx: &mut App) -> Vec<Inlin
             continue;
         }
 
-        let is_code = child.marks.iter().any(|(_, mark)| mark.code);
-        if is_code {
-            flush_text(
-                &mut items,
-                &mut text,
-                &mut links,
-                &mut highlights,
-                &mut fonts,
-                &mut segment_state,
-                segment_base,
-            );
-            let (code_links, code_highlights, code_fonts) = marks_for_node(&child.marks, 0, cx);
-            child.state.lock().unwrap().set_text(child.text.clone());
-            items.push(InlineFlowItem::Text {
-                state: child.state.clone(),
-                base: child_start,
-                text: child.text.clone(),
-                links: code_links,
-                highlights: code_highlights,
-                font_overrides: code_fonts,
-                code_style: Some(InlineCodeStyle {
-                    font_family: cx.theme().mono_font_family.clone(),
-                    font_size: cx.theme().tokens.typography.mono_md.size,
-                    background: cx.theme().tokens.colors.muted,
-                    radius: crate::material::radius_chip(cx),
-                }),
-            });
+        let inline_code_style = |cx: &App| InlineCodeStyle {
+            font_family: cx.theme().mono_font_family.clone(),
+            font_size: cx.theme().tokens.typography.mono_md.size,
+            background: cx.theme().tokens.colors.muted,
+            radius: crate::material::radius_chip(cx),
+        };
+        let has_code = child.marks.iter().any(|(_, mark)| mark.code);
+        if has_code {
+            // A pure code span keeps its own InlineState; a formatted node
+            // that mixes prose and code splits into wrappable prose and
+            // code chips along its mark boundaries.
+            if child.marks.len() == 1
+                && child.marks[0].0 == (0..child.text.len())
+                && child.marks[0].1.code
+            {
+                flush_text(
+                    &mut items,
+                    &mut text,
+                    &mut links,
+                    &mut highlights,
+                    &mut fonts,
+                    &mut segment_state,
+                    segment_base,
+                );
+                let (code_links, code_highlights, code_fonts) = marks_for_node(&child.marks, 0, cx);
+                let code_highlights =
+                    gpui::combine_highlights(std::iter::empty(), code_highlights).collect();
+                child.state.lock().unwrap().set_text(child.text.clone());
+                items.push(InlineFlowItem::Text {
+                    state: child.state.clone(),
+                    base: child_start,
+                    text: child.text.clone(),
+                    links: code_links,
+                    highlights: code_highlights,
+                    font_overrides: code_fonts,
+                    code_style: Some(inline_code_style(cx)),
+                });
+                continue;
+            }
+            let len = child.text.len();
+            for (range, mark) in &child.marks {
+                let start = child.text.floor_char_boundary(range.start.min(len));
+                let end = child.text.ceil_char_boundary(range.end.min(len));
+                if start >= end {
+                    continue;
+                }
+                let slice = &child.text[start..end];
+                let slice_marks = [(0..slice.len(), mark.clone())];
+                if mark.code {
+                    flush_text(
+                        &mut items,
+                        &mut text,
+                        &mut links,
+                        &mut highlights,
+                        &mut fonts,
+                        &mut segment_state,
+                        segment_base,
+                    );
+                    let (code_links, code_highlights, code_fonts) =
+                        marks_for_node(&slice_marks, 0, cx);
+                    let code_highlights =
+                        gpui::combine_highlights(std::iter::empty(), code_highlights).collect();
+                    let shared: SharedString = slice.to_string().into();
+                    items.push(InlineFlowItem::Text {
+                        state: InlineState::shared(shared.clone()),
+                        base: child_start + start,
+                        text: shared,
+                        links: code_links,
+                        highlights: code_highlights,
+                        font_overrides: code_fonts,
+                        code_style: Some(inline_code_style(cx)),
+                    });
+                } else {
+                    if text.is_empty() {
+                        segment_state = Some(InlineState::shared(SharedString::default()));
+                        segment_base = child_start + start;
+                    }
+                    let offset = text.len();
+                    text.push_str(slice);
+                    let (node_links, node_highlights, node_fonts) =
+                        marks_for_node(&slice_marks, offset, cx);
+                    extend_links(&mut links, node_links);
+                    highlights = gpui::combine_highlights(highlights, node_highlights).collect();
+                    fonts.extend(node_fonts);
+                }
+            }
             continue;
         }
 
@@ -1111,7 +1196,7 @@ fn inline_flow_items(paragraph: &Paragraph, id: &str, cx: &mut App) -> Vec<Inlin
         let offset = text.len();
         text.push_str(&child.text);
         let (node_links, node_highlights, node_fonts) = marks_for_node(&child.marks, offset, cx);
-        links.extend(node_links);
+        extend_links(&mut links, node_links);
         highlights = gpui::combine_highlights(highlights, node_highlights).collect();
         fonts.extend(node_fonts);
     }
