@@ -570,6 +570,54 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    fn an_address_is_the_one_its_character_references_spell(cx: &mut TestAppContext) {
+        let (_, cx) = show(
+            r#"<a href="https://example.com/&copy/&#x96;&rarr;?a=1&copy=2&amp;b=3">link</a>"#,
+            cx,
+        );
+        let link = cx.debug_bounds("visual").unwrap().origin + point(px(4.0), px(4.0));
+        cx.simulate_click(link, Modifiers::default());
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("https://example.com/©/–→?a=1&copy=2&b=3")
+        );
+    }
+
+    /// Markup written without the tags HTML implies, each with a selector
+    /// that matches only in the tree a browser builds from it.
+    #[gpui::test]
+    fn tags_left_out_are_implied_as_html_implies_them(cx: &mut TestAppContext) {
+        let cases = [
+            ("p + figure", "<p>foo<figure>bar<p>baz"),
+            ("h1 + h2", "<h1>Hello<h2>World"),
+            ("li + li", "<ul><li><div><p>a<li>b</ul>"),
+            ("dd + dt", "<dl><dt>a<dd><p>b<dt>c</dl>"),
+            ("ul ul li", "<ul><li><ul></li><li>a</ul></ul>"),
+            (
+                "tbody > tr:nth-child(2) > td",
+                "<table><thead><tr><th>h</thead><tr><td>a<tr><td>b</table>",
+            ),
+            ("tbody > tr > td", "<table><td>a</table>"),
+        ];
+        for (selector, html) in cases {
+            let mut cx = cx.new_app();
+            let html = format!("<style>{selector}{{height:300px}}</style>{html}");
+            let bounds = drawn(&html, &mut cx);
+            assert!(bounds.size.height >= px(300.0), "{html}: no {selector}");
+        }
+    }
+
+    #[gpui::test]
+    fn a_word_wider_than_its_box_is_not_broken(cx: &mut TestAppContext) {
+        let narrow = |text: &str| format!(r#"<div style="width:1em">{text}</div>"#);
+        let line = drawn(&narrow("1"), &mut cx.new_app()).size.height;
+        let word = drawn(&narrow("100%"), &mut cx.new_app()).size.height;
+        assert_eq!(word, line);
+        // The same measure sees a line broken where it may be.
+        assert!(drawn(&narrow("1 0 0 %"), cx).size.height > line);
+    }
+
+    #[gpui::test]
     fn a_visual_cut_at_a_limit_says_so(cx: &mut TestAppContext) {
         let cases = [
             ("<p>x</p>".repeat(5_000), "html-left-out-nodes"),

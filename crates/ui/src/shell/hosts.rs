@@ -59,7 +59,45 @@ impl AppShell {
         }));
     }
 
+    /// Take the thread a cold start restored out of the saved checkpoint as
+    /// the first of its content arrives, until its baseline settles: a launch
+    /// that dies loading or first drawing the thread does not open it again.
+    /// A client keeps nothing of a thread between launches, so there is
+    /// nothing of it to draw before its host says something of it, and a
+    /// launch the host never answers leaves the checkpoint on the thread.
+    fn withhold_arriving_thread(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = &self.pending_navigation_restore else {
+            return;
+        };
+        if pending.withheld
+            || self.navigation.is_none()
+            || self.page_thread(cx).as_ref() != Some(&pending.thread)
+        {
+            return;
+        }
+        let Some(link) = self.link_of(&pending.thread.host) else {
+            return;
+        };
+        let session = Some(pending.thread.session_id.as_str());
+        let store = link.store.read(cx);
+        if store.session_status_for(session, cx).is_none()
+            && store.session_plan_for(session, cx).is_none()
+            && store.with_timeline_for(session, |_| (), cx).is_none()
+        {
+            return;
+        }
+        let mut checkpoint = self.navigation_snapshot(cx);
+        checkpoint.without_thread();
+        if let Ok(checkpoint) = serde_json::to_value(checkpoint) {
+            DevicePreferences::save_navigation(checkpoint, cx);
+        }
+        if let Some(pending) = &mut self.pending_navigation_restore {
+            pending.withheld = true;
+        }
+    }
+
     pub(super) fn reconcile_navigation_restore(&mut self, cx: &mut Context<Self>) {
+        self.withhold_arriving_thread(cx);
         let Some(pending) = &self.pending_navigation_restore else {
             return;
         };
@@ -205,8 +243,10 @@ impl AppShell {
     /// if the launch explicitly targeted a host outside it (for example
     /// `--connect`, a pending outbox, or a space); that host is then the
     /// scope the device keeps, so the one left behind does not open beside
-    /// it when its roster next changes. The host in this process is left out
-    /// unless `with_local`.
+    /// it when its roster next changes. A launch that names no host opens the
+    /// scope as kept; one with nothing left to show (its machine was removed)
+    /// gives way to the host in this process, where there is one. That host
+    /// is left out unless `with_local`.
     pub(super) fn open_workspace(
         &mut self,
         initial: Option<AttachmentTarget>,
@@ -219,6 +259,10 @@ impl AppShell {
         if !with_local {
             targets.retain(|target| *target != AttachmentTarget::Local);
         }
+        let initial = initial.or_else(|| {
+            (targets.is_empty() && with_local && self.setup.local.is_some())
+                .then_some(AttachmentTarget::Local)
+        });
         let mut outside = false;
         let persisted_scope = if let Some(initial) = &initial {
             if targets.iter().any(|target| same_target(target, initial))

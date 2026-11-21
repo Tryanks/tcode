@@ -238,6 +238,21 @@ impl Dialect for Antigravity {
         let opts = setup.opts;
         let mcp_servers = setup.mcp_servers().await;
         let meta = session_meta(setup.init, opts.instructions.as_deref());
+        if meta.is_none()
+            && opts
+                .instructions
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty())
+        {
+            // The session carries Tcode's instructions nowhere else, and the
+            // thread's status lists them as given.
+            setup
+                .warn(
+                    "This Antigravity version takes no appended session instructions, so Tcode's instructions for its tools were not given to the model"
+                        .into(),
+                )
+                .await;
+        }
         let resumed_id = opts
             .resume
             .as_ref()

@@ -410,6 +410,57 @@ fn a_launch_outside_the_kept_view_leaves_that_view_behind(cx: &mut TestAppContex
     assert_eq!(linked(&shell, cx), [key_solo]);
 }
 
+/// A desktop launched with no host named is on the view it kept, though
+/// that is another machine and it has a host of its own. A kept view whose
+/// machine has since been removed has nothing to show: this machine opens
+/// in its place and becomes the view.
+#[gpui::test]
+fn a_launch_that_names_no_host_reopens_the_kept_view(cx: &mut TestAppContext) {
+    use tcode_client::host::WorkspaceScope;
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let kept = WorkspaceScope::Host {
+        host_id: "studio".into(),
+    };
+    for (saved, opens, keeps) in [
+        (
+            vec![saved_machine("studio", false)],
+            HostKey::Remote("studio".into()),
+            kept.clone(),
+        ),
+        (Vec::new(), HostKey::Local, WorkspaceScope::Local),
+    ] {
+        let client = Rc::new(WorkspaceClient {
+            saved: RefCell::new(saved.clone()),
+            transports: RefCell::default(),
+            preferences: RefCell::new(tcode_client::host::ClientPreferences {
+                workspace: Some(tcode_client::host::WorkspacePreference {
+                    scope: Some(kept.clone()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            last_host_id: RefCell::default(),
+            pairs: RefCell::default(),
+            watchers: RefCell::default(),
+        });
+        let _machines: Vec<_> = saved
+            .iter()
+            .map(|host| WorkspaceHost::offer(&client, &host.host_id, cx))
+            .collect();
+        let desktop: Rc<dyn ClientHost> = client.clone();
+        let (shell, _local, cx) = mount_with(cx, Some(desktop));
+        assert_eq!(linked(&shell, cx), [opens]);
+        assert_eq!(
+            client
+                .load_preferences()
+                .unwrap()
+                .workspace
+                .and_then(|workspace| workspace.scope),
+            Some(keeps)
+        );
+    }
+}
+
 /// On the Machines page, clicking a machine group opens all of its members
 /// together, clicking a member opens that machine alone (reusing its link),
 /// and clicking a standalone machine switches to it alone.
