@@ -96,7 +96,7 @@ impl Visual {
     /// The page of `html`, whose `owner` draws again as its pictures arrive.
     pub(crate) fn new<T: 'static>(html: &str, owner: &mut Context<T>) -> Self {
         let html: Arc<str> = Arc::from(html);
-        let state = owner.new(|cx| HtmlState::new(html.clone(), cx));
+        let state = owner.new(|_| HtmlState::new(html.clone()));
         let redraw = owner.observe(&state, |_, _, cx| cx.notify());
         Self {
             state,

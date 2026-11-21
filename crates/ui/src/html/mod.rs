@@ -50,7 +50,7 @@ pub struct HtmlState {
 }
 
 impl HtmlState {
-    pub fn new(html: impl Into<Arc<str>>, _cx: &mut Context<Self>) -> Self {
+    pub fn new(html: impl Into<Arc<str>>) -> Self {
         let source: Arc<str> = html.into();
         let doc = Document::parse(&source);
         let sheet = Stylesheet::parse_all(&doc.stylesheets);
@@ -381,7 +381,7 @@ pub(crate) mod tests {
     ) -> (Entity<Host>, &'a mut VisualTestContext) {
         cx.update(crate::test_client::init);
         let (host, cx) = cx.add_window_view(|_, cx| Host {
-            state: cx.new(|cx| HtmlState::new(html, cx)),
+            state: cx.new(|_| HtmlState::new(html)),
         });
         for _ in 0..2 {
             cx.run_until_parked();
