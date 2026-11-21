@@ -157,38 +157,66 @@ impl Dialect for Registry {
             .as_ref()
             .and_then(|cursor| cursor.0.get("acp_session_id"))
             .and_then(Value::as_str)
-            .map(str::to_string)
-            .filter(|_| setup.init.agent_capabilities.load_session);
+            .map(str::to_string);
 
         let mut loaded_session = None;
         if let Some(session_id) = resumed {
-            // `session/load` replays the whole conversation as `session/update`
-            // notifications. Our JSONL log is the authoritative history and the
-            // UI has already folded it, so the replay is swallowed (see
-            // `session_update`); we only want the session live again.
             let session_id = acp::SessionId::new(session_id);
-            let loaded = setup
-                .load(
-                    acp::LoadSessionRequest::new(session_id.clone(), opts.cwd.clone())
-                        .mcp_servers(mcp_servers.clone()),
-                )
-                .await;
-            match loaded {
-                Ok(loaded) => {
-                    loaded_session = Some((session_id, loaded.modes, loaded.config_options));
+            if setup
+                .init
+                .agent_capabilities
+                .session_capabilities
+                .resume
+                .is_some()
+            {
+                let request = acp::ResumeSessionRequest::new(session_id.clone(), opts.cwd.clone())
+                    .mcp_servers(mcp_servers.clone());
+                match setup.connection.send_request(request).block_task().await {
+                    Ok(resumed) => {
+                        loaded_session = Some((session_id, resumed.modes, resumed.config_options));
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "acp[{}]: session/resume failed ({}); starting a fresh session",
+                            agent.id,
+                            describe(&err)
+                        );
+                        setup
+                            .warn(format!(
+                                "{} could not resume the previous conversation; starting a new one",
+                                agent.name
+                            ))
+                            .await;
+                    }
                 }
-                Err(err) => {
-                    log::warn!(
-                        "acp[{}]: session/load failed ({}); starting a fresh session",
-                        agent.id,
-                        describe(&err)
-                    );
-                    setup
-                        .warn(format!(
-                            "{} could not resume the previous conversation; starting a new one",
-                            agent.name
-                        ))
-                        .await;
+            } else if setup.init.agent_capabilities.load_session {
+                // `session/load` replays the whole conversation as `session/update`
+                // notifications. Our JSONL log is the authoritative history and the
+                // UI has already folded it, so the replay is swallowed (see
+                // `session_update`); we only want the session live again.
+                let loaded = setup
+                    .load(
+                        acp::LoadSessionRequest::new(session_id.clone(), opts.cwd.clone())
+                            .mcp_servers(mcp_servers.clone()),
+                    )
+                    .await;
+                match loaded {
+                    Ok(loaded) => {
+                        loaded_session = Some((session_id, loaded.modes, loaded.config_options));
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "acp[{}]: session/load failed ({}); starting a fresh session",
+                            agent.id,
+                            describe(&err)
+                        );
+                        setup
+                            .warn(format!(
+                                "{} could not resume the previous conversation; starting a new one",
+                                agent.name
+                            ))
+                            .await;
+                    }
                 }
             }
         }
