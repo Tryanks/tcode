@@ -16,9 +16,36 @@ pub(crate) struct ParsedDocument {
     /// The source defines a link reference, which a link in any of its
     /// blocks, before or after the definition, resolves against.
     pub(crate) defines_links: bool,
+    /// Parsing panicked and fell back to plain text.
+    pub(crate) fallback: bool,
 }
 
 pub(crate) fn parse_document(source: &str) -> ParsedDocument {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        parse_document_inner(source)
+    })) {
+        Ok(document) => document,
+        Err(_) => {
+            log::error!("markdown parse panicked; falling back to plain text");
+            let children = if source.is_empty() {
+                Vec::new()
+            } else {
+                vec![BlockNode::Paragraph(Paragraph {
+                    children: vec![plain_inline(source)],
+                    ..Default::default()
+                })]
+            };
+            ParsedDocument {
+                root: BlockNode::Root { children },
+                root_starts: None,
+                defines_links: false,
+                fallback: true,
+            }
+        }
+    }
+}
+
+fn parse_document_inner(source: &str) -> ParsedDocument {
     let parser = rushdown::parser::Parser::with_extensions(
         rushdown::parser::Options::default(),
         rushdown::parser::gfm(rushdown::parser::GfmOptions::default())
@@ -45,6 +72,7 @@ pub(crate) fn parse_document(source: &str) -> ParsedDocument {
         root: BlockNode::Root { children },
         root_starts: positions_available.then_some(root_starts),
         defines_links: defines_links(&arena, doc_ref),
+        fallback: false,
     }
 }
 
@@ -442,14 +470,12 @@ fn push_merged(
     }
     let value = std::mem::take(text);
     let mut node = InlineNode::new(value).marks(std::mem::take(marks));
-    let len = node.text.len();
-    if let Some((range, last_mark)) = node.marks.last_mut()
-        && range.start == 0
-        && range.end == len
-    {
-        last_mark.merge(mark);
+    if node.marks.is_empty() {
+        node.marks.push((0..node.text.len(), mark));
     } else {
-        node.marks.push((0..len, mark));
+        for (_, existing) in &mut node.marks {
+            existing.merge(mark.clone());
+        }
     }
     paragraph.children.push(node);
 }

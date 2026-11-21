@@ -255,6 +255,7 @@ markdown:
   math_show_source: "LaTeX ソースを表示"
   math_copy: "LaTeX をコピー"
   math_error: "レンダリングできません：%{error}"
+  render_fallback: "書式の描画でエラーが発生したため、プレーンテキストで表示しています。"
   open_image: "画像を開く"
   link_open: "リンクを開く"
   link_copy_address: "リンクのアドレスをコピー"
@@ -1210,6 +1211,7 @@ permission:
     permissions: "権限"
     approvalMode: "権限"
     permission_mode: "権限"
+    mode: "権限"
   unavailable:
     "1": "設定で許可されていません"
     "2": "継承された権限設定"
@@ -1264,6 +1266,11 @@ permission:
       full_access: "サンドボックスなし、確認もありません。"
     approvalMode:
       unrestricted: "すべてのツール呼び出しを確認なしで実行"
+    mode:
+      default: "権限設定に従い、編集とコマンド実行の前に確認します。"
+      accept-edits: "ワークスペース内のファイル編集を確認なしで承認します。"
+      auto: "編集と安全なコマンドを承認し、元に戻せない操作の前に確認します。"
+      plan: "タスクを実行する前に慎重に計画します。"
 approval:
   command_requested: "コマンドの承認をリクエストしています"
   file_read_requested: "ファイル読み取りの承認をリクエストしています"
@@ -1702,6 +1709,12 @@ hosts:
   actions: "%{name} の操作"
   pair_again: "再ペアリング"
   in_group: "ホストグループに所属"
+  group_section: "ホストグループ"
+  group_machine_one: "1 台のホスト"
+  group_machines: "%{count} 台のホスト"
+  group_machines_with_local: "%{count} 台のホスト（このマシンを含む）"
+  hidden_in_group: "グループ表示から非表示"
+  include_in_group: "グループに表示"
   local:
     unavailable: "起動できませんでした：%{reason}"
     default_settings: "%{reason}。設定を読み込めなかったため、既定の言語とテーマを使用しています。"

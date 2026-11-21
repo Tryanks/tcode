@@ -431,6 +431,27 @@ pub fn existing_machine_id(data_dir: &Path) -> io::Result<Option<EndpointId>> {
     Ok(Some(parse_secret_key(secret_key)?.public()))
 }
 
+/// The machine group `(id, name)` of `traverse.json` in `data_dir`, if this
+/// data directory hosts a machine in a group. A file that exists and cannot
+/// be read is an error, not no group.
+pub fn existing_machine_group(data_dir: &Path) -> io::Result<Option<(String, String)>> {
+    let Some(bytes) = read_if_present(&data_dir.join(HOST_FILE))? else {
+        return Ok(None);
+    };
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    let Some(group) = value.get("group").filter(|group| !group.is_null()) else {
+        return Ok(None);
+    };
+    let id = group["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid group id"))?;
+    let name = group["name"]
+        .as_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid group name"))?;
+    Ok(Some((id.to_owned(), name.to_owned())))
+}
+
 fn read_if_present(path: &Path) -> io::Result<Option<Vec<u8>>> {
     match fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),

@@ -160,6 +160,70 @@ pub fn parse_claude_usage(value: &Value, fetched_at: u64) -> ProviderUsage {
     }
 }
 
+/// Normalize `agy --print /usage --output-format json`'s `command.data.groups`.
+pub fn parse_antigravity_usage(value: &Value, fetched_at: u64) -> ProviderUsage {
+    if value.get("status").and_then(Value::as_str) != Some("SUCCESS") {
+        let message = value
+            .get("error")
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or("usage not available");
+        return error_usage(fetched_at, message);
+    }
+    let Some(groups) = value
+        .pointer("/command/data/groups")
+        .and_then(Value::as_array)
+    else {
+        return error_usage(fetched_at, "usage not available");
+    };
+    let mut windows = Vec::new();
+    for group in groups {
+        let scope = group
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+        let mut group_windows = Vec::new();
+        for bucket in group
+            .get("buckets")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let kind = match bucket.get("window").and_then(Value::as_str) {
+                Some("5h") => UsageWindowKind::FiveHour,
+                Some("weekly") => UsageWindowKind::Weekly,
+                _ => continue,
+            };
+            let Some(remaining) = bucket.get("remaining_fraction").and_then(Value::as_f64) else {
+                continue;
+            };
+            let used_percent = ((1.0 - remaining) * 100.0).clamp(0.0, 100.0) as f32;
+            group_windows.push(UsageWindow {
+                kind,
+                scope: scope.clone(),
+                used_percent,
+                resets_at: bucket.get("reset_time").and_then(rfc3339_seconds),
+            });
+        }
+        group_windows.sort_by_key(|window| match window.kind {
+            UsageWindowKind::FiveHour => 0,
+            UsageWindowKind::Weekly => 1,
+            UsageWindowKind::Other { .. } => 2,
+        });
+        windows.extend(group_windows);
+    }
+    if windows.is_empty() {
+        return error_usage(fetched_at, "no usage windows reported");
+    }
+    ProviderUsage {
+        fetched_at,
+        plan: None,
+        windows,
+        error: None,
+    }
+}
+
 /// Fetch and normalize usage for providers that expose account limits.
 pub async fn fetch_provider_usage(
     provider: ProviderKind,
@@ -169,6 +233,7 @@ pub async fn fetch_provider_usage(
     let payload = match provider {
         ProviderKind::Codex => agent::codex::read_rate_limits(binary, launch_env).await,
         ProviderKind::ClaudeCode => agent::claude::read_usage(binary, launch_env).await,
+        ProviderKind::Antigravity => agent::antigravity::read_usage(binary, launch_env).await,
         ProviderKind::Pi
         | ProviderKind::OpenCode
         | ProviderKind::Cursor
@@ -192,6 +257,7 @@ pub fn usage_from_payload(
     let parse = match provider {
         ProviderKind::Codex => parse_codex_rate_limits,
         ProviderKind::ClaudeCode => parse_claude_usage,
+        ProviderKind::Antigravity => parse_antigravity_usage,
         ProviderKind::Pi
         | ProviderKind::OpenCode
         | ProviderKind::Cursor
@@ -302,6 +368,79 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// `agy --print /usage --output-format json` in the shape Antigravity CLI
+    /// 1.5.13 prints (`command.data.groups[].buckets[]` with `remaining_fraction`
+    /// and RFC 3339 `reset_time`); the numbers are invented.
+    #[test]
+    fn antigravity_usage_lists_five_hour_before_weekly_for_each_group() {
+        let usage = parse_antigravity_usage(
+            &serde_json::json!({
+                "status": "SUCCESS",
+                "command": {
+                    "name": "usage",
+                    "data": {
+                        "groups": [
+                            {
+                                "name": "Gemini Models",
+                                "buckets": [
+                                    {"id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.75, "reset_time": "2026-01-08T00:00:00Z"},
+                                    {"id": "gemini-5h", "window": "5h", "remaining_fraction": 0.6, "reset_time": "2026-01-02T03:00:00Z"}
+                                ]
+                            },
+                            {
+                                "name": "Claude and GPT models",
+                                "buckets": [
+                                    {"id": "3p-weekly", "window": "weekly", "remaining_fraction": 0.5, "reset_time": "2026-01-08T00:00:00Z"},
+                                    {"id": "3p-5h", "window": "5h", "remaining_fraction": 1.0, "reset_time": null}
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }),
+            7,
+        );
+        assert_eq!(usage.error, None);
+        assert_eq!(
+            usage.windows,
+            [
+                UsageWindow {
+                    kind: UsageWindowKind::FiveHour,
+                    scope: Some("Gemini Models".into()),
+                    used_percent: 40.0,
+                    resets_at: Some(1_767_322_800),
+                },
+                UsageWindow {
+                    kind: UsageWindowKind::Weekly,
+                    scope: Some("Gemini Models".into()),
+                    used_percent: 25.0,
+                    resets_at: Some(1_767_830_400),
+                },
+                UsageWindow {
+                    kind: UsageWindowKind::FiveHour,
+                    scope: Some("Claude and GPT models".into()),
+                    used_percent: 0.0,
+                    resets_at: None,
+                },
+                UsageWindow {
+                    kind: UsageWindowKind::Weekly,
+                    scope: Some("Claude and GPT models".into()),
+                    used_percent: 50.0,
+                    resets_at: Some(1_767_830_400),
+                },
+            ]
+        );
+        let failed = parse_antigravity_usage(
+            &serde_json::json!({
+                "status": "ERROR",
+                "error": "authentication required"
+            }),
+            7,
+        );
+        assert_eq!(failed.error.as_deref(), Some("authentication required"));
+        assert!(failed.windows.is_empty());
     }
 
     #[test]

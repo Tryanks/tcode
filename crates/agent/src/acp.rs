@@ -157,29 +157,21 @@ impl Dialect for Registry {
             .as_ref()
             .and_then(|cursor| cursor.0.get("acp_session_id"))
             .and_then(Value::as_str)
-            .map(str::to_string)
-            .filter(|_| setup.init.agent_capabilities.load_session);
+            .map(str::to_string);
 
         let mut loaded_session = None;
         if let Some(session_id) = resumed {
-            // `session/load` replays the whole conversation as `session/update`
-            // notifications. Our JSONL log is the authoritative history and the
-            // UI has already folded it, so the replay is swallowed (see
-            // `session_update`); we only want the session live again.
+            // Tcode's own log is the history and the UI has already folded
+            // it, so the session is only made live again: what a
+            // `session/load` replays is swallowed (see `session_update`).
             let session_id = acp::SessionId::new(session_id);
-            let loaded = setup
-                .load(
-                    acp::LoadSessionRequest::new(session_id.clone(), opts.cwd.clone())
-                        .mcp_servers(mcp_servers.clone()),
-                )
-                .await;
-            match loaded {
-                Ok(loaded) => {
-                    loaded_session = Some((session_id, loaded.modes, loaded.config_options));
+            match setup.reattach(&session_id, &mcp_servers, None).await {
+                Some(Ok((modes, config_options))) => {
+                    loaded_session = Some((session_id, modes, config_options));
                 }
-                Err(err) => {
+                Some(Err(err)) => {
                     log::warn!(
-                        "acp[{}]: session/load failed ({}); starting a fresh session",
+                        "acp[{}]: the session could not be resumed ({}); starting a fresh session",
                         agent.id,
                         describe(&err)
                     );
@@ -190,6 +182,7 @@ impl Dialect for Registry {
                         ))
                         .await;
                 }
+                None => {}
             }
         }
         let (session_id, modes, config_options) = match loaded_session {

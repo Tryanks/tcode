@@ -1234,3 +1234,124 @@ fn a_page_of_history_leaves_what_the_reader_opened_with_its_turn(cx: &mut TestAp
     );
     assert_eq!(opened(cx), before, "what turn 3 had open went elsewhere");
 }
+
+/// A history page whose turns reuse an item id from a later turn (restarted
+/// sessions, replayed tool calls) keeps the scrolled-up reader in place rather
+/// than resetting to the tail, and later unrelated store updates leave them
+/// there too.
+#[gpui::test]
+fn a_page_with_reused_item_ids_keeps_the_reader_in_place(cx: &mut TestAppContext) {
+    use gpui::{VisualTestContext, point, px};
+
+    const TURNS: usize = 12;
+    let events: Vec<_> = (0..TURNS)
+        .flat_map(|turn| {
+            let mut events = vec![
+                agent::AgentEvent::TurnStarted {
+                    turn_id: turn.to_string(),
+                },
+                user_event(&format!("user-{turn}"), &format!("Question {turn}")),
+            ];
+            if turn == 2 || turn == 8 {
+                let item = agent::ThreadItem {
+                    id: "reused-call".into(),
+                    parent_item_id: None,
+                    content: agent::ItemContent::ToolCall {
+                        image_reads: Vec::new(),
+                        name: "read".into(),
+                        input: serde_json::json!({ "path": format!("turn-{turn}.rs") }),
+                        output: Some("ok".into()),
+                        status: ItemStatus::Completed,
+                        family: None,
+                    },
+                };
+                events.push(agent::AgentEvent::ItemStarted(item.clone()));
+                events.push(agent::AgentEvent::ItemCompleted(item));
+            }
+            events.extend([
+                answer_event(
+                    &format!("answer-{turn}"),
+                    &format!("Answer {turn}, one paragraph of several.\n\n").repeat(8),
+                ),
+                agent::AgentEvent::TurnCompleted {
+                    turn_id: turn.to_string(),
+                    status: agent::TurnStatus::Completed,
+                    usage: None,
+                },
+            ]);
+            events
+        })
+        .collect();
+    let held_from = events
+        .iter()
+        .position(
+            |event| matches!(event, agent::AgentEvent::TurnStarted { turn_id } if turn_id == "6"),
+        )
+        .unwrap();
+    let mut thread = ScriptedThread::new(cx, events, held_from, false);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (view, cx) = thread.open(cx);
+    draw_settled(cx);
+    let list = view.read_with(cx, |chat, _| chat.list_state.clone());
+    assert!(list.is_following_tail());
+
+    for (phase, delta) in [
+        (gpui::TouchPhase::Started, 0.),
+        (gpui::TouchPhase::Moved, 700.),
+        (gpui::TouchPhase::Ended, 0.),
+    ] {
+        cx.simulate_event(gpui::ScrollEvent {
+            position: list.viewport_bounds().center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(delta))),
+            touch_phase: phase,
+            ..Default::default()
+        });
+    }
+    draw_settled(cx);
+    assert!(!list.is_following_tail());
+    let on_screen = |cx: &mut VisualTestContext| {
+        (6..TURNS)
+            .filter_map(|turn| {
+                let bounds = cx.debug_bounds(format!("user-bubble-user-{turn}").leak())?;
+                bounds
+                    .intersects(&list.viewport_bounds())
+                    .then_some((turn, bounds.top()))
+            })
+            .collect::<Vec<_>>()
+    };
+    let reading = on_screen(cx);
+    assert!(!reading.is_empty(), "a question is on screen");
+    let rows = list.item_count();
+
+    assert!(thread.answer_page(held_from).is_some());
+    cx.run_until_parked();
+    draw_settled(cx);
+    assert!(list.item_count() > rows, "the page landed");
+    assert!(
+        !list.is_following_tail(),
+        "a page with a reused item id reset the reader to the tail"
+    );
+    let assert_same_position = |cx: &mut VisualTestContext, context: &str| {
+        let now = on_screen(cx);
+        for (turn, top) in &reading {
+            let moved = now
+                .iter()
+                .find(|(seen, _)| seen == turn)
+                .map(|(_, now)| *now);
+            assert!(
+                moved.is_some_and(|now| (now - *top).abs() < px(1.)),
+                "{context}: question {turn} moved from {top:?} to {moved:?}"
+            );
+        }
+    };
+    assert_same_position(cx, "after history page");
+
+    // An unrelated store notification triggers a no-op timeline sync.
+    thread.store.update(cx, |_, cx| cx.notify());
+    draw_settled(cx);
+    assert!(
+        !list.is_following_tail(),
+        "an unrelated store notification reset the reader to the tail"
+    );
+    assert_same_position(cx, "after unrelated store notify");
+}

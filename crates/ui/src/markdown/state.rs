@@ -7,14 +7,19 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::copy::CopiedMark;
 use gpui::{
     App, Bounds, ClipboardItem, Context, Entity, FocusHandle, ImageSource, IntoElement,
     ListAlignment, ListState, ParentElement as _, Pixels, Point, Render, ScrollHandle,
-    SharedString, SharedUri, Size, Styled as _, Window, px,
+    SharedString, SharedUri, Size, Styled as _, Window, div, px,
 };
 use gpui_base::{ElementExt as _, v_flex};
 
@@ -152,6 +157,9 @@ pub struct MarkdownState {
     /// The document's height below the bottom of the line the reveal has
     /// reached, as last placed.
     unrevealed: Cell<Pixels>,
+    /// Rich Markdown parsing or rendering panicked for this message; draw its
+    /// raw text instead so the thread stays readable.
+    render_fallback: Arc<AtomicBool>,
 }
 
 impl MarkdownState {
@@ -213,7 +221,16 @@ impl MarkdownState {
             stream_fade: StreamFade::default(),
             fade_frame: None,
             unrevealed: Cell::new(px(0.)),
+            render_fallback: Arc::new(AtomicBool::new(parsed_document.fallback)),
         }
+    }
+
+    pub(super) fn render_fallback_flag(&self) -> Arc<AtomicBool> {
+        self.render_fallback.clone()
+    }
+
+    pub(super) fn mark_render_fallback(&self) {
+        self.render_fallback.store(true, Ordering::Relaxed);
     }
 
     /// Draw the document in `epoch`'s scenes.
@@ -611,6 +628,9 @@ impl MarkdownState {
         if reparse_start == 0 {
             self.defines_links = parsed_document.defines_links;
         }
+        if parsed_document.fallback {
+            self.render_fallback.store(true, Ordering::Relaxed);
+        }
 
         let BlockNode::Root {
             children: mut old_blocks,
@@ -747,6 +767,8 @@ impl MarkdownState {
         // their heights, so every reparse must invalidate the cached sizes.
         self.list_state.reset(self.items.len());
         self.item_heights.borrow_mut().reset(self.items.len());
+        self.render_fallback
+            .store(parsed_document.fallback, Ordering::Relaxed);
         cx.notify();
     }
 
@@ -985,9 +1007,11 @@ impl Render for MarkdownState {
             window.request_animation_frame();
         }
         let state = cx.entity();
-        v_flex()
-            .w_full()
-            .child(render::render_root(
+        if self.render_fallback.load(Ordering::Relaxed) {
+            return self.render_plain_fallback(&state, cx);
+        }
+        let rendered = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            render::render_root(
                 self.parsed.clone(),
                 self.items.clone(),
                 self.list_state.clone(),
@@ -995,10 +1019,45 @@ impl Render for MarkdownState {
                 &state,
                 window,
                 cx,
-            ))
+            )
+        })) {
+            Ok(element) => element,
+            Err(_) => {
+                log::error!("markdown render panicked; falling back to plain text");
+                self.render_fallback.store(true, Ordering::Relaxed);
+                return self.render_plain_fallback(&state, cx);
+            }
+        };
+        v_flex()
+            .w_full()
+            .child(rendered)
             .on_prepaint(move |bounds, _, cx| {
                 state.update(cx, |state, _| state.update_layout(bounds));
             })
+            .into_any_element()
+    }
+}
+
+impl MarkdownState {
+    fn render_plain_fallback(
+        &self,
+        state: &gpui::Entity<Self>,
+        cx: &gpui::App,
+    ) -> gpui::AnyElement {
+        let state = state.clone();
+        v_flex()
+            .w_full()
+            .gap_1()
+            .child(
+                div()
+                    .text_secondary(false, cx)
+                    .child(crate::tr!("markdown.render_fallback").into_owned()),
+            )
+            .child(div().w_full().whitespace_normal().child(self.text.clone()))
+            .on_prepaint(move |bounds, _, cx| {
+                state.update(cx, |state, _| state.update_layout(bounds));
+            })
+            .into_any_element()
     }
 }
 

@@ -68,6 +68,10 @@ pub(crate) struct TimelineView {
     /// store.
     timeline_revision: Option<u64>,
     pub(in crate::chat) history_placeholder_height: gpui::Pixels,
+    /// Whether the previously synced window still had unloaded history above
+    /// it, so the final page reaching the start of the log still completes a
+    /// partial first turn in place.
+    had_unloaded_history: bool,
     /// Distance to scroll back once a page has filled the reservation the
     /// reader had scrolled into. Applied by the render after the frame that
     /// measured the page, never between frames: GPUI resolves the wheel and
@@ -247,6 +251,7 @@ impl TimelineView {
             timeline_stale: false,
             timeline_revision: None,
             history_placeholder_height: px(0.),
+            had_unloaded_history: false,
             reservation_scroll_back: None,
             carried_anchor: false,
             rows: Vec::new(),
@@ -969,17 +974,18 @@ impl TimelineView {
         let awaiting_activity_snapshot = self
             .auto_activity_expansions
             .awaiting_session_snapshot(session_key.as_deref());
-        let continuity = if session_changed {
-            TimelineContinuity::NewSession
-        } else if self
+        let history_available = self
             .workspace_store
             .read(cx)
-            .history_available_for(self.session_id.as_deref())
-        {
+            .history_available_for(self.session_id.as_deref());
+        let continuity = if session_changed {
+            TimelineContinuity::NewSession
+        } else if history_available || self.had_unloaded_history {
             TimelineContinuity::PartialFirstTurn
         } else {
             TimelineContinuity::Complete
         };
+        self.had_unloaded_history = history_available;
         let old_len = self.rows.len();
         let old_last_turn = self.rows.last().map(|row| row.turn);
         let folds = self

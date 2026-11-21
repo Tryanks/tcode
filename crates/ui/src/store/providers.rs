@@ -205,10 +205,22 @@ impl WorkspaceStore {
         )
     }
 
+    pub fn picker_models_for_acp(&self, agent_id: &str) -> Vec<ResolvedModel> {
+        picker_models(
+            self.acp_models(agent_id),
+            &ProviderSettings::default(),
+            &self.acp_favorite_ids(agent_id),
+        )
+    }
+
     pub(super) fn favorite_ids(&self, profile_id: &str) -> Vec<String> {
         self.provider_profile_kind(profile_id)
             .map(|kind| self.settings_replica.favorite_ids(kind, profile_id))
             .unwrap_or_default()
+    }
+
+    pub(super) fn acp_favorite_ids(&self, agent_id: &str) -> Vec<String> {
+        self.settings_replica.acp_favorite_ids(agent_id)
     }
 
     pub fn provider_profile_display_name(&self, profile_id: &str) -> String {

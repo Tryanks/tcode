@@ -112,7 +112,7 @@ impl Composer {
         if let Some(rail) = self.picker_rail.clone() {
             return rail;
         }
-        if has_favorites && agent_id.is_none() {
+        if has_favorites {
             return PickerRail::Favorites;
         }
         thread_rail(provider, agent_id, profile_id)
@@ -148,6 +148,7 @@ impl Composer {
                 store,
                 &thread_rail(provider, acp_agent_id.as_deref(), active_profile.as_deref()),
                 &[],
+                &[],
             )
             .into_iter()
             .find(|row| row.model.is_none())
@@ -174,7 +175,7 @@ impl Composer {
         // Build the filtered row list for the current frame. Favorites open
         // first when any exist. The favorites sweep covers every
         // enabled profile — built-ins *and* third-party (e.g. a Kimi endpoint)
-        // — in rail order, so a starred custom-profile model is not lost.
+        // — and every enabled ACP agent in rail order.
         let query = self.model_search.read(cx).value().to_lowercase();
         let fav_profiles: Vec<(String, ProviderKind)> = {
             let profiles = store.enabled_profiles();
@@ -192,6 +193,12 @@ impl Composer {
         // The collaborations have a rail where there is one to list, and where this
         // window may write one.
         let collaborations_rail = !collaborations.is_empty() || store.scope().is_full();
+        let acp_rail_agents: Vec<(String, String)> = store
+            .settings_installed_acp_agents()
+            .into_iter()
+            .filter(|agent| agent.enabled && agent.offered_for_new_sessions())
+            .map(|agent| (agent.id.clone(), agent.name.clone()))
+            .collect();
         let has_favorites = collaborations
             .iter()
             .any(|collaboration| collaboration.favorite)
@@ -200,7 +207,10 @@ impl Composer {
                     .picker_models_for_profile(id)
                     .iter()
                     .any(|m| m.favorite)
-            });
+            })
+            || acp_rail_agents
+                .iter()
+                .any(|(id, _)| store.picker_models_for_acp(id).iter().any(|m| m.favorite));
         // A thread under a collaboration that is no favorite opens on the collaborations.
         let rail = match active_collaboration {
             Some(collaboration) if self.picker_rail.is_none() && !collaboration.favorite => {
@@ -213,7 +223,8 @@ impl Composer {
                 has_favorites,
             ),
         };
-        let all_rows: Rc<[ModelRow]> = rail_rows(store, &rail, &fav_profiles).into();
+        let all_rows: Rc<[ModelRow]> =
+            rail_rows(store, &rail, &fav_profiles, &acp_rail_agents).into();
         let rows: Rc<[ModelRow]> = all_rows
             .iter()
             .filter(|r| query.is_empty() || r.name.to_lowercase().contains(&query))
@@ -255,12 +266,6 @@ impl Composer {
             }),
         };
         let pending = selected.pending.is_some();
-        let acp_rail_agents: Vec<(String, String)> = store
-            .settings_installed_acp_agents()
-            .into_iter()
-            .filter(|agent| agent.enabled && agent.offered_for_new_sessions())
-            .map(|agent| (agent.id.clone(), agent.name.clone()))
-            .collect();
 
         let trigger = Button::new("model-picker")
             .motion(&self.button_motion())
@@ -812,6 +817,7 @@ fn rail_rows(
     store: &WorkspaceStore,
     rail: &PickerRail,
     fav_profiles: &[(String, ProviderKind)],
+    acp_agents: &[(String, String)],
 ) -> Vec<ModelRow> {
     match rail {
         PickerRail::Collaborations => collaboration_rows(store),
@@ -832,6 +838,22 @@ fn rail_rows(
                         provider: kind,
                         profile_id: profile_id.clone(),
                         acp_agent_id: None,
+                        favorite: Some(true),
+                        collaboration: None,
+                    })
+            }))
+            .chain(acp_agents.iter().flat_map(|(id, _)| {
+                let agent_id = id.clone();
+                store
+                    .picker_models_for_acp(id)
+                    .into_iter()
+                    .filter(|m| m.favorite)
+                    .map(move |m| ModelRow {
+                        model: Some(m.id),
+                        name: m.name,
+                        provider: ProviderKind::Acp,
+                        profile_id: None,
+                        acp_agent_id: Some(agent_id.clone()),
                         favorite: Some(true),
                         collaboration: None,
                     })
@@ -863,7 +885,7 @@ fn rail_rows(
         // The agent's own models; until it lists any, the agent itself,
         // which runs on whichever model it starts with.
         PickerRail::Acp(id) => {
-            let models = store.acp_models(id);
+            let models = store.picker_models_for_acp(id);
             if models.is_empty() {
                 store
                     .installed_acp_agent(id)
@@ -880,14 +902,14 @@ fn rail_rows(
                     .collect()
             } else {
                 models
-                    .iter()
+                    .into_iter()
                     .map(|m| ModelRow {
-                        model: Some(m.id.clone()),
-                        name: m.display_name.clone(),
+                        model: Some(m.id),
+                        name: m.name,
                         provider: ProviderKind::Acp,
                         profile_id: None,
                         acp_agent_id: Some(id.clone()),
-                        favorite: None,
+                        favorite: Some(m.favorite),
                         collaboration: None,
                     })
                     .collect()
@@ -1446,9 +1468,10 @@ fn render_model_row(
     let is_pending = row.is_pending(selected);
     let name = row.name.clone();
     let provider = row.provider;
-    // Favorites holds the models of the native profiles, and the collaborations.
+    // Favorites holds the models of native profiles, ACP agents, and collaborations.
     let favorite = row.favorite.zip(row.model.clone());
     let fav_profile_id = row.profile_id.clone();
+    let fav_acp_agent_id = row.acp_agent_id.clone();
     let fav_collaboration = row.collaboration_id().map(str::to_owned);
     // A window on the whole host writes collaborations; a space's member only runs them.
     let edited = fav_collaboration
@@ -1513,13 +1536,20 @@ fn render_model_row(
                 )
                 .when(show_source || row.collaboration.is_some(), |this| {
                     // A third-party profile's row is attributed to that profile
-                    // (its accent + display name), not the built-in provider.
+                    // (its accent + display name), and an ACP model to its agent.
                     let store = store_entity.read(cx);
                     let glyph = profile_glyph(store, row.provider, row.profile_id.as_deref());
-                    let label = match (&row.collaboration, &row.profile_id) {
-                        (Some((_, summary)), _) => gpui::SharedString::from(summary.clone()),
-                        (None, Some(id)) => store.provider_profile_display_name(id).into(),
-                        (None, None) => gpui::SharedString::from(provider_label(row.provider)),
+                    let label = match (&row.collaboration, &row.acp_agent_id, &row.profile_id) {
+                        (Some((_, summary)), _, _) => gpui::SharedString::from(summary.clone()),
+                        (None, Some(id), _) => store
+                            .installed_acp_agent(id)
+                            .map(|agent| agent.name)
+                            .unwrap_or_else(|| id.clone())
+                            .into(),
+                        (None, None, Some(id)) => store.provider_profile_display_name(id).into(),
+                        (None, None, None) => {
+                            gpui::SharedString::from(provider_label(row.provider))
+                        }
                     };
                     this.child(
                         h_flex()
@@ -1573,11 +1603,16 @@ fn render_model_row(
                         cx.stop_propagation();
                         let fav_id = fav_id.clone();
                         let fav_profile_id = fav_profile_id.clone();
+                        let fav_acp_agent_id = fav_acp_agent_id.clone();
                         store_fav.update(cx, |store, cx| match &fav_collaboration {
                             Some(id) => store.toggle_favorite_collaboration(id),
-                            None => {
-                                store.toggle_favorite_model(provider, fav_profile_id, fav_id, cx)
-                            }
+                            None => store.toggle_favorite_model(
+                                provider,
+                                fav_profile_id,
+                                fav_acp_agent_id,
+                                fav_id,
+                                cx,
+                            ),
                         });
                         // Refresh the open popover so the star + ordering update.
                         popover_fav.update(cx, |_, cx| cx.notify());

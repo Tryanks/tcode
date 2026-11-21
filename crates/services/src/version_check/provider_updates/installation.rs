@@ -149,6 +149,7 @@ pub(super) enum LatestQuery {
         channel: String,
         maximum: Option<(u32, u32, u32)>,
     },
+    Antigravity,
     Mise {
         command: UpdateCommand,
         tool: String,
@@ -445,6 +446,31 @@ async fn latest(probe: &SystemProbe, query: &LatestQuery) -> Result<Option<Strin
                 return Ok(None);
             }
             Ok(Some(version.trim().to_string()))
+        }
+        LatestQuery::Antigravity => {
+            let Some(platform) = antigravity_manifest_platform() else {
+                return Ok(None);
+            };
+            let url = format!(
+                "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/{platform}.json"
+            );
+            let response = ureq::get(&url)
+                .config()
+                .timeout_global(Some(Duration::from_secs(10)))
+                .build()
+                .call()
+                .map_err(|error| format!("{url}: {error}"))?;
+            let mut bytes = Vec::new();
+            response
+                .into_body()
+                .into_reader()
+                .read_to_end(&mut bytes)
+                .map_err(|error| format!("{url}: {error}"))?;
+            serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .and_then(|json| json.get("version")?.as_str().map(str::to_string))
+                .map(Some)
+                .ok_or_else(|| unread(&url))
         }
         LatestQuery::Mise {
             command,
@@ -829,7 +855,10 @@ fn provider_brew_package(provider: ProviderKind, name: &str) -> bool {
         ProviderKind::Codex => matches!(name, "codex" | "codex@alpha"),
         ProviderKind::Pi => name == "pi-coding-agent",
         ProviderKind::OpenCode => matches!(name, "opencode" | "opencode-v2"),
-        ProviderKind::Cursor | ProviderKind::Grok | ProviderKind::Acp => false,
+        ProviderKind::Cursor
+        | ProviderKind::Grok
+        | ProviderKind::Antigravity
+        | ProviderKind::Acp => false,
     }
 }
 
@@ -1224,6 +1253,36 @@ fn native(context: &Context<'_>) -> Option<Installation> {
                 LatestQuery::Registry(npm_package(ProviderKind::OpenCode).into()),
             ))
         }
+        ProviderKind::Antigravity if is_native_antigravity_binary(context, &home) => {
+            Some(context.installation(
+                InstallSource::Native,
+                Some(context.at(context.binary.clone(), &["update"])),
+                LatestQuery::Antigravity,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn is_native_antigravity_binary(context: &Context<'_>, home: &Path) -> bool {
+    if cfg!(windows) {
+        let local_app_data = env_value(context.env, "LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Local"));
+        context.same(&context.canonical, &local_app_data.join("agy/bin/agy.exe"))
+    } else {
+        context.same(&context.canonical, &home.join(".local/bin/agy"))
+    }
+}
+
+fn antigravity_manifest_platform() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Some("darwin_arm64"),
+        ("macos", "x86_64") => Some("darwin_amd64"),
+        ("linux", "aarch64") => Some("linux_arm64"),
+        ("linux", "x86_64") => Some("linux_amd64"),
+        ("windows", "aarch64") => Some("windows_arm64"),
+        ("windows", "x86_64") => Some("windows_amd64"),
         _ => None,
     }
 }

@@ -679,10 +679,23 @@ fn a_mode_is_the_permission_control_of_a_provider_without_one() {
         "options": [{ "value": "ask", "name": "Ask" }]
     }]))
     .unwrap();
-    for (provider, role) in [
-        (ProviderKind::Acp, crate::OptionRole::Permission),
-        (ProviderKind::Cursor, crate::OptionRole::Model),
-        (ProviderKind::Grok, crate::OptionRole::Model),
+    for (provider, expected_id, role) in [
+        (
+            ProviderKind::Acp,
+            MODE_OPTION_ID,
+            crate::OptionRole::Permission,
+        ),
+        (
+            ProviderKind::Antigravity,
+            "mode",
+            crate::OptionRole::Permission,
+        ),
+        (
+            ProviderKind::Cursor,
+            MODE_OPTION_ID,
+            crate::OptionRole::Model,
+        ),
+        (ProviderKind::Grok, MODE_OPTION_ID, crate::OptionRole::Model),
     ] {
         for (modes, config) in [(Some(&modes), None), (None, Some(config.as_slice()))] {
             let mut state = State::new(provider, PathBuf::from("/workspace"));
@@ -694,7 +707,7 @@ fn a_mode_is_the_permission_control_of_a_provider_without_one() {
             let [OptionDescriptor::Select { id, role: got, .. }] = descriptors.as_slice() else {
                 panic!("one mode select, got {descriptors:?}");
             };
-            assert_eq!((id.as_str(), *got), (MODE_OPTION_ID, role), "{provider:?}");
+            assert_eq!((id.as_str(), *got), (expected_id, role), "{provider:?}");
         }
     }
 }
@@ -783,9 +796,11 @@ fn a_file_written_for_a_call_is_that_calls_change_once() {
     };
     smol::block_on(async {
         let (events, received) = smol::channel::unbounded();
+        let (turn_tx, _turn_done) = smol::channel::unbounded();
         let client = Client {
             events,
             state: Arc::new(Mutex::new(State::new(ProviderKind::Acp, cwd.clone()))),
+            turn_tx,
         };
         let apply = |update| client.state.lock_recover().apply_update(update);
         let write = async |text: &str| {
@@ -848,12 +863,14 @@ fn a_file_written_for_a_call_is_that_calls_change_once() {
 fn a_permission_request_ended_without_the_user_is_reported_resolved() {
     smol::block_on(async {
         let (events, received) = smol::channel::unbounded();
+        let (turn_tx, _turn_done) = smol::channel::unbounded();
         let client = Client {
             events,
             state: Arc::new(Mutex::new(State::new(
                 ProviderKind::Acp,
                 PathBuf::from("/workspace"),
             ))),
+            turn_tx,
         };
         let request = || {
             acp::RequestPermissionRequest::new(

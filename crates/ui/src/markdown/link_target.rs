@@ -68,8 +68,8 @@ pub(super) fn resolve_link(url: &str, base_dir: Option<&Path>, elsewhere: bool) 
             position,
         });
     }
-    if let Some(path) = url.strip_prefix("file://") {
-        return LinkTarget::Local(PathBuf::from(path));
+    if let Some(path) = file_url_path(url, elsewhere) {
+        return LinkTarget::Local(path);
     }
     if url.contains("://") || url.starts_with("mailto:") {
         return LinkTarget::Web(url.to_string());
@@ -92,11 +92,16 @@ pub(super) fn resolve_link(url: &str, base_dir: Option<&Path>, elsewhere: bool) 
 
     // Another machine's files cannot be looked for from here, so what is
     // written as a path is taken as one, without the location it ends with,
-    // and is absolute by that machine's rules. What has a scheme of its own
-    // (`data:`) is not written as a path.
+    // and is absolute by that machine's rules, or under its home, which it
+    // expands. What has a scheme of its own (`data:`) is not written as a
+    // path.
     if elsewhere {
         let path = candidates.pop().unwrap_or_default();
-        return if path.starts_with('/') || crate::remote::windows_drive_path(&path) {
+        return if path.starts_with('/')
+            || path.starts_with("~/")
+            || path.starts_with("~\\")
+            || crate::remote::windows_drive_path(&path)
+        {
             LinkTarget::Local(PathBuf::from(path))
         } else if let Some(base_dir) = base_dir.filter(|_| url::Url::parse(&path).is_err()) {
             LinkTarget::Local(base_dir.join(path))
@@ -120,6 +125,35 @@ pub(super) fn resolve_link(url: &str, base_dir: Option<&Path>, elsewhere: bool) 
     }
 
     LinkTarget::Web(url.to_string())
+}
+
+/// The file a `file://` URL names, percent-decoded and without the location
+/// it ends with, unless a file of that very name is here to be found.
+fn file_url_path(url: &str, elsewhere: bool) -> Option<PathBuf> {
+    let raw = url.strip_prefix("file://")?;
+    let decoded = if let Ok(parsed) = url::Url::parse(url)
+        && let Ok(path) = percent_encoding::percent_decode_str(parsed.path()).decode_utf8()
+    {
+        let path = match parsed.host_str() {
+            Some(host) if !host.eq_ignore_ascii_case("localhost") => format!("//{host}{path}"),
+            _ => path.into_owned(),
+        };
+        // `file:///C:/app` names `C:/app`.
+        match path.strip_prefix('/') {
+            Some(drive) if crate::remote::windows_drive_path(drive) => drive.to_owned(),
+            _ => path,
+        }
+    } else {
+        raw.to_owned()
+    };
+    if !elsewhere && Path::new(&decoded).exists() {
+        return Some(PathBuf::from(decoded));
+    }
+    let mut path = decoded;
+    while let Some(stripped) = strip_line_fragment(&path).or_else(|| strip_line_suffix(&path)) {
+        path = stripped;
+    }
+    Some(PathBuf::from(path))
 }
 
 fn expand_home(path: &str) -> PathBuf {
@@ -147,9 +181,14 @@ fn strip_line_suffix(path: &str) -> Option<String> {
 }
 
 fn strip_line_fragment(path: &str) -> Option<String> {
-    let (without_fragment, line) = path.rsplit_once("#L")?;
-    (!line.is_empty() && line.bytes().all(|byte| byte.is_ascii_digit()))
-        .then(|| without_fragment.to_string())
+    let (without_fragment, lines) = path.rsplit_once("#L")?;
+    // `#L12`, or the range `#L12-L24` or `#L12-24`.
+    let (first, last) = match lines.split_once('-') {
+        Some((first, last)) => (first, Some(last.strip_prefix('L').unwrap_or(last))),
+        None => (lines, None),
+    };
+    let number = |line: &str| !line.is_empty() && line.bytes().all(|byte| byte.is_ascii_digit());
+    (number(first) && last.is_none_or(number)).then(|| without_fragment.to_string())
 }
 
 #[cfg(test)]
@@ -189,6 +228,7 @@ mod tests {
             "src/lib.rs:42",
             "src/lib.rs:42:7",
             "src/lib.rs#L12",
+            "src/lib.rs#L12-L24",
             "src/lib.rs:42#L12",
         ] {
             assert_eq!(
@@ -209,6 +249,10 @@ mod tests {
             resolve_link("file:///does-not-need-to-exist", None, false),
             LinkTarget::Local(PathBuf::from("/does-not-need-to-exist"))
         );
+        assert_eq!(
+            resolve_link("file:///tmp/my%20report.pdf#L10-L20", None, false),
+            LinkTarget::Local(PathBuf::from("/tmp/my report.pdf"))
+        );
         for (target, position) in [
             ("tcode-thread://t-1#42", Some(42)),
             ("tcode-thread://t-1", None),
@@ -226,6 +270,8 @@ mod tests {
         for (target, path) in [
             ("/srv/app/out/report.pdf", "/srv/app/out/report.pdf"),
             ("/srv/app/src/lib.rs:42:7", "/srv/app/src/lib.rs"),
+            ("file:///srv/app/src/lib.rs:42:7", "/srv/app/src/lib.rs"),
+            ("~/downloads/archive.tar.gz", "~/downloads/archive.tar.gz"),
             ("src/lib.rs#L12", "/srv/app/src/lib.rs"),
             ("C:\\app\\src\\lib.rs:42", "C:\\app\\src\\lib.rs"),
         ] {

@@ -206,6 +206,7 @@ async fn failure<S: AsyncWrite + Unpin>(stream: &mut S, error: ProtocolError) ->
     let status = match error.code.as_str() {
         "out_of_scope" => "403 Forbidden",
         "not_found" => "404 Not Found",
+        "not_a_file" => "400 Bad Request",
         "changed" => "409 Conflict",
         "busy" => "429 Too Many Requests",
         _ => "500 Internal Server Error",

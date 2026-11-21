@@ -1483,6 +1483,7 @@ impl Shared {
     /// machines, as a device of the group would be after connecting.
     fn write_local_hosts(&self, roster: Option<Roster>) {
         let Some(roster) = roster else {
+            crate::hosts::notify(&self.data_dir);
             return;
         };
         match local_device(&self.data_dir) {

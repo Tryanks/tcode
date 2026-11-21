@@ -158,7 +158,6 @@ fn only_the_columns_host_offers_its_draft_until_it_leaves(cx: &mut TestAppContex
         .workspace
         .expect("arranged");
     assert_eq!(workspace.left, ["host-a"]);
-    assert!(workspace.hosts.iter().all(|host| host.host_id != "host-a"));
 }
 
 /// A window reopens on the thread it showed and on that thread's host:
@@ -269,82 +268,212 @@ fn a_cold_start_reopens_the_thread_on_the_host_it_showed(cx: &mut TestAppContext
     assert!(a.read_with(cx, |store, _| store.open_threads().is_empty()));
 }
 
-/// Pairing with a machine adds it beside the window's hosts, leaving
-/// their links as they are; pairing into a space replaces them, as a
-/// space is reached alone.
+/// Pairing switches the window to the newly paired target's scope: pairing
+/// into a machine group opens that group's members without mixing in a
+/// previously open standalone machine, pairing a standalone machine opens it
+/// alone, and pairing a space opens that space alone.
 #[gpui::test]
-fn pairing_adds_a_machine_beside_the_others_and_a_space_replaces_them(cx: &mut TestAppContext) {
+fn pairing_switches_to_the_paired_group_standalone_or_space(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, hosts, client, cx) = mount_workspace(
         cx,
-        vec![saved_machine("host-a", true)],
+        vec![saved_machine("solo", false)],
         Default::default(),
         1200.,
     );
-    let key_a = HostKey::Remote("host-a".into());
-    let a = store_on(&shell, "host-a", cx);
-    hosts[&key_a].come_up(&a, Vec::new(), None, cx);
+    let key_solo = HostKey::Remote("solo".into());
+    let solo = store_on(&shell, "solo", cx);
+    hosts[&key_solo].come_up(&solo, Vec::new(), None, cx);
 
+    // Pairing with a machine in a group (which also saves its peer in the
+    // roster) opens only that group, never mixing in `solo`.
+    let _b = WorkspaceHost::offer(&client, "host-b", cx);
     let _c = WorkspaceHost::offer(&client, "host-c", cx);
-    pair_with(&shell, &client, saved_machine("host-c", false), cx);
+    client.remember_host(saved_machine("host-c", true)).unwrap();
+    pair_with(&shell, &client, saved_machine("host-b", true), cx);
     assert_eq!(
         linked(&shell, cx),
-        [key_a.clone(), HostKey::Remote("host-c".into())]
+        [
+            HostKey::Remote("host-c".into()),
+            HostKey::Remote("host-b".into()),
+        ]
     );
-    assert_eq!(store_on(&shell, "host-a", cx), a, "A's link is kept");
-    assert!(a.read_with(cx, |store, _| store.connection_state().is_connected()));
-    assert_eq!(store_of(&shell, cx), a, "the column stays");
     assert_eq!(
         shell.read_with(cx, |shell, cx| shell.window_state.read(cx).route()),
         Route::Chat
     );
 
+    // Pairing a standalone machine switches to that machine alone.
     let _d = WorkspaceHost::offer(&client, "host-d", cx);
+    pair_with(&shell, &client, saved_machine("host-d", false), cx);
+    assert_eq!(linked(&shell, cx), [HostKey::Remote("host-d".into())]);
+
+    // Pairing a space switches to that space alone.
+    let _e = WorkspaceHost::offer(&client, "host-e", cx);
     pair_with(
         &shell,
         &client,
         tcode_client::pairing::PairedHost {
             space_id: Some("space".into()),
             space_name: Some("Shared".into()),
-            ..saved_machine("host-d", false)
+            ..saved_machine("host-e", false)
         },
         cx,
     );
-    assert_eq!(linked(&shell, cx), [HostKey::Remote("host-d".into())]);
+    assert_eq!(linked(&shell, cx), [HostKey::Remote("host-e".into())]);
 }
 
-/// A group this device comes to know of — the machine in this process
-/// joined it, which writes its members beside the saved machines — opens
-/// its members at once, beside the hosts already open: no machine has to
-/// connect again first.
+/// Saving a new group member never invades a standalone machine's view; when
+/// the window is viewing that group, a newly learned member of the same group
+/// opens immediately beside the existing ones.
 #[gpui::test]
-fn a_groups_members_open_as_soon_as_the_device_knows_them(cx: &mut TestAppContext) {
+fn group_roster_updates_stay_out_of_standalone_views_and_open_in_their_group(
+    cx: &mut TestAppContext,
+) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, hosts, client, cx) = mount_workspace(
         cx,
-        vec![saved_machine("host-a", false)],
+        vec![saved_machine("solo", false)],
+        Default::default(),
+        1200.,
+    );
+    let key_solo = HostKey::Remote("solo".into());
+    let solo = store_on(&shell, "solo", cx);
+    hosts[&key_solo].come_up(&solo, Vec::new(), None, cx);
+
+    // A group member saved in the background does not mix into `solo`.
+    let _b = WorkspaceHost::offer(&client, "host-b", cx);
+    client.remember_host(saved_machine("host-b", true)).unwrap();
+    draw(cx);
+    assert_eq!(linked(&shell, cx), std::slice::from_ref(&key_solo));
+    assert_eq!(store_of(&shell, cx), solo);
+
+    // Opening that group shows only the group; a new member of the same group
+    // then opens immediately beside it while an unrelated standalone host does not.
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.open_group("group".into(), None, window, cx)
+        })
+    });
+    draw(cx);
+    assert_eq!(linked(&shell, cx), [HostKey::Remote("host-b".into())]);
+    let b = store_on(&shell, "host-b", cx);
+
+    let _c = WorkspaceHost::offer(&client, "host-c", cx);
+    client.remember_host(saved_machine("host-c", true)).unwrap();
+    let _other = WorkspaceHost::offer(&client, "other-solo", cx);
+    client
+        .remember_host(saved_machine("other-solo", false))
+        .unwrap();
+    draw(cx);
+    assert_eq!(
+        linked(&shell, cx),
+        [
+            HostKey::Remote("host-b".into()),
+            HostKey::Remote("host-c".into()),
+        ]
+    );
+    assert_eq!(store_on(&shell, "host-b", cx), b, "B's link is kept");
+}
+
+/// A launch on a host outside the view the device kept makes that host the
+/// view: the group left behind does not open beside it when its roster next
+/// changes.
+#[gpui::test]
+fn a_launch_outside_the_kept_view_leaves_that_view_behind(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let (shell, _hosts, client, cx) = mount_workspace(
+        cx,
+        vec![saved_machine("solo", false), saved_machine("host-b", true)],
         tcode_client::host::ClientPreferences {
-            workspace: Some(crate::workspace::arranged(
-                None,
-                &[HostKey::Remote("host-a".into())],
-            )),
+            navigation: Some(serde_json::json!({
+                "history": ["threads", "thread"],
+                "thread": { "host": "solo", "session_id": "thread-1" },
+                "panel": "diff"
+            })),
+            workspace: Some(tcode_client::host::WorkspacePreference {
+                scope: Some(tcode_client::host::WorkspaceScope::Group {
+                    group_id: "group".into(),
+                }),
+                ..Default::default()
+            }),
             ..Default::default()
         },
         1200.,
     );
-    let key_a = HostKey::Remote("host-a".into());
-    let a = store_on(&shell, "host-a", cx);
-    hosts[&key_a].come_up(&a, Vec::new(), None, cx);
+    let key_solo = HostKey::Remote("solo".into());
+    assert_eq!(linked(&shell, cx), std::slice::from_ref(&key_solo));
 
-    let _b = WorkspaceHost::offer(&client, "host-b", cx);
-    client.remember_host(saved_machine("host-b", true)).unwrap();
+    let _c = WorkspaceHost::offer(&client, "host-c", cx);
+    client.remember_host(saved_machine("host-c", true)).unwrap();
     draw(cx);
+    assert_eq!(linked(&shell, cx), [key_solo]);
+}
+
+/// On the Machines page, clicking a machine group opens all of its members
+/// together, clicking a member opens that machine alone (reusing its link),
+/// and clicking a standalone machine switches to it alone.
+#[gpui::test]
+fn machines_page_opens_the_clicked_group_member_or_standalone_machine(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (shell, hosts, client, cx) = mount_workspace(
+        cx,
+        vec![
+            saved_machine("solo", false),
+            saved_machine("nas", true),
+            saved_machine("desk", true),
+        ],
+        Default::default(),
+        393.,
+    );
+    let key_solo = HostKey::Remote("solo".into());
+    let solo = store_on(&shell, "solo", cx);
+    hosts[&key_solo].come_up(&solo, Vec::new(), None, cx);
+    assert_eq!(linked(&shell, cx), std::slice::from_ref(&key_solo));
+
+    let open_hosts = |cx: &mut VisualTestContext| {
+        shell
+            .read_with(cx, |shell, _| shell.window_state())
+            .update(cx, |state, cx| state.go(Destination::Hosts, cx));
+        crate::test_frames::draw_settled(cx);
+    };
+
+    // Click the machine group row -> opens only the group's members.
+    open_hosts(cx);
+    let group_row = cx
+        .debug_bounds("host-group-group")
+        .expect("machine group entry");
+    cx.simulate_click(group_row.center(), gpui::Modifiers::default());
+    crate::test_frames::draw_settled(cx);
     assert_eq!(
         linked(&shell, cx),
-        [key_a.clone(), HostKey::Remote("host-b".into())]
+        [
+            HostKey::Remote("nas".into()),
+            HostKey::Remote("desk".into()),
+        ]
     );
-    assert_eq!(store_on(&shell, "host-a", cx), a, "A's link is kept");
-    assert_eq!(store_of(&shell, cx), a, "the column stays");
+    let nas_store = store_on(&shell, "nas", cx);
+
+    // Click a member inside the group -> opens that member alone, keeping its link.
+    open_hosts(cx);
+    let nas_row = cx.debug_bounds("host-nas").expect("group member row");
+    cx.simulate_click(nas_row.center(), gpui::Modifiers::default());
+    crate::test_frames::draw_settled(cx);
+    assert_eq!(linked(&shell, cx), [HostKey::Remote("nas".into())]);
+    assert_eq!(
+        store_on(&shell, "nas", cx),
+        nas_store,
+        "reuses the already open link"
+    );
+
+    // Click the standalone machine -> switches to it alone.
+    let _solo_again = WorkspaceHost::offer(&client, "solo", cx);
+    open_hosts(cx);
+    let solo_row = cx.debug_bounds("host-solo").expect("standalone row");
+    cx.simulate_click(solo_row.center(), gpui::Modifiers::default());
+    crate::test_frames::draw_settled(cx);
+    assert_eq!(linked(&shell, cx), [key_solo]);
 }
 
 /// A thread of host B opened beside a pane of host A's: both show, each
@@ -1478,6 +1607,7 @@ fn a_local_host_that_does_not_start_is_shown_and_retried(cx: &mut TestAppContext
         addrs: vec!["127.0.0.1:47503".into()],
         last_connected_unix: None,
         group_id: None,
+        group_name: None,
         space_id: None,
         space_name: None,
     };
@@ -1554,12 +1684,12 @@ fn a_local_host_that_does_not_start_is_shown_and_retried(cx: &mut TestAppContext
     assert_eq!(attempts.get(), 2);
     assert_eq!(
         attached(cx),
-        Some(Some("studio".into())),
-        "the window stays on the machine it is on"
+        Some(None),
+        "retrying This machine switches to the local host once it starts"
     );
     let store = shell
         .read_with(cx, |shell, _| shell.local_store())
-        .expect("the local host joins it");
+        .expect("the local host opens");
     crate::store::tests::seed_full_scope(&store, &local_incoming, Vec::new(), cx);
     open_machines(cx);
     crate::test_frames::draw_settled(cx);

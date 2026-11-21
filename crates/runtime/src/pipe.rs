@@ -1267,8 +1267,9 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::ToggleFavoriteModel {
             provider,
             profile_id,
+            acp_agent_id,
             model,
-        } => app.toggle_favorite_model(provider, profile_id, model, cx),
+        } => app.toggle_favorite_model(provider, profile_id, acp_agent_id, model, cx),
         Command::RewindTurn {
             session_id,
             turn,

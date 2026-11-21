@@ -255,6 +255,7 @@ markdown:
   math_show_source: "Show LaTeX source"
   math_copy: "Copy LaTeX"
   math_error: "Unable to render: %{error}"
+  render_fallback: "Rendered as plain text after a formatting error."
   open_image: "Open image"
   link_open: "Open link"
   link_copy_address: "Copy link address"
@@ -1210,6 +1211,7 @@ permission:
     permissions: "Permissions"
     approvalMode: "Permissions"
     permission_mode: "Permissions"
+    mode: "Permissions"
   unavailable:
     "1": "Not allowed by your configuration"
     "2": "Inherited permission configuration"
@@ -1264,6 +1266,11 @@ permission:
       full_access: "No sandbox and no prompts."
     approvalMode:
       unrestricted: "Every tool call runs without asking"
+    mode:
+      default: "Ask before edits and commands, per your permission settings."
+      accept-edits: "Approve file edits in the workspace without asking."
+      auto: "Approve edits and safe commands; ask before irreversible actions."
+      plan: "Plan carefully before executing a task."
 approval:
   command_requested: "Command approval requested"
   file_read_requested: "File-read approval requested"
@@ -1702,6 +1709,12 @@ hosts:
   actions: "Actions for %{name}"
   pair_again: "Pair again"
   in_group: "In a machine group"
+  group_section: "MACHINE GROUP"
+  group_machine_one: "1 machine"
+  group_machines: "%{count} machines"
+  group_machines_with_local: "%{count} machines · includes this machine"
+  hidden_in_group: "Hidden from group view"
+  include_in_group: "Show in group"
   local:
     unavailable: "Could not start: %{reason}"
     default_settings: "%{reason}. Its settings could not be read, so the default language and theme are in use."

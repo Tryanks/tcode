@@ -272,6 +272,7 @@ pub fn provider_glyph(provider: ProviderKind) -> Icon {
         ProviderKind::OpenCode => ("icons/opencode.svg", None),
         ProviderKind::Cursor => ("icons/cursor.svg", None),
         ProviderKind::Grok => ("icons/grok.svg", None),
+        ProviderKind::Antigravity => ("icons/antigravity.svg", None),
         ProviderKind::Acp => ("icons/box.svg", None),
     };
     Icon::empty()

@@ -40,6 +40,7 @@ pub fn state_dirs(provider: ProviderKind, launch_env: &LaunchEnv) -> Vec<PathBuf
         ProviderKind::OpenCode => agent::opencode::data_dir(launch_env).into_iter().collect(),
         ProviderKind::Cursor => agent::cursor::state_dirs(launch_env),
         ProviderKind::Grok => agent::grok::home_dir(launch_env).into_iter().collect(),
+        ProviderKind::Antigravity => agent::antigravity::state_dirs(launch_env),
         ProviderKind::Acp => Vec::new(),
     }
 }
