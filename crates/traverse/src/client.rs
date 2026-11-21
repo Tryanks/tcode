@@ -602,6 +602,7 @@ async fn pair_exchange(
                 let mut host = invite.paired(host_name);
                 host.space_name = space_name;
                 host.group_id = group.as_ref().map(|roster| roster.id.clone());
+                host.group_name = group.as_ref().map(|roster| roster.name.clone());
                 learn_addresses(&mut host, &connection);
                 if group.is_some() {
                     persist_roster(device, &host.host_id, group.as_ref());

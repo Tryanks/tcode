@@ -700,17 +700,19 @@ impl AppShell {
                 .into_any_element();
         };
         let store = link.store.read(cx);
-        // A remote machine's list is headed by the machine, with the link's
-        // state where every other page puts its context. The local list, and
-        // a list over several machines, is just Threads, each machine's
-        // state in its own section.
+        // A single remote machine's list is headed by that machine and its link
+        // state; a machine group's list is headed by the group's name; the
+        // local list alone is Threads.
         let (title, subtitle): (SharedString, Option<SharedString>) =
-            match store.remote_host_name().filter(|_| self.links.len() == 1) {
-                Some(_) => (
-                    store.machine_label().into(),
-                    Some(crate::remote::connection_label(&store.connection_state()).into()),
-                ),
-                None => (crate::tr!("mobile.threads").into_owned().into(), None),
+            match self.active_group_name(cx) {
+                Some(group_name) => (group_name.into(), None),
+                None => match store.remote_host_name().filter(|_| self.links.len() == 1) {
+                    Some(_) => (
+                        store.machine_label().into(),
+                        Some(crate::remote::connection_label(&store.connection_state()).into()),
+                    ),
+                    None => (crate::tr!("mobile.threads").into_owned().into(), None),
+                },
             };
         let sidebar = self.sidebar.clone();
         // The root's leading control leads to Machines.

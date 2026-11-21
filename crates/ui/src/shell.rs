@@ -725,9 +725,9 @@ pub struct AppShell {
     links: Vec<Link>,
     /// The panes, each over one of `links`' hosts.
     column: Option<Column>,
-    /// Whether `links` is one host reached only alone, a space's, in place
-    /// of this device's workspace.
-    alone: bool,
+    /// The machine group this process's own host belonged to when the shell
+    /// last checked, so joining or leaving a group updates the window.
+    known_local_group: Option<String>,
     /// The threads of every host in `links`, wide beside the chat and as
     /// the compact threads page.
     sidebar: Entity<SessionsSidebar>,
@@ -974,12 +974,17 @@ impl AppShell {
         });
         let sidebar = cx.new(|cx| SessionsSidebar::new(Vec::new(), window_state.clone(), cx));
         let palette = cx.new(|cx| CommandPalette::new(window_state.clone(), window, cx));
+        let known_local_group = client
+            .local_machine_group()
+            .ok()
+            .flatten()
+            .map(|(id, _)| id);
         let mut shell = Self {
             window_state,
             client,
             links: Vec::new(),
             column: None,
-            alone: false,
+            known_local_group,
             sidebar,
             palette,
             hosts,
@@ -1026,7 +1031,9 @@ impl AppShell {
             cx.spawn_in(window, async move |this, cx| {
                 while changes.recv().await.is_ok() {
                     if this
-                        .update_in(cx, |shell, window, cx| shell.open_new_members(window, cx))
+                        .update_in(cx, |shell, window, cx| {
+                            shell.on_saved_hosts_changed(window, cx)
+                        })
                         .is_err()
                     {
                         return;
@@ -1281,6 +1288,11 @@ pub(crate) fn request_host(request: HostRequest, window: &mut Window, cx: &mut A
     window.defer(cx, move |window, cx| {
         shell.update(cx, |shell, cx| match request {
             HostRequest::Open(target) => shell.open_host(target, window, cx),
+            HostRequest::OpenGroup(group_id) => shell.open_group(group_id, None, window, cx),
+            HostRequest::Paired(host) => shell.open_paired(host, window, cx),
+            HostRequest::IncludeInGroup { group_id, host_id } => {
+                shell.include_in_group(group_id, host_id, window, cx)
+            }
             HostRequest::Leave(host) => shell.leave_host(&host, window, cx),
             HostRequest::Move { host, earlier } => shell.move_host(&host, earlier, cx),
         });

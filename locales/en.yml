@@ -1704,6 +1704,12 @@ hosts:
   actions: "Actions for %{name}"
   pair_again: "Pair again"
   in_group: "In a machine group"
+  group_section: "MACHINE GROUP"
+  group_machine_one: "1 machine"
+  group_machines: "%{count} machines"
+  group_machines_with_local: "%{count} machines · includes this machine"
+  hidden_in_group: "Hidden from group view"
+  include_in_group: "Show in group"
   local:
     unavailable: "Could not start: %{reason}"
     default_settings: "%{reason}. Its settings could not be read, so the default language and theme are in use."

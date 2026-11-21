@@ -41,6 +41,9 @@ pub struct PairedHost {
     /// told this device; its machines are saved beside it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    /// The group's name as that machine last reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_name: Option<String>,
 }
 
 /// `traverse` as a list, or as the single optional value older records
@@ -162,6 +165,7 @@ impl PairInvite {
             addrs: Vec::new(),
             last_connected_unix: None,
             group_id: None,
+            group_name: None,
         }
     }
 }
@@ -328,6 +332,7 @@ mod tests {
             addrs: vec!["192.168.1.2:47420".into()],
             last_connected_unix: None,
             group_id: None,
+            group_name: None,
         };
         let mut hosts = vec![host("desk", "first"), host("laptop", "laptop")];
         remember_host(&mut hosts, host("desk", "second"));

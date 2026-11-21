@@ -162,8 +162,8 @@ members stay with their own machine.
    and lists the devices this machine brings first. If the join finds no
    path to that machine, type its IP address, as when pairing a device.
 3. A desktop joins together with its own window: the window saves every
-   member under **Your machines**, and as group members they are among the
-   machines it keeps open (see [Machines side by side](#machines-side-by-side)).
+   member under its **Machine group** section on **Machines** and opens the
+   group side by side (see [Machines side by side](#machines-side-by-side)).
 
 While a machine is in a group, its invitation says so and names the group;
 the link carries the group's id.
@@ -172,8 +172,8 @@ the link carries the group's id.
 
 Scan or paste any member's invitation: the device is paired with that
 machine, and the machine tells the others. The device saves every member
-under **Your machines** and keeps each one open beside its other machines,
-except one it disconnected (see
+under that group on **Machines** and opens the group's multi-host view without
+mixing in unrelated standalone machines (see
 [Machines side by side](#machines-side-by-side)). A space link never brings a
 device into the group.
 
@@ -583,31 +583,34 @@ the page's scheme, so `https://` pages use `wss://`.
 
 ### Machines side by side
 
-The machines a native device keeps open are, in this order
-([`members`](../crates/ui/src/workspace.rs)):
+A native window shows one scope at a time
+([`active_scope`](../crates/ui/src/workspace.rs),
+[`members`](../crates/ui/src/workspace.rs)):
 
-- **This machine**, on a desktop. It is always there, and listed once even
-  when the device also saved it as a member of a group.
-- Each full-access machine you added from **Machines**, in the order its
-  row's **⋯ → Move up** and **Move down** give it.
-- Every member of a group the device is paired with, unless you chose
-  **Disconnect** for it on this device; choosing it on **Machines** brings it
-  back.
+- **This machine** alone, on a desktop when chosen from **Machines** (or at
+  launch while this machine is not in a group).
+- **One machine** alone: any standalone machine, any individual member clicked
+  under a machine group, or any shared space. Standalone machines never mix
+  into a group's multi-host view.
+- **One machine group** side by side: clicking a group's top row on
+  **Machines** opens every member of that group (including **This machine**
+  when this machine belongs to that group), in the order **⋯ → Move up** and
+  **Move down** give them, excluding members you chose **Disconnect** for
+  (**⋯ → Show in group** brings a hidden member back).
 
-A space's machine is never one of them; it is shown alone, as in
-[From another desktop](#from-another-desktop). A device that has never kept
-a list of machines, such as one upgraded from an earlier version, starts with
-**This machine**, the machine it was last on, if it had full access there,
-and its group members.
+On **Machines**, each machine group has its own section: clicking its top row
+opens the group's multi-host view, and clicking a member row beneath it opens
+that member alone. Unrelated standalone machines and shared spaces stay under
+**Your machines** and open alone.
 
-With one machine the sidebar has no machine headings. With more, the **Group
-by project** layout gives each machine its own section under a heading with its
-name and connection state; a click on the heading folds the section, and the
-device remembers it. The flat list keeps one list in time order across every
-machine. A heading's **⋯** menu starts a quick thread or a thread in one of
-that machine's projects, adds a project, sorts the projects, disconnects the
-machine (not **This machine**), and opens **Machines** with **Manage
-machines**.
+With one machine the sidebar has no machine headings. With more (a machine
+group view), the **Group by project** layout gives each machine its own
+section under a heading with its name and connection state; a click on the
+heading folds the section, and the device remembers it. The flat list keeps
+one list in time order across every machine in the group. A heading's **⋯**
+menu starts a quick thread or a thread in one of that machine's projects, adds
+a project, sorts the projects, disconnects the machine from the group view
+(not **This machine**), and opens **Machines** with **Manage machines**.
 
 A machine that is offline, or reconnecting after a failure, empties only its
 own section: its heading shows the state (in the flat list, above the

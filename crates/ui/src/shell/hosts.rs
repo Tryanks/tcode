@@ -128,7 +128,38 @@ impl AppShell {
         self.schedule_navigation_save(cx);
     }
 
-    /// The hosts this device's workspace holds, in order.
+    /// The active scope of this window's workspace.
+    pub(super) fn active_scope(&self, cx: &App) -> tcode_client::host::WorkspaceScope {
+        let local = self.setup.local.is_some();
+        let client = &self.client;
+        let saved = client.load_hosts().unwrap_or_default();
+        let preference = DevicePreferences::workspace(cx);
+        let last_host_id = client.last_host_id();
+        let local_machine_id = client.local_machine_id().ok().flatten();
+        let local_group = client.local_machine_group().ok().flatten();
+        crate::workspace::active_scope(&crate::workspace::Device {
+            saved: &saved,
+            preference: preference.as_ref(),
+            last_host_id: last_host_id.as_deref(),
+            local,
+            local_machine_id: local_machine_id.as_deref(),
+            local_group_id: local_group.as_ref().map(|(id, _)| id.as_str()),
+            fixed_machine: client.fixed_machine(),
+        })
+    }
+
+    /// The display name of the active machine group, when the window is open
+    /// on a machine group.
+    pub(super) fn active_group_name(&self, cx: &App) -> Option<String> {
+        let tcode_client::host::WorkspaceScope::Group { group_id } = self.active_scope(cx) else {
+            return None;
+        };
+        let saved = self.client.load_hosts().unwrap_or_default();
+        let local_group = self.client.local_machine_group().ok().flatten();
+        crate::workspace::group_name(&group_id, &saved, local_group.as_ref()).map(str::to_owned)
+    }
+
+    /// The hosts this device's active scope holds, in order.
     pub(super) fn members(&self, cx: &App) -> Vec<AttachmentTarget> {
         let local = self.setup.local.is_some();
         let client = &self.client;
@@ -140,18 +171,19 @@ impl AppShell {
         // Unreadable, it was reported on opening; the group's roster is not
         // saved meanwhile, so no saved machine is this one.
         let local_machine_id = client.local_machine_id().ok().flatten();
+        let local_group = client.local_machine_group().ok().flatten();
         crate::workspace::members(&crate::workspace::Device {
             saved: &saved,
             preference: preference.as_ref(),
             last_host_id: last_host_id.as_deref(),
             local,
             local_machine_id: local_machine_id.as_deref(),
+            local_group_id: local_group.as_ref().map(|(id, _)| id.as_str()),
             fixed_machine: client.fixed_machine(),
         })
     }
 
-    /// Change how this device arranges its workspace, from the hosts in it
-    /// now.
+    /// Mutate the device's persisted workspace preference.
     pub(super) fn arrange_workspace(
         &self,
         change: impl FnOnce(&mut tcode_client::host::WorkspacePreference),
@@ -162,18 +194,17 @@ impl AppShell {
         if self.client.load_hosts().is_err() {
             return;
         }
-        let members: Vec<HostKey> = self.members(cx).iter().map(AttachmentTarget::key).collect();
         DevicePreferences::arrange_workspace(cx, |workspace| {
-            let mut arranged = crate::workspace::arranged(workspace.as_ref(), &members);
-            change(&mut arranged);
-            *workspace = Some(arranged);
+            let arranged = workspace.get_or_insert_with(Default::default);
+            change(arranged);
         });
     }
 
-    /// Open every host of the workspace, and `initial`, which the column
-    /// shows first, though it is not one of them; a host reached only alone
-    /// is opened alone. The host in this process is left out unless
-    /// `with_local`.
+    /// Open this window's active scope at launch. `initial`, when supplied,
+    /// focuses that host if it belongs to the active scope, or opens it alone
+    /// if the launch explicitly targeted a host outside it (for example
+    /// `--connect`, a pending outbox, or a space). The host in this process is
+    /// left out unless `with_local`.
     pub(super) fn open_workspace(
         &mut self,
         initial: Option<AttachmentTarget>,
@@ -181,28 +212,38 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(target) = initial
-            .as_ref()
-            .filter(|target| !crate::workspace::joins_target(target))
-        {
-            self.alone = true;
-            self.attach(target.clone(), window, cx);
-            return;
-        }
-        self.alone = false;
-        // A device's first workspace is the one an earlier version showed
-        // it, kept from here on.
-        if DevicePreferences::workspace(cx).is_none() {
-            self.arrange_workspace(|_| {}, cx);
-        }
+        let scope = self.active_scope(cx);
         let mut targets = self.members(cx);
         if !with_local {
             targets.retain(|target| *target != AttachmentTarget::Local);
         }
-        if let Some(initial) = &initial
-            && !targets.iter().any(|target| same_target(target, initial))
+        let persisted_scope = if let Some(initial) = &initial {
+            if targets.iter().any(|target| same_target(target, initial))
+                || (*initial == AttachmentTarget::Local && !with_local)
+            {
+                scope
+            } else {
+                targets = vec![initial.clone()];
+                match initial {
+                    AttachmentTarget::Local => tcode_client::host::WorkspaceScope::Local,
+                    AttachmentTarget::Remote(host) => tcode_client::host::WorkspaceScope::Host {
+                        host_id: host.host_id.clone(),
+                    },
+                }
+            }
+        } else {
+            scope
+        };
+        if DevicePreferences::workspace(cx)
+            .as_ref()
+            .and_then(|workspace| workspace.scope.as_ref())
+            .is_none()
+            && with_local
         {
-            targets.push(initial.clone());
+            self.arrange_workspace(
+                |workspace| crate::workspace::set_scope(workspace, persisted_scope),
+                cx,
+            );
         }
         for target in targets {
             if self.link_of(&target.key()).is_none() {
@@ -230,83 +271,355 @@ impl AppShell {
         cx.notify();
     }
 
-    /// Open the workspace's hosts that joined it since the window opened
-    /// them, such as a group's new member.
-    pub(super) fn open_new_members(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.alone {
-            return;
-        }
-        let new: Vec<_> = self
-            .members(cx)
-            .into_iter()
-            // The host in this process is opened at launch, or asked for
-            // again after it failed to start.
-            .filter(|target| *target != AttachmentTarget::Local)
-            .filter(|target| self.link_of(&target.key()).is_none())
-            .collect();
-        if new.is_empty() {
-            return;
-        }
-        for target in new {
-            self.open_target(target, window, cx);
-        }
-        match self.links.first().map(Link::key) {
-            Some(host) if self.column.is_none() => self.enter_first_host(host, window, cx),
-            _ => {
-                self.order_links(cx);
-                self.sync_hosts(cx);
+    /// Reconcile the window when `hosts.json` (or this machine's group)
+    /// changes. Only a machine group view opens newly learned members of that
+    /// same group; a single-host view is never mixed with unrelated group
+    /// members. On a desktop viewing this machine alone, newly joining a group
+    /// upgrades the view to that group once.
+    pub(super) fn on_saved_hosts_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current_local_group = self
+            .client
+            .local_machine_group()
+            .ok()
+            .flatten()
+            .map(|(id, _)| id);
+        if current_local_group != self.known_local_group {
+            let previous =
+                std::mem::replace(&mut self.known_local_group, current_local_group.clone());
+            match (previous, current_local_group, self.active_scope(cx)) {
+                (_, Some(group_id), tcode_client::host::WorkspaceScope::Local) => {
+                    self.arrange_workspace(
+                        |workspace| {
+                            crate::workspace::set_scope(
+                                workspace,
+                                tcode_client::host::WorkspaceScope::Group {
+                                    group_id: group_id.clone(),
+                                },
+                            );
+                        },
+                        cx,
+                    );
+                }
+                (
+                    Some(left_group),
+                    None,
+                    tcode_client::host::WorkspaceScope::Group { group_id },
+                ) if left_group == group_id => {
+                    self.arrange_workspace(
+                        |workspace| {
+                            crate::workspace::set_scope(
+                                workspace,
+                                tcode_client::host::WorkspaceScope::Local,
+                            );
+                        },
+                        cx,
+                    );
+                    let targets = self.members(cx);
+                    self.apply_scope_targets(targets, Some(HostKey::Local), false, window, cx);
+                    self.hosts.update(cx, |_, cx| cx.notify());
+                    return;
+                }
+                _ => {}
             }
         }
+        if matches!(
+            self.active_scope(cx),
+            tcode_client::host::WorkspaceScope::Group { .. }
+        ) {
+            let new: Vec<_> = self
+                .members(cx)
+                .into_iter()
+                // The host in this process is opened at launch, or asked for
+                // again after it failed to start.
+                .filter(|target| *target != AttachmentTarget::Local)
+                .filter(|target| self.link_of(&target.key()).is_none())
+                .collect();
+            if !new.is_empty() {
+                for target in new {
+                    self.open_target(target, window, cx);
+                }
+                match self.links.first().map(Link::key) {
+                    Some(host) if self.column.is_none() => self.enter_first_host(host, window, cx),
+                    _ => {
+                        self.order_links(cx);
+                        self.sync_hosts(cx);
+                    }
+                }
+            }
+        }
+        self.hosts.update(cx, |_, cx| cx.notify());
         cx.notify();
     }
 
-    /// Show `target` among the workspace's hosts, adding it to them. A host
-    /// reached only alone replaces them, and a browser only ever has its
-    /// own. A link the machine refused is not reused: it stopped
-    /// reconnecting, and pairing again lands here with the same machine.
+    /// Switch this window to `target` alone (this machine, a standalone
+    /// machine, a group member viewed on its own, or a space). A link the
+    /// machine refused is rebuilt; an already-working link to `target` is kept
+    /// while every other link closes.
     pub(super) fn open_host(
         &mut self,
         target: AttachmentTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let fixed = self.client.fixed_machine();
-        if fixed || !crate::workspace::joins_target(&target) {
-            self.replace_workspace(target, window, cx);
+        let host = target.key();
+        // Already showing only this exact target and it works: return to threads.
+        if let [current] = self.links.as_slice()
+            && same_target(&current.target, &target)
+            && !refused(&current.store, cx)
+        {
+            let scope = match &target {
+                AttachmentTarget::Local => tcode_client::host::WorkspaceScope::Local,
+                AttachmentTarget::Remote(saved) => tcode_client::host::WorkspaceScope::Host {
+                    host_id: saved.host_id.clone(),
+                },
+            };
+            self.arrange_workspace(
+                |workspace| crate::workspace::set_scope(workspace, scope),
+                cx,
+            );
+            self.show_host_section(&host, cx);
             return;
         }
-        let host = target.key();
-        if self.alone {
-            self.blur_navigation(window, cx);
-            self.arrange_workspace(|workspace| crate::workspace::join(workspace, &host), cx);
+        // Never drop a working link for a local host that cannot start.
+        let prestarted_local = if target == AttachmentTarget::Local {
+            if self.link_of(&HostKey::Local).is_some() {
+                None
+            } else {
+                let Ok(local) = self.start_local(&target, cx) else {
+                    return;
+                };
+                local
+            }
+        } else {
+            None
+        };
+        if target == AttachmentTarget::Local && self.setup.local.is_none() {
+            log::error!("this client cannot reach {target:?}");
+            return;
+        }
+        let scope = match &target {
+            AttachmentTarget::Local => tcode_client::host::WorkspaceScope::Local,
+            AttachmentTarget::Remote(saved) => tcode_client::host::WorkspaceScope::Host {
+                host_id: saved.host_id.clone(),
+            },
+        };
+        self.arrange_workspace(
+            |workspace| crate::workspace::set_scope(workspace, scope),
+            cx,
+        );
+        self.apply_scope_targets_with_local(
+            vec![target],
+            prestarted_local,
+            Some(host),
+            true,
+            window,
+            cx,
+        );
+    }
+
+    /// Switch this window to the multi-host view of `group_id`. If every saved
+    /// member of that group was previously hidden, bring them all back so the
+    /// group is never empty.
+    pub(super) fn open_group(
+        &mut self,
+        group_id: String,
+        focus: Option<HostKey>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.arrange_workspace(
+            |workspace| {
+                crate::workspace::set_scope(
+                    workspace,
+                    tcode_client::host::WorkspaceScope::Group {
+                        group_id: group_id.clone(),
+                    },
+                );
+            },
+            cx,
+        );
+        let mut targets = self.members(cx);
+        if targets.is_empty() {
+            let saved = self.client.load_hosts().unwrap_or_default();
+            let member_ids: Vec<String> = saved
+                .iter()
+                .filter(|host| {
+                    host.space_id.is_none() && host.group_id.as_deref() == Some(group_id.as_str())
+                })
+                .map(|host| host.host_id.clone())
+                .collect();
+            if !member_ids.is_empty() {
+                self.arrange_workspace(
+                    |workspace| {
+                        crate::workspace::clear_left_for(
+                            workspace,
+                            member_ids.iter().map(String::as_str),
+                        );
+                    },
+                    cx,
+                );
+                targets = self.members(cx);
+            }
+        }
+        self.apply_scope_targets(targets, focus, true, window, cx);
+    }
+
+    /// Switch this window to a newly paired machine: its machine group when it
+    /// belongs to one, otherwise that machine alone.
+    pub(super) fn open_paired(
+        &mut self,
+        host: tcode_client::pairing::PairedHost,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if host.space_id.is_none()
+            && let Some(group_id) = host.group_id.clone()
+        {
+            let host_id = host.host_id.clone();
+            self.arrange_workspace(
+                |workspace| crate::workspace::include_in_group(workspace, &host_id),
+                cx,
+            );
+            self.open_group(group_id, Some(HostKey::Remote(host_id)), window, cx);
+            return;
+        }
+        self.open_host(AttachmentTarget::Remote(Box::new(host)), window, cx);
+    }
+
+    /// Show a previously hidden member again inside its group's multi-host view.
+    pub(super) fn include_in_group(
+        &mut self,
+        group_id: String,
+        host_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.arrange_workspace(
+            |workspace| crate::workspace::include_in_group(workspace, &host_id),
+            cx,
+        );
+        self.open_group(group_id, Some(HostKey::Remote(host_id)), window, cx);
+    }
+
+    /// Reconcile the window's open links with `targets`: when none of the
+    /// currently open links survive, retire the old workspace as a whole; when
+    /// at least one surviving non-refused link stays open, close only the links
+    /// leaving and open the ones arriving without disturbing surviving links.
+    fn apply_scope_targets(
+        &mut self,
+        targets: Vec<AttachmentTarget>,
+        focus: Option<HostKey>,
+        reveal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_scope_targets_with_local(targets, None, focus, reveal, window, cx);
+    }
+
+    fn apply_scope_targets_with_local(
+        &mut self,
+        targets: Vec<AttachmentTarget>,
+        mut prestarted_local: Option<tcode_client::host::Transport>,
+        focus: Option<HostKey>,
+        reveal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if targets.is_empty() {
             let links = std::mem::take(&mut self.links);
             self.retire(links, cx);
-            self.open_workspace(Some(target), true, window, cx);
-            return;
-        }
-        if let Some(link) = self.link_of(&host) {
-            if !refused(&link.store, cx) {
-                self.arrange_workspace(|workspace| crate::workspace::join(workspace, &host), cx);
-                self.order_links(cx);
-                self.sync_hosts(cx);
-                self.show_host_section(&host, cx);
-                return;
-            }
-            self.close_link(&host, window, cx);
-        }
-        if self.open_target(target, window, cx).is_none() {
+            self.sync_hosts(cx);
+            self.window_state
+                .update(cx, |state, cx| state.leave_workspace(cx));
             cx.notify();
             return;
         }
-        self.arrange_workspace(|workspace| crate::workspace::join(workspace, &host), cx);
-        if self.column.is_none() {
+        let keeps_any = self.links.iter().any(|link| {
+            !refused(&link.store, cx)
+                && targets
+                    .iter()
+                    .any(|target| same_target(&link.target, target))
+        });
+        if !keeps_any {
+            self.pending_navigation_restore = None;
             self.blur_navigation(window, cx);
-            self.enter_first_host(host.clone(), window, cx);
+            let links = std::mem::take(&mut self.links);
+            self.retire(links, cx);
+            for target in targets {
+                if target == AttachmentTarget::Local
+                    && let Some(local) = prestarted_local.take()
+                {
+                    self.open_link(target, Some(local), window, cx);
+                } else {
+                    self.open_target(target, window, cx);
+                }
+            }
+            self.order_links(cx);
+            self.sync_hosts(cx);
+            let opened = |key: &HostKey| self.link_of(key).is_some();
+            let host = focus
+                .filter(opened)
+                .or_else(|| Some(HostKey::Local).filter(opened))
+                .or_else(|| self.links.first().map(Link::key));
+            let Some(host) = host else {
+                self.window_state
+                    .update(cx, |state, cx| state.leave_workspace(cx));
+                cx.notify();
+                return;
+            };
+            self.show_column(host.clone(), window, cx);
+            self.window_state
+                .update(cx, |state, cx| state.enter_workspace(cx));
+            self.show_pending_session(&host, cx);
+            cx.notify();
+            return;
+        }
+        // Keep surviving links open; close links that left or were refused.
+        let to_close: Vec<HostKey> = self
+            .links
+            .iter()
+            .filter(|link| {
+                refused(&link.store, cx)
+                    || !targets
+                        .iter()
+                        .any(|target| same_target(&link.target, target))
+            })
+            .map(Link::key)
+            .collect();
+        for key in to_close {
+            self.close_link(&key, window, cx);
+        }
+        for target in targets {
+            if self.link_of(&target.key()).is_none() {
+                if target == AttachmentTarget::Local
+                    && let Some(local) = prestarted_local.take()
+                {
+                    self.open_link(target, Some(local), window, cx);
+                } else {
+                    self.open_target(target, window, cx);
+                }
+            }
+        }
+        if self.column.is_none() {
+            if let Some(host) = focus
+                .clone()
+                .filter(|key| self.link_of(key).is_some())
+                .or_else(|| self.links.first().map(Link::key))
+            {
+                self.blur_navigation(window, cx);
+                self.enter_first_host(host, window, cx);
+            }
         } else {
             self.order_links(cx);
             self.sync_hosts(cx);
         }
-        self.show_host_section(&host, cx);
+        if reveal
+            && let Some(host) = focus
+                .filter(|key| self.link_of(key).is_some())
+                .or_else(|| self.links.first().map(Link::key))
+        {
+            self.show_host_section(&host, cx);
+        }
         cx.notify();
     }
 
@@ -336,70 +649,67 @@ impl AppShell {
         cx.notify();
     }
 
-    /// Take `host` out of the workspace: only its link closes, and it stays
-    /// out though a group it is in would bring it back. Leaving a host
-    /// reached alone opens the workspace again.
+    /// Take `host` out of the current view: in a machine group, only its link
+    /// closes and it stays hidden from that group; on a single remote host or
+    /// space, a desktop returns to this machine and a client without a local
+    /// host empties the window.
     pub(super) fn leave_host(
         &mut self,
         host: &HostKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The host in this process is always in the workspace.
+        // The host in this process is never disconnected.
         if *host == HostKey::Local || self.link_of(host).is_none() {
             return;
         }
-        if self.alone {
-            let links = std::mem::take(&mut self.links);
-            self.retire(links, cx);
-            self.sync_hosts(cx);
-            self.open_workspace(None, true, window, cx);
+        let in_group = matches!(
+            self.active_scope(cx),
+            tcode_client::host::WorkspaceScope::Group { .. }
+        );
+        if in_group {
+            self.arrange_workspace(
+                |workspace| crate::workspace::leave_group_member(workspace, host),
+                cx,
+            );
+            let last = self.links.len() == 1;
+            self.close_link(host, window, cx);
+            if last {
+                self.arrange_workspace(
+                    |workspace| {
+                        crate::workspace::set_scope(
+                            workspace,
+                            tcode_client::host::WorkspaceScope::Empty,
+                        );
+                    },
+                    cx,
+                );
+            }
             return;
         }
-        self.arrange_workspace(|workspace| crate::workspace::leave(workspace, host), cx);
+        if self.setup.local.is_some() {
+            self.open_host(AttachmentTarget::Local, window, cx);
+            return;
+        }
+        self.arrange_workspace(
+            |workspace| {
+                crate::workspace::set_scope(workspace, tcode_client::host::WorkspaceScope::Empty);
+            },
+            cx,
+        );
         self.close_link(host, window, cx);
     }
 
-    /// Move `host` one place earlier, or later, among the workspace's hosts.
+    /// Move `host` one place earlier, or later, among the current group's hosts.
     pub(super) fn move_host(&mut self, host: &HostKey, earlier: bool, cx: &mut Context<Self>) {
+        let members: Vec<HostKey> = self.members(cx).iter().map(AttachmentTarget::key).collect();
         self.arrange_workspace(
-            |workspace| crate::workspace::shift(workspace, host, earlier),
+            |workspace| crate::workspace::shift(workspace, &members, host, earlier),
             cx,
         );
         self.order_links(cx);
         self.sync_hosts(cx);
         cx.notify();
-    }
-
-    /// Make `target` the workspace's only host, beneath the navigation root.
-    /// The window, its stack and its overlays stay put.
-    pub(super) fn replace_workspace(
-        &mut self,
-        target: AttachmentTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Already there: go to that host's threads instead of tearing its
-        // link down and building the same one again.
-        if let [current] = self.links.as_slice()
-            && same_target(&current.target, &target)
-            && !refused(&current.store, cx)
-        {
-            self.show_host_section(&target.key(), cx);
-            return;
-        }
-        // Never drop a working link for one this client cannot open.
-        let reachable = match &target {
-            AttachmentTarget::Local => self.setup.local.is_some(),
-            AttachmentTarget::Remote(_) => true,
-        };
-        if !reachable {
-            log::error!("this client cannot reach {target:?}");
-            return;
-        }
-        self.alone = !crate::workspace::joins_target(&target);
-        self.blur_navigation(window, cx);
-        self.attach(target, window, cx);
     }
 
     /// Close the link to `host` and the panes showing its threads, and
@@ -595,37 +905,6 @@ impl AppShell {
     ) -> Option<HostKey> {
         let local = self.start_local(&target, cx).ok()?;
         self.open_link(target, local, window, cx)
-    }
-
-    /// Link this window to `target` alone, in place of every link it had.
-    pub(super) fn attach(
-        &mut self,
-        target: AttachmentTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // A local host that does not start is a failure to link like any
-        // other: whatever this window was on stays.
-        let Ok(local) = self.start_local(&target, cx) else {
-            return;
-        };
-        self.pending_navigation_restore = None;
-        let links = std::mem::take(&mut self.links);
-        self.retire(links, cx);
-        let host = self.open_link(target, local, window, cx);
-        self.sync_hosts(cx);
-        let Some(host) = host else {
-            log::error!("this client cannot reach the requested host");
-            self.window_state
-                .update(cx, |state, cx| state.leave_workspace(cx));
-            cx.notify();
-            return;
-        };
-        self.show_column(host.clone(), window, cx);
-        self.window_state
-            .update(cx, |state, cx| state.enter_workspace(cx));
-        self.show_pending_session(&host, cx);
-        cx.notify();
     }
 
     /// A message still on its way to a thread of `host` shows that thread.

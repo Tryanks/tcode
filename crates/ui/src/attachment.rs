@@ -285,15 +285,23 @@ impl AttachmentTarget {
     }
 }
 
-/// What the window is asked to do with a host.
+/// What the window is asked to do with a host or machine group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostRequest {
-    /// Show `target` in the workspace beside the hosts already there; a
-    /// host that is reached only alone replaces them.
+    /// Switch this window to `target` alone (this machine, a standalone
+    /// machine, a group member viewed on its own, or a space).
     Open(AttachmentTarget),
-    /// Take the host out of the workspace, keeping its saved record.
+    /// Switch this window to the multi-host view of the machine group
+    /// `group_id`.
+    OpenGroup(String),
+    /// Switch this window to a newly paired machine: its group's multi-host
+    /// view when it belongs to one, otherwise that machine alone.
+    Paired(PairedHost),
+    /// Show a previously hidden member again inside its group's view.
+    IncludeInGroup { group_id: String, host_id: String },
+    /// Take `host` out of the current view, keeping its saved record.
     Leave(HostKey),
-    /// Move the host one place earlier, or later, among the workspace's.
+    /// Move the host one place earlier, or later, within the current group view.
     Move { host: HostKey, earlier: bool },
 }
 

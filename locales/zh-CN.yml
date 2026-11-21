@@ -1697,6 +1697,12 @@ hosts:
   actions: "%{name} 的操作"
   pair_again: "重新配对"
   in_group: "主机组成员"
+  group_section: "主机组"
+  group_machine_one: "1 台主机"
+  group_machines: "%{count} 台主机"
+  group_machines_with_local: "%{count} 台主机（含本机）"
+  hidden_in_group: "已在主机组视图中隐藏"
+  include_in_group: "在主机组中显示"
   local:
     unavailable: "无法启动：%{reason}"
     default_settings: "%{reason}。无法读取本机设置，当前使用默认语言和主题。"

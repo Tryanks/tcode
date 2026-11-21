@@ -1704,6 +1704,12 @@ hosts:
   actions: "%{name} の操作"
   pair_again: "再ペアリング"
   in_group: "ホストグループに所属"
+  group_section: "ホストグループ"
+  group_machine_one: "1 台のホスト"
+  group_machines: "%{count} 台のホスト"
+  group_machines_with_local: "%{count} 台のホスト（このマシンを含む）"
+  hidden_in_group: "グループ表示から非表示"
+  include_in_group: "グループに表示"
   local:
     unavailable: "起動できませんでした：%{reason}"
     default_settings: "%{reason}。設定を読み込めなかったため、既定の言語とテーマを使用しています。"

@@ -857,6 +857,7 @@ fn preview_reads_the_attachment_route_when_saved_hosts_are_stale(cx: &mut TestAp
         addrs: vec!["192.168.31.5:47420".into()],
         last_connected_unix: None,
         group_id: None,
+        group_name: None,
         space_id: None,
         space_name: None,
     };

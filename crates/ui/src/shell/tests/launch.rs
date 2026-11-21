@@ -36,6 +36,7 @@ fn pending_outbox_overrides_desktop_launch_without_a_snapshot(cx: &mut TestAppCo
             addrs: vec!["127.0.0.1:48442".into()],
             last_connected_unix: None,
             group_id: None,
+            group_name: None,
             space_id: None,
             space_name: None,
         },

@@ -212,6 +212,7 @@ fn a_device_paired_with_one_member_reaches_every_member_and_outlives_the_first()
     );
     let from_window = saved(&window, &headless);
     assert_eq!(from_window.group_id.as_deref(), Some(home.id.as_str()));
+    assert_eq!(from_window.group_name.as_deref(), Some("Home"));
     assert!(
         saved_changes.try_recv().is_ok(),
         "the window hears of the group's machines as they are saved"
@@ -225,6 +226,7 @@ fn a_device_paired_with_one_member_reaches_every_member_and_outlives_the_first()
     let paired = pair(&invitation(&desktop), &phone);
     assert_eq!(paired.name, "Desktop");
     assert_eq!(paired.group_id.as_deref(), Some(home.id.as_str()));
+    assert_eq!(paired.group_name.as_deref(), Some("Home"));
     assert!(admits(&desktop, &phone));
     eventually(&headless, "the headless machine admit the phone", || {
         admits(&headless, &phone)

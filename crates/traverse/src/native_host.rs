@@ -342,6 +342,11 @@ impl ClientHost for NativeClientHost {
             .map_err(|error| FileFailure::new(crate::identity::HOST_FILE, error))
     }
 
+    fn local_machine_group(&self) -> Result<Option<(String, String)>, FileFailure> {
+        crate::identity::existing_machine_group(&self.data_dir)
+            .map_err(|error| FileFailure::new(crate::identity::HOST_FILE, error))
+    }
+
     /// None while mobile.json cannot be read; the window reports that file.
     fn last_host_id(&self) -> Option<String> {
         self.prefs()
@@ -693,6 +698,7 @@ mod tests {
                 addrs: vec!["192.168.31.5:47420".into()],
                 last_connected_unix: None,
                 group_id: None,
+                group_name: None,
             })
             .unwrap();
         let (locked, received) = std::sync::mpsc::channel();
@@ -835,6 +841,7 @@ mod tests {
             addrs: Vec::new(),
             last_connected_unix: None,
             group_id: None,
+            group_name: None,
         };
         assert_eq!(host.remember_host(machine).unwrap_err().file, "hosts.json");
         assert_eq!(host.remove_host(MACHINE_ID).unwrap_err().file, "hosts.json");
@@ -891,6 +898,9 @@ mod tests {
             window_size: Some((1280, 900)),
             window_maximized: true,
             workspace: Some(tcode_client::host::WorkspacePreference {
+                scope: Some(tcode_client::host::WorkspaceScope::Group {
+                    group_id: "home".into(),
+                }),
                 hosts: vec![
                     tcode_client::host::WorkspaceHost {
                         host_id: "local".into(),
@@ -946,6 +956,7 @@ mod tests {
         assert_eq!(
             saved["workspace"],
             serde_json::json!({
+                "scope": {"kind": "group", "group_id": "home"},
                 "hosts": [{"host_id": "local"}, {"host_id": "studio", "collapsed": true}],
                 "left": ["attic"]
             })

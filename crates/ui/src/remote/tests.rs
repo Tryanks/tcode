@@ -37,6 +37,7 @@ fn a_fixed_machine_client_has_no_way_to_add_one(cx: &mut TestAppContext) {
                 addrs: Vec::new(),
                 last_connected_unix: None,
                 group_id: None,
+                group_name: None,
                 space_id: None,
                 space_name: None,
             }])
@@ -388,6 +389,7 @@ fn superseded_pairing_does_not_overwrite_the_saved_machine(cx: &mut TestAppConte
         addrs: vec!["192.168.1.10:47420".into()],
         last_connected_unix: None,
         group_id: None,
+        group_name: None,
         space_id: None,
         space_name: None,
     };
