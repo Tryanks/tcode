@@ -214,19 +214,14 @@ pub enum Query {
 /// to it, and the bound is what one render may cost the host.
 pub const MAX_STORED_OUTPUT_COLS: u16 = 400;
 
-/// Screen rows the host emulates command output into. Trailing blank rows are
-/// trimmed, so a shorter output returns a shorter frame.
-pub const STORED_OUTPUT_ROWS: u16 = 16;
-
-/// How much of a finished command's output its frame holds: all of it, up to
-/// its last `STORED_OUTPUT_BYTES` and the `STORED_OUTPUT_HISTORY` rows of
-/// scrollback they make; what comes before, the frame counts in
-/// `lines_evicted`. A frame goes as one transport line, whose peers read
-/// 16 MiB at most, and each character is a JSON cell of about 13 bytes: this
-/// much dense output makes a frame of about 10 MiB (measured by the host's
-/// `a_frame_at_the_ceiling_fits_one_transport_line`).
-pub const STORED_OUTPUT_BYTES: usize = 768 * 1024;
-pub const STORED_OUTPUT_HISTORY: usize = 20_000;
+/// Rows of a command's output its frame holds: the last ones, as the host's
+/// emulator screen of this height shows them, trailing blank rows trimmed.
+/// They are rows of the screen, not lines of the output: a line wraps at the
+/// width subscribed to, so a frame is at most this many rows of that many
+/// cells however long a line is. What came before them the frame counts in
+/// `lines_evicted`. It is more than any client's window shows at once, so
+/// each takes the rows it shows from the end of the one frame they all get.
+pub const STORED_OUTPUT_ROWS: u16 = 32;
 
 /// Largest export the host will put on one response frame. The transport writes
 /// a single WebSocket text frame per NDJSON line and peers read with

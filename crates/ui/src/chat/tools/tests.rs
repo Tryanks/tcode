@@ -990,20 +990,6 @@ fn copied_output(id: &str, cx: &mut VisualTestContext) -> String {
         .unwrap_or_default()
 }
 
-/// The wheel over `id`'s output, `lines` rows' worth, up into what scrolled
-/// off for a positive count.
-fn scroll_output(id: &str, lines: f32, cx: &mut VisualTestContext) {
-    let output = cx
-        .debug_bounds(format!("command-output-{id}").leak())
-        .expect("the output's grid");
-    cx.simulate_event(gpui::ScrollEvent {
-        position: output.center(),
-        delta: gpui::ScrollDelta::Lines(gpui::point(0., lines)),
-        ..Default::default()
-    });
-    draw_settled(cx);
-}
-
 /// Steps the host until the window drawn at rest shows `what`.
 fn step_until(
     thread: &mut StoredThread,
@@ -1014,12 +1000,11 @@ fn step_until(
     thread.driver.settle_until(cx, what, done);
 }
 
-/// A command that printed more lines than its record keeps, its host's screen of them in
-/// the window's grid, scrolls back to the first line it printed. The record
-/// carried only a preview of them, but the host's screen holds them all, so
-/// the window offers nothing to load.
+/// A command that printed more lines than its window has room for shows
+/// the last of them and says that more came before, with nothing to load:
+/// the 16-row window holds the command's row and the output's last 15.
 #[gpui::test]
-fn a_long_command_scrolls_to_its_first_line(cx: &mut TestAppContext) {
+fn a_long_command_shows_its_last_lines_and_says_more_came_before(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let log = shell_log("count", 300);
@@ -1030,13 +1015,13 @@ fn a_long_command_scrolls_to_its_first_line(cx: &mut TestAppContext) {
     step_until(&mut thread, "the host's screen", cx, |cx| {
         copied_output("count", cx).ends_with("line 300 of the run")
     });
-    assert!(!shows(cx, "load-output-count"), "nothing left to load");
-    scroll_output("count", 400., cx);
-    let start = copied_output("count", cx);
+    let shown = copied_output("count", cx);
     assert!(
-        start.starts_with("line 1 of the run\n"),
-        "it scrolls back to the first line: {start}"
+        shown.starts_with("line 286 of the run\n"),
+        "its last rows: {shown}"
     );
+    assert!(shows(cx, "command-output-before-count"));
+    assert!(!shows(cx, "load-output-count"), "nothing left to load");
     thread.shutdown(cx);
 }
 
@@ -1046,7 +1031,7 @@ fn a_long_command_scrolls_to_its_first_line(cx: &mut TestAppContext) {
 fn a_shortened_commands_copy_output_copies_whole(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
-    let lines = tcode_protocol::STORED_OUTPUT_HISTORY + 5_000;
+    let lines = 25_000;
     let (mut thread, cx) = StoredThread::open(cx, &shell_log("long", lines), 1_024.);
     thread.open_work_log("long", cx);
     let header = cx.debug_bounds("activity-row-long").expect("the window");

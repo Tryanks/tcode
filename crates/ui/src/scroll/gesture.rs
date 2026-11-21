@@ -47,16 +47,8 @@ pub(crate) struct AreaKey(u64);
 
 impl AreaKey {
     pub(crate) fn of_element(id: &GlobalElementId) -> Self {
-        Self::hashed(id)
-    }
-
-    pub(crate) fn named(name: &str) -> Self {
-        Self::hashed(name)
-    }
-
-    fn hashed(value: impl Hash) -> Self {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        value.hash(&mut hasher);
+        id.hash(&mut hasher);
         Self(hasher.finish())
     }
 }
