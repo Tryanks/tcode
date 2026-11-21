@@ -14,8 +14,8 @@ use gpui_base::{h_flex, v_flex};
 
 use super::dom::{Document, ElementData, MAX_DEPTH, MAX_NODES, NodeId, NodeKind};
 use super::style::{
-    AccentBorder, AccentBorderSide, ComputedStyle, DisplayKind, GridColumns, GridTrack,
-    ListStyleType, TextTransform, WhiteSpaceMode,
+    ComputedStyle, DisplayKind, GridColumns, GridTrack, ListStyleType, TextTransform,
+    WhiteSpaceMode,
 };
 use super::svg::{MediaSlots, RasterKey, RasterState};
 use super::{Computed, HtmlState, PictureOf};
@@ -228,19 +228,20 @@ fn render_element(
 
     let mut container = div().min_w_0();
     style.apply_to(container.style(), ctx.viewport_width);
-    let accent_border = style.split_accent_border();
-    if let Some(accent) = accent_border {
-        // Clear the accent side on the outer box so the inner overlay strip
-        // paints that side's distinct color without altering the other sides.
-        let s = container.style();
-        match accent.side {
-            AccentBorderSide::Top => s.border_widths.top = Some(px(0.0).into()),
-            AccentBorderSide::Right => s.border_widths.right = Some(px(0.0).into()),
-            AccentBorderSide::Bottom => s.border_widths.bottom = Some(px(0.0).into()),
-            AccentBorderSide::Left => s.border_widths.left = Some(px(0.0).into()),
-        }
-        s.overflow.x.get_or_insert(Overflow::Hidden);
-        s.overflow.y.get_or_insert(Overflow::Hidden);
+    if matches!(style.grid_columns, Some(GridColumns::AutoFit { .. }))
+        && let Some(columns) = &mut container.style().grid_cols
+    {
+        // `auto-fit` leaves no empty column: a row of three items is three
+        // columns wide however many would fit.
+        let items = ctx.doc.nodes[node_id]
+            .children
+            .iter()
+            .filter(|&&child| match &ctx.doc.nodes[child].kind {
+                NodeKind::Text(text) => !text.trim().is_empty(),
+                NodeKind::Element(_) => ctx.computed.shown(child).is_some(),
+            })
+            .count();
+        columns.repeat = columns.repeat.min(items.max(1) as u16);
     }
 
     let next_list_ctx = match el.tag.as_str() {
@@ -319,30 +320,7 @@ fn render_element(
                 .into_any_element()
         }
     };
-    Some(wrap_accent_border(container, accent_border, style))
-}
-
-fn wrap_accent_border(
-    inner: AnyElement,
-    accent: Option<AccentBorder>,
-    style: &ComputedStyle,
-) -> AnyElement {
-    let Some(accent) = accent else {
-        return inner;
-    };
-    let mut shell = div().w_full().min_w_0().border_color(accent.color);
-    let s = shell.style();
-    match accent.side {
-        AccentBorderSide::Top => s.border_widths.top = Some(accent.width),
-        AccentBorderSide::Right => s.border_widths.right = Some(accent.width),
-        AccentBorderSide::Bottom => s.border_widths.bottom = Some(accent.width),
-        AccentBorderSide::Left => s.border_widths.left = Some(accent.width),
-    }
-    s.corner_radii.top_left = style.radius_tl;
-    s.corner_radii.top_right = style.radius_tr;
-    s.corner_radii.bottom_right = style.radius_br;
-    s.corner_radii.bottom_left = style.radius_bl;
-    shell.overflow_hidden().child(inner).into_any_element()
+    Some(container)
 }
 
 fn render_pseudo(style: &ComputedStyle, ctx: &mut RenderCtx<'_>) -> AnyElement {
@@ -1069,8 +1047,9 @@ fn render_svg_element(
         }
         Some((_, RasterState::Failed(error))) => picture_failed(&error, cx),
         None => {
-            let mut placeholder = div().w(px(w)).h(px(h)).rounded(px(6.0));
+            let mut placeholder = div().rounded(px(6.0));
             style.apply_to(placeholder.style(), ctx.viewport_width);
+            fit_media_box(placeholder.style(), style, w, h);
             maybe_center_media(placeholder.into_any_element(), style)
         }
     })
@@ -1145,11 +1124,7 @@ fn render_raster_box(
     let viewer_source = source.clone();
     let clickable = w >= 64.0 || h >= 64.0;
 
-    let mut image = img(source)
-        .w(px(w))
-        .h(px(h))
-        .object_fit(ObjectFit::Contain)
-        .flex_shrink_0();
+    let mut image = img(source).size_full().object_fit(ObjectFit::Contain);
     if let Some(radius) = style.radius_tl {
         image.style().corner_radii.top_left = Some(radius);
         image.style().corner_radii.top_right = style.radius_tr.or(Some(radius));
@@ -1157,11 +1132,9 @@ fn render_raster_box(
         image.style().corner_radii.bottom_left = style.radius_bl.or(Some(radius));
     }
 
-    let mut wrapper = div().flex_shrink_0();
+    let mut wrapper = div();
     style.apply_to(wrapper.style(), ctx.viewport_width);
-    // Let the fitted image own exact aspect-preserved dimensions unless explicitly overridden.
-    wrapper.style().size.width = Some(px(w).into());
-    wrapper.style().size.height = Some(px(h).into());
+    fit_media_box(wrapper.style(), style, w, h);
 
     let element = if clickable {
         wrapper
@@ -1177,6 +1150,22 @@ fn render_raster_box(
         wrapper.child(image).into_any_element()
     };
     maybe_center_media(element, style)
+}
+
+/// The box of a picture fitted to `w` by `h`: as wide as the page asks, a
+/// share of what holds it where the page gives a percentage, never wider than
+/// what holds it, and as tall as its shape then makes it. The fitted size is
+/// reckoned from the whole view's width, which a box nested in padding is
+/// narrower than.
+fn fit_media_box(target: &mut gpui::StyleRefinement, style: &ComputedStyle, w: f32, h: f32) {
+    target.size.width = Some(match style.width {
+        Some(Length::Definite(DefiniteLength::Fraction(share))) => relative(share).into(),
+        _ => px(w).into(),
+    });
+    target.size.height = Some(Length::Auto);
+    target.max_size.width = Some(relative(1.0).into());
+    target.aspect_ratio = Some(w / h);
+    target.flex_shrink = Some(1.0);
 }
 
 fn maybe_center_media(element: AnyElement, style: &ComputedStyle) -> AnyElement {

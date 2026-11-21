@@ -98,21 +98,6 @@ pub(crate) enum GridColumns {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AccentBorderSide {
-    Top,
-    Right,
-    Bottom,
-    Left,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct AccentBorder {
-    pub(crate) side: AccentBorderSide,
-    pub(crate) width: AbsoluteLength,
-    pub(crate) color: Hsla,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ListStyleType {
     Default,
     None,
@@ -399,58 +384,6 @@ impl ComputedStyle {
             || (self.background.is_some() && self.background_hsla.is_none())
     }
 
-    /// When an element sets borders on multiple sides with a distinct color on one side
-    /// (e.g. `border: 1px solid var(--border); border-left: 4px solid var(--accent);`),
-    /// returns that distinct accent side because GPUI `Style` has a single `border_color`.
-    pub(crate) fn split_accent_border(&self) -> Option<AccentBorder> {
-        let base = self.border_color.unwrap_or(self.color);
-        let sides = [
-            (
-                AccentBorderSide::Top,
-                self.border_top_w,
-                self.border_top_color,
-            ),
-            (
-                AccentBorderSide::Right,
-                self.border_right_w,
-                self.border_right_color,
-            ),
-            (
-                AccentBorderSide::Bottom,
-                self.border_bottom_w,
-                self.border_bottom_color,
-            ),
-            (
-                AccentBorderSide::Left,
-                self.border_left_w,
-                self.border_left_color,
-            ),
-        ];
-        let mut active_sides = 0usize;
-        let mut distinct: Option<AccentBorder> = None;
-        for (side, w, c) in sides {
-            let Some(w) = w else { continue };
-            let px_w = match w {
-                AbsoluteLength::Pixels(p) => f32::from(p),
-                AbsoluteLength::Rems(r) => r.0 * self.font_size,
-            };
-            if px_w <= 0.0 {
-                continue;
-            }
-            active_sides += 1;
-            if let Some(color) = c
-                && color != base
-            {
-                distinct = Some(AccentBorder {
-                    side,
-                    width: w,
-                    color,
-                });
-            }
-        }
-        if active_sides >= 2 { distinct } else { None }
-    }
-
     /// Apply this computed style onto a GPUI `StyleRefinement`.
     pub(crate) fn apply_to(&self, style: &mut StyleRefinement, viewport_width: f32) {
         self.apply_flow_to(style, viewport_width);
@@ -634,6 +567,8 @@ impl ComputedStyle {
         if self.border_left_w.is_some() {
             style.border_widths.left = self.border_left_w;
         }
+        // A box is drawn in one border colour, as GPUI draws it: the one
+        // given for the whole box, else a side's.
         if let Some(color) = self
             .border_color
             .or(self.border_left_color)
