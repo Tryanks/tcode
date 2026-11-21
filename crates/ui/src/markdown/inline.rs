@@ -128,7 +128,7 @@ impl Inline {
             return;
         };
         let pending = PendingContextTarget::Link(PendingLinkMenu {
-            target: view.read(cx).resolve_link(&link.url),
+            target: view.read(cx).resolve_link(&link.url, cx),
             text: text.get(range).map(SharedString::from).unwrap_or_default(),
             raw_url: link.url,
         });
@@ -419,7 +419,7 @@ impl Element for Inline {
                     let row = rows.iter().find(|row| row.hitbox.is_hovered(window))?;
                     let (view, url) = (view.clone(), links.get(row.link)?.1.url.clone());
                     let build: crate::overlay::TooltipBuilder = Rc::new(move |_, cx| {
-                        Tooltip::new(view.read(cx).resolve_link(&url).tooltip_text())
+                        Tooltip::new(view.read(cx).resolve_link(&url, cx).tooltip_text())
                     });
                     Some((row.link, row.placement, build))
                 }
@@ -497,7 +497,7 @@ impl Element for Inline {
                 }
                 if let Some(link) = Self::link_for_position(&layout, &links, event.position) {
                     cx.stop_propagation();
-                    view.read(cx).resolve_link(&link.url).open(window, cx);
+                    MarkdownState::open_link(&view, &link.url, window, cx);
                 }
             }
         });

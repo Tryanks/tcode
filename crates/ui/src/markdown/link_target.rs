@@ -41,16 +41,23 @@ impl LinkTarget {
         }
     }
 
-    pub(super) fn open(self, window: &mut gpui::Window, cx: &mut gpui::App) {
+    /// Open the target; `host` is the host a file it names is on.
+    pub(super) fn open(
+        self,
+        host: crate::store::ImageHost,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) {
         match self {
             Self::Web(url) => cx.open_url(&url),
-            Self::Local(path) => cx.open_with_system(&path),
+            Self::Local(path) => crate::host_file::open(host, &path, window, cx),
             Self::Thread(anchor) => window.dispatch_action(Box::new(anchor), cx),
         }
     }
 }
 
-pub(super) fn resolve_link(url: &str, base_dir: Option<&Path>) -> LinkTarget {
+/// `elsewhere`: the files are on a host this client is not on.
+pub(super) fn resolve_link(url: &str, base_dir: Option<&Path>, elsewhere: bool) -> LinkTarget {
     if let Some(anchor) = url.strip_prefix(THREAD_SCHEME) {
         let (thread_id, position) = match anchor.split_once('#') {
             Some((id, position)) => (id, position.parse().ok()),
@@ -81,6 +88,21 @@ pub(super) fn resolve_link(url: &str, base_dir: Option<&Path>) -> LinkTarget {
             }
         }
         index += 1;
+    }
+
+    // Another machine's files cannot be looked for from here, so what is
+    // written as a path is taken as one, without the location it ends with,
+    // and is absolute by that machine's rules. What has a scheme of its own
+    // (`data:`) is not written as a path.
+    if elsewhere {
+        let path = candidates.pop().unwrap_or_default();
+        return if path.starts_with('/') || crate::remote::windows_drive_path(&path) {
+            LinkTarget::Local(PathBuf::from(path))
+        } else if let Some(base_dir) = base_dir.filter(|_| url::Url::parse(&path).is_err()) {
+            LinkTarget::Local(base_dir.join(path))
+        } else {
+            LinkTarget::Web(url.to_string())
+        };
     }
 
     for candidate in candidates {
@@ -157,7 +179,7 @@ mod tests {
             "src/lib.rs#Lx",
         ] {
             assert_eq!(
-                resolve_link(target, Some(&root)),
+                resolve_link(target, Some(&root), false),
                 LinkTarget::Web(target.into()),
                 "{target}"
             );
@@ -170,21 +192,21 @@ mod tests {
             "src/lib.rs:42#L12",
         ] {
             assert_eq!(
-                resolve_link(target, Some(&root)),
+                resolve_link(target, Some(&root), false),
                 LinkTarget::Local(file.clone()),
                 "{target}"
             );
         }
         assert_eq!(
-            resolve_link(file.to_str().unwrap(), None),
+            resolve_link(file.to_str().unwrap(), None, false),
             LinkTarget::Local(file)
         );
         assert_eq!(
-            resolve_link("src/lib.rs", None),
+            resolve_link("src/lib.rs", None, false),
             LinkTarget::Web("src/lib.rs".into())
         );
         assert_eq!(
-            resolve_link("file:///does-not-need-to-exist", None),
+            resolve_link("file:///does-not-need-to-exist", None, false),
             LinkTarget::Local(PathBuf::from("/does-not-need-to-exist"))
         );
         for (target, position) in [
@@ -192,11 +214,31 @@ mod tests {
             ("tcode-thread://t-1", None),
         ] {
             assert_eq!(
-                resolve_link(target, None),
+                resolve_link(target, None, false),
                 LinkTarget::Thread(OpenThreadAnchor {
                     thread_id: "t-1".into(),
                     position,
                 }),
+                "{target}"
+            );
+        }
+        // A host elsewhere: none of these is on this client to be found.
+        for (target, path) in [
+            ("/srv/app/out/report.pdf", "/srv/app/out/report.pdf"),
+            ("/srv/app/src/lib.rs:42:7", "/srv/app/src/lib.rs"),
+            ("src/lib.rs#L12", "/srv/app/src/lib.rs"),
+            ("C:\\app\\src\\lib.rs:42", "C:\\app\\src\\lib.rs"),
+        ] {
+            assert_eq!(
+                resolve_link(target, Some(Path::new("/srv/app")), true),
+                LinkTarget::Local(PathBuf::from(path)),
+                "{target}"
+            );
+        }
+        for target in ["https://example.com/docs#L12", "data:text/plain,hello"] {
+            assert_eq!(
+                resolve_link(target, Some(&root), true),
+                LinkTarget::Web(target.into()),
                 "{target}"
             );
         }

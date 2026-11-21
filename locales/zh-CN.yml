@@ -1442,6 +1442,7 @@ errors:
   provider_closed: "%{harness} 会话意外关闭。"
   persist_event: "保存事件失败：%{error}"
   export_thread: "导出线程失败：%{error}"
+  download_file: "下载 %{name} 失败：%{error}"
   worktree_add: "创建 worktree 失败：%{error}"
   worktree_remove: "移除 worktree 失败：%{error}"
   orphan_sweep_skipped: "Tcode 未清理废弃的 worktree：无法读取线程：%{error}"

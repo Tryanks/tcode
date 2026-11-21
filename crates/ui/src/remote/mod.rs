@@ -258,7 +258,7 @@ pub(crate) fn open_host_path_in_zed(
 }
 
 /// Whether `path` is a Windows drive path, `C:\...` or `C:/...`.
-fn windows_drive_path(path: &str) -> bool {
+pub(crate) fn windows_drive_path(path: &str) -> bool {
     matches!(path.as_bytes(), [drive, b':', b'\\' | b'/', ..] if drive.is_ascii_alphabetic())
 }
 
