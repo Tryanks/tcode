@@ -143,14 +143,13 @@ pub(crate) fn visualization(
     viewport_width: Option<f32>,
     cx: &App,
 ) -> AnyElement {
-    let note = |selector: String, text: String| {
+    let note = |text: String| {
         div()
             .w_full()
             .min_w_0()
             .text_secondary(false, cx)
             .whitespace_normal()
             .child(text)
-            .debug_selector(move || selector)
             .into_any_element()
     };
     match shown {
@@ -160,24 +159,19 @@ pub(crate) fn visualization(
             .gap_2()
             .items_center()
             .child(Spinner::new().small())
-            .child(note(
-                format!("visualize-building-{id}"),
-                crate::tr!("chat.visualize_building").into_owned(),
-            ))
+            .child(note(crate::tr!("chat.visualize_building").into_owned()))
             .into_any_element(),
-        Shown::Unreadable(why) => note(format!("visualize-unreadable-{id}"), why),
+        Shown::Unreadable(why) => note(why),
         Shown::Page { state, html } => {
             let mut view = HtmlView::new(&state);
             if let Some(width) = viewport_width {
                 view = view.viewport_width(width);
             }
-            let selector = format!("visualize-page-{id}");
             div()
                 .id(SharedString::from(format!("visualize-page-{id}")))
                 .w_full()
                 .min_w_0()
                 .child(view)
-                .debug_selector(move || selector)
                 .context_menu(move |menu, _, _| {
                     menu.menu_with_icon(
                         crate::tr!("chat.copy_html").into_owned(),
