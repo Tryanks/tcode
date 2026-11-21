@@ -767,8 +767,8 @@ fn main() {
     let initial_target = {
         let native_client = native_client.clone();
         let data_dir = data_dir.clone();
-        move || match connect {
-            Some(host_id) => {
+        move || {
+            connect.map(|host_id| {
                 let saved = native_client.load_hosts().unwrap_or_else(|error| {
                     eprintln!("tcode: could not read {}/{error}", data_dir.display());
                     std::process::exit(1);
@@ -781,8 +781,7 @@ fn main() {
                     std::process::exit(1);
                 };
                 AttachmentTarget::Remote(Box::new(host))
-            }
-            None => AttachmentTarget::Local,
+            })
         }
     };
     // The local kernel is process composition, not a property of the window's
@@ -895,7 +894,7 @@ fn main() {
             let shell = main_window.open(
                 ShellSetup {
                     local_failure: failure,
-                    initial: Some(initial_target),
+                    initial: initial_target,
                     local_settings: kernel.is_some().then_some(local_settings),
                     ..ShellSetup::default()
                 },

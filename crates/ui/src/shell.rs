@@ -662,9 +662,9 @@ pub struct ShellSetup {
     /// frame, whatever the window attaches to, and the window attaches to that
     /// host only when asked again.
     pub local_failure: Option<String>,
-    /// The host the window shows first at launch, opened beside the
-    /// workspace's hosts though it is not one of them; a host reached only
-    /// alone opens alone. `None` shows the workspace's first host.
+    /// The host this launch asks for, shown first: where the view the device
+    /// kept does not hold it, it opens alone and becomes that view. `None`
+    /// asks for none, and the kept view opens.
     pub initial: Option<AttachmentTarget>,
     /// A browser link that could not be paired opens the normal form with the
     /// one-shot failure visible after its URL fragment has been cleared.

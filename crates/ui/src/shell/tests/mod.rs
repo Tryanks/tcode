@@ -1779,7 +1779,7 @@ fn mount_on_host(
     let host = tcode_runtime::pipe::spawn_host(disk, tcode_runtime::pipe::HostServices::default())
         .expect("spawn test host");
     let driver = crate::store::tests::LocalHostDriver::new(&host);
-    let (shell, _transport, cx) = mount_with(cx, Some(AttachmentTarget::Local), client.clone());
+    let (shell, _transport, cx) = mount_with(cx, client.clone());
     let store = store_of(&shell, cx);
     store.update(cx, |store, cx| {
         *store = WorkspaceStore::new_attached(
@@ -1810,19 +1810,13 @@ pub(crate) fn shell_behind(store: &Entity<WorkspaceStore>, cx: &mut TestAppConte
 }
 
 fn mount(cx: &mut TestAppContext) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
-    mount_initial(cx, Some(AttachmentTarget::Local))
+    mount_with(cx, None)
 }
 
-fn mount_initial(
-    cx: &mut TestAppContext,
-    initial: Option<AttachmentTarget>,
-) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
-    mount_with(cx, initial, None)
-}
-
+/// A desktop window launched with no host named, over a host in its own
+/// process the test holds the other end of.
 fn mount_with(
     cx: &mut TestAppContext,
-    initial: Option<AttachmentTarget>,
     client_host: Option<Rc<dyn ClientHost>>,
 ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
     // As `run_shell` does before opening the window: the shell alone,
@@ -1852,7 +1846,6 @@ fn mount_with(
                     local: Some(Rc::new(move |_| {
                         Ok(transport.borrow_mut().take().expect("one attachment"))
                     })),
-                    initial,
                     ..Default::default()
                 },
                 window,

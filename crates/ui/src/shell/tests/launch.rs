@@ -57,7 +57,6 @@ fn pending_outbox_overrides_desktop_launch_without_a_snapshot(cx: &mut TestAppCo
         AppShell::new(
             state,
             ShellSetup {
-                initial: Some(AttachmentTarget::Local),
                 restore_navigation: false,
                 ..Default::default()
             },
@@ -285,7 +284,6 @@ fn a_reopened_window_is_where_the_closed_one_was(cx: &mut TestAppContext) {
     let (closed, mut closed_cx) = open(
         ShellSetup {
             local: Some(local.clone()),
-            initial: Some(AttachmentTarget::Local),
             ..Default::default()
         },
         cx,

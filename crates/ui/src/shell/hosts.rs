@@ -243,8 +243,10 @@ impl AppShell {
     /// if the launch explicitly targeted a host outside it (for example
     /// `--connect`, a pending outbox, or a space); that host is then the
     /// scope the device keeps, so the one left behind does not open beside
-    /// it when its roster next changes. The host in this process is left out
-    /// unless `with_local`.
+    /// it when its roster next changes. A launch that names no host opens the
+    /// scope as kept; one with nothing left to show (its machine was removed)
+    /// gives way to the host in this process, where there is one. That host
+    /// is left out unless `with_local`.
     pub(super) fn open_workspace(
         &mut self,
         initial: Option<AttachmentTarget>,
@@ -257,6 +259,10 @@ impl AppShell {
         if !with_local {
             targets.retain(|target| *target != AttachmentTarget::Local);
         }
+        let initial = initial.or_else(|| {
+            (targets.is_empty() && with_local && self.setup.local.is_some())
+                .then_some(AttachmentTarget::Local)
+        });
         let mut outside = false;
         let persisted_scope = if let Some(initial) = &initial {
             if targets.iter().any(|target| same_target(target, initial))
