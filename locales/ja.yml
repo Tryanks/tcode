@@ -1207,6 +1207,7 @@ permission:
     permissions: "権限"
     approvalMode: "権限"
     permission_mode: "権限"
+    mode: "権限"
   unavailable:
     "1": "設定で許可されていません"
     "2": "継承された権限設定"
@@ -1261,6 +1262,11 @@ permission:
       full_access: "サンドボックスなし、確認もありません。"
     approvalMode:
       unrestricted: "すべてのツール呼び出しを確認なしで実行"
+    mode:
+      default: "権限設定に従い、編集とコマンド実行の前に確認します。"
+      accept-edits: "ワークスペース内のファイル編集を確認なしで承認します。"
+      auto: "編集と安全なコマンドを承認し、元に戻せない操作の前に確認します。"
+      plan: "タスクを実行する前に慎重に計画します。"
 approval:
   command_requested: "コマンドの承認をリクエストしています"
   file_read_requested: "ファイル読み取りの承認をリクエストしています"

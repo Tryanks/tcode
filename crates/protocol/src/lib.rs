@@ -382,6 +382,8 @@ pub use wire::{
 // RuntimeNotice's review_recorded go. ProvidersStatus gains acp_models, each
 // installed ACP agent's own models; SetActiveAcpAgent gains model, and the
 // RefreshAcpCatalog command lists an agent's models and options again.
+// ProviderKind gains Antigravity (wire name `antigravity`), which an older peer
+// cannot decode because ProviderKind has no unknown fallback.
 pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]

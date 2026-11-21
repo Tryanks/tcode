@@ -390,7 +390,7 @@ pub struct ProvidersStatus {
     pub update_run: Option<ProviderUpdateRun>,
     pub tcode_update: TcodeUpdateStatus,
     pub provider_snapshots: HashMap<String, ProviderSnapshot>,
-    /// Latest account usage per profile id (Codex / Claude Code only).
+    /// Latest account usage per profile id (Codex / Claude Code / Antigravity).
     pub provider_usage: HashMap<String, tcode_core::usage::ProviderUsage>,
     /// Profile ids with a usage fetch in flight.
     pub usage_checking: HashSet<String>,

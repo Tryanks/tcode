@@ -16,6 +16,7 @@ pub fn plugin_op_command(
     let (default, argv) = match provider {
         ProviderKind::ClaudeCode => ("claude", claude::op_args(op).ok()?),
         ProviderKind::Grok => ("grok", grok::op_args(op).ok()?),
+        ProviderKind::Antigravity => ("agy", antigravity::op_args(op).ok()?),
         // Codex is driven over its app server, so the request stands in
         // for a command line.
         ProviderKind::Codex => ("codex", codex_request(op)?),
@@ -278,6 +279,56 @@ pub(crate) mod opencode {
     }
 }
 
+pub(crate) mod antigravity {
+    use super::pi::source_operand;
+    use crate::{AgentError, PluginOp, PluginScope};
+
+    /// `agy plugin` installs, enables, disables and uninstalls user-level
+    /// plugins; installs take a marketplace name (`plugin[@marketplace]`),
+    /// GitHub URL or local path, while uninstall/enable/disable take the
+    /// plugin name.
+    pub(crate) fn op_args(op: &PluginOp) -> Result<Vec<String>, AgentError> {
+        let user_only = |scope: PluginScope| match scope {
+            PluginScope::User => Ok(()),
+            other => Err(AgentError::Protocol(format!(
+                "Antigravity manages plugins for the user only, not in the {other:?} scope"
+            ))),
+        };
+        match op {
+            PluginOp::Install { id, scope, .. } => {
+                user_only(*scope)?;
+                Ok(vec!["plugin".into(), "install".into(), source_operand(id)?])
+            }
+            PluginOp::Uninstall { id, scope } => {
+                user_only(*scope)?;
+                Ok(vec!["plugin".into(), "uninstall".into(), name(id)?])
+            }
+            PluginOp::SetEnabled { id, scope, enabled } => {
+                user_only(*scope)?;
+                let verb = if *enabled { "enable" } else { "disable" };
+                Ok(vec!["plugin".into(), verb.into(), name(id)?])
+            }
+            PluginOp::Update { .. } => Err(AgentError::Protocol(
+                "`agy plugin` has no update command".into(),
+            )),
+            PluginOp::AddMarketplace { .. } | PluginOp::RemoveMarketplace { .. } => Err(
+                AgentError::Protocol(
+                    "Antigravity installs plugins from the official marketplace, GitHub URLs or local paths"
+                        .into(),
+                ),
+            ),
+        }
+    }
+
+    fn name(id: &str) -> Result<String, AgentError> {
+        let base = match id.rsplit_once('@') {
+            Some((name, _)) if !name.is_empty() => name,
+            _ => id,
+        };
+        source_operand(base)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +366,23 @@ mod tests {
         assert_eq!(
             plugin_op_command(ProviderKind::Grok, None, &user).as_deref(),
             Some("grok plugin install alpha@tcode-probe")
+        );
+        assert_eq!(
+            plugin_op_command(ProviderKind::Antigravity, None, &user).as_deref(),
+            Some("agy plugin install alpha@tcode-probe")
+        );
+        assert_eq!(
+            plugin_op_command(
+                ProviderKind::Antigravity,
+                None,
+                &PluginOp::SetEnabled {
+                    id: "alpha@antigravity-plugins-official".into(),
+                    scope: PluginScope::User,
+                    enabled: false,
+                }
+            )
+            .as_deref(),
+            Some("agy plugin disable alpha")
         );
         assert_eq!(plugin_op_command(ProviderKind::Cursor, None, &user), None);
     }

@@ -1,5 +1,6 @@
 //! The Agent Client Protocol session shared by every ACP-speaking client: the
-//! registry client (`acp.rs`) and the native Cursor and Grok clients.
+//! registry client (`acp.rs`) and the native Cursor, Grok and Antigravity
+//! clients.
 //!
 //! One child process per session, JSON-RPC over its stdio, driven by an
 //! `agent_client_protocol::Client` connection on a dedicated thread running a
@@ -49,13 +50,24 @@ pub(crate) use crate::ACP_MODEL_OPTION_ID as MODEL_OPTION_ID;
 use crate::EFFORT_OPTION_ID;
 const CONFIG_OPTION_PREFIX: &str = "acp:cfg:";
 
+/// The canonical mode option id for `provider`. Antigravity exposes its live
+/// permission modes under `"mode"` (`crate::permission_control`), while generic
+/// ACP agents and other dialects use [`MODE_OPTION_ID`].
+fn mode_option_id(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Antigravity => "mode",
+        _ => MODE_OPTION_ID,
+    }
+}
+
 /// The descriptor id of the session config option `config_id` in `category`.
 fn config_option_id(
+    provider: ProviderKind,
     config_id: &str,
     category: Option<&acp::SessionConfigOptionCategory>,
 ) -> String {
     match category {
-        Some(acp::SessionConfigOptionCategory::Mode) => MODE_OPTION_ID.to_string(),
+        Some(acp::SessionConfigOptionCategory::Mode) => mode_option_id(provider).to_string(),
         Some(acp::SessionConfigOptionCategory::Model) => MODEL_OPTION_ID.to_string(),
         Some(acp::SessionConfigOptionCategory::ThoughtLevel) => EFFORT_OPTION_ID.to_string(),
         _ => format!("{CONFIG_OPTION_PREFIX}{config_id}"),
@@ -64,7 +76,7 @@ fn config_option_id(
 
 /// What a session config option of `category` is on `provider`: a thought
 /// level is the model's reasoning effort, and a mode is what runs without
-/// asking unless the provider has a permission control of its own.
+/// asking when it is the provider's permission control.
 fn config_option_role(
     provider: ProviderKind,
     category: Option<&acp::SessionConfigOptionCategory>,
@@ -72,7 +84,8 @@ fn config_option_role(
     match category {
         Some(acp::SessionConfigOptionCategory::ThoughtLevel) => crate::OptionRole::Effort,
         Some(acp::SessionConfigOptionCategory::Mode)
-            if crate::permission_control(provider).is_none() =>
+            if provider == ProviderKind::Antigravity
+                || crate::permission_control(provider).is_none() =>
         {
             crate::OptionRole::Permission
         }
@@ -88,17 +101,19 @@ pub(crate) fn config_selection<'a>(
     config_id: &str,
     category: Option<&acp::SessionConfigOptionCategory>,
 ) -> Option<&'a str> {
-    config_selection_value(selections, config_id, category).and_then(Value::as_str)
+    config_selection_value(ProviderKind::Acp, selections, config_id, category)
+        .and_then(Value::as_str)
 }
 
 /// The persisted JSON value for the session config option `config_id` in
 /// `category`, covering both select and boolean config options.
 fn config_selection_value<'a>(
+    provider: ProviderKind,
     selections: &'a [OptionSelection],
     config_id: &str,
     category: Option<&acp::SessionConfigOptionCategory>,
 ) -> Option<&'a Value> {
-    let id = config_option_id(config_id, category);
+    let id = config_option_id(provider, config_id, category);
     selections
         .iter()
         .find(|selection| selection.id == id)
@@ -234,6 +249,13 @@ pub(crate) trait Dialect: Send + Sync + 'static {
         true
     }
 
+    /// Whether this agent accepts loopback HTTP `mcpServers` in `session/new`,
+    /// `session/load` and `session/resume`. By default follows
+    /// `mcpCapabilities.http` (plus known servers that omit the flag).
+    fn accepts_http_mcp(&self, init: &acp::InitializeResponse) -> bool {
+        init.agent_capabilities.mcp_capabilities.http || accepts_undeclared_http_mcp(init)
+    }
+
     /// Session config options that tcode already controls elsewhere (the
     /// composer's model picker), so they are neither surfaced again in
     /// [`AgentEvent::ProviderOptions`] nor restored from the thread's option
@@ -281,6 +303,7 @@ pub(crate) struct Setup<'a> {
     pub(crate) opts: &'a SessionOptions,
     pub(crate) init: &'a acp::InitializeResponse,
     name: &'a str,
+    accepts_http_mcp: bool,
     state: &'a Arc<Mutex<State>>,
     events: &'a Sender<AgentEvent>,
 }
@@ -292,15 +315,26 @@ impl Setup<'_> {
 
     /// The `mcpServers` for `session/new`, `load` or `resume`. tcode's MCP
     /// servers are loopback streamable-HTTP endpoints, so they are only
-    /// offered to agents that speak MCP over HTTP; the instructions go with them.
+    /// offered to agents that speak MCP over HTTP; the instructions go with
+    /// them when the provider delivers instructions per prompt.
     pub(crate) async fn mcp_servers(&self) -> Vec<acp::McpServer> {
         let registrations: Vec<_> = self.opts.mcp_servers.iter().collect();
-        let servers = mcp_servers(&registrations, self.init);
-        self.state.lock_recover().instructions = if servers.is_empty() {
-            None
+        let servers = if self.accepts_http_mcp {
+            http_mcp_servers(&registrations)
         } else {
-            self.opts.instructions.clone()
+            Vec::new()
         };
+        {
+            let mut state = self.state.lock_recover();
+            state.instructions = if !servers.is_empty()
+                && state.options.provider.caps().instruction_channel
+                    == crate::InstructionChannel::PerPromptUserBlock
+            {
+                self.opts.instructions.clone()
+            } else {
+                None
+            };
+        }
         if !registrations.is_empty() && servers.is_empty() {
             let _ = self.events.send(AgentEvent::McpServersNotAttached).await;
             log::info!(
@@ -413,7 +447,10 @@ impl Setup<'_> {
         modes: Option<&acp::SessionModeState>,
         config_options: &[acp::SessionConfigOption],
     ) {
-        let owned_options = self.state.lock_recover().owned_options;
+        let (provider, owned_options) = {
+            let state = self.state.lock_recover();
+            (state.options.provider, state.owned_options)
+        };
         let has_mode_config = config_options
             .iter()
             .any(|option| option.category == Some(acp::SessionConfigOptionCategory::Mode));
@@ -421,11 +458,12 @@ impl Setup<'_> {
             if owned(
                 owned_options,
                 &option.id.0,
-                &config_option_id(&option.id.0, option.category.as_ref()),
+                &config_option_id(provider, &option.id.0, option.category.as_ref()),
             ) {
                 continue;
             }
             let Some(chosen) = config_selection_value(
+                provider,
                 &self.opts.option_selections,
                 option.id.0.as_ref(),
                 option.category.as_ref(),
@@ -475,7 +513,7 @@ impl Setup<'_> {
                 .opts
                 .option_selections
                 .iter()
-                .find(|selection| selection.id == MODE_OPTION_ID)
+                .find(|selection| selection.id == mode_option_id(provider))
                 .and_then(|selection| selection.value.as_str())
             && modes.current_mode_id.0.as_ref() != chosen
         {
@@ -521,6 +559,7 @@ pub(crate) struct Session {
     pub(crate) connection: Connection,
     events: Sender<AgentEvent>,
     state: Arc<Mutex<State>>,
+    turn_tx: Sender<TurnOutcome>,
 }
 
 impl Session {
@@ -530,6 +569,42 @@ impl Session {
 
     pub(crate) fn with_state<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
         f(&mut self.state.lock_recover())
+    }
+
+    /// Steer the running turn by issuing a replacement `session/prompt` on
+    /// `session_id` (for agents such as `agy acp` that supersede the earlier
+    /// in-flight prompt request and keep streaming until the new one finishes).
+    /// Returns `false` when no turn is currently running.
+    pub(crate) fn steer_prompt(
+        &self,
+        session_id: &acp::SessionId,
+        text: &str,
+        attachments: &[Attachment],
+    ) -> bool {
+        let Some((turn_id, generation)) = self.with_state(|state| {
+            let turn_id = state.turn.clone()?;
+            state.prompt_generation += 1;
+            Some((turn_id, state.prompt_generation))
+        }) else {
+            return false;
+        };
+        let request =
+            acp::PromptRequest::new(session_id.clone(), prompt_blocks(text, attachments, None));
+        let pending = self.connection.send_request(request);
+        let turn_tx = self.turn_tx.clone();
+        self.connection
+            .spawn(async move {
+                let result = pending.block_task().await;
+                let _ = turn_tx
+                    .send(TurnOutcome {
+                        turn_id,
+                        generation,
+                        result,
+                    })
+                    .await;
+                Ok(())
+            })
+            .is_ok()
     }
 
     /// Cancel the agent's work as [`SessionCommand::Interrupt`] does, whether
@@ -871,9 +946,11 @@ async fn run_actor<D: Dialect>(
     let mut state = State::new(provider, opts.cwd.clone());
     state.owned_options = dialect.owned_config_options();
     let state = Arc::new(Mutex::new(state));
+    let (turn_tx, turn_done) = smol::channel::unbounded::<TurnOutcome>();
     let client = Client {
         events: events.clone(),
         state: state.clone(),
+        turn_tx: turn_tx.clone(),
     };
     let (io_done_tx, io_done) = smol::channel::bounded::<String>(1);
     let pending_deliveries = Arc::new(Mutex::new(VecDeque::new()));
@@ -1007,6 +1084,8 @@ async fn run_actor<D: Dialect>(
                     &client,
                     &stderr_tail,
                     &io_done,
+                    &turn_tx,
+                    &turn_done,
                     &session_started,
                     &pending_deliveries,
                 )
@@ -1071,6 +1150,8 @@ async fn connected_actor<D: Dialect>(
     client: &Client,
     stderr_tail: &crate::process::StderrTail,
     io_done: &Receiver<String>,
+    turn_tx: &Sender<TurnOutcome>,
+    turn_done: &Receiver<TurnOutcome>,
     session_started: &AtomicBool,
     pending_deliveries: &Arc<Mutex<VecDeque<u64>>>,
 ) -> Result<Exit, sdk::Error> {
@@ -1115,49 +1196,53 @@ async fn connected_actor<D: Dialect>(
         let mut state = state.lock_recover();
         if let Some(mut descriptor) = crate::permission_control(provider) {
             let id = descriptor_id(&descriptor).to_owned();
-            let mut value = opts
-                .option_selections
-                .iter()
-                .find(|selection| selection.id == id)
-                .map(|selection| selection.value.clone())
-                .or_else(|| match &descriptor {
-                    OptionDescriptor::Select { default_value, .. } => {
-                        default_value.as_ref().map(|value| json!(value))
-                    }
-                    OptionDescriptor::Boolean { default_value, .. } => Some(json!(default_value)),
-                });
-            if provider == ProviderKind::Cursor {
-                value = Some(json!("unrestricted"));
-            } else if provider == ProviderKind::Grok {
-                let mut arguments = launch.args.iter();
-                while let Some(argument) = arguments.next() {
-                    if argument == "--permission-mode" {
-                        if let Some(mode) = arguments.next() {
+            if state.options.origin(&id).is_none() {
+                let mut value = opts
+                    .option_selections
+                    .iter()
+                    .find(|selection| selection.id == id)
+                    .map(|selection| selection.value.clone())
+                    .or_else(|| match &descriptor {
+                        OptionDescriptor::Select { default_value, .. } => {
+                            default_value.as_ref().map(|value| json!(value))
+                        }
+                        OptionDescriptor::Boolean { default_value, .. } => {
+                            Some(json!(default_value))
+                        }
+                    });
+                if provider == ProviderKind::Cursor {
+                    value = Some(json!("unrestricted"));
+                } else if provider == ProviderKind::Grok {
+                    let mut arguments = launch.args.iter();
+                    while let Some(argument) = arguments.next() {
+                        if argument == "--permission-mode" {
+                            if let Some(mode) = arguments.next() {
+                                value = Some(json!(mode));
+                            }
+                        } else if let Some(mode) = argument.strip_prefix("--permission-mode=") {
                             value = Some(json!(mode));
                         }
-                    } else if let Some(mode) = argument.strip_prefix("--permission-mode=") {
-                        value = Some(json!(mode));
                     }
                 }
-            }
-            if let Some(value) = value {
-                if let (OptionDescriptor::Select { options, .. }, Some(mode)) =
-                    (&mut descriptor, value.as_str())
-                    && !options.iter().any(|option| option.value == mode)
-                {
-                    options.push(SelectOption {
-                        value: mode.to_owned(),
-                        label: mode.to_owned(),
-                        description: None,
-                        unavailable: Some("Reported by the launch arguments".into()),
-                        speed: None,
-                        summary: None,
-                        approval: crate::approval_class(provider, &id, mode),
-                    });
+                if let Some(value) = value {
+                    if let (OptionDescriptor::Select { options, .. }, Some(mode)) =
+                        (&mut descriptor, value.as_str())
+                        && !options.iter().any(|option| option.value == mode)
+                    {
+                        options.push(SelectOption {
+                            value: mode.to_owned(),
+                            label: mode.to_owned(),
+                            description: None,
+                            unavailable: Some("Reported by the launch arguments".into()),
+                            speed: None,
+                            summary: None,
+                            approval: crate::approval_class(provider, &id, mode),
+                        });
+                    }
+                    state
+                        .options
+                        .upsert(descriptor, OptionOrigin::Launch, value);
                 }
-                state
-                    .options
-                    .upsert(descriptor, OptionOrigin::Launch, value);
             }
         }
         state.options.current_model()
@@ -1177,7 +1262,6 @@ async fn connected_actor<D: Dialect>(
     session_started.store(true, Ordering::Release);
 
     let session = client.session(connection.clone());
-    let (turn_tx, turn_done) = smol::channel::unbounded::<TurnOutcome>();
     let mut turn_seq: u64 = 0;
 
     let close_reason = loop {
@@ -1212,7 +1296,7 @@ async fn connected_actor<D: Dialect>(
                     executor,
                     &session,
                     &session_id,
-                    &turn_tx,
+                    turn_tx,
                     &mut turn_seq,
                     pending_deliveries,
                 )
@@ -1241,6 +1325,7 @@ async fn connected_actor<D: Dialect>(
 
 struct TurnOutcome {
     turn_id: String,
+    generation: u64,
     result: Result<acp::PromptResponse, sdk::Error>,
 }
 
@@ -1261,6 +1346,7 @@ async fn handshake<D: Dialect>(
         opts,
         init: &init,
         name,
+        accepts_http_mcp: dialect.accepts_http_mcp(&init),
         state,
         events,
     };
@@ -1330,9 +1416,13 @@ async fn handle_command<D: Dialect>(
         } => {
             *turn_seq += 1;
             let id = format!("turn-{turn_seq}");
-            state.lock_recover().turn = Some(id.clone());
+            let (generation, instructions) = {
+                let mut state = state.lock_recover();
+                state.turn = Some(id.clone());
+                state.prompt_generation += 1;
+                (state.prompt_generation, state.instructions.clone())
+            };
 
-            let instructions = state.lock_recover().instructions.clone();
             let request = acp::PromptRequest::new(
                 session_id.clone(),
                 prompt_blocks(&text, &attachments, instructions.as_deref()),
@@ -1353,6 +1443,7 @@ async fn handle_command<D: Dialect>(
                     let _ = turn_tx
                         .send(TurnOutcome {
                             turn_id: id,
+                            generation,
                             result,
                         })
                         .await;
@@ -1615,7 +1706,9 @@ async fn finish_turn<D: Dialect>(
 ) {
     let completion = {
         let mut state = state.lock_recover();
-        if state.turn.as_deref() != Some(outcome.turn_id.as_str()) {
+        if state.turn.as_deref() != Some(outcome.turn_id.as_str())
+            || state.prompt_generation != outcome.generation
+        {
             return;
         }
         let end = dialect.turn_end(&mut state, outcome.result);
@@ -1769,15 +1862,8 @@ fn accepts_undeclared_http_mcp(init: &acp::InitializeResponse) -> bool {
         .is_some_and(|info| info.name == "Antigravity ACP Server")
 }
 
-/// The `mcpServers` array for `session/new`, gated on `mcpCapabilities.http`
-/// (plus known agents that accept HTTP MCP servers without declaring it).
-fn mcp_servers(
-    registrations: &[&McpRegistration],
-    init: &acp::InitializeResponse,
-) -> Vec<acp::McpServer> {
-    if !init.agent_capabilities.mcp_capabilities.http && !accepts_undeclared_http_mcp(init) {
-        return Vec::new();
-    }
+/// The `mcpServers` array for `session/new`, `session/load` and `session/resume`.
+fn http_mcp_servers(registrations: &[&McpRegistration]) -> Vec<acp::McpServer> {
     registrations
         .iter()
         .map(|mcp| {
@@ -1954,11 +2040,28 @@ impl OptionRegistry {
         modes: Option<&acp::SessionModeState>,
         config: Option<&[acp::SessionConfigOption]>,
     ) {
+        let permission_meta =
+            crate::permission_control(self.provider).and_then(|descriptor| match descriptor {
+                OptionDescriptor::Select {
+                    id,
+                    label,
+                    recommended,
+                    permissive,
+                    ..
+                } => Some((id, label, recommended, permissive)),
+                OptionDescriptor::Boolean { .. } => None,
+            });
         if let Some(modes) = modes {
+            let id = mode_option_id(self.provider).to_string();
+            let (label, recommended, permissive) = permission_meta
+                .as_ref()
+                .filter(|(perm_id, ..)| *perm_id == id)
+                .map(|(_, label, rec, perm)| (label.clone(), rec.clone(), perm.clone()))
+                .unwrap_or_else(|| ("Mode".to_string(), None, None));
             self.upsert(
                 OptionDescriptor::Select {
-                    id: MODE_OPTION_ID.to_string(),
-                    label: "Mode".to_string(),
+                    id: id.clone(),
+                    label,
                     options: modes
                         .available_modes
                         .iter()
@@ -1969,11 +2072,7 @@ impl OptionRegistry {
                             unavailable: None,
                             speed: None,
                             summary: None,
-                            approval: crate::approval_class(
-                                ProviderKind::Acp,
-                                MODE_OPTION_ID,
-                                &mode.id.0,
-                            ),
+                            approval: crate::approval_class(self.provider, &id, &mode.id.0),
                         })
                         .collect(),
                     default_value: Some(modes.current_mode_id.0.to_string()),
@@ -1982,8 +2081,8 @@ impl OptionRegistry {
                         Some(&acp::SessionConfigOptionCategory::Mode),
                     ),
                     apply: crate::ApplyTiming::Live,
-                    recommended: None,
-                    permissive: None,
+                    recommended,
+                    permissive,
                     minimum: None,
                 },
                 OptionOrigin::Mode,
@@ -1998,12 +2097,17 @@ impl OptionRegistry {
         }
         for option in config.unwrap_or_default() {
             // The mode, model and thought-level categories take tcode's
-            // canonical ids (the runtime reads `acp:mode`); every option,
-            // whatever its category, is set through `session/set_config_option`.
-            let id = config_option_id(&option.id.0, option.category.as_ref());
-            let approval = |value: &str| crate::approval_class(ProviderKind::Acp, &id, value);
+            // canonical ids; every option, whatever its category, is set
+            // through `session/set_config_option`.
+            let id = config_option_id(self.provider, &option.id.0, option.category.as_ref());
+            let approval = |value: &str| crate::approval_class(self.provider, &id, value);
             match &option.kind {
                 acp::SessionConfigKind::Select(select) => {
+                    let (label, recommended, permissive) = permission_meta
+                        .as_ref()
+                        .filter(|(perm_id, ..)| *perm_id == id)
+                        .map(|(_, label, rec, perm)| (label.clone(), rec.clone(), perm.clone()))
+                        .unwrap_or_else(|| (option.name.clone(), None, None));
                     let options = match &select.options {
                         acp::SessionConfigSelectOptions::Ungrouped(flat) => flat
                             .iter()
@@ -2036,13 +2140,13 @@ impl OptionRegistry {
                     self.upsert(
                         OptionDescriptor::Select {
                             id,
-                            label: option.name.clone(),
+                            label,
                             options,
                             default_value: Some(select.current_value.0.to_string()),
                             role: config_option_role(self.provider, option.category.as_ref()),
                             apply: crate::ApplyTiming::Live,
-                            recommended: None,
-                            permissive: None,
+                            recommended,
+                            permissive,
                             minimum: None,
                         },
                         OptionOrigin::Config(option.id.clone()),
@@ -2201,6 +2305,9 @@ struct TextStream {
 pub(crate) struct State {
     cwd: PathBuf,
     turn: Option<String>,
+    /// Incremented on every `session/prompt` issued for the active turn (initial
+    /// send or steering replacement) so superseded prompt responses are ignored.
+    prompt_generation: u64,
     /// True while `session/load` answers, which may replay history first.
     loading: bool,
     tools: HashMap<String, ToolState>,
@@ -2228,6 +2335,7 @@ impl State {
         Self {
             cwd,
             turn: None,
+            prompt_generation: 0,
             loading: false,
             tools: HashMap::new(),
             text: None,
@@ -2324,8 +2432,8 @@ impl State {
         if let Some(modes) = self.modes.as_mut() {
             modes.current_mode_id = mode.clone();
         }
-        self.options
-            .select(MODE_OPTION_ID, Value::String(mode.0.to_string()));
+        let id = mode_option_id(self.options.provider);
+        self.options.select(id, Value::String(mode.0.to_string()));
     }
 
     fn provider_options(&self) -> AgentEvent {
@@ -3062,6 +3170,7 @@ fn approval_request(
 struct Client {
     events: Sender<AgentEvent>,
     state: Arc<Mutex<State>>,
+    turn_tx: Sender<TurnOutcome>,
 }
 
 impl Client {
@@ -3070,6 +3179,7 @@ impl Client {
             connection,
             events: self.events.clone(),
             state: self.state.clone(),
+            turn_tx: self.turn_tx.clone(),
         }
     }
 
