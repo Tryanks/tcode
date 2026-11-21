@@ -376,6 +376,40 @@ fn group_roster_updates_stay_out_of_standalone_views_and_open_in_their_group(
     assert_eq!(store_on(&shell, "host-b", cx), b, "B's link is kept");
 }
 
+/// A launch on a host outside the view the device kept makes that host the
+/// view: the group left behind does not open beside it when its roster next
+/// changes.
+#[gpui::test]
+fn a_launch_outside_the_kept_view_leaves_that_view_behind(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let (shell, _hosts, client, cx) = mount_workspace(
+        cx,
+        vec![saved_machine("solo", false), saved_machine("host-b", true)],
+        tcode_client::host::ClientPreferences {
+            navigation: Some(serde_json::json!({
+                "history": ["threads", "thread"],
+                "thread": { "host": "solo", "session_id": "thread-1" },
+                "panel": "diff"
+            })),
+            workspace: Some(tcode_client::host::WorkspacePreference {
+                scope: Some(tcode_client::host::WorkspaceScope::Group {
+                    group_id: "group".into(),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        1200.,
+    );
+    let key_solo = HostKey::Remote("solo".into());
+    assert_eq!(linked(&shell, cx), std::slice::from_ref(&key_solo));
+
+    let _c = WorkspaceHost::offer(&client, "host-c", cx);
+    client.remember_host(saved_machine("host-c", true)).unwrap();
+    draw(cx);
+    assert_eq!(linked(&shell, cx), [key_solo]);
+}
+
 /// On the Machines page, clicking a machine group opens all of its members
 /// together, clicking a member opens that machine alone (reusing its link),
 /// and clicking a standalone machine switches to it alone.

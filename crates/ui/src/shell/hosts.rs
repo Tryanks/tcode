@@ -203,8 +203,10 @@ impl AppShell {
     /// Open this window's active scope at launch. `initial`, when supplied,
     /// focuses that host if it belongs to the active scope, or opens it alone
     /// if the launch explicitly targeted a host outside it (for example
-    /// `--connect`, a pending outbox, or a space). The host in this process is
-    /// left out unless `with_local`.
+    /// `--connect`, a pending outbox, or a space); that host is then the
+    /// scope the device keeps, so the one left behind does not open beside
+    /// it when its roster next changes. The host in this process is left out
+    /// unless `with_local`.
     pub(super) fn open_workspace(
         &mut self,
         initial: Option<AttachmentTarget>,
@@ -217,12 +219,14 @@ impl AppShell {
         if !with_local {
             targets.retain(|target| *target != AttachmentTarget::Local);
         }
+        let mut outside = false;
         let persisted_scope = if let Some(initial) = &initial {
             if targets.iter().any(|target| same_target(target, initial))
                 || (*initial == AttachmentTarget::Local && !with_local)
             {
                 scope
             } else {
+                outside = true;
                 targets = vec![initial.clone()];
                 match initial {
                     AttachmentTarget::Local => tcode_client::host::WorkspaceScope::Local,
@@ -234,12 +238,9 @@ impl AppShell {
         } else {
             scope
         };
-        if DevicePreferences::workspace(cx)
-            .as_ref()
-            .and_then(|workspace| workspace.scope.as_ref())
-            .is_none()
-            && with_local
-        {
+        let kept =
+            DevicePreferences::workspace(cx).is_some_and(|workspace| workspace.scope.is_some());
+        if outside || (!kept && with_local) {
             self.arrange_workspace(
                 |workspace| crate::workspace::set_scope(workspace, persisted_scope),
                 cx,
