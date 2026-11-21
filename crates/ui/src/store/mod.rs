@@ -43,11 +43,10 @@ mod deletion;
 mod history;
 mod providers;
 pub(crate) use providers::AgentChoice;
-mod right_panel;
-pub(crate) use history::HISTORY_WINDOW_SCREENS;
 pub(crate) mod images;
 mod intents;
 mod preview;
+mod right_panel;
 pub(crate) use preview::{PreviewPlace, PreviewReleased};
 mod thread;
 pub(crate) use images::{

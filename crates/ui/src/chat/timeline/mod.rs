@@ -67,7 +67,19 @@ pub(crate) struct TimelineView {
     /// mirrored it: a record streamed in moves it on without notifying the
     /// store.
     timeline_revision: Option<u64>,
+    /// The room above the first held row that stands for the turns not held
+    /// yet, so the scrollbar spans the whole thread rather than what is held.
     pub(in crate::chat) history_placeholder_height: gpui::Pixels,
+    /// The mean height of a held turn, at which the reservation counts each
+    /// turn not held.
+    history_turn_height: Option<gpui::Pixels>,
+    /// The turns not held as the last render counted them.
+    history_unheld: Option<usize>,
+    /// The held turns changed since the turn height was measured. It is
+    /// measured again once, after the frame that lays out the change: a
+    /// height that followed every frame would move the scrollbar while a
+    /// reply streams in.
+    history_turn_height_stale: bool,
     /// Whether the previously synced window still had unloaded history above
     /// it, so the final page reaching the start of the log still completes a
     /// partial first turn in place.
@@ -207,12 +219,13 @@ impl TimelineView {
     ) -> Self {
         // GPUI's list, not gpui-base's `VirtualList`, which takes every row's
         // size up front: a row's height here is known only once it is laid out.
-        // Measure enough rows to establish the six-screen window even when
-        // distant rows still have unknown heights in ListState's summary.
+        // Every held row is measured, not only those near the screen: a row
+        // the list has not laid out counts as no height, so the scrollbar
+        // would span only what has been seen, and jump as the reader reaches
+        // the rest.
         let height = f32::from(window.bounds().size.height);
-        let overdraw =
-            timeline_overdraw(height).max(height * (crate::store::HISTORY_WINDOW_SCREENS + 1.));
-        let list_state = ListState::new(0, ListAlignment::Bottom, px(overdraw));
+        let overdraw = timeline_overdraw(height);
+        let list_state = ListState::new(0, ListAlignment::Bottom, px(overdraw)).measure_all();
         list_state.set_follow_mode(FollowMode::Tail);
         let timeline = cx.entity().downgrade();
         let list_scroll = crate::motion::ListScroll::default();
@@ -254,6 +267,9 @@ impl TimelineView {
             timeline_stale: false,
             timeline_revision: None,
             history_placeholder_height: px(0.),
+            history_turn_height: None,
+            history_unheld: None,
+            history_turn_height_stale: false,
             had_unloaded_history: false,
             reservation_scroll_back: None,
             carried_anchor: false,
@@ -483,6 +499,18 @@ impl Render for TimelineView {
             let Some(timeline) = timeline.upgrade() else {
                 return;
             };
+            let measured = timeline
+                .read(cx)
+                .history_turn_height_due()
+                .then(|| timeline.read(cx).measure_history_turn_height())
+                .flatten();
+            if let Some(height) = measured {
+                timeline.update(cx, |timeline, cx| {
+                    timeline.history_turn_height = Some(height);
+                    timeline.history_turn_height_stale = false;
+                    cx.notify();
+                });
+            }
             let timeline = timeline.read(cx);
             if timeline.capture.is_some() {
                 return;
@@ -510,28 +538,23 @@ impl Render for TimelineView {
                 });
             }
         });
-        // A screen's height: the window's, which this render already knows.
-        // The list's own height is only measured by this frame's layout.
-        let placeholder = if self
-            .workspace_store
-            .read(cx)
-            .history_available_for(self.session_id.as_deref())
-        {
-            window.viewport_size().height
-        } else {
-            px(0.)
-        };
+        let placeholder = self.history_reservation_height(window, cx);
         if placeholder != self.history_placeholder_height && !self.rows.is_empty() {
             let anchor = self.list_state.logical_scroll_top();
             let following = self.list_state.is_following_tail();
             self.list_state.remeasure_items(0..1);
             if anchor.item_ix == 0 && !following {
-                self.list_state.scroll_to(ListOffset {
-                    item_ix: 0,
-                    offset_in_item: (anchor.offset_in_item + placeholder
-                        - self.history_placeholder_height)
-                        .max(px(0.)),
-                });
+                if self.sees_only_reservation(anchor.offset_in_item) {
+                    // The reservation may now end above the reader.
+                    self.carried_anchor = true;
+                } else {
+                    self.list_state.scroll_to(ListOffset {
+                        item_ix: 0,
+                        offset_in_item: (anchor.offset_in_item + placeholder
+                            - self.history_placeholder_height)
+                            .max(px(0.)),
+                    });
+                }
             }
             self.history_placeholder_height = placeholder;
         }
@@ -1093,6 +1116,8 @@ impl TimelineView {
             ListSync::None => {}
             ListSync::Reset { count } => {
                 self.reservation_scroll_back = None;
+                self.history_turn_height = None;
+                self.history_unheld = None;
                 self.list_state.reset(count);
                 if session_changed {
                     // Reset also clears stale item focus handles. A newly opened
@@ -1415,6 +1440,49 @@ pub(super) struct ReservationScrollBack {
 }
 
 impl TimelineView {
+    /// Whether the turn height the reservation counts at is to be measured.
+    fn history_turn_height_due(&self) -> bool {
+        self.history_unheld.is_some()
+            && (self.history_turn_height_stale || self.history_turn_height.is_none())
+    }
+
+    /// The mean height of a held turn, from the rows the last layout
+    /// measured: none while a row has not been laid out yet, nor while the
+    /// rows fit the viewport, which leaves the scrollbar no extent to read
+    /// it from, nor while a drag holds that extent at its start.
+    fn measure_history_turn_height(&self) -> Option<gpui::Pixels> {
+        let list = &self.list_state;
+        let turns = self.rows.last()?.turn + 1;
+        if list.is_scrollbar_dragging() || list.is_scrolled_to_end().is_none() {
+            return None;
+        }
+        let height = list.viewport_bounds().size.height;
+        let held = list.max_offset_for_scrollbar().y + height - self.leading_space();
+        (held > px(0.)).then(|| held / turns as f32)
+    }
+
+    /// The reservation for the turns not held: each counted at the mean
+    /// height of a held turn. Until a layout has measured one, or when the
+    /// unheld history is only the start of the first held turn, a screen's
+    /// height: the window's, which this render already knows; the list's own
+    /// height is only measured by this frame's layout.
+    fn history_reservation_height(&mut self, window: &Window, cx: &App) -> gpui::Pixels {
+        let store = self.workspace_store.read(cx);
+        let session_id = self.session_id.as_deref();
+        if !store.history_available_for(session_id) {
+            self.history_unheld = None;
+            return px(0.);
+        }
+        let unheld = store.absolute_turn_for(session_id, 0);
+        if self.history_unheld.replace(unheld) != Some(unheld) {
+            self.history_turn_height_stale = true;
+        }
+        match self.history_turn_height {
+            Some(height) if unheld > 0 => height * unheld as f32,
+            _ => window.viewport_size().height,
+        }
+    }
+
     /// Space above the first turn's content: the edge padding plus the history
     /// reservation. Both move to the new first row when a page lands.
     pub(super) fn leading_space(&self) -> gpui::Pixels {
@@ -1423,17 +1491,25 @@ impl TimelineView {
 
     /// Hold a reader who rested at `anchor` on the row now at `row`. The
     /// first row carries the leading space, so a reader there who stays at
-    /// the first row keeps the offset; one whose row has moved down keeps the
-    /// pixel inside the padding or the reservation, which now belongs to the
-    /// rows above. A list anchor cannot precede its row (rows above it stay
-    /// unpainted), so the render after the next frame walks back over them
-    /// once layout has measured them.
+    /// the first row keeps the offset; one whose row has moved down, and who
+    /// sees it, keeps the pixel inside the padding or the reservation, which
+    /// now belongs to the rows above. A list anchor cannot precede its row
+    /// (rows above it stay unpainted), so the render after the next frame
+    /// walks back over them once layout has measured them.
     fn keep_reading(&mut self, anchor: ListOffset, row: usize) {
         if anchor.item_ix != 0 || row == 0 {
             self.list_state.scroll_to(ListOffset {
                 item_ix: row,
                 offset_in_item: anchor.offset_in_item,
             });
+            return;
+        }
+        if self.sees_only_reservation(anchor.offset_in_item) {
+            // No held row is on screen to keep in place, so the reader keeps
+            // their place in the thread, as the scrollbar shows it, even
+            // where the page now stands there instead of the reservation.
+            self.list_state.scroll_to(anchor);
+            self.carried_anchor = true;
             return;
         }
         let into_reservation = self.leading_space() - anchor.offset_in_item;
@@ -1451,6 +1527,12 @@ impl TimelineView {
                 measured: false,
             });
         }
+    }
+
+    /// Whether a reader `offset` into the first row sees only the
+    /// reservation, and none of the held rows below it.
+    fn sees_only_reservation(&self, offset: gpui::Pixels) -> bool {
+        offset + self.list_state.viewport_bounds().size.height <= self.leading_space()
     }
 
     /// Walk back over a landed page inside the render that follows the frame
