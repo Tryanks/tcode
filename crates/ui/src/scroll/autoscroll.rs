@@ -86,7 +86,7 @@ struct PressRoom(Axes);
 impl Global for PressRoom {}
 
 /// The axes `handle`'s content overflows its viewport on.
-fn room(handle: &impl ScrollbarHandle) -> Axes {
+pub(super) fn room(handle: &impl ScrollbarHandle) -> Axes {
     let content = handle.content_size();
     let viewport = handle.viewport_bounds().size;
     Axes {
@@ -130,12 +130,23 @@ pub(crate) fn report_room<H: ScrollbarHandle + Clone + 'static>(
     RoomReport {
         handle: handle.clone(),
         child: child.into_any_element(),
+        page: false,
     }
 }
 
 pub(crate) struct RoomReport<H> {
     handle: H,
     child: AnyElement,
+    page: bool,
+}
+
+impl<H> RoomReport<H> {
+    /// The viewport is a page's: a fling that runs into its end ends there
+    /// ([`gesture::end_flings_at_page_end`](super::gesture::end_flings_at_page_end)).
+    pub(super) fn page(mut self) -> Self {
+        self.page = true;
+        self
+    }
 }
 
 impl<H: ScrollbarHandle + Clone + 'static> Element for RoomReport<H> {
@@ -186,6 +197,9 @@ impl<H: ScrollbarHandle + Clone + 'static> Element for RoomReport<H> {
         window: &mut Window,
         cx: &mut App,
     ) {
+        if self.page {
+            super::gesture::end_flings_at_page_end(*hitbox, self.handle.clone(), window);
+        }
         self.child.paint(window, cx);
         listen_for_press(
             *hitbox,
