@@ -359,7 +359,7 @@ pub use wire::{
 // set_hidden_from_threads. The protocol adds the StopWatchingThreads command,
 // and ThreadWakes' notify counts the threads watched rather than the watches.
 //
-// Unreleased: the timeline gains the warning entry, and RuntimeNotice loses
+// Version 31 (v0.4.5): the timeline gains the warning entry, and RuntimeNotice loses
 // provider_message. The agent event stream and the timeline gain
 // request_retry, and RuntimeNotice gains usage_limit_reached.
 // SettingsPatch's title_generation_provider, title_generation_model and
@@ -396,7 +396,7 @@ pub use wire::{
 // Settings gains visualize, with the visualize_enabled patch.
 // A command output frame holds the output's last rows and no history, and
 // its lines_evicted counts every row before them.
-pub const PROTOCOL_VERSION: u32 = 30;
+pub const PROTOCOL_VERSION: u32 = 31;
 
 #[cfg(test)]
 mod tests;
