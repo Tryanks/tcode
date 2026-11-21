@@ -9,6 +9,7 @@
 mod color;
 mod css;
 mod dom;
+pub(crate) mod raster;
 mod render;
 mod style;
 mod svg;
