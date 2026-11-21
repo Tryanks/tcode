@@ -569,6 +569,30 @@ pub(crate) mod tests {
         assert_eq!(cx.opened_url().as_deref(), Some("https://example.com/a"));
     }
 
+    /// Markup written without the tags HTML implies, each with a selector
+    /// that matches only in the tree a browser builds from it.
+    #[gpui::test]
+    fn tags_left_out_are_implied_as_html_implies_them(cx: &mut TestAppContext) {
+        let cases = [
+            ("p + figure", "<p>foo<figure>bar<p>baz"),
+            ("h1 + h2", "<h1>Hello<h2>World"),
+            ("li + li", "<ul><li><div><p>a<li>b</ul>"),
+            ("dd + dt", "<dl><dt>a<dd><p>b<dt>c</dl>"),
+            ("ul ul li", "<ul><li><ul></li><li>a</ul></ul>"),
+            (
+                "tbody > tr:nth-child(2) > td",
+                "<table><thead><tr><th>h</thead><tr><td>a<tr><td>b</table>",
+            ),
+            ("tbody > tr > td", "<table><td>a</table>"),
+        ];
+        for (selector, html) in cases {
+            let mut cx = cx.new_app();
+            let html = format!("<style>{selector}{{height:300px}}</style>{html}");
+            let bounds = drawn(&html, &mut cx);
+            assert!(bounds.size.height >= px(300.0), "{html}: no {selector}");
+        }
+    }
+
     #[gpui::test]
     fn a_visual_cut_at_a_limit_says_so(cx: &mut TestAppContext) {
         let cases = [

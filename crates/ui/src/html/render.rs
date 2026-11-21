@@ -725,9 +725,6 @@ fn render_table(
                         }
                     }
                 }
-                "tr" => {
-                    rows.push((cid, cs, false));
-                }
                 _ => {}
             }
         }

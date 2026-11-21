@@ -283,7 +283,9 @@ impl<'a> Parser<'a> {
             return;
         }
 
-        self.auto_close_for(&tag);
+        if !self.make_way_for(&tag) {
+            return;
+        }
         let void = self_closing || is_void_tag(&tag);
         let el = build_element(tag, attrs, None);
         self.open_element(el, void);
@@ -305,12 +307,8 @@ impl<'a> Parser<'a> {
             self.in_head = false;
             return;
         }
-        if let Some(pos) = self
-            .stack
-            .iter()
-            .rposition(|&id| self.doc.element(id).is_some_and(|el| el.tag == tag))
-        {
-            self.stack.truncate(pos);
+        if let Some(at) = self.open_in_scope(&[tag.as_str()]) {
+            self.stack.truncate(at);
         }
     }
 
@@ -459,47 +457,75 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn auto_close_for(&mut self, incoming: &str) {
-        let Some(&top) = self.stack.last() else {
-            return;
+    fn tag_of(&self, open: NodeId) -> &str {
+        self.doc.element(open).map_or("", |el| el.tag.as_str())
+    }
+
+    /// The innermost open element that is one of `tags`, unless a nearer one
+    /// bounds the scope HTML looks for them in.
+    fn open_in_scope(&self, tags: &[&str]) -> Option<usize> {
+        for (at, &open) in self.stack.iter().enumerate().rev() {
+            let open = self.tag_of(open);
+            if tags.contains(&open) {
+                return Some(at);
+            }
+            if bounds_scope(open, tags[0]) {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Close what HTML has a `tag` start tag close, and open the table parts
+    /// it implies. False for a table part outside a table, which HTML drops.
+    fn make_way_for(&mut self, tag: &str) -> bool {
+        if is_table_part(tag) {
+            let Some(table) = self.open_in_scope(&["table"]) else {
+                return false;
+            };
+            self.clear_to_table_parent(tag, table);
+            return true;
+        }
+        let closed: &[&str] = match tag {
+            "li" => &["li"],
+            "dd" | "dt" => &["dd", "dt"],
+            _ if closes_p(tag) => &["p"],
+            _ => return true,
         };
-        let Some(top_tag) = self.doc.element(top).map(|el| el.tag.as_str()) else {
-            return;
-        };
-        let should_close = match top_tag {
-            "p" => matches!(
-                incoming,
-                "p" | "div"
-                    | "section"
-                    | "article"
-                    | "header"
-                    | "footer"
-                    | "main"
-                    | "nav"
-                    | "aside"
-                    | "ul"
-                    | "ol"
-                    | "dl"
-                    | "table"
-                    | "pre"
-                    | "blockquote"
-                    | "hr"
-                    | "h1"
-                    | "h2"
-                    | "h3"
-                    | "h4"
-                    | "h5"
-                    | "h6"
-            ),
-            "li" => incoming == "li",
-            "dt" | "dd" => matches!(incoming, "dt" | "dd"),
-            "td" | "th" => matches!(incoming, "td" | "th" | "tr"),
-            "tr" => incoming == "tr",
-            "thead" | "tbody" | "tfoot" => matches!(incoming, "thead" | "tbody" | "tfoot"),
-            _ => false,
-        };
-        if should_close {
+        if let Some(at) = self.open_in_scope(closed) {
+            self.stack.truncate(at);
+        }
+        if is_heading(tag)
+            && let Some(&top) = self.stack.last()
+            && is_heading(self.tag_of(top))
+        {
             self.stack.pop();
+        }
+        true
+    }
+
+    /// Leave open what a `tag` of the table open at `table` is a child of,
+    /// opening the `tbody`, `tr` or `colgroup` it was written without.
+    fn clear_to_table_parent(&mut self, tag: &str, table: usize) {
+        let parents: &[&str] = match tag {
+            "td" | "th" => &["tr"],
+            "tr" => &["tbody", "thead", "tfoot"],
+            "col" => &["colgroup"],
+            _ => {
+                self.stack.truncate(table + 1);
+                return;
+            }
+        };
+        let parent = self.stack[table..]
+            .iter()
+            .rposition(|&open| parents.contains(&self.tag_of(open)));
+        match parent {
+            Some(parent) => self.stack.truncate(table + parent + 1),
+            None => {
+                let implied = parents[0];
+                self.clear_to_table_parent(implied, table);
+                self.open_element(build_element(implied.to_owned(), Vec::new(), None), false);
+            }
         }
     }
 
@@ -589,6 +615,64 @@ fn build_element(
         attrs,
         raw_svg,
     }
+}
+
+fn is_table_part(tag: &str) -> bool {
+    matches!(
+        tag,
+        "caption" | "col" | "colgroup" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr"
+    )
+}
+
+fn is_heading(tag: &str) -> bool {
+    matches!(tag, "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+}
+
+/// Whether a start tag ends a paragraph left open.
+fn closes_p(tag: &str) -> bool {
+    is_heading(tag)
+        || matches!(
+            tag,
+            "address"
+                | "article"
+                | "aside"
+                | "blockquote"
+                | "details"
+                | "div"
+                | "dl"
+                | "fieldset"
+                | "figcaption"
+                | "figure"
+                | "footer"
+                | "form"
+                | "header"
+                | "hgroup"
+                | "hr"
+                | "main"
+                | "menu"
+                | "nav"
+                | "ol"
+                | "p"
+                | "pre"
+                | "section"
+                | "table"
+                | "ul"
+        )
+}
+
+/// Whether an open `tag` ends the scope HTML looks in for an open `wanted`:
+/// a table and its parts are those of the nearest table, an item is one of
+/// the nearest list, and nothing else reaches out of a table or its cell.
+fn bounds_scope(tag: &str, wanted: &str) -> bool {
+    if wanted == "table" || is_table_part(wanted) {
+        return tag == "table";
+    }
+    matches!(tag, "table" | "td" | "th" | "caption")
+        || match wanted {
+            "li" => matches!(tag, "ul" | "ol"),
+            "dd" | "dt" => tag == "dl",
+            _ => false,
+        }
 }
 
 fn is_void_tag(tag: &str) -> bool {
