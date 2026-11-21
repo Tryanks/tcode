@@ -1215,8 +1215,12 @@ impl TimelineView {
         let copied = self.copied.is(&copy_key);
         let html_arc: Arc<str> = Arc::from(html_str);
         let copy_html = html_arc.clone();
-        let viewport_width = (f32::from(self.layout.width) > 0.0)
-            .then(|| (f32::from(self.layout.width) - 56.0).clamp(240.0, 760.0));
+        let viewport_width = (f32::from(self.layout.width) > 0.0).then(|| {
+            let column =
+                (f32::from(self.layout.width) - 2.0 * CONTENT_MIN_PADDING).min(CONTENT_MAX_WIDTH);
+            // Subtract card border (2px) and body `p_3()` horizontal padding (24px).
+            (column - 26.0).max(200.0)
+        });
 
         components::visualize::visualize_card(
             components::visualize::VisualizeCardData {

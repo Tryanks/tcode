@@ -40,6 +40,8 @@ pub(crate) struct RenderCtx<'a> {
     pub(crate) state: &'a Entity<HtmlState>,
     pub(crate) theme: &'a Theme,
     pub(crate) env: MediaEnv,
+    /// Remaining available content width inside nested padded/bordered boxes.
+    pub(crate) avail_width: f32,
     pub(crate) pending_media: Vec<PendingMedia>,
     pub(crate) id_seq: usize,
 }
@@ -72,6 +74,7 @@ pub(crate) fn render_document(
         state,
         theme: &theme,
         env,
+        avail_width: env.viewport_width,
         pending_media: Vec::new(),
         id_seq: 0,
     };
@@ -206,7 +209,7 @@ fn render_element(
     }
 
     let mut container = div().min_w_0();
-    style.apply_to(container.style(), ctx.env.viewport_width);
+    style.apply_to(container.style(), ctx.avail_width);
     let accent_border = style.split_accent_border();
     if let Some(accent) = accent_border {
         // Clear the accent side on the outer box so the inner overlay strip
@@ -269,6 +272,10 @@ fn render_element(
         container = container.child(render_pseudo(&before, ctx));
     }
 
+    let prev_avail = ctx.avail_width;
+    let horiz_chrome = horizontal_chrome_px(style, ctx.avail_width);
+    ctx.avail_width = (ctx.avail_width - horiz_chrome).max(120.0);
+
     let children = render_children(
         &ctx.doc.nodes[node_id].children,
         style,
@@ -276,6 +283,16 @@ fn render_element(
         ctx,
         cx,
     );
+    ctx.avail_width = prev_avail;
+    // CSS Grid `auto-fit` collapses empty tracks so fewer items than max columns
+    // still stretch across the full container width (`auto-fill` keeps empty tracks).
+    if matches!(style.display, DisplayKind::Grid | DisplayKind::InlineGrid)
+        && matches!(style.grid_columns, Some(GridColumns::AutoFit { .. }))
+        && !children.is_empty()
+        && let Some(cols) = container.style().grid_cols.as_mut()
+    {
+        cols.repeat = cols.repeat.min(children.len() as u16).max(1);
+    }
     container = container.children(children);
 
     if let Some(after) = compute_pseudo_style(
@@ -1097,14 +1114,14 @@ fn render_svg_element(
             .child(format!("SVG render error: {err}"))
             .into_any_element(),
         None => {
-            let (w, h) = fitted_media_size(natural, style, ctx.env.viewport_width);
+            let (w, h) = fitted_media_size(natural, style, ctx.avail_width);
             ctx.pending_media.push(PendingMedia::Svg {
                 key,
                 xml: prepared.xml,
                 natural,
                 target_width: w,
             });
-            let mut placeholder = div().w(px(w)).h(px(h)).rounded(px(6.0));
+            let mut placeholder = div().max_w_full().w(px(w)).h(px(h)).rounded(px(6.0));
             style.apply_to(placeholder.style(), ctx.env.viewport_width);
             maybe_center_media(placeholder.into_any_element(), style)
         }
@@ -1170,17 +1187,31 @@ fn render_raster_box(
     ctx: &mut RenderCtx<'_>,
 ) -> AnyElement {
     let natural = gpui::size(f32::from(pic.size().width), f32::from(pic.size().height));
-    let (w, h) = fitted_media_size(natural, style, ctx.env.viewport_width);
+    let (w, h) = fitted_media_size(natural, style, ctx.avail_width);
+    let aspect = (w / h).max(0.05);
+    let fill_width = matches!(
+        style.width,
+        Some(Length::Definite(DefiniteLength::Fraction(f))) if (f - 1.0).abs() < 0.01
+    );
     let source = pic.source();
     let viewer_source = source.clone();
     let viewer_label = label.to_string();
     let clickable = w >= 64.0 || h >= 64.0;
 
-    let mut image = img(source)
-        .w(px(w))
-        .h(px(h))
-        .object_fit(ObjectFit::Contain)
-        .flex_shrink_0();
+    let mut image = if fill_width {
+        img(source)
+            .w_full()
+            .max_w_full()
+            .aspect_ratio(aspect)
+            .object_fit(ObjectFit::Contain)
+    } else {
+        img(source)
+            .w(px(w))
+            .max_w_full()
+            .h(px(h))
+            .object_fit(ObjectFit::Contain)
+            .flex_shrink_0()
+    };
     if let Some(radius) = style.radius_tl {
         image.style().corner_radii.top_left = Some(radius);
         image.style().corner_radii.top_right = style.radius_tr.or(Some(radius));
@@ -1188,11 +1219,16 @@ fn render_raster_box(
         image.style().corner_radii.bottom_left = style.radius_bl.or(Some(radius));
     }
 
-    let mut wrapper = div().flex_shrink_0();
+    let mut wrapper = div().min_w_0().max_w_full();
     style.apply_to(wrapper.style(), ctx.env.viewport_width);
-    // Let the fitted image own exact aspect-preserved dimensions unless explicitly overridden.
-    wrapper.style().size.width = Some(px(w).into());
-    wrapper.style().size.height = Some(px(h).into());
+    if fill_width {
+        wrapper.style().size.width = Some(relative(1.0).into());
+        wrapper.style().size.height = None;
+    } else {
+        wrapper.style().flex_shrink = Some(0.0);
+        wrapper.style().size.width = Some(px(w).into());
+        wrapper.style().size.height = Some(px(h).into());
+    }
 
     let element = if clickable {
         let id = ctx.next_id("svg");
@@ -1223,15 +1259,35 @@ fn maybe_center_media(element: AnyElement, style: &ComputedStyle) -> AnyElement 
     }
 }
 
+fn horizontal_chrome_px(style: &ComputedStyle, avail: f32) -> f32 {
+    let def_px = |len: Option<DefiniteLength>| match len {
+        Some(DefiniteLength::Absolute(gpui::AbsoluteLength::Pixels(p))) => f32::from(p).max(0.0),
+        Some(DefiniteLength::Absolute(gpui::AbsoluteLength::Rems(r))) => {
+            (r.0 * super::style::BASE_FONT_PX).max(0.0)
+        }
+        Some(DefiniteLength::Fraction(f)) => (avail * f).max(0.0),
+        None => 0.0,
+    };
+    let abs_px = |len: Option<gpui::AbsoluteLength>| match len {
+        Some(gpui::AbsoluteLength::Pixels(p)) => f32::from(p).max(0.0),
+        Some(gpui::AbsoluteLength::Rems(r)) => (r.0 * super::style::BASE_FONT_PX).max(0.0),
+        None => 0.0,
+    };
+    def_px(style.padding_left)
+        + def_px(style.padding_right)
+        + abs_px(style.border_left_w)
+        + abs_px(style.border_right_w)
+}
+
 fn fitted_media_size(
     natural: gpui::Size<f32>,
     style: &ComputedStyle,
-    viewport_width: f32,
+    avail_width: f32,
 ) -> (f32, f32) {
     let nat_w = natural.width.max(1.0);
     let nat_h = natural.height.max(1.0);
     let aspect = nat_w / nat_h;
-    let max_w = (viewport_width - 8.0).max(120.0);
+    let max_w = avail_width.max(120.0);
 
     let resolve_len = |len: Option<Length>, base: f32| -> Option<f32> {
         match len? {
