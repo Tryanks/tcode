@@ -3396,3 +3396,13 @@ harness_options:
   context_window: "コンテキストウィンドウ"
   fast_mode: "高速モード"
   service_tier: "サービスティア"
+html:
+  left_out_nodes: "このビジュアルは描画できる要素数を超えています。最初の %{count} 個より後は表示されません。"
+  left_out_depth: "このビジュアルは %{count} 階層を超えて入れ子になっています。それより深い階層は、本来の親の隣に描画されます。"
+  left_out_styles: "このビジュアルは複雑すぎて完全には描画できません。一部のスタイルと図は表示されません。"
+  drawing: "図"
+  image: "画像"
+  picture_failed: "この画像を描画できませんでした：%{error}"
+  svg_too_long: "この図は長すぎて描画できません。"
+  data_uri_malformed: "この画像を描画できませんでした：data: アドレスに内容がありません。"
+  image_too_large: "この画像は大きすぎて描画できません：%{width} × %{height} ピクセル。"

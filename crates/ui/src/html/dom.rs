@@ -2,19 +2,25 @@
 //!
 //! Designed for self-contained visual cards: `<style>` blocks are extracted
 //! into `stylesheets`, inline `<svg>` subtrees keep their raw XML verbatim for
-//! SVG rasterization, and `<script>` / `<noscript>` / `<template>` / `<iframe>`
+//! SVG rasterization, and `<script>` / `<template>` / `<iframe>` / `<object>`
 //! subtrees are discarded safely.
 
 pub(crate) type NodeId = usize;
 
-const MAX_NODES: usize = 4096;
-const MAX_DEPTH: usize = 64;
+/// The most nodes a document is drawn with; [`Document::left_out`] says so
+/// when there were more.
+pub(crate) const MAX_NODES: usize = 4096;
+/// The deepest an element nests; [`Document::flattened`] says so when one
+/// was written deeper and became a sibling of what should have held it.
+pub(crate) const MAX_DEPTH: usize = 64;
 
 #[derive(Debug, Default)]
 pub(crate) struct Document {
     pub(crate) nodes: Vec<Node>,
     pub(crate) roots: Vec<NodeId>,
     pub(crate) stylesheets: Vec<String>,
+    pub(crate) left_out: bool,
+    pub(crate) flattened: bool,
 }
 
 #[derive(Debug)]
@@ -22,6 +28,20 @@ pub(crate) struct Node {
     pub(crate) parent: Option<NodeId>,
     pub(crate) children: Vec<NodeId>,
     pub(crate) kind: NodeKind,
+    pub(crate) place: Place,
+}
+
+/// Where an element stands among its element siblings, counted once when the
+/// document is parsed: counting per selector is quadratic in a long run of
+/// siblings.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Place {
+    pub(crate) previous: Option<NodeId>,
+    /// 1-based among element siblings, and among those of the same tag.
+    pub(crate) index: u32,
+    pub(crate) index_of_type: u32,
+    pub(crate) last: bool,
+    pub(crate) last_of_type: bool,
 }
 
 #[derive(Debug)]
@@ -58,6 +78,7 @@ impl Document {
     pub(crate) fn parse(input: &str) -> Self {
         let mut parser = Parser::new(input);
         parser.parse();
+        parser.doc.place_elements();
         parser.doc
     }
 
@@ -68,58 +89,41 @@ impl Document {
         }
     }
 
-    /// Index among element siblings (1-based) and total element sibling count.
-    pub(crate) fn element_sibling_position(&self, id: NodeId) -> (usize, usize) {
-        let siblings = match self.nodes[id].parent {
-            Some(parent) => &self.nodes[parent].children,
-            None => &self.roots,
-        };
-        let mut pos = 0;
-        let mut total = 0;
-        for &child in siblings {
-            if matches!(self.nodes[child].kind, NodeKind::Element(_)) {
-                total += 1;
-                if child == id {
-                    pos = total;
-                }
+    fn place_elements(&mut self) {
+        let mut places = vec![Place::default(); self.nodes.len()];
+        let mut of_type: std::collections::HashMap<&str, (u32, NodeId)> = Default::default();
+        let families = std::iter::once(&self.roots).chain(self.nodes.iter().map(|n| &n.children));
+        for siblings in families {
+            of_type.clear();
+            let mut previous = None;
+            let mut index = 0;
+            for &id in siblings {
+                let NodeKind::Element(el) = &self.nodes[id].kind else {
+                    continue;
+                };
+                index += 1;
+                let same = of_type.entry(el.tag.as_str()).or_insert((0, id));
+                *same = (same.0 + 1, id);
+                places[id] = Place {
+                    previous,
+                    index,
+                    index_of_type: same.0,
+                    last: false,
+                    last_of_type: false,
+                };
+                previous = Some(id);
+            }
+            if let Some(last) = previous {
+                places[last].last = true;
+            }
+            for (_, last) in of_type.values() {
+                places[*last].last_of_type = true;
             }
         }
-        (pos, total)
-    }
-
-    /// 1-based index and total count among sibling elements with the same tag.
-    pub(crate) fn element_type_position(&self, id: NodeId, tag: &str) -> (usize, usize) {
-        let siblings = match self.nodes[id].parent {
-            Some(parent) => &self.nodes[parent].children,
-            None => &self.roots,
-        };
-        let mut pos = 0;
-        let mut total = 0;
-        for &child in siblings {
-            if let NodeKind::Element(el) = &self.nodes[child].kind
-                && el.tag == tag
-            {
-                total += 1;
-                if child == id {
-                    pos = total;
-                }
-            }
+        drop(of_type);
+        for (node, place) in self.nodes.iter_mut().zip(places) {
+            node.place = place;
         }
-        (pos, total)
-    }
-
-    /// Previous element sibling, skipping whitespace/text nodes.
-    pub(crate) fn prev_element_sibling(&self, id: NodeId) -> Option<NodeId> {
-        let siblings = match self.nodes[id].parent {
-            Some(parent) => &self.nodes[parent].children,
-            None => &self.roots,
-        };
-        let idx = siblings.iter().position(|&c| c == id)?;
-        siblings[..idx]
-            .iter()
-            .rev()
-            .copied()
-            .find(|&c| matches!(self.nodes[c].kind, NodeKind::Element(_)))
     }
 }
 
@@ -145,7 +149,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse(&mut self) {
-        while self.pos < self.bytes.len() && self.doc.nodes.len() < MAX_NODES {
+        while self.pos < self.bytes.len() {
             if self.bytes[self.pos] == b'<' {
                 if self.starts_with("<!--") {
                     self.skip_comment();
@@ -171,12 +175,11 @@ impl<'a> Parser<'a> {
                 while self.pos < self.bytes.len() && self.bytes[self.pos] != b'<' {
                     self.pos += 1;
                 }
-                if !self.in_head {
-                    let raw = &self.input[start..self.pos];
-                    let decoded = decode_entities(raw);
-                    if !decoded.is_empty() {
-                        self.push_text(&decoded);
-                    }
+                let decoded = decode_entities(&self.input[start..self.pos]);
+                // Text is not head content: it ends a head left open.
+                self.in_head &= decoded.trim().is_empty();
+                if !self.in_head && !decoded.is_empty() {
+                    self.push_text(&decoded);
                 }
             }
         }
@@ -228,6 +231,12 @@ impl<'a> Parser<'a> {
             }
             return;
         }
+        // Only metadata is head content: any other element ends a head left
+        // open, as a browser's parser does, instead of taking the body with it.
+        self.in_head &= matches!(
+            tag.as_str(),
+            "base" | "link" | "meta" | "script" | "style" | "template" | "title"
+        );
         if matches!(tag.as_str(), "html" | "body") {
             // Preserve classes / inline styles on `body` or `html` only if present by wrapping,
             // otherwise treat transparently so fragment & full-document inputs render identically.
@@ -252,7 +261,7 @@ impl<'a> Parser<'a> {
         }
         if matches!(
             tag.as_str(),
-            "script" | "noscript" | "template" | "iframe" | "object" | "title"
+            "script" | "template" | "iframe" | "object" | "title"
         ) {
             if !self_closing {
                 let _ = self.read_raw_text(&tag);
@@ -496,6 +505,7 @@ impl<'a> Parser<'a> {
 
     fn open_element(&mut self, el: ElementData, void: bool) {
         if self.doc.nodes.len() >= MAX_NODES {
+            self.doc.left_out = true;
             return;
         }
         let parent = self.stack.last().copied();
@@ -504,22 +514,28 @@ impl<'a> Parser<'a> {
             parent,
             children: Vec::new(),
             kind: NodeKind::Element(el),
+            place: Place::default(),
         });
         match parent {
             Some(p) => self.doc.nodes[p].children.push(id),
             None => self.doc.roots.push(id),
         }
-        if !void && self.stack.len() < MAX_DEPTH {
-            self.stack.push(id);
+        if !void {
+            if self.stack.len() < MAX_DEPTH {
+                self.stack.push(id);
+            } else {
+                self.doc.flattened = true;
+            }
         }
     }
 
     fn push_text(&mut self, text: &str) {
-        if self.doc.nodes.len() >= MAX_NODES {
-            return;
-        }
         let parent = self.stack.last().copied();
         if parent.is_none() && text.trim().is_empty() {
+            return;
+        }
+        if self.doc.nodes.len() >= MAX_NODES {
+            self.doc.left_out = true;
             return;
         }
         // Coalesce adjacent text nodes under the same parent.
@@ -538,6 +554,7 @@ impl<'a> Parser<'a> {
             parent,
             children: Vec::new(),
             kind: NodeKind::Text(text.to_string()),
+            place: Place::default(),
         });
         match parent {
             Some(p) => self.doc.nodes[p].children.push(id),
@@ -612,7 +629,10 @@ pub(crate) fn decode_entities(input: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         rest = &rest[amp + 1..];
-        if let Some(semi) = rest.find(';').filter(|&i| i <= 16) {
+        // No entity is longer than this; looking further makes a run of
+        // ampersands quadratic.
+        let name = &rest.as_bytes()[..rest.len().min(17)];
+        if let Some(semi) = name.iter().position(|&b| b == b';') {
             let entity = &rest[..semi];
             if let Some(decoded) = decode_single_entity(entity) {
                 out.push_str(decoded.as_str());

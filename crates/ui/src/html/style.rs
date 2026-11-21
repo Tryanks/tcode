@@ -1,26 +1,39 @@
 //! Computed CSS styles, UA defaults, theme CSS custom properties, and
 //! translation into GPUI [`StyleRefinement`].
 
-use std::collections::HashMap;
 use std::ops::Range;
+use std::rc::Rc;
 
 use gpui::{
     AbsoluteLength, AlignContent, AlignItems, AlignSelf, Background, BorderStyle, BoxShadow,
     DefiniteLength, Display, Fill, FlexDirection, FlexWrap, FontStyle, FontWeight, GridLocation,
     GridPlacement, GridTemplate, GridTemplateMinSize, Hsla, JustifyContent, Length, Overflow,
-    Position, Rgba, SharedString, StrikethroughStyle, StyleRefinement, TextAlign, UnderlineStyle,
+    Pixels, Position, SharedString, StrikethroughStyle, StyleRefinement, TextAlign, UnderlineStyle,
     Visibility, WhiteSpace, linear_color_stop, linear_gradient, point, px, relative, rems,
 };
 
 use super::color::{hsla_to_css, parse_color_for_mode, split_top_level_commas};
 use super::css::{
-    Declaration, MediaEnv, PseudoElement, Stylesheet, parse_declarations, resolve_vars,
+    ActiveRules, Budget, Declaration, PseudoElement, Vars, number, parse_declarations, resolve_vars,
 };
 use super::dom::{Document, ElementData, NodeId};
 use crate::theme::Theme;
 
 /// Default base font size in pixels for `rem` and root `em` units.
 pub(crate) const BASE_FONT_PX: f32 = 14.0;
+
+/// The longest length a declaration may give, in pixels either way. Past it
+/// a row's height stops being a number the timeline can add to the others.
+const MAX_PX: f32 = 100_000.0;
+/// The largest multiple of its container a percentage may give.
+const MAX_FRACTION: f32 = 100.0;
+/// The largest flex or `fr` factor: the factors of one line are summed.
+const MAX_FACTOR: f32 = 10_000.0;
+/// The most grid tracks a template or a placement may name; layout walks
+/// every track for every item.
+pub(crate) const MAX_GRID_TRACKS: u16 = 256;
+/// The most shadows one box is painted with.
+const MAX_SHADOWS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DisplayKind {
@@ -123,7 +136,7 @@ pub(crate) struct ComputedStyle {
     pub(crate) text_transform: TextTransform,
     pub(crate) white_space: WhiteSpaceMode,
     pub(crate) list_style: ListStyleType,
-    pub(crate) vars: HashMap<String, String>,
+    pub(crate) vars: Rc<Vars>,
 
     // Text decorations (not strictly inherited in CSS, carried on inline spans)
     pub(crate) underline: bool,
@@ -210,17 +223,13 @@ pub(crate) struct ComputedStyle {
 
 impl ComputedStyle {
     /// Root inherited style seeded from the active Tcode theme and stylesheet `:root` vars.
-    pub(crate) fn root(theme: &Theme, sheet: &Stylesheet, env: MediaEnv) -> Self {
-        let mut vars = theme_variables(theme);
-        for (k, v) in sheet.root_variables(env) {
-            vars.insert(k, v);
-        }
+    fn root(theme: &Palette, vars: Rc<Vars>) -> Self {
         Self {
             color: theme.foreground,
             font_size: BASE_FONT_PX,
             font_weight: FontWeight::NORMAL,
             font_style: FontStyle::Normal,
-            font_family: theme.font_family.clone(),
+            font_family: theme.font_sans.clone(),
             line_height: Some(DefiniteLength::Fraction(1.5)),
             text_align: None,
             text_transform: TextTransform::None,
@@ -292,7 +301,7 @@ impl ComputedStyle {
         }
     }
 
-    pub(crate) fn inherit_from(parent: &Self) -> Self {
+    fn inherit_from(parent: &Self) -> Self {
         Self {
             color: parent.color,
             font_size: parent.font_size,
@@ -444,6 +453,12 @@ impl ComputedStyle {
 
     /// Apply this computed style onto a GPUI `StyleRefinement`.
     pub(crate) fn apply_to(&self, style: &mut StyleRefinement, viewport_width: f32) {
+        self.apply_flow_to(style, viewport_width);
+        self.apply_box_to(style);
+    }
+
+    /// How the box lays out what it holds.
+    pub(crate) fn apply_flow_to(&self, style: &mut StyleRefinement, viewport_width: f32) {
         match self.display {
             DisplayKind::None => style.display = Some(Display::None),
             DisplayKind::Flex | DisplayKind::InlineFlex => {
@@ -509,6 +524,29 @@ impl ComputedStyle {
             }
         }
 
+        if let Some(wrap) = self.flex_wrap {
+            style.flex_wrap = Some(wrap);
+        }
+        if let Some(jc) = self.justify_content {
+            style.justify_content = Some(jc);
+        }
+        if let Some(ai) = self.align_items {
+            style.align_items = Some(ai);
+        }
+        if let Some(ac) = self.align_content {
+            style.align_content = Some(ac);
+        }
+        if let Some(gap) = self.col_gap {
+            style.gap.width = Some(gap);
+        }
+        if let Some(gap) = self.row_gap {
+            style.gap.height = Some(gap);
+        }
+    }
+
+    /// The box itself: where it sits in its parent, its size, its edges and
+    /// the type it is set in.
+    fn apply_box_to(&self, style: &mut StyleRefinement) {
         if self.visibility == Visibility::Hidden {
             style.visibility = Some(Visibility::Hidden);
         }
@@ -628,9 +666,6 @@ impl ComputedStyle {
             style.corner_radii.bottom_left = self.radius_bl;
         }
 
-        if let Some(wrap) = self.flex_wrap {
-            style.flex_wrap = Some(wrap);
-        }
         if let Some(grow) = self.flex_grow {
             style.flex_grow = Some(grow);
         }
@@ -640,23 +675,8 @@ impl ComputedStyle {
         if let Some(basis) = self.flex_basis {
             style.flex_basis = Some(basis);
         }
-        if let Some(jc) = self.justify_content {
-            style.justify_content = Some(jc);
-        }
-        if let Some(ai) = self.align_items {
-            style.align_items = Some(ai);
-        }
         if let Some(aself) = self.align_self {
             style.align_self = Some(aself);
-        }
-        if let Some(ac) = self.align_content {
-            style.align_content = Some(ac);
-        }
-        if let Some(gap) = self.col_gap {
-            style.gap.width = Some(gap);
-        }
-        if let Some(gap) = self.row_gap {
-            style.gap.height = Some(gap);
         }
         if let Some(loc) = &self.grid_location {
             style.grid_location = Some(loc.clone());
@@ -668,14 +688,17 @@ impl ComputedStyle {
         if !self.box_shadows.is_empty() {
             style.box_shadow = Some(self.box_shadows.clone());
         }
+        // A box that scrolls is given a scroll area by the renderer; the
+        // style only clips it.
+        let clip = |overflow| match overflow {
+            Overflow::Scroll => Overflow::Hidden,
+            other => other,
+        };
         if let Some(ox) = self.overflow_x {
-            style.overflow.x = Some(ox);
-            if ox == Overflow::Scroll {
-                style.restrict_scroll_to_axis = Some(true);
-            }
+            style.overflow.x = Some(clip(ox));
         }
         if let Some(oy) = self.overflow_y {
-            style.overflow.y = Some(oy);
+            style.overflow.y = Some(clip(oy));
         }
 
         // Typography
@@ -715,100 +738,194 @@ impl ComputedStyle {
     }
 }
 
-/// Resolve the computed style for `node_id`.
-pub(crate) fn compute_element_style(
-    doc: &Document,
-    node_id: NodeId,
-    el: &ElementData,
-    parent: &ComputedStyle,
-    sheet: &Stylesheet,
-    theme: &Theme,
-    env: MediaEnv,
-) -> ComputedStyle {
-    let mut style = ComputedStyle::inherit_from(parent);
-    apply_ua_defaults(&mut style, el, theme);
+/// What of the active theme a cascade reads: the colours and fonts behind
+/// the UA defaults and the custom properties the tool documents to the
+/// model. Two themes with the same palette cascade alike.
+#[derive(Clone, PartialEq)]
+pub(crate) struct Palette {
+    pub(crate) dark: bool,
+    foreground: Hsla,
+    muted_foreground: Hsla,
+    muted: Hsla,
+    border: Hsla,
+    link: Hsla,
+    warning: Hsla,
+    font_sans: SharedString,
+    font_mono: SharedString,
+    radius: Pixels,
+    colors: [(&'static str, Hsla); 18],
+}
 
-    let matched = sheet.matching_declarations(doc, node_id, env, None);
-    let inline = el
-        .inline_style
-        .as_deref()
-        .map(parse_declarations)
-        .unwrap_or_default();
-
-    // First pass: collect custom properties (`--*`) so `var()` works regardless of order.
-    for decl in matched.iter().copied().chain(inline.iter()) {
-        if decl.name.starts_with("--") {
-            let resolved = resolve_vars(&decl.value, &style.vars);
-            style.vars.insert(decl.name.clone(), resolved);
+impl Palette {
+    pub(crate) fn of(theme: &Theme) -> Self {
+        // The theme has no palette for a chart's series; these are theirs,
+        // in the light theme and the dark one.
+        let series =
+            |light: u32, dark: u32| theme.by_mode(gpui::rgb(light).into(), gpui::rgb(dark).into());
+        Self {
+            dark: theme.mode.is_dark(),
+            foreground: theme.foreground,
+            muted_foreground: theme.muted_foreground,
+            muted: theme.muted,
+            border: theme.border,
+            link: theme.link,
+            warning: theme.warning,
+            font_sans: theme.font_family.clone(),
+            font_mono: theme.mono_font_family.clone(),
+            radius: theme.tokens.radius.md,
+            colors: [
+                ("--background", theme.background),
+                ("--foreground", theme.foreground),
+                ("--card", theme.muted),
+                ("--muted", theme.muted),
+                ("--muted-foreground", theme.muted_foreground),
+                ("--border", theme.border),
+                ("--primary", theme.primary),
+                ("--accent", theme.accent),
+                ("--destructive", theme.danger),
+                ("--success", theme.success),
+                ("--warning", theme.warning),
+                ("--info", theme.info),
+                ("--chart-1", series(0x2563eb, 0x60a5fa)),
+                ("--chart-2", series(0x0d9488, 0x2dd4bf)),
+                ("--chart-3", series(0xd97706, 0xfbbf24)),
+                ("--chart-4", series(0x7c3aed, 0xa78bfa)),
+                ("--chart-5", series(0xdb2777, 0xf472b6)),
+                ("--chart-6", series(0x16a34a, 0x4ade80)),
+            ],
         }
     }
-    // Second pass: `color` and `font-size` first so `currentColor` and `em` resolve accurately.
-    let all_decls = || {
+
+    pub(crate) fn font_sans(&self) -> &str {
+        &self.font_sans
+    }
+
+    /// The custom properties `tcode_visualize` documents to the model.
+    fn variables(&self) -> Rc<Vars> {
+        let mut values: Vec<(&str, String)> = self
+            .colors
+            .iter()
+            .map(|(name, color)| (*name, hsla_to_css(*color)))
+            .collect();
+        values.push(("--font-sans", self.font_sans.to_string()));
+        values.push(("--font-mono", self.font_mono.to_string()));
+        values.push(("--radius", format!("{}px", f32::from(self.radius))));
+        let declared: Vec<(&str, &str)> = values
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect();
+        Vars::declare(&Rc::default(), &declared)
+    }
+}
+
+/// One pass over a document's styles: every element's style from its
+/// parent's, within a [`Budget`].
+pub(crate) struct Cascade<'a> {
+    pub(crate) doc: &'a Document,
+    pub(crate) rules: ActiveRules<'a>,
+    pub(crate) theme: &'a Palette,
+    pub(crate) budget: Budget,
+    /// A value past one of this module's limits was drawn at the limit.
+    pub(crate) clamped: bool,
+}
+
+impl Cascade<'_> {
+    pub(crate) fn root(&mut self) -> ComputedStyle {
+        let declared = self.rules.root_properties();
+        let vars = self.declare(&self.theme.variables(), &declared);
+        ComputedStyle::root(self.theme, vars)
+    }
+
+    fn declare(&mut self, inherited: &Rc<Vars>, declared: &[(&str, &str)]) -> Rc<Vars> {
+        let cost = declared.iter().map(|(_, value)| cost(value)).sum();
+        if declared.is_empty() || !self.budget.spend(cost) {
+            return inherited.clone();
+        }
+        Vars::declare(inherited, declared)
+    }
+
+    /// Resolve the computed style for `node_id`.
+    pub(crate) fn element(
+        &mut self,
+        node_id: NodeId,
+        el: &ElementData,
+        parent: &ComputedStyle,
+    ) -> ComputedStyle {
+        let mut style = ComputedStyle::inherit_from(parent);
+        apply_ua_defaults(&mut style, el, self.theme);
+
+        let matched = self
+            .rules
+            .matching_declarations(self.doc, node_id, None, &mut self.budget);
+        let inline = el
+            .inline_style
+            .as_deref()
+            .map(parse_declarations)
+            .unwrap_or_default();
         // Order: normal matched -> normal inline -> !important matched -> !important inline
-        let normal_matched = matched.iter().copied().filter(|d| !d.important);
-        let normal_inline = inline.iter().filter(|d| !d.important);
-        let imp_matched = matched.iter().copied().filter(|d| d.important);
-        let imp_inline = inline.iter().filter(|d| d.important);
-        normal_matched
-            .chain(normal_inline)
-            .chain(imp_matched)
-            .chain(imp_inline)
-    };
+        let ordered: Vec<&Declaration> = (matched.iter().copied().filter(|d| !d.important))
+            .chain(inline.iter().filter(|d| !d.important))
+            .chain(matched.iter().copied().filter(|d| d.important))
+            .chain(inline.iter().filter(|d| d.important))
+            .collect();
+        self.apply(&mut style, &ordered, parent.font_size);
 
-    for decl in all_decls() {
-        if matches!(decl.name.as_str(), "color" | "font-size") {
-            apply_declaration(&mut style, decl, parent.font_size, theme);
-        }
-    }
-    for decl in all_decls() {
-        if !decl.name.starts_with("--") && !matches!(decl.name.as_str(), "color" | "font-size") {
-            apply_declaration(&mut style, decl, parent.font_size, theme);
-        }
+        // HTML presentation attributes on elements (width/height/align/bgcolor).
+        apply_html_presentational_attrs(&mut style, el);
+
+        style
     }
 
-    // HTML presentation attributes on elements (width/height/align/bgcolor).
-    apply_html_presentational_attrs(&mut style, el);
+    /// Resolve `::before` or `::after` pseudo-element style if `content` is specified.
+    pub(crate) fn pseudo(
+        &mut self,
+        node_id: NodeId,
+        parent: &ComputedStyle,
+        pseudo: PseudoElement,
+    ) -> Option<ComputedStyle> {
+        let matched =
+            self.rules
+                .matching_declarations(self.doc, node_id, Some(pseudo), &mut self.budget);
+        if matched.is_empty() {
+            return None;
+        }
+        let mut style = ComputedStyle::inherit_from(parent);
+        style.display = DisplayKind::Inline;
+        self.apply(&mut style, &matched, parent.font_size);
+        style.content.as_ref()?;
+        Some(style)
+    }
 
-    style
+    /// Custom properties first, so `var()` works whatever the order; then
+    /// `color` and `font-size`, which `currentColor` and `em` in the rest
+    /// resolve against.
+    fn apply(&mut self, style: &mut ComputedStyle, ordered: &[&Declaration], parent_em: f32) {
+        let declared: Vec<(&str, &str)> = ordered
+            .iter()
+            .filter(|decl| decl.name.starts_with("--"))
+            .map(|decl| (decl.name.as_str(), decl.value.as_str()))
+            .collect();
+        style.vars = self.declare(&style.vars, &declared);
+        let first = |decl: &&&Declaration| matches!(decl.name.as_str(), "color" | "font-size");
+        let rest = ordered
+            .iter()
+            .filter(|decl| !decl.name.starts_with("--") && !first(decl));
+        for decl in ordered.iter().filter(first).chain(rest) {
+            if !self.budget.spend(cost(&decl.value)) {
+                return;
+            }
+            apply_declaration(style, decl, parent_em, self.theme, &mut self.clamped);
+        }
+    }
 }
 
-/// Resolve `::before` or `::after` pseudo-element style if `content` is specified.
-pub(crate) fn compute_pseudo_style(
-    doc: &Document,
-    node_id: NodeId,
-    parent: &ComputedStyle,
-    sheet: &Stylesheet,
-    theme: &Theme,
-    env: MediaEnv,
-    pseudo: PseudoElement,
-) -> Option<ComputedStyle> {
-    let matched = sheet.matching_declarations(doc, node_id, env, Some(pseudo));
-    if matched.is_empty() {
-        return None;
-    }
-    let mut style = ComputedStyle::inherit_from(parent);
-    style.display = DisplayKind::Inline;
-    for decl in &matched {
-        if decl.name.starts_with("--") {
-            let resolved = resolve_vars(&decl.value, &style.vars);
-            style.vars.insert(decl.name.clone(), resolved);
-        }
-    }
-    for decl in &matched {
-        if matches!(decl.name.as_str(), "color" | "font-size") {
-            apply_declaration(&mut style, decl, parent.font_size, theme);
-        }
-    }
-    for decl in &matched {
-        if !decl.name.starts_with("--") && !matches!(decl.name.as_str(), "color" | "font-size") {
-            apply_declaration(&mut style, decl, parent.font_size, theme);
-        }
-    }
-    style.content.as_ref()?;
-    Some(style)
+/// What a declaration of `value` costs a [`Budget`]: one unit, and one more
+/// for every sixteen bytes it has to be read through.
+fn cost(value: &str) -> usize {
+    1 + value.len() / 16
 }
 
-fn apply_ua_defaults(style: &mut ComputedStyle, el: &ElementData, theme: &Theme) {
+fn apply_ua_defaults(style: &mut ComputedStyle, el: &ElementData, theme: &Palette) {
     match el.tag.as_str() {
         "span" | "a" | "strong" | "b" | "em" | "i" | "u" | "s" | "del" | "strike" | "small"
         | "sub" | "sup" | "code" | "kbd" | "samp" | "mark" | "abbr" | "cite" | "time" | "q"
@@ -902,14 +1019,14 @@ fn apply_ua_defaults(style: &mut ComputedStyle, el: &ElementData, theme: &Theme)
             style.underline = true;
         }
         "code" | "kbd" | "samp" => {
-            style.font_family = theme.mono_font_family.clone();
+            style.font_family = theme.font_mono.clone();
             style.font_size = (style.font_size * 0.92).max(11.0);
-            let bg = theme.tokens.colors.muted;
+            let bg = theme.muted;
             style.background_hsla = Some(bg);
             style.background = Some(Fill::Color(bg.into()));
         }
         "pre" => {
-            style.font_family = theme.mono_font_family.clone();
+            style.font_family = theme.font_mono.clone();
             style.font_size = (BASE_FONT_PX * 0.9).max(11.5);
             style.white_space = WhiteSpaceMode::Pre;
             style.padding_top = Some(px(10.0).into());
@@ -920,7 +1037,7 @@ fn apply_ua_defaults(style: &mut ComputedStyle, el: &ElementData, theme: &Theme)
             style.radius_tr = Some(px(6.0).into());
             style.radius_br = Some(px(6.0).into());
             style.radius_bl = Some(px(6.0).into());
-            let bg = theme.tokens.colors.muted;
+            let bg = theme.muted;
             style.background_hsla = Some(bg);
             style.background = Some(Fill::Color(bg.into()));
             style.overflow_x = Some(Overflow::Scroll);
@@ -985,20 +1102,28 @@ fn apply_html_presentational_attrs(style: &mut ComputedStyle, el: &ElementData) 
 
 fn parse_attr_length(raw: &str, em: f32) -> Option<Length> {
     let s = raw.trim();
-    if let Ok(n) = s.parse::<f32>() {
-        return Some(px(n).into());
+    if let Some(n) = number(s) {
+        return unsigned(Some(Length::from(px(bounded_px(n)))));
     }
-    parse_length(s, em)
+    unsigned(parse_length(s, em))
 }
 
-fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_em: f32, theme: &Theme) {
-    let raw = resolve_vars(&decl.value, &style.vars);
+fn apply_declaration(
+    style: &mut ComputedStyle,
+    decl: &Declaration,
+    parent_em: f32,
+    theme: &Palette,
+    clamped: &mut bool,
+) {
+    let Some(raw) = resolve_vars(&decl.value, &style.vars) else {
+        return;
+    };
     let val = raw.trim();
     if val.is_empty() {
         return;
     }
     let em = style.font_size;
-    let dark = theme.mode.is_dark();
+    let dark = theme.dark;
 
     match decl.name.as_str() {
         "display" => {
@@ -1030,10 +1155,10 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_em: f
         }
         "opacity" => {
             if let Some(pct) = val.strip_suffix('%') {
-                if let Ok(n) = pct.trim().parse::<f32>() {
+                if let Some(n) = number(pct) {
                     style.opacity = Some((n / 100.0).clamp(0.0, 1.0));
                 }
-            } else if let Ok(n) = val.parse::<f32>() {
+            } else if let Some(n) = number(val) {
                 style.opacity = Some(n.clamp(0.0, 1.0));
             }
         }
@@ -1055,22 +1180,22 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_em: f
                 style.left = Some(l);
             }
         }
-        "width" => style.width = parse_length(val, em),
-        "height" => style.height = parse_length(val, em),
-        "min-width" => style.min_width = parse_length(val, em),
-        "min-height" => style.min_height = parse_length(val, em),
+        "width" => style.width = unsigned(parse_length(val, em)),
+        "height" => style.height = unsigned(parse_length(val, em)),
+        "min-width" => style.min_width = unsigned(parse_length(val, em)),
+        "min-height" => style.min_height = unsigned(parse_length(val, em)),
         "max-width" => {
             if val.eq_ignore_ascii_case("none") {
                 style.max_width = None;
             } else {
-                style.max_width = parse_length(val, em);
+                style.max_width = unsigned(parse_length(val, em));
             }
         }
         "max-height" => {
             if val.eq_ignore_ascii_case("none") {
                 style.max_height = None;
             } else {
-                style.max_height = parse_length(val, em);
+                style.max_height = unsigned(parse_length(val, em));
             }
         }
         "aspect-ratio" => {
@@ -1112,25 +1237,25 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_em: f
             }
         }
         "padding" => {
-            if let Some([t, r, b, l]) = parse_four_definite(val, em) {
+            if let Some([t, r, b, l]) = all_unsigned(parse_four_definite(val, em)) {
                 style.padding_top = Some(t);
                 style.padding_right = Some(r);
                 style.padding_bottom = Some(b);
                 style.padding_left = Some(l);
             }
         }
-        "padding-top" => style.padding_top = parse_definite(val, em),
-        "padding-right" => style.padding_right = parse_definite(val, em),
-        "padding-bottom" => style.padding_bottom = parse_definite(val, em),
-        "padding-left" => style.padding_left = parse_definite(val, em),
+        "padding-top" => style.padding_top = unsigned(parse_definite(val, em)),
+        "padding-right" => style.padding_right = unsigned(parse_definite(val, em)),
+        "padding-bottom" => style.padding_bottom = unsigned(parse_definite(val, em)),
+        "padding-left" => style.padding_left = unsigned(parse_definite(val, em)),
         "padding-inline" => {
-            if let Some([l, r]) = parse_two_definite(val, em) {
+            if let Some([l, r]) = all_unsigned(parse_two_definite(val, em)) {
                 style.padding_left = Some(l);
                 style.padding_right = Some(r);
             }
         }
         "padding-block" => {
-            if let Some([t, b]) = parse_two_definite(val, em) {
+            if let Some([t, b]) = all_unsigned(parse_two_definite(val, em)) {
                 style.padding_top = Some(t);
                 style.padding_bottom = Some(b);
             }
@@ -1159,7 +1284,7 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_em: f
         "border-bottom" => apply_side_border(val, em, style, Side::Bottom, dark),
         "border-left" => apply_side_border(val, em, style, Side::Left, dark),
         "border-width" => {
-            if let Some([t, r, b, l]) = parse_four_absolute(val, em) {
+            if let Some([t, r, b, l]) = all_unsigned(parse_four_absolute(val, em)) {
                 style.border_top_w = Some(t);
                 style.border_right_w = Some(r);
                 style.border_bottom_w = Some(b);
@@ -1211,7 +1336,7 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_em: f
         "border-radius" => {
             // Strip optional `/ ...` elliptical radii
             let main = val.split('/').next().unwrap_or(val).trim();
-            if let Some([tl, tr, br, bl]) = parse_four_radius(main, em) {
+            if let Some([tl, tr, br, bl]) = all_unsigned(parse_four_radius(main, em)) {
                 style.radius_tl = Some(tl);
                 style.radius_tr = Some(tr);
                 style.radius_br = Some(br);
@@ -1256,16 +1381,16 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_em: f
             }
         }
         "flex-grow" => {
-            if let Ok(n) = val.parse::<f32>() {
-                style.flex_grow = Some(n.max(0.0));
+            if let Some(n) = factor(val) {
+                style.flex_grow = Some(n);
             }
         }
         "flex-shrink" => {
-            if let Ok(n) = val.parse::<f32>() {
-                style.flex_shrink = Some(n.max(0.0));
+            if let Some(n) = factor(val) {
+                style.flex_shrink = Some(n);
             }
         }
-        "flex-basis" => style.flex_basis = parse_length(val, em),
+        "flex-basis" => style.flex_basis = unsigned(parse_length(val, em)),
         "flex" => apply_flex_shorthand(style, val, em),
 
         // Alignment & gap
@@ -1290,29 +1415,29 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_em: f
             }
         }
         "gap" => {
-            if let Some([r, c]) = parse_two_definite(val, em) {
+            if let Some([r, c]) = all_unsigned(parse_two_definite(val, em)) {
                 style.row_gap = Some(r);
                 style.col_gap = Some(c);
             }
         }
-        "row-gap" => style.row_gap = parse_definite(val, em),
-        "column-gap" => style.col_gap = parse_definite(val, em),
+        "row-gap" => style.row_gap = unsigned(parse_definite(val, em)),
+        "column-gap" => style.col_gap = unsigned(parse_definite(val, em)),
 
         // Grid
         "grid-template-columns" => {
-            style.grid_columns = parse_grid_columns(val, em);
+            style.grid_columns = parse_grid_columns(val, em, clamped);
         }
         "grid-template-rows" => {
-            style.grid_rows = parse_grid_row_count(val);
+            style.grid_rows = parse_grid_row_count(val, clamped);
         }
         "grid-column" => {
-            if let Some(range) = parse_grid_line_range(val) {
+            if let Some(range) = parse_grid_line_range(val, clamped) {
                 let loc = style.grid_location.get_or_insert_default();
                 loc.column = range;
             }
         }
         "grid-row" => {
-            if let Some(range) = parse_grid_line_range(val) {
+            if let Some(range) = parse_grid_line_range(val, clamped) {
                 let loc = style.grid_location.get_or_insert_default();
                 loc.row = range;
             }
@@ -1354,6 +1479,10 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_em: f
                 style.box_shadows.clear();
             } else {
                 style.box_shadows = parse_box_shadows(val, em, style.color, dark);
+                if style.box_shadows.len() > MAX_SHADOWS {
+                    style.box_shadows.truncate(MAX_SHADOWS);
+                    *clamped = true;
+                }
             }
         }
 
@@ -1399,29 +1528,30 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_em: f
         }
         "font-family" => {
             let lower = val.to_ascii_lowercase();
-            if lower.contains("mono")
+            if lower.contains(&theme.font_mono.to_ascii_lowercase())
+                || lower.contains("mono")
                 || lower.contains("menlo")
                 || lower.contains("consolas")
                 || lower.contains("courier")
                 || lower.contains("fira code")
                 || lower.contains("jetbrains")
             {
-                style.font_family = theme.mono_font_family.clone();
+                style.font_family = theme.font_mono.clone();
             } else {
-                style.font_family = theme.font_family.clone();
+                style.font_family = theme.font_sans.clone();
             }
         }
         "line-height" => {
             if val.eq_ignore_ascii_case("normal") {
                 style.line_height = Some(DefiniteLength::Fraction(1.45));
-            } else if let Ok(mult) = val.parse::<f32>() {
+            } else if let Some(mult) = number(val) {
                 style.line_height = Some(DefiniteLength::Fraction(mult.clamp(0.8, 4.0)));
             } else if let Some(pct) = val.strip_suffix('%') {
-                if let Ok(n) = pct.trim().parse::<f32>() {
+                if let Some(n) = number(pct) {
                     style.line_height = Some(DefiniteLength::Fraction((n / 100.0).clamp(0.8, 4.0)));
                 }
-            } else if let Some(len) = parse_definite(val, em) {
-                style.line_height = Some(len);
+            } else if let Some(height) = parse_px_f32(val, em) {
+                style.line_height = Some(px(height.clamp(0.8 * em, 4.0 * em)).into());
             }
         }
         "text-align" => {
@@ -1570,8 +1700,68 @@ fn parse_border_width(s: &str, em: f32) -> Option<AbsoluteLength> {
         "thin" => Some(px(1.0).into()),
         "medium" => Some(px(2.0).into()),
         "thick" => Some(px(3.0).into()),
-        _ => parse_absolute(s, em),
+        _ => unsigned(parse_absolute(s, em)),
     }
+}
+
+/// A flex factor.
+fn factor(raw: &str) -> Option<f32> {
+    number(raw).map(|n| n.clamp(0.0, MAX_FACTOR))
+}
+
+trait Signed {
+    fn is_negative(&self) -> bool;
+}
+
+impl Signed for AbsoluteLength {
+    fn is_negative(&self) -> bool {
+        match self {
+            Self::Pixels(pixels) => *pixels < px(0.0),
+            Self::Rems(rems) => rems.0 < 0.0,
+        }
+    }
+}
+
+impl Signed for DefiniteLength {
+    fn is_negative(&self) -> bool {
+        match self {
+            Self::Absolute(length) => length.is_negative(),
+            Self::Fraction(fraction) => *fraction < 0.0,
+        }
+    }
+}
+
+impl Signed for Length {
+    fn is_negative(&self) -> bool {
+        match self {
+            Self::Definite(length) => length.is_negative(),
+            Self::Auto => false,
+        }
+    }
+}
+
+/// A length for a property CSS gives no negative value: a size, a padding,
+/// a border, a gap.
+fn unsigned<T: Signed>(length: Option<T>) -> Option<T> {
+    length.filter(|length| !length.is_negative())
+}
+
+fn all_unsigned<T: Signed, const N: usize>(lengths: Option<[T; N]>) -> Option<[T; N]> {
+    lengths.filter(|lengths| lengths.iter().all(|length| !length.is_negative()))
+}
+
+/// A length in pixels as layout can take it: `em` and `calc()` multiply, so
+/// a product may be out of range where each number read was not.
+fn bounded_px(value: f32) -> f32 {
+    if value.is_nan() {
+        0.0
+    } else {
+        value.clamp(-MAX_PX, MAX_PX)
+    }
+}
+
+fn bounded_fraction(percent: f32) -> f32 {
+    (percent / 100.0).clamp(-MAX_FRACTION, MAX_FRACTION)
 }
 
 fn apply_flex_shorthand(style: &mut ComputedStyle, val: &str, em: f32) {
@@ -1600,36 +1790,36 @@ fn apply_flex_shorthand(style: &mut ComputedStyle, val: &str, em: f32) {
     let parts: Vec<&str> = val.split_whitespace().collect();
     match parts.as_slice() {
         [one] => {
-            if let Ok(grow) = one.parse::<f32>() {
-                style.flex_grow = Some(grow.max(0.0));
+            if let Some(grow) = factor(one) {
+                style.flex_grow = Some(grow);
                 style.flex_shrink = Some(1.0);
                 style.flex_basis = Some(px(0.0).into());
-            } else if let Some(basis) = parse_length(one, em) {
+            } else if let Some(basis) = unsigned(parse_length(one, em)) {
                 style.flex_grow = Some(1.0);
                 style.flex_shrink = Some(1.0);
                 style.flex_basis = Some(basis);
             }
         }
         [a, b] => {
-            if let Ok(grow) = a.parse::<f32>() {
-                style.flex_grow = Some(grow.max(0.0));
-                if let Ok(shrink) = b.parse::<f32>() {
-                    style.flex_shrink = Some(shrink.max(0.0));
+            if let Some(grow) = factor(a) {
+                style.flex_grow = Some(grow);
+                if let Some(shrink) = factor(b) {
+                    style.flex_shrink = Some(shrink);
                     style.flex_basis = Some(px(0.0).into());
-                } else if let Some(basis) = parse_length(b, em) {
+                } else if let Some(basis) = unsigned(parse_length(b, em)) {
                     style.flex_shrink = Some(1.0);
                     style.flex_basis = Some(basis);
                 }
             }
         }
         [a, b, c, ..] => {
-            if let Ok(grow) = a.parse::<f32>() {
-                style.flex_grow = Some(grow.max(0.0));
+            if let Some(grow) = factor(a) {
+                style.flex_grow = Some(grow);
             }
-            if let Ok(shrink) = b.parse::<f32>() {
-                style.flex_shrink = Some(shrink.max(0.0));
+            if let Some(shrink) = factor(b) {
+                style.flex_shrink = Some(shrink);
             }
-            if let Some(basis) = parse_length(c, em) {
+            if let Some(basis) = unsigned(parse_length(c, em)) {
                 style.flex_basis = Some(basis);
             }
         }
@@ -1715,7 +1905,7 @@ fn parse_font_weight(val: &str) -> Option<FontWeight> {
         "extrabold" | "800" => Some(FontWeight::EXTRA_BOLD),
         "black" | "900" => Some(FontWeight::BLACK),
         "lighter" => Some(FontWeight::LIGHT),
-        other => other.parse::<f32>().ok().map(FontWeight),
+        other => number(other).map(|weight| FontWeight(weight.clamp(1.0, 1000.0))),
     }
 }
 
@@ -1733,24 +1923,17 @@ fn parse_font_size(val: &str, parent_em: f32) -> Option<f32> {
         _ => {}
     }
     if let Some(pct) = val.strip_suffix('%') {
-        return pct
-            .trim()
-            .parse::<f32>()
-            .ok()
-            .map(|n| parent_em * n / 100.0);
+        return number(pct).map(|n| bounded_px(parent_em * n / 100.0));
     }
     parse_px_f32(val, parent_em)
 }
 
 fn parse_aspect_ratio(val: &str) -> Option<f32> {
-    if let Some((w, h)) = val.split_once('/') {
-        let w = w.trim().parse::<f32>().ok()?;
-        let h = h.trim().parse::<f32>().ok()?;
-        (w > 0.0 && h > 0.0).then_some(w / h)
-    } else {
-        let r = val.parse::<f32>().ok()?;
-        (r > 0.0).then_some(r)
-    }
+    let ratio = match val.split_once('/') {
+        Some((w, h)) => number(w)? / number(h)?,
+        None => number(val)?,
+    };
+    (ratio > 0.0).then(|| ratio.clamp(0.01, 100.0))
 }
 
 pub(crate) fn parse_length(raw: &str, em: f32) -> Option<Length> {
@@ -1763,64 +1946,49 @@ pub(crate) fn parse_length(raw: &str, em: f32) -> Option<Length> {
 
 pub(crate) fn parse_definite(raw: &str, em: f32) -> Option<DefiniteLength> {
     let s = raw.trim();
-    if s == "0" {
-        return Some(DefiniteLength::Absolute(AbsoluteLength::Pixels(px(0.0))));
+    match strip_calc(s) {
+        Some(inner) => eval_calc(inner, em),
+        None => parse_term(s, em),
     }
-    if let Some(inner) = strip_calc(s) {
-        return eval_calc(inner, em);
-    }
+}
+
+/// One length, which is not a `calc()`: a `calc()` holds terms, not itself.
+fn parse_term(s: &str, em: f32) -> Option<DefiniteLength> {
     if let Some(pct) = s.strip_suffix('%') {
-        return pct
-            .trim()
-            .parse::<f32>()
-            .ok()
-            .map(|n| DefiniteLength::Fraction(n / 100.0));
+        return number(pct).map(|n| DefiniteLength::Fraction(bounded_fraction(n)));
     }
     if let Some(vw) = s.strip_suffix("vw") {
-        return vw
-            .trim()
-            .parse::<f32>()
-            .ok()
-            .map(|n| DefiniteLength::Fraction((n / 100.0).clamp(0.0, 1.0)));
+        return number(vw).map(|n| DefiniteLength::Fraction((n / 100.0).clamp(0.0, 1.0)));
     }
     parse_absolute(s, em).map(DefiniteLength::Absolute)
 }
 
 pub(crate) fn parse_absolute(raw: &str, em: f32) -> Option<AbsoluteLength> {
     let s = raw.trim();
-    if s == "0" {
-        return Some(AbsoluteLength::Pixels(px(0.0)));
-    }
     if let Some(r) = s.strip_suffix("rem") {
-        return r.trim().parse::<f32>().ok().map(|n| rems(n).into());
+        return number(r).map(|n| rems(bounded_px(n * BASE_FONT_PX) / BASE_FONT_PX).into());
     }
     parse_px_f32(s, em).map(|v| AbsoluteLength::Pixels(px(v)))
 }
 
 pub(crate) fn parse_px_f32(raw: &str, em: f32) -> Option<f32> {
     let s = raw.trim();
-    if s == "0" {
-        return Some(0.0);
-    }
-    if let Some(v) = s.strip_suffix("px") {
-        return v.trim().parse::<f32>().ok();
-    }
-    if let Some(v) = s.strip_suffix("rem") {
-        return v.trim().parse::<f32>().ok().map(|n| n * BASE_FONT_PX);
-    }
-    if let Some(v) = s.strip_suffix("em") {
-        return v.trim().parse::<f32>().ok().map(|n| n * em);
-    }
-    if let Some(v) = s.strip_suffix("ch") {
-        return v.trim().parse::<f32>().ok().map(|n| n * em * 0.6);
-    }
-    if let Some(v) = s.strip_suffix("pt") {
-        return v.trim().parse::<f32>().ok().map(|n| n * 1.3333);
-    }
-    if let Some(v) = s.strip_suffix("vh") {
-        return v.trim().parse::<f32>().ok().map(|n| n * 6.0);
-    }
-    None
+    let (value, unit) = if s == "0" {
+        (0.0, 1.0)
+    } else if let Some(v) = s.strip_suffix("px") {
+        (number(v)?, 1.0)
+    } else if let Some(v) = s.strip_suffix("rem") {
+        (number(v)?, BASE_FONT_PX)
+    } else if let Some(v) = s.strip_suffix("em") {
+        (number(v)?, em)
+    } else if let Some(v) = s.strip_suffix("ch") {
+        (number(v)?, em * 0.6)
+    } else if let Some(v) = s.strip_suffix("pt") {
+        (number(v)?, 1.3333)
+    } else {
+        (number(s.strip_suffix("vh")?)?, 6.0)
+    };
+    Some(bounded_px(value * unit))
 }
 
 fn definite_to_px(len: Option<DefiniteLength>, em: f32) -> Option<f32> {
@@ -1844,7 +2012,7 @@ fn strip_calc(s: &str) -> Option<&str> {
 fn eval_calc(expr: &str, em: f32) -> Option<DefiniteLength> {
     let tokens: Vec<&str> = expr.split_whitespace().collect();
     if tokens.len() == 1 {
-        return parse_definite(tokens[0], em);
+        return parse_term(tokens[0], em);
     }
     if tokens.len() == 3 {
         let op = tokens[1];
@@ -1856,29 +2024,24 @@ fn eval_calc(expr: &str, em: f32) -> Option<DefiniteLength> {
                 "/" if b.abs() > 1e-6 => a / b,
                 _ => return None,
             };
-            return Some(DefiniteLength::Absolute(AbsoluteLength::Pixels(px(res))));
+            return Some(DefiniteLength::Absolute(AbsoluteLength::Pixels(px(
+                bounded_px(res),
+            ))));
         }
         if let (Some(a), Some(b)) = (
-            tokens[0]
-                .strip_suffix('%')
-                .and_then(|s| s.parse::<f32>().ok()),
-            tokens[2]
-                .strip_suffix('%')
-                .and_then(|s| s.parse::<f32>().ok()),
+            tokens[0].strip_suffix('%').and_then(number),
+            tokens[2].strip_suffix('%').and_then(number),
         ) {
             let res = match op {
                 "+" => a + b,
                 "-" => a - b,
                 _ => return None,
             };
-            return Some(DefiniteLength::Fraction(res / 100.0));
+            return Some(DefiniteLength::Fraction(bounded_fraction(res)));
         }
         // Mixed `100% - 16px` fallback: preserve percentage fraction for container sizing.
-        if let Some(a) = tokens[0]
-            .strip_suffix('%')
-            .and_then(|s| s.parse::<f32>().ok())
-        {
-            return Some(DefiniteLength::Fraction(a / 100.0));
+        if let Some(a) = tokens[0].strip_suffix('%').and_then(number) {
+            return Some(DefiniteLength::Fraction(bounded_fraction(a)));
         }
     }
     None
@@ -1887,14 +2050,14 @@ fn eval_calc(expr: &str, em: f32) -> Option<DefiniteLength> {
 fn parse_radius_value(raw: &str, em: f32) -> Option<AbsoluteLength> {
     let s = raw.trim();
     if let Some(pct) = s.strip_suffix('%') {
-        let n = pct.trim().parse::<f32>().ok()?;
+        let n = number(pct)?;
         return if n >= 49.0 {
             Some(px(9999.0).into())
         } else {
-            Some(px(n * 0.5).into())
+            unsigned(Some(px(n * 0.5).into()))
         };
     }
-    parse_absolute(s, em)
+    unsigned(parse_absolute(s, em))
 }
 
 fn expand_four<T: Copy>(vals: &[T]) -> Option<[T; 4]> {
@@ -1963,9 +2126,16 @@ fn parse_four_radius(val: &str, em: f32) -> Option<[AbsoluteLength; 4]> {
     expand_four(&parsed)
 }
 
+/// A count of grid tracks, at most [`MAX_GRID_TRACKS`].
+fn track_count(raw: &str, clamped: &mut bool) -> Option<u16> {
+    let count = raw.trim().parse::<u64>().ok().filter(|n| *n > 0)?;
+    *clamped |= count > u64::from(MAX_GRID_TRACKS);
+    Some(count.min(u64::from(MAX_GRID_TRACKS)) as u16)
+}
+
 /// Parse `grid-template-columns` supporting `repeat(N, 1fr)`,
 /// `repeat(auto-fit|auto-fill, minmax(Wpx, 1fr))`, and explicit track lists.
-fn parse_grid_columns(val: &str, em: f32) -> Option<GridColumns> {
+fn parse_grid_columns(val: &str, em: f32, clamped: &mut bool) -> Option<GridColumns> {
     let s = val.trim();
     if s.eq_ignore_ascii_case("none") {
         return None;
@@ -1983,9 +2153,7 @@ fn parse_grid_columns(val: &str, em: f32) -> Option<GridColumns> {
                 let min_px = extract_minmax_min(track, em).unwrap_or(180.0);
                 return Some(GridColumns::AutoFit { min_px });
             }
-            if let Ok(n) = count.parse::<u16>()
-                && n > 0
-            {
+            if let Some(n) = track_count(count, clamped) {
                 return Some(GridColumns::Equal(n));
             }
         }
@@ -1994,18 +2162,23 @@ fn parse_grid_columns(val: &str, em: f32) -> Option<GridColumns> {
     if tokens.is_empty() {
         return None;
     }
+    let most = usize::from(MAX_GRID_TRACKS);
     let mut tracks = Vec::new();
     for tok in tokens {
+        if tracks.len() >= most {
+            *clamped = true;
+            break;
+        }
         let tl = tok.to_ascii_lowercase();
         if let Some(inner) = tl.strip_prefix("repeat(").and_then(|r| r.strip_suffix(')')) {
             let parts = split_top_level_commas(inner);
             if parts.len() == 2
-                && let Ok(n) = parts[0].trim().parse::<usize>()
+                && let Some(n) = track_count(parts[0], clamped)
             {
+                let room = most - tracks.len();
+                *clamped |= usize::from(n) > room;
                 let tr = parse_single_track(parts[1].trim(), em);
-                for _ in 0..n.min(24) {
-                    tracks.push(tr.clone());
-                }
+                tracks.extend(std::iter::repeat_n(tr, usize::from(n).min(room)));
                 continue;
             }
         }
@@ -2052,19 +2225,20 @@ fn parse_single_track(tok: &str, em: f32) -> GridTrack {
     {
         let parts = split_top_level_commas(inner);
         if let Some(max_part) = parts.get(1) {
-            return parse_single_track(max_part, em);
+            return parse_track_size(max_part, em);
         }
     }
-    if let Some(fr) = t
-        .strip_suffix("fr")
-        .and_then(|s| s.trim().parse::<f32>().ok())
-    {
-        return GridTrack::Fr(fr.max(0.1));
+    parse_track_size(t, em)
+}
+
+/// One track size, which is not a `minmax()`: a `minmax()` holds sizes, not
+/// itself.
+fn parse_track_size(tok: &str, em: f32) -> GridTrack {
+    let t = tok.trim();
+    if let Some(fr) = t.strip_suffix("fr").and_then(number) {
+        return GridTrack::Fr(fr.clamp(0.1, MAX_FACTOR));
     }
-    if let Some(pct) = t
-        .strip_suffix('%')
-        .and_then(|s| s.trim().parse::<f32>().ok())
-    {
+    if let Some(pct) = t.strip_suffix('%').and_then(number) {
         return GridTrack::Percent(pct / 100.0);
     }
     if let Some(p) = parse_px_f32(t, em) {
@@ -2073,31 +2247,34 @@ fn parse_single_track(tok: &str, em: f32) -> GridTrack {
     GridTrack::Auto
 }
 
-fn parse_grid_row_count(val: &str) -> Option<u16> {
+fn parse_grid_row_count(val: &str, clamped: &mut bool) -> Option<u16> {
     let lower = val.trim().to_ascii_lowercase();
     if let Some(inner) = lower
         .strip_prefix("repeat(")
         .and_then(|r| r.strip_suffix(')'))
     {
         let parts = split_top_level_commas(inner);
-        if let Some(n) = parts.first().and_then(|s| s.trim().parse::<u16>().ok()) {
+        if let Some(n) = parts.first().and_then(|s| track_count(s, clamped)) {
             return Some(n);
         }
     }
     let count = split_whitespace_preserving_parens(val).len();
-    (count > 0).then_some(count as u16)
+    track_count(&count.to_string(), clamped)
 }
 
-fn parse_grid_line_range(val: &str) -> Option<Range<GridPlacement>> {
-    let parse_one = |s: &str| -> GridPlacement {
+fn parse_grid_line_range(val: &str, clamped: &mut bool) -> Option<Range<GridPlacement>> {
+    let mut parse_one = |s: &str| -> GridPlacement {
         let t = s.trim().to_ascii_lowercase();
         if let Some(rest) = t.strip_prefix("span")
-            && let Ok(n) = rest.trim().parse::<u16>()
+            && let Some(n) = track_count(rest, clamped)
         {
-            return GridPlacement::Span(n.max(1));
+            return GridPlacement::Span(n);
         }
-        if let Ok(line) = t.parse::<i16>() {
-            return GridPlacement::Line(line);
+        if let Ok(line) = t.parse::<i64>() {
+            // A grid of that many tracks has one more line than tracks.
+            let last = i64::from(MAX_GRID_TRACKS) + 1;
+            *clamped |= line.abs() > last;
+            return GridPlacement::Line(line.clamp(-last, last) as i16);
         }
         GridPlacement::Auto
     };
@@ -2166,14 +2343,10 @@ fn parse_linear_gradient(val: &str, current: Hsla, dark: bool) -> Option<Backgro
 fn parse_gradient_direction(raw: &str) -> Option<f32> {
     let s = raw.trim().to_ascii_lowercase();
     if let Some(deg) = s.strip_suffix("deg") {
-        return deg.trim().parse::<f32>().ok().map(|d| d.rem_euclid(360.0));
+        return number(deg).map(|d| d.rem_euclid(360.0));
     }
     if let Some(turn) = s.strip_suffix("turn") {
-        return turn
-            .trim()
-            .parse::<f32>()
-            .ok()
-            .map(|t| (t * 360.0).rem_euclid(360.0));
+        return number(turn).map(|t| (t * 360.0).rem_euclid(360.0));
     }
     if let Some(dir) = s.strip_prefix("to ") {
         let mut x = 0.0f32;
@@ -2211,7 +2384,7 @@ fn parse_gradient_stop(raw: &str, current: Hsla, dark: bool) -> Option<(Hsla, Op
     let pct = tokens
         .get(1)
         .and_then(|t| t.strip_suffix('%'))
-        .and_then(|n| n.parse::<f32>().ok())
+        .and_then(number)
         .map(|n| (n / 100.0).clamp(0.0, 1.0));
     Some((color, pct))
 }
@@ -2317,233 +2490,4 @@ pub(crate) fn split_whitespace_preserving_parens(s: &str) -> Vec<&str> {
         out.push(&s[st..]);
     }
     out
-}
-
-/// Built-in CSS custom properties seeded from Tcode's active theme.
-/// Provides both concise names (`--bg-primary`, `--accent`, `--blue`) and
-/// descriptive aliases (`--color-background-primary`, `--color-text-primary`)
-/// so visuals automatically adapt to light and dark modes.
-pub(crate) fn theme_variables(theme: &Theme) -> HashMap<String, String> {
-    let dark = theme.mode.is_dark();
-    let bg_primary = hsla_to_css(theme.background);
-    let bg_secondary = hsla_to_css(theme.tokens.colors.muted);
-    let bg_tertiary = hsla_to_css(theme.muted);
-    let text_primary = hsla_to_css(theme.foreground);
-    let text_secondary = hsla_to_css(theme.muted_foreground);
-    let text_tertiary = hsla_to_css(theme.muted_foreground.opacity(0.72));
-    let border = hsla_to_css(theme.border);
-    let border_subtle = hsla_to_css(theme.border.opacity(0.6));
-    let accent = hsla_to_css(theme.primary);
-    let accent_fg = hsla_to_css(theme.primary_foreground);
-    let info = hsla_to_css(theme.info);
-    let info_bg = hsla_to_css(theme.info.opacity(if dark { 0.18 } else { 0.12 }));
-    let success = hsla_to_css(theme.success);
-    let success_bg = hsla_to_css(theme.success.opacity(if dark { 0.18 } else { 0.12 }));
-    let warning = hsla_to_css(theme.warning);
-    let warning_bg = hsla_to_css(theme.warning.opacity(if dark { 0.20 } else { 0.14 }));
-    let danger = hsla_to_css(theme.danger);
-    let danger_bg = hsla_to_css(theme.danger.opacity(if dark { 0.18 } else { 0.12 }));
-
-    let palette = |light_hex: u32, dark_hex: u32| -> (String, String) {
-        let hex = if dark { dark_hex } else { light_hex };
-        let c: Hsla = Rgba {
-            r: ((hex >> 16) & 0xff) as f32 / 255.0,
-            g: ((hex >> 8) & 0xff) as f32 / 255.0,
-            b: (hex & 0xff) as f32 / 255.0,
-            a: 1.0,
-        }
-        .into();
-        (
-            hsla_to_css(c),
-            hsla_to_css(c.opacity(if dark { 0.18 } else { 0.12 })),
-        )
-    };
-
-    let (blue, blue_bg) = palette(0x2563eb, 0x60a5fa);
-    let (green, green_bg) = palette(0x16a34a, 0x4ade80);
-    let (amber, amber_bg) = palette(0xd97706, 0xfbbf24);
-    let (red, red_bg) = palette(0xdc2626, 0xf87171);
-    let (purple, purple_bg) = palette(0x7c3aed, 0xa78bfa);
-    let (teal, teal_bg) = palette(0x0d9488, 0x2dd4bf);
-    let (pink, pink_bg) = palette(0xdb2777, 0xf472b6);
-    let (yellow, yellow_bg) = palette(0xca8a04, 0xfacc15);
-    let (gray, gray_bg) = palette(0x64748b, 0x94a3b8);
-    let popover = hsla_to_css(theme.popover);
-    let secondary = hsla_to_css(theme.secondary);
-    let input = hsla_to_css(theme.input);
-    let ring = hsla_to_css(theme.ring);
-    let accent_bg = hsla_to_css(theme.primary.opacity(if dark { 0.18 } else { 0.12 }));
-
-    let mut m = HashMap::with_capacity(96);
-    let mut set = |keys: &[&str], val: &str| {
-        for k in keys {
-            m.insert((*k).to_string(), val.to_string());
-        }
-    };
-
-    set(
-        &[
-            "--background",
-            "--bg",
-            "--bg-primary",
-            "--color-background-primary",
-        ],
-        &bg_primary,
-    );
-    set(
-        &[
-            "--bg-secondary",
-            "--surface",
-            "--card",
-            "--code-background",
-            "--color-background-secondary",
-        ],
-        &bg_secondary,
-    );
-    set(
-        &["--bg-tertiary", "--muted", "--color-background-tertiary"],
-        &bg_tertiary,
-    );
-    set(&["--popover"], &popover);
-    set(&["--secondary"], &secondary);
-    set(&["--input"], &input);
-    set(&["--ring", "--color-ring-primary"], &ring);
-    set(
-        &[
-            "--foreground",
-            "--card-foreground",
-            "--popover-foreground",
-            "--secondary-foreground",
-            "--code-foreground",
-            "--fg",
-            "--text",
-            "--text-primary",
-            "--color-text-primary",
-        ],
-        &text_primary,
-    );
-    set(
-        &[
-            "--muted-foreground",
-            "--text-secondary",
-            "--muted-fg",
-            "--color-text-secondary",
-        ],
-        &text_secondary,
-    );
-    set(
-        &["--text-tertiary", "--color-text-tertiary"],
-        &text_tertiary,
-    );
-    set(
-        &[
-            "--border",
-            "--color-border",
-            "--color-border-primary",
-            "--color-border-secondary",
-        ],
-        &border,
-    );
-    set(
-        &["--border-subtle", "--color-border-tertiary"],
-        &border_subtle,
-    );
-    set(
-        &["--accent", "--primary", "--color-accent", "--color-primary"],
-        &accent,
-    );
-    set(
-        &[
-            "--accent-foreground",
-            "--primary-foreground",
-            "--accent-fg",
-            "--primary-fg",
-        ],
-        &accent_fg,
-    );
-    set(&["--accent-surface", "--accent-bg"], &accent_bg);
-    set(&["--accent-surface-foreground"], &accent);
-    set(
-        &["--info", "--link", "--color-info", "--color-text-info"],
-        &info,
-    );
-    set(&["--info-foreground"], &info);
-    set(&["--info-bg", "--color-background-info"], &info_bg);
-    set(
-        &["--success", "--color-success", "--color-text-success"],
-        &success,
-    );
-    set(&["--success-foreground"], &success);
-    set(&["--success-bg", "--color-background-success"], &success_bg);
-    set(
-        &["--warning", "--color-warning", "--color-text-warning"],
-        &warning,
-    );
-    set(&["--warning-foreground"], &warning);
-    set(
-        &[
-            "--warning-bg",
-            "--warning-surface",
-            "--color-background-warning",
-        ],
-        &warning_bg,
-    );
-    set(
-        &[
-            "--destructive",
-            "--danger",
-            "--error",
-            "--color-danger",
-            "--color-text-danger",
-        ],
-        &danger,
-    );
-    set(
-        &["--destructive-foreground", "--danger-foreground"],
-        &danger,
-    );
-    set(
-        &[
-            "--destructive-surface",
-            "--danger-bg",
-            "--error-bg",
-            "--color-background-danger",
-        ],
-        &danger_bg,
-    );
-
-    set(&["--blue", "--chart-1", "--viz-series-1"], &blue);
-    set(&["--blue-bg"], &blue_bg);
-    set(&["--teal", "--cyan", "--chart-2", "--viz-series-6"], &teal);
-    set(&["--teal-bg", "--cyan-bg"], &teal_bg);
-    set(
-        &["--amber", "--orange", "--chart-3", "--viz-series-2"],
-        &amber,
-    );
-    set(&["--amber-bg", "--orange-bg"], &amber_bg);
-    set(
-        &["--purple", "--violet", "--chart-4", "--viz-series-5"],
-        &purple,
-    );
-    set(&["--purple-bg", "--violet-bg"], &purple_bg);
-    set(&["--pink", "--chart-5", "--viz-series-4"], &pink);
-    set(&["--pink-bg"], &pink_bg);
-    set(&["--green", "--chart-6", "--viz-series-3"], &green);
-    set(&["--green-bg"], &green_bg);
-    set(&["--red"], &red);
-    set(&["--red-bg"], &red_bg);
-    set(&["--yellow"], &yellow);
-    set(&["--yellow-bg"], &yellow_bg);
-    set(&["--gray", "--grey"], &gray);
-    set(&["--gray-bg", "--grey-bg"], &gray_bg);
-
-    m.insert("--font-sans".into(), theme.font_family.to_string());
-    m.insert("--font-mono".into(), theme.mono_font_family.to_string());
-    m.insert("--font-size-base".into(), "14px".into());
-    m.insert("--radius-sm".into(), "4px".into());
-    m.insert("--radius".into(), "8px".into());
-    m.insert("--radius-md".into(), "8px".into());
-    m.insert("--radius-lg".into(), "12px".into());
-    m.insert("--radius-full".into(), "9999px".into());
-    m
 }

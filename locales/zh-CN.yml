@@ -3389,3 +3389,13 @@ harness_options:
   context_window: "上下文窗口"
   fast_mode: "快速模式"
   service_tier: "服务层级"
+html:
+  left_out_nodes: "此可视化内容的元素数量超出可绘制的上限，前 %{count} 个之后的内容未显示。"
+  left_out_depth: "此可视化内容的嵌套超过 %{count} 层，更深的层级被绘制在其容器旁边。"
+  left_out_styles: "此可视化内容过于复杂，无法完整绘制，部分样式和图形未显示。"
+  drawing: "图形"
+  image: "图片"
+  picture_failed: "无法绘制此图片：%{error}"
+  svg_too_long: "此图形过长，无法绘制。"
+  data_uri_malformed: "无法绘制此图片：其 data: 地址没有内容。"
+  image_too_large: "此图片过大，无法绘制：%{width} × %{height} 像素。"
