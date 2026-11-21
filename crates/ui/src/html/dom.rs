@@ -175,7 +175,7 @@ impl<'a> Parser<'a> {
                 while self.pos < self.bytes.len() && self.bytes[self.pos] != b'<' {
                     self.pos += 1;
                 }
-                let decoded = decode_entities(&self.input[start..self.pos]);
+                let decoded = decode_entities(&self.input[start..self.pos], false);
                 // Text is not head content: it ends a head left open.
                 self.in_head &= decoded.trim().is_empty();
                 if !self.in_head && !decoded.is_empty() {
@@ -283,7 +283,9 @@ impl<'a> Parser<'a> {
             return;
         }
 
-        self.auto_close_for(&tag);
+        if !self.make_way_for(&tag) {
+            return;
+        }
         let void = self_closing || is_void_tag(&tag);
         let el = build_element(tag, attrs, None);
         self.open_element(el, void);
@@ -305,12 +307,8 @@ impl<'a> Parser<'a> {
             self.in_head = false;
             return;
         }
-        if let Some(pos) = self
-            .stack
-            .iter()
-            .rposition(|&id| self.doc.element(id).is_some_and(|el| el.tag == tag))
-        {
-            self.stack.truncate(pos);
+        if let Some(at) = self.open_in_scope(&[tag.as_str()]) {
+            self.stack.truncate(at);
         }
     }
 
@@ -378,7 +376,7 @@ impl<'a> Parser<'a> {
             if self.pos < self.bytes.len() {
                 self.pos += 1;
             }
-            decode_entities(raw)
+            decode_entities(raw, true)
         } else {
             let start = self.pos;
             while self.pos < self.bytes.len()
@@ -387,7 +385,7 @@ impl<'a> Parser<'a> {
             {
                 self.pos += 1;
             }
-            decode_entities(&self.input[start..self.pos])
+            decode_entities(&self.input[start..self.pos], true)
         }
     }
 
@@ -459,47 +457,75 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn auto_close_for(&mut self, incoming: &str) {
-        let Some(&top) = self.stack.last() else {
-            return;
+    fn tag_of(&self, open: NodeId) -> &str {
+        self.doc.element(open).map_or("", |el| el.tag.as_str())
+    }
+
+    /// The innermost open element that is one of `tags`, unless a nearer one
+    /// bounds the scope HTML looks for them in.
+    fn open_in_scope(&self, tags: &[&str]) -> Option<usize> {
+        for (at, &open) in self.stack.iter().enumerate().rev() {
+            let open = self.tag_of(open);
+            if tags.contains(&open) {
+                return Some(at);
+            }
+            if bounds_scope(open, tags[0]) {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Close what HTML has a `tag` start tag close, and open the table parts
+    /// it implies. False for a table part outside a table, which HTML drops.
+    fn make_way_for(&mut self, tag: &str) -> bool {
+        if is_table_part(tag) {
+            let Some(table) = self.open_in_scope(&["table"]) else {
+                return false;
+            };
+            self.clear_to_table_parent(tag, table);
+            return true;
+        }
+        let closed: &[&str] = match tag {
+            "li" => &["li"],
+            "dd" | "dt" => &["dd", "dt"],
+            _ if closes_p(tag) => &["p"],
+            _ => return true,
         };
-        let Some(top_tag) = self.doc.element(top).map(|el| el.tag.as_str()) else {
-            return;
-        };
-        let should_close = match top_tag {
-            "p" => matches!(
-                incoming,
-                "p" | "div"
-                    | "section"
-                    | "article"
-                    | "header"
-                    | "footer"
-                    | "main"
-                    | "nav"
-                    | "aside"
-                    | "ul"
-                    | "ol"
-                    | "dl"
-                    | "table"
-                    | "pre"
-                    | "blockquote"
-                    | "hr"
-                    | "h1"
-                    | "h2"
-                    | "h3"
-                    | "h4"
-                    | "h5"
-                    | "h6"
-            ),
-            "li" => incoming == "li",
-            "dt" | "dd" => matches!(incoming, "dt" | "dd"),
-            "td" | "th" => matches!(incoming, "td" | "th" | "tr"),
-            "tr" => incoming == "tr",
-            "thead" | "tbody" | "tfoot" => matches!(incoming, "thead" | "tbody" | "tfoot"),
-            _ => false,
-        };
-        if should_close {
+        if let Some(at) = self.open_in_scope(closed) {
+            self.stack.truncate(at);
+        }
+        if is_heading(tag)
+            && let Some(&top) = self.stack.last()
+            && is_heading(self.tag_of(top))
+        {
             self.stack.pop();
+        }
+        true
+    }
+
+    /// Leave open what a `tag` of the table open at `table` is a child of,
+    /// opening the `tbody`, `tr` or `colgroup` it was written without.
+    fn clear_to_table_parent(&mut self, tag: &str, table: usize) {
+        let parents: &[&str] = match tag {
+            "td" | "th" => &["tr"],
+            "tr" => &["tbody", "thead", "tfoot"],
+            "col" => &["colgroup"],
+            _ => {
+                self.stack.truncate(table + 1);
+                return;
+            }
+        };
+        let parent = self.stack[table..]
+            .iter()
+            .rposition(|&open| parents.contains(&self.tag_of(open)));
+        match parent {
+            Some(parent) => self.stack.truncate(table + parent + 1),
+            None => {
+                let implied = parents[0];
+                self.clear_to_table_parent(implied, table);
+                self.open_element(build_element(implied.to_owned(), Vec::new(), None), false);
+            }
         }
     }
 
@@ -591,6 +617,64 @@ fn build_element(
     }
 }
 
+fn is_table_part(tag: &str) -> bool {
+    matches!(
+        tag,
+        "caption" | "col" | "colgroup" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr"
+    )
+}
+
+fn is_heading(tag: &str) -> bool {
+    matches!(tag, "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+}
+
+/// Whether a start tag ends a paragraph left open.
+fn closes_p(tag: &str) -> bool {
+    is_heading(tag)
+        || matches!(
+            tag,
+            "address"
+                | "article"
+                | "aside"
+                | "blockquote"
+                | "details"
+                | "div"
+                | "dl"
+                | "fieldset"
+                | "figcaption"
+                | "figure"
+                | "footer"
+                | "form"
+                | "header"
+                | "hgroup"
+                | "hr"
+                | "main"
+                | "menu"
+                | "nav"
+                | "ol"
+                | "p"
+                | "pre"
+                | "section"
+                | "table"
+                | "ul"
+        )
+}
+
+/// Whether an open `tag` ends the scope HTML looks in for an open `wanted`:
+/// a table and its parts are those of the nearest table, an item is one of
+/// the nearest list, and nothing else reaches out of a table or its cell.
+fn bounds_scope(tag: &str, wanted: &str) -> bool {
+    if wanted == "table" || is_table_part(wanted) {
+        return tag == "table";
+    }
+    matches!(tag, "table" | "td" | "th" | "caption")
+        || match wanted {
+            "li" => matches!(tag, "ul" | "ol"),
+            "dd" | "dt" => tag == "dl",
+            _ => false,
+        }
+}
+
 fn is_void_tag(tag: &str) -> bool {
     matches!(
         tag,
@@ -620,7 +704,9 @@ fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
     h.windows(n.len()).position(|w| w.eq_ignore_ascii_case(n))
 }
 
-pub(crate) fn decode_entities(input: &str) -> String {
+/// `input` with its character references decoded as HTML decodes them in
+/// text, or in an attribute's value.
+fn decode_entities(input: &str, in_attribute: bool) -> String {
     if !input.contains('&') {
         return input.to_string();
     }
@@ -629,77 +715,359 @@ pub(crate) fn decode_entities(input: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         rest = &rest[amp + 1..];
-        // No entity is longer than this; looking further makes a run of
+        // No reference is longer than this; looking further makes a run of
         // ampersands quadratic.
-        let name = &rest.as_bytes()[..rest.len().min(17)];
-        if let Some(semi) = name.iter().position(|&b| b == b';') {
-            let entity = &rest[..semi];
-            if let Some(decoded) = decode_single_entity(entity) {
-                out.push_str(decoded.as_str());
-                rest = &rest[semi + 1..];
-                continue;
+        let head = &rest.as_bytes()[..rest.len().min(17)];
+        let ended = head
+            .iter()
+            .position(|&b| b == b';')
+            .and_then(|semi| Some((semi + 1, reference(&rest[..semi])?)));
+        match ended.or_else(|| legacy_reference(rest, in_attribute)) {
+            Some((len, decoded)) => {
+                out.push(decoded);
+                rest = &rest[len..];
             }
+            None => out.push('&'),
         }
-        out.push('&');
     }
     out.push_str(rest);
     out
 }
 
-fn decode_single_entity(entity: &str) -> Option<String> {
-    if let Some(hex) = entity
-        .strip_prefix("#x")
-        .or_else(|| entity.strip_prefix("#X"))
-    {
-        let code = u32::from_str_radix(hex, 16).ok()?;
-        return char::from_u32(code).map(|c| c.to_string());
-    }
-    if let Some(dec) = entity.strip_prefix('#') {
-        let code = dec.parse::<u32>().ok()?;
-        return char::from_u32(code).map(|c| c.to_string());
-    }
-    let s = match entity {
-        "amp" => "&",
-        "lt" => "<",
-        "gt" => ">",
-        "quot" => "\"",
-        "apos" => "'",
-        "nbsp" => "\u{00a0}",
-        "ndash" => "–",
-        "mdash" => "—",
-        "hellip" => "…",
-        "times" => "×",
-        "divide" => "÷",
-        "plusmn" => "±",
-        "minus" => "−",
-        "rarr" => "→",
-        "larr" => "←",
-        "uarr" => "↑",
-        "darr" => "↓",
-        "harr" => "↔",
-        "bull" => "•",
-        "middot" => "·",
-        "copy" => "©",
-        "reg" => "®",
-        "trade" => "™",
-        "deg" => "°",
-        "check" => "✓",
-        "cross" => "✗",
-        "euro" => "€",
-        "pound" => "£",
-        "yen" => "¥",
-        "laquo" => "«",
-        "raquo" => "»",
-        "lsquo" => "‘",
-        "rsquo" => "’",
-        "ldquo" => "“",
-        "rdquo" => "”",
-        "le" => "≤",
-        "ge" => "≥",
-        "ne" => "≠",
-        "approx" => "≈",
-        "infin" => "∞",
-        _ => return None,
+/// What a C1 control's number stands for: HTML reads it as the byte of
+/// Windows-1252 it is nearly always written for.
+const WINDOWS_1252: [char; 32] = [
+    '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž', '\u{8f}',
+    '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}', 'ž', 'Ÿ',
+];
+
+/// The character a reference written between `&` and `;` stands for.
+fn reference(name: &str) -> Option<char> {
+    let Some(number) = name.strip_prefix('#') else {
+        return named_reference(name);
     };
-    Some(s.to_string())
+    let code = match number.strip_prefix(['x', 'X']) {
+        Some(hex) => u32::from_str_radix(hex, 16),
+        None => number.parse(),
+    }
+    .ok()?;
+    match code {
+        0x80..=0x9f => Some(WINDOWS_1252[code as usize - 0x80]),
+        _ => char::from_u32(code),
+    }
+}
+
+/// The longest name at the start of `rest` that HTML decodes without its
+/// semicolon, and its length: `amp`, `lt`, `gt`, `quot` and the names of
+/// ISO 8859-1, none longer than six letters. In an attribute's value HTML
+/// leaves one as written before `=`, a letter or a digit, where it is a
+/// parameter of an address far more often than a reference.
+fn legacy_reference(rest: &str, in_attribute: bool) -> Option<(usize, char)> {
+    let (len, decoded) = (2..=rest.len().min(6)).rev().find_map(|len| {
+        let name = rest.get(..len)?;
+        let decoded = named_reference(name)?;
+        (matches!(name, "amp" | "lt" | "gt" | "quot") || matches!(decoded, '\u{a0}'..='\u{ff}'))
+            .then_some((len, decoded))
+    })?;
+    let joined = rest
+        .as_bytes()
+        .get(len)
+        .is_some_and(|&next| next == b'=' || next.is_ascii_alphanumeric());
+    (!in_attribute || !joined).then_some((len, decoded))
+}
+
+/// The names of HTML 4 and, of those HTML5 added, the ones for ASCII
+/// punctuation and the few symbols models write.
+fn named_reference(name: &str) -> Option<char> {
+    Some(match name {
+        "AElig" => 'Æ',
+        "Aacute" => 'Á',
+        "Acirc" => 'Â',
+        "Agrave" => 'À',
+        "Alpha" => 'Α',
+        "Aring" => 'Å',
+        "Atilde" => 'Ã',
+        "Auml" => 'Ä',
+        "Beta" => 'Β',
+        "Ccedil" => 'Ç',
+        "Chi" => 'Χ',
+        "Dagger" => '‡',
+        "Delta" => 'Δ',
+        "ETH" => 'Ð',
+        "Eacute" => 'É',
+        "Ecirc" => 'Ê',
+        "Egrave" => 'È',
+        "Epsilon" => 'Ε',
+        "Eta" => 'Η',
+        "Euml" => 'Ë',
+        "Gamma" => 'Γ',
+        "Iacute" => 'Í',
+        "Icirc" => 'Î',
+        "Igrave" => 'Ì',
+        "Iota" => 'Ι',
+        "Iuml" => 'Ï',
+        "Kappa" => 'Κ',
+        "Lambda" => 'Λ',
+        "Mu" => 'Μ',
+        "Ntilde" => 'Ñ',
+        "Nu" => 'Ν',
+        "OElig" => 'Œ',
+        "Oacute" => 'Ó',
+        "Ocirc" => 'Ô',
+        "Ograve" => 'Ò',
+        "Omega" => 'Ω',
+        "Omicron" => 'Ο',
+        "Oslash" => 'Ø',
+        "Otilde" => 'Õ',
+        "Ouml" => 'Ö',
+        "Phi" => 'Φ',
+        "Pi" => 'Π',
+        "Prime" => '″',
+        "Psi" => 'Ψ',
+        "Rho" => 'Ρ',
+        "Scaron" => 'Š',
+        "Sigma" => 'Σ',
+        "THORN" => 'Þ',
+        "Tau" => 'Τ',
+        "Theta" => 'Θ',
+        "Uacute" => 'Ú',
+        "Ucirc" => 'Û',
+        "Ugrave" => 'Ù',
+        "Upsilon" => 'Υ',
+        "Uuml" => 'Ü',
+        "Xi" => 'Ξ',
+        "Yacute" => 'Ý',
+        "Yuml" => 'Ÿ',
+        "Zeta" => 'Ζ',
+        "aacute" => 'á',
+        "acirc" => 'â',
+        "acute" => '´',
+        "aelig" => 'æ',
+        "agrave" => 'à',
+        "alefsym" => 'ℵ',
+        "alpha" => 'α',
+        "amp" => '&',
+        "and" => '∧',
+        "ang" => '∠',
+        "apos" => '\'',
+        "approx" => '≈',
+        "aring" => 'å',
+        "ast" => '*',
+        "asymp" => '≈',
+        "atilde" => 'ã',
+        "auml" => 'ä',
+        "bdquo" => '„',
+        "beta" => 'β',
+        "brvbar" => '¦',
+        "bsol" => '\\',
+        "bull" => '•',
+        "cap" => '∩',
+        "ccedil" => 'ç',
+        "cedil" => '¸',
+        "cent" => '¢',
+        "check" => '✓',
+        "checkmark" => '✓',
+        "chi" => 'χ',
+        "circ" => 'ˆ',
+        "clubs" => '♣',
+        "colon" => ':',
+        "comma" => ',',
+        "commat" => '@',
+        "cong" => '≅',
+        "copy" => '©',
+        "crarr" => '↵',
+        "cross" => '✗',
+        "cup" => '∪',
+        "curren" => '¤',
+        "dArr" => '⇓',
+        "dagger" => '†',
+        "darr" => '↓',
+        "deg" => '°',
+        "delta" => 'δ',
+        "diams" => '♦',
+        "divide" => '÷',
+        "dollar" => '$',
+        "eacute" => 'é',
+        "ecirc" => 'ê',
+        "egrave" => 'è',
+        "empty" => '∅',
+        "emsp" => '\u{2003}',
+        "ensp" => '\u{2002}',
+        "epsilon" => 'ε',
+        "equals" => '=',
+        "equiv" => '≡',
+        "eta" => 'η',
+        "eth" => 'ð',
+        "euml" => 'ë',
+        "euro" => '€',
+        "excl" => '!',
+        "exist" => '∃',
+        "fnof" => 'ƒ',
+        "forall" => '∀',
+        "frac12" => '½',
+        "frac14" => '¼',
+        "frac34" => '¾',
+        "frasl" => '⁄',
+        "gamma" => 'γ',
+        "ge" => '≥',
+        "grave" => '`',
+        "gt" => '>',
+        "hArr" => '⇔',
+        "harr" => '↔',
+        "hearts" => '♥',
+        "hellip" => '…',
+        "iacute" => 'í',
+        "icirc" => 'î',
+        "iexcl" => '¡',
+        "igrave" => 'ì',
+        "image" => 'ℑ',
+        "infin" => '∞',
+        "int" => '∫',
+        "iota" => 'ι',
+        "iquest" => '¿',
+        "isin" => '∈',
+        "iuml" => 'ï',
+        "kappa" => 'κ',
+        "lArr" => '⇐',
+        "lambda" => 'λ',
+        "lang" => '〈',
+        "laquo" => '«',
+        "larr" => '←',
+        "lbrace" => '{',
+        "lbrack" => '[',
+        "lceil" => '⌈',
+        "lcub" => '{',
+        "ldquo" => '“',
+        "le" => '≤',
+        "lfloor" => '⌊',
+        "lowast" => '∗',
+        "lowbar" => '_',
+        "loz" => '◊',
+        "lpar" => '(',
+        "lrm" => '\u{200e}',
+        "lsaquo" => '‹',
+        "lsqb" => '[',
+        "lsquo" => '‘',
+        "lt" => '<',
+        "macr" => '¯',
+        "mdash" => '—',
+        "micro" => 'µ',
+        "middot" => '·',
+        "minus" => '−',
+        "mu" => 'μ',
+        "nabla" => '∇',
+        "nbsp" => '\u{a0}',
+        "ndash" => '–',
+        "ne" => '≠',
+        "ni" => '∋',
+        "not" => '¬',
+        "notin" => '∉',
+        "nsub" => '⊄',
+        "ntilde" => 'ñ',
+        "nu" => 'ν',
+        "num" => '#',
+        "oacute" => 'ó',
+        "ocirc" => 'ô',
+        "oelig" => 'œ',
+        "ograve" => 'ò',
+        "oline" => '‾',
+        "omega" => 'ω',
+        "omicron" => 'ο',
+        "oplus" => '⊕',
+        "or" => '∨',
+        "ordf" => 'ª',
+        "ordm" => 'º',
+        "oslash" => 'ø',
+        "otilde" => 'õ',
+        "otimes" => '⊗',
+        "ouml" => 'ö',
+        "para" => '¶',
+        "part" => '∂',
+        "percnt" => '%',
+        "period" => '.',
+        "permil" => '‰',
+        "perp" => '⊥',
+        "phi" => 'φ',
+        "pi" => 'π',
+        "piv" => 'ϖ',
+        "plus" => '+',
+        "plusmn" => '±',
+        "pound" => '£',
+        "prime" => '′',
+        "prod" => '∏',
+        "prop" => '∝',
+        "psi" => 'ψ',
+        "quest" => '?',
+        "quot" => '"',
+        "rArr" => '⇒',
+        "radic" => '√',
+        "rang" => '〉',
+        "raquo" => '»',
+        "rarr" => '→',
+        "rbrace" => '}',
+        "rbrack" => ']',
+        "rceil" => '⌉',
+        "rcub" => '}',
+        "rdquo" => '”',
+        "real" => 'ℜ',
+        "reg" => '®',
+        "rfloor" => '⌋',
+        "rho" => 'ρ',
+        "rlm" => '\u{200f}',
+        "rpar" => ')',
+        "rsaquo" => '›',
+        "rsqb" => ']',
+        "rsquo" => '’',
+        "sbquo" => '‚',
+        "scaron" => 'š',
+        "sdot" => '⋅',
+        "sect" => '§',
+        "semi" => ';',
+        "shy" => '\u{ad}',
+        "sigma" => 'σ',
+        "sigmaf" => 'ς',
+        "sim" => '∼',
+        "sol" => '/',
+        "spades" => '♠',
+        "star" => '☆',
+        "starf" => '★',
+        "sub" => '⊂',
+        "sube" => '⊆',
+        "sum" => '∑',
+        "sup" => '⊃',
+        "sup1" => '¹',
+        "sup2" => '²',
+        "sup3" => '³',
+        "supe" => '⊇',
+        "szlig" => 'ß',
+        "tau" => 'τ',
+        "there4" => '∴',
+        "theta" => 'θ',
+        "thetasym" => 'ϑ',
+        "thinsp" => '\u{2009}',
+        "thorn" => 'þ',
+        "tilde" => '˜',
+        "times" => '×',
+        "trade" => '™',
+        "uArr" => '⇑',
+        "uacute" => 'ú',
+        "uarr" => '↑',
+        "ucirc" => 'û',
+        "ugrave" => 'ù',
+        "uml" => '¨',
+        "upsih" => 'ϒ',
+        "upsilon" => 'υ',
+        "uuml" => 'ü',
+        "verbar" => '|',
+        "vert" => '|',
+        "weierp" => '℘',
+        "xi" => 'ξ',
+        "yacute" => 'ý',
+        "yen" => '¥',
+        "yuml" => 'ÿ',
+        "zeta" => 'ζ',
+        "zwj" => '\u{200d}',
+        "zwnj" => '\u{200c}',
+        _ => return None,
+    })
 }

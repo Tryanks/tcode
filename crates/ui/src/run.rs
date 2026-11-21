@@ -86,7 +86,10 @@ impl Default for ShellOptions {
         Self {
             window: WindowOptions::default(),
             title: crate::tr!("app.name").into(),
+            #[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
             fonts: vec![Cow::Borrowed(crate::assets::DM_SANS)],
+            #[cfg(any(target_vendor = "apple", target_os = "windows"))]
+            fonts: Vec::new(),
             locale_fonts: Vec::new(),
             theme_json: Cow::Borrowed(THEME_JSON),
             activate: false,

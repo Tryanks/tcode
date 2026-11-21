@@ -267,7 +267,8 @@ impl TryFrom<ThemeConfig> for Theme {
         radius.xl = px(config.radius * 2.);
         // Sizes and line heights are gpui-base's scale on purpose.
         let mut typography = TypographyTokens::default();
-        typography.sans = config.font_family.clone().into();
+        let font_family = interface_font(config.font_family);
+        typography.sans = font_family.clone().into();
         typography.mono = mono.clone();
         let mut tokens = SemanticThemeTokens::default();
         tokens.colors = colors;
@@ -281,7 +282,7 @@ impl TryFrom<ThemeConfig> for Theme {
             danger,
             danger_active: danger,
             danger_foreground,
-            font_family: config.font_family.into(),
+            font_family: font_family.into(),
             foreground,
             highlight_theme: if mode.is_dark() {
                 HighlightTheme::default_dark()
@@ -427,4 +428,23 @@ pub(crate) fn apply_theme(mode: crate::settings::ThemeMode, window: &mut Window,
         crate::settings::ThemeMode::System => window.appearance().into(),
     };
     glide_mode(mode, window, cx);
+}
+
+/// The family the interface is drawn in. The theme asks for the system's font
+/// by GPUI's name for it. macOS, iOS and Windows have one that is always
+/// there. Elsewhere the name is the DM Sans the client carries:
+///
+/// - a browser tab's canvas reaches no system font;
+/// - on Linux gpui-fast 0.1.16 takes the name to be IBM Plex Sans, and where
+///   that is not installed the first of its fallbacks to be found is the
+///   embedded monospace Lilex;
+/// - on Android it is Roboto as read from `/system/fonts`, and a device
+///   without a family of that name has none of GPUI's fallbacks either, which
+///   panics.
+fn interface_font(family: String) -> String {
+    #[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
+    if family == ".SystemUIFont" {
+        return "DM Sans".into();
+    }
+    family
 }
