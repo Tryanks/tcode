@@ -146,8 +146,13 @@ impl TimelineView {
             .session_status_for(self.session_id.as_deref(), cx)
             .is_some_and(|status| status.activity.turn_running);
         let row_count = self.rows.len();
-        let resident_ids = self.md_states.keys().cloned().collect();
-        let (texts, decisions) = self
+        let resident_ids = self
+            .md_states
+            .keys()
+            .chain(self.visuals.keys())
+            .cloned()
+            .collect();
+        let (texts, visuals, decisions) = self
             .workspace_store
             .read(cx)
             .with_timeline_for(
@@ -169,12 +174,17 @@ impl TimelineView {
                         resident_ids: &resident_ids,
                     });
                     let mut texts = Vec::new();
+                    let mut visuals = Vec::new();
                     let last = timeline.entries.len().checked_sub(1);
                     for (index, entry) in timeline.entries.iter().enumerate() {
                         if !decisions.build.contains(&entry.id) {
                             continue;
                         }
                         let row = row_of_entry(&self.rows, index, entry.turn);
+                        if tools::visualize::card(entry).is_some() {
+                            visuals.push((row, entry.clone()));
+                            continue;
+                        }
                         // A running turn's text arrives into its last entry.
                         let streaming = running && Some(index) == last;
                         // A resident message whose entry is unchanged keeps its
@@ -193,12 +203,13 @@ impl TimelineView {
                         };
                         texts.push((row, entry.clone(), text, streaming));
                     }
-                    (texts, decisions)
+                    (texts, visuals, decisions)
                 },
                 cx,
             )
             .unwrap_or_default();
         self.md_states.retain(|id, _| !decisions.evict.contains(id));
+        self.visuals.retain(|id, _| !decisions.evict.contains(id));
         self.pending_md_builds
             .retain(|id, _| decisions.build.contains(id) && !decisions.evict.contains(id));
 
@@ -227,6 +238,11 @@ impl TimelineView {
                 rebuilt_rows.extend(row);
             }
         }
+        for (row, entry) in visuals {
+            if self.sync_visual(&entry, cx) {
+                rebuilt_rows.extend(row);
+            }
+        }
         self.place_messages_in_selection(cx);
         let mut rebuilt_rows = rebuilt_rows
             .into_iter()
@@ -249,6 +265,81 @@ impl TimelineView {
             }
         }
         self.list_state.remeasure_items(range);
+    }
+
+    /// Bring the page of the visualization `entry` up to date with it, and
+    /// read its file once its call completed. Whether the page was made now.
+    fn sync_visual(&mut self, entry: &Arc<TimelineEntry>, cx: &mut Context<Self>) -> bool {
+        use components::visualize::{FileRead, Visual};
+        let Some(visualization) = tools::visualize::card(entry) else {
+            return false;
+        };
+        let (inline, file) = match visualization.page {
+            tools::visualize::Page::Inline(html) => (html, None),
+            tools::visualize::Page::File(path) => ("", Some(path)),
+        };
+        let mut made = false;
+        let visual = self.visuals.entry(entry.id.clone()).or_insert_with(|| {
+            made = true;
+            Visual::new(inline, cx)
+        });
+        if file.is_none() && !visual.synced_from(entry) {
+            visual.set_html(inline, cx);
+            visual.set_synced_from(entry);
+        }
+        if let Some(path) = file
+            && !visualization.running
+            && visual.file.is_none()
+            && let Some(read) = self.read_visual(entry.id.clone(), path, cx)
+        {
+            self.visuals
+                .get_mut(&entry.id)
+                .expect("the page was made above")
+                .file = Some(FileRead::Reading { _read: read });
+        }
+        made
+    }
+
+    /// Read the page of visualization `id` from `path` on the thread's host.
+    fn read_visual(&self, id: String, path: &str, cx: &mut Context<Self>) -> Option<Task<()>> {
+        let host = self.workspace_store.read(cx).image_host();
+        let transfer = crate::store::images::HostImages::link(host, cx)?.read_original(
+            tcode_protocol::OriginalTarget::File {
+                path: PathBuf::from(path),
+            },
+        );
+        Some(cx.spawn(async move |this, cx| {
+            let read = components::visualize::read_page(transfer).await;
+            let _ = this.update(cx, |timeline, cx| {
+                timeline.finish_visual_read(&id, read, cx);
+            });
+        }))
+    }
+
+    fn finish_visual_read(
+        &mut self,
+        id: &str,
+        read: Result<String, components::visualize::Unread>,
+        cx: &mut Context<Self>,
+    ) {
+        use components::visualize::FileRead;
+        let Some(visual) = self.visuals.get_mut(id) else {
+            return;
+        };
+        visual.file = Some(match read {
+            Ok(html) => {
+                visual.set_html(&html, cx);
+                FileRead::Read
+            }
+            Err(why) => FileRead::Failed(why),
+        });
+        if let Some(row) = self
+            .markdown_row(id, cx)
+            .filter(|row| *row < self.rows.len())
+        {
+            self.list_state.remeasure_items(row..row + 1);
+        }
+        cx.notify();
     }
 
     /// Make each resident message the selection entry at its index in the
@@ -520,7 +611,7 @@ fn markdown_entries_for_residency(
             entry.content,
             EntryContent::Item(ItemContent::AssistantMessage { .. } | ItemContent::Plan { .. })
         ) || user_content(&entry.content).is_some();
-        if markdown_bearing {
+        if markdown_bearing || tools::visualize::card(entry).is_some() {
             entries.push(MarkdownEntry {
                 id: entry.id.clone(),
                 row,

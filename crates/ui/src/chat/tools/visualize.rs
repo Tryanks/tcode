@@ -1,13 +1,9 @@
-//! Visualize tool recognition and fallback `ToolView`.
-//!
-//! Recognizes Tcode's built-in `tcode_visualize` (`visualize`) tool as well as
-//! external visualization / widget tools (`visualize`, `show_widget`,
-//! `render_html`) whose input carries an `html` (or `widget_code`) payload.
+//! The `visualize` tool of Tcode's own `tcode_visualize` server: what a call
+//! asks to be drawn, and the window of a call that drew nothing.
 
-use std::borrow::Cow;
 use std::path::Path;
 
-use agent::ItemStatus;
+use agent::{ItemStatus, McpRegistration};
 use gpui::AnyElement;
 use serde::Deserialize;
 use tcode_core::session::TimelineEntry;
@@ -16,17 +12,8 @@ use super::window::{Argument, Header, Verb};
 use super::{Bound, Call, ToolCtx, ToolView, code_section, copy, output_section};
 use crate::icon::IconName;
 
-const SERVERS: &[&str] = &["tcode_visualize", "visualize"];
-const TOOL_NAMES: &[&str] = &[
-    "visualize",
-    "show_widget",
-    "render_html",
-    "html_render",
-    "render_visual",
-];
-
 #[derive(Deserialize)]
-struct VisualizeInput<'a> {
+struct Input<'a> {
     #[serde(default, borrow)]
     title: Option<&'a str>,
     #[serde(default, borrow)]
@@ -34,110 +21,96 @@ struct VisualizeInput<'a> {
     #[serde(default, borrow)]
     html: Option<&'a str>,
     #[serde(default, borrow)]
-    widget_code: Option<&'a str>,
-    #[serde(default, borrow)]
     path: Option<&'a str>,
 }
 
-#[derive(Deserialize)]
-struct VisualizeOutput {
-    #[serde(default)]
-    html: Option<String>,
-}
-
-/// Parsed fields for a visualization tool call.
-#[derive(Debug, Clone)]
-pub(in crate::chat) struct VisualizePayload<'a> {
+/// What a call to the tool asks to be drawn.
+pub(in crate::chat) struct Visualization<'a> {
+    /// Empty when the call names none.
     pub(in crate::chat) title: &'a str,
     pub(in crate::chat) description: Option<&'a str>,
-    pub(in crate::chat) html: Cow<'a, str>,
-    pub(in crate::chat) status: ItemStatus,
+    pub(in crate::chat) page: Page<'a>,
+    /// Whether the call is still running, so the page may yet change.
+    pub(in crate::chat) running: bool,
 }
 
-/// Extract visualization payload if `entry` is a visualize tool call.
-pub(in crate::chat) fn payload(entry: &TimelineEntry) -> Option<VisualizePayload<'_>> {
-    let call = Call::of(entry)?;
-    extract(&call)
+/// Where a visualization's HTML is.
+pub(in crate::chat) enum Page<'a> {
+    /// In the call.
+    Inline(&'a str),
+    /// In a file on the thread's host, which the card reads: the call's
+    /// result does not carry it.
+    File(&'a str),
 }
 
-/// Whether `entry` should render as a standalone visualization card in the chat stream.
-pub(in crate::chat) fn is_visualize(entry: &TimelineEntry) -> bool {
-    payload(entry).is_some()
-}
-
-fn extract<'a>(call: &Call<'a>) -> Option<VisualizePayload<'a>> {
-    let name_matches = call.served(SERVERS, TOOL_NAMES)
-        || TOOL_NAMES
-            .iter()
-            .any(|name| call.name.tool.eq_ignore_ascii_case(name));
-    if !name_matches {
+fn visualization<'a>(call: &Call<'a>) -> Option<Visualization<'a>> {
+    if !call.served(&[McpRegistration::SERVER_NAME_VISUALIZE], &["visualize"]) {
         return None;
     }
-    let input = call.input::<VisualizeInput<'a>>()?;
-    let inline_html = input
-        .html
-        .or(input.widget_code)
-        .filter(|h| !h.trim().is_empty())
-        .map(Cow::Borrowed);
-    let output_html = inline_html
-        .is_none()
-        .then(|| {
-            call.output
-                .and_then(|raw| serde_json::from_str::<VisualizeOutput>(raw).ok())
-                .and_then(|out| out.html)
-                .filter(|h| !h.trim().is_empty())
-                .map(Cow::Owned)
-        })
-        .flatten();
-
-    let html = match inline_html.or(output_html) {
-        Some(h) => h,
-        None if call.status == ItemStatus::InProgress
-            && (input.html.is_some() || input.widget_code.is_some() || input.path.is_some()) =>
-        {
-            Cow::Borrowed("")
-        }
-        None => return None,
+    let input = call.input::<Input<'a>>()?;
+    let filled = |text: Option<&'a str>| text.map(str::trim).filter(|text| !text.is_empty());
+    // As the server chooses: the page in the call when it holds one, else
+    // the file.
+    let page = match (filled(input.html), filled(input.path)) {
+        (None, Some(path)) => Page::File(path),
+        _ => Page::Inline(input.html.unwrap_or_default()),
     };
-    let title = input
-        .title
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .unwrap_or("Visual");
-    let description = input.description.map(str::trim).filter(|d| !d.is_empty());
-    Some(VisualizePayload {
-        title,
-        description,
-        html,
-        status: call.status,
+    Some(Visualization {
+        title: filled(input.title).unwrap_or_default(),
+        description: filled(input.description),
+        page,
+        running: call.status == ItemStatus::InProgress,
     })
 }
 
-pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView + 'a>> {
-    let spec = extract(call)?;
-    Some(Box::new(VisualizeView { spec }))
+/// The visualization `entry` draws as a card in the thread: a call still
+/// running or completed. One that failed, was declined or was interrupted
+/// drew nothing, and stays a tool row that shows what the harness reported.
+pub(in crate::chat) fn card(entry: &TimelineEntry) -> Option<Visualization<'_>> {
+    let call = Call::of(entry)?;
+    matches!(call.status, ItemStatus::InProgress | ItemStatus::Completed)
+        .then(|| visualization(&call))
+        .flatten()
 }
 
-struct VisualizeView<'a> {
-    spec: VisualizePayload<'a>,
+pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView + 'a>> {
+    Some(Box::new(VisualizeView(visualization(call)?)))
+}
+
+struct VisualizeView<'a>(Visualization<'a>);
+
+impl VisualizeView<'_> {
+    fn inline(&self) -> &str {
+        match self.0.page {
+            Page::Inline(html) => html,
+            Page::File(_) => "",
+        }
+    }
 }
 
 impl ToolView for VisualizeView<'_> {
     fn header(&self, _call: &Call<'_>, _cwd: &Path) -> Header {
         Header::new(IconName::LayoutDashboard, Verb("visualize"))
-            .argument(Argument::plain(self.spec.title))
+            .argument(Argument::plain(self.0.title))
     }
 
     fn body(&self, call: &Call<'_>, ctx: &mut ToolCtx<'_, '_>) -> AnyElement {
-        let html =
-            (!self.spec.html.is_empty()).then(|| code_section(call, &self.spec.html, "html", ctx));
+        let html = self.inline();
+        let html = (!html.trim().is_empty()).then(|| code_section(call, html, "html", ctx));
         let output = output_section(call, Bound::OUTPUT, ctx);
         super::body(html.into_iter().chain(output))
     }
 
     fn copy_items(&self, _call: &Call<'_>) -> Vec<(String, String)> {
         let mut items = Vec::new();
-        copy(&mut items, "chat.copy_html", &self.spec.html);
+        copy(&mut items, "chat.copy_html", self.inline());
         items
+    }
+
+    fn path(&self) -> Option<&str> {
+        match self.0.page {
+            Page::File(path) => Some(path),
+            Page::Inline(_) => None,
+        }
     }
 }

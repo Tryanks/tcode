@@ -294,7 +294,7 @@ impl TimelineView {
                     column = column.child(self.compose_plan(entry, cwd, cx));
                 }
                 Segment::Visualize(entry) => {
-                    column = column.child(self.compose_visualize(index, entry, cx));
+                    column = column.child(self.compose_visualize(index, entry, cwd, cx));
                 }
                 Segment::Withheld(entry) => {
                     let EntryContent::Withheld { bytes, row } = entry.content else {
@@ -1183,51 +1183,72 @@ impl TimelineView {
         }
     }
 
-    /// A user-role entry, sent or still steering: the notice the host wrote,
-    /// or else the user's bubble.
-    /// A standalone visualization card rendered from a visualize tool call.
+    /// A visualization's card: the page its call asked for, once the
+    /// timeline holds it.
     fn compose_visualize(
         &mut self,
         turn: usize,
         entry: &TimelineEntry,
+        cwd: &Path,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(payload) = tools::visualize::payload(entry) else {
-            return div().into_any_element();
+        use components::visualize::{CardBody, FileRead};
+        let Some(visualization) = tools::visualize::card(entry) else {
+            unreachable!();
         };
-        let html_str = payload.html.as_ref();
-        let state = if let Some((existing, _)) = self.html_states.get(&entry.id) {
-            existing.update(cx, |s, cx| s.set_html(html_str, cx));
-            existing.clone()
-        } else {
-            let created = cx.new(|cx| crate::html::HtmlState::new(html_str, cx));
-            let sub = cx.observe(&created, |_, _, cx| cx.notify());
-            self.html_states
-                .insert(entry.id.clone(), (created.clone(), sub));
-            created
-        };
-
         let collapse_key = format!("visualize-collapsed:{}", entry.id);
         let collapsed = self.expanded.contains(&collapse_key);
         let source_key = format!("visualize-source:{}", entry.id);
         let showing_source = self.expanded.contains(&source_key);
+        let page = |visual: &components::visualize::Visual| CardBody::Page {
+            state: visual.state.clone(),
+            html: visual.html.clone(),
+            source: None,
+        };
+        let mut body = match (self.visuals.get(&entry.id), &visualization.page) {
+            (None, _) => CardBody::Building,
+            (Some(_), tools::visualize::Page::Inline(html))
+                if visualization.running && html.trim().is_empty() =>
+            {
+                CardBody::Building
+            }
+            (Some(visual), tools::visualize::Page::Inline(_)) => page(visual),
+            (Some(visual), tools::visualize::Page::File(path)) => match &visual.file {
+                None | Some(FileRead::Reading { .. }) => CardBody::Building,
+                Some(FileRead::Read) => page(visual),
+                Some(FileRead::Failed(why)) => CardBody::Unreadable(why.message(path)),
+            },
+        };
+        if let CardBody::Page { html, source, .. } = &mut body
+            && showing_source
+            && !collapsed
+        {
+            *source = Some(tools::code_block(
+                format!("visualize-source-{}", entry.id),
+                html,
+                "html",
+                &mut tools::ToolCtx {
+                    chat: self,
+                    cx,
+                    cwd,
+                    images_inline: false,
+                },
+            ));
+        }
         let copy_key = format!("visualize:{}", entry.id);
         let copied = self.copied.is(&copy_key);
-        let html_arc: Arc<str> = Arc::from(html_str);
-        let copy_html = html_arc.clone();
         let viewport_width = (f32::from(self.layout.width) > 0.0)
             .then(|| (f32::from(self.layout.width) - 56.0).clamp(240.0, 760.0));
+        let id = entry.id.clone();
 
         components::visualize::visualize_card(
             components::visualize::VisualizeCardData {
                 id: &entry.id,
-                title: payload.title,
-                description: payload.description,
-                html: html_arc,
-                state,
-                status: payload.status,
+                title: visualization.title,
+                description: visualization.description,
+                body,
+                running: visualization.running,
                 collapsed,
-                showing_source,
                 copied,
                 compact: self.window_state.read(cx).compact,
                 viewport_width,
@@ -1240,8 +1261,10 @@ impl TimelineView {
                 this.toggle_expanded(turn, &source_key, cx);
             }),
             cx.listener(move |this, _, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(copy_html.to_string()));
-                this.mark_copied(copy_key.clone(), cx);
+                if let Some(visual) = this.visuals.get(&id) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(visual.html.to_string()));
+                    this.mark_copied(copy_key.clone(), cx);
+                }
             }),
             cx,
         )
@@ -1354,6 +1377,8 @@ impl TimelineView {
             .cloned()
     }
 
+    /// A user-role entry, sent or still steering: the notice the host wrote,
+    /// or else the user's bubble.
     fn compose_user_entry(
         &self,
         (turn, entry, cwd, pinned): (usize, &TimelineEntry, &Path, bool),

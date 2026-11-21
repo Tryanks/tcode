@@ -111,8 +111,9 @@ pub(crate) struct TimelineView {
     /// rows of the plans gaining and losing it.
     pub(in crate::chat) deciding_plan: Option<String>,
     pub(in crate::chat) md_states: HashMap<String, MdState>,
-    pub(in crate::chat) html_states:
-        HashMap<String, (Entity<crate::html::HtmlState>, Subscription)>,
+    /// The pages of the visualizations near the screen, resident and evicted
+    /// as the messages' Markdown is.
+    pub(in crate::chat) visuals: HashMap<String, components::visualize::Visual>,
     /// The transcript's one text selection, across its messages; each
     /// message is the entry at its index in the timeline. It goes when the
     /// focus leaves the whole chat.
@@ -267,7 +268,7 @@ impl TimelineView {
             shown_deliveries: Vec::new(),
             deciding_plan: None,
             md_states: HashMap::new(),
-            html_states: HashMap::new(),
+            visuals: HashMap::new(),
             selection,
             entry_ends: None,
             selection_hold: None,
@@ -1067,7 +1068,7 @@ impl TimelineView {
         if session_changed {
             self.painted_rows.set(None);
             self.md_states.clear();
-            self.html_states.clear();
+            self.visuals.clear();
             self.selection
                 .update(cx, |selection, cx| selection.clear(cx));
             self.pending_md_builds.clear();
