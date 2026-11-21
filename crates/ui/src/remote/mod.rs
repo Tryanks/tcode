@@ -161,6 +161,45 @@ impl ZedEntry {
     }
 }
 
+/// Open `path` on `image_host` (or the current pane's host when `None`):
+/// on the local host hand it to the OS; on a remote host whose client
+/// supports direct file downloads (the browser), trigger a download and
+/// surface any failure as a notification.
+pub(crate) fn open_or_download_host_path(
+    image_host: Option<crate::store::ImageHost>,
+    path: std::path::PathBuf,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let store = image_host
+        .and_then(|host| crate::shell::store_of_image_host(host, cx))
+        .or_else(|| crate::shell::current_store(cx));
+    let Some(store) = store else {
+        cx.open_with_system(&path);
+        return;
+    };
+    if !store.read(cx).is_remote() {
+        cx.open_with_system(&path);
+        return;
+    }
+    if !store.read(cx).supports_host_file_download() {
+        return;
+    }
+    let download = store.read(cx).download_host_file(&path);
+    window
+        .spawn(cx, async move |cx| {
+            if let Err(error) = download.await {
+                let _ = cx.update(|window, cx| {
+                    window.push_notification(
+                        Notification::error(crate::tr!("errors.download_file", error = error)),
+                        cx,
+                    );
+                });
+            }
+        })
+        .detach();
+}
+
 /// Open `path` of `host` in Zed; `None` is the current pane's host.
 pub(crate) fn open_path_in_zed(
     host: Option<&HostKey>,

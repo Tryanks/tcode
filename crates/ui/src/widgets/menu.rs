@@ -225,14 +225,26 @@ impl PopupMenu {
     /// unpaired with them.
     fn place_path_items(&mut self, cx: &App) {
         let entry = crate::remote::ZedEntry::current(cx);
-        let elsewhere =
-            crate::shell::current_store(cx).is_some_and(|store| store.read(cx).is_remote());
+        let store = crate::shell::current_store(cx);
+        let elsewhere = store
+            .as_ref()
+            .is_some_and(|store| store.read(cx).is_remote());
+        let can_download = elsewhere
+            && store
+                .as_ref()
+                .is_some_and(|store| store.read(cx).supports_host_file_download());
         self.items.retain_mut(|item| {
             let MenuItem::Item { label, action, .. } = item else {
                 return true;
             };
-            if elsewhere && (action.as_any().is::<OpenPath>() || action.as_any().is::<RevealPath>())
-            {
+            if elsewhere && action.as_any().is::<RevealPath>() {
+                return false;
+            }
+            if elsewhere && action.as_any().is::<OpenPath>() {
+                if can_download {
+                    *label = Some(crate::tr!("chat.download").into_owned().into());
+                    return true;
+                }
                 return false;
             }
             let Some(open) = action.as_any().downcast_ref::<OpenPathInZed>() else {
@@ -442,7 +454,14 @@ impl Render for PopupMenu {
                 cx.write_to_clipboard(ClipboardItem::new_string(action.0.clone()))
             })
             .on_action(|action: &OpenUrl, _, cx| cx.open_url(&action.0))
-            .on_action(|action: &OpenPath, _, cx| cx.open_with_system(Path::new(&action.0)))
+            .on_action(|action: &OpenPath, window, cx| {
+                crate::remote::open_or_download_host_path(
+                    None,
+                    std::path::PathBuf::from(&action.0),
+                    window,
+                    cx,
+                )
+            })
             .on_action(|action: &OpenPathInZed, window, cx| {
                 crate::remote::open_path_in_zed(
                     action.host.as_ref(),

@@ -543,6 +543,22 @@ pub(crate) fn store_of_host(host: &HostKey, cx: &App) -> Option<Entity<Workspace
     Some(current_shell(cx)?.read(cx).link_of(host)?.store.clone())
 }
 
+/// The store that owns `image_host`, while the window is linked to it.
+pub(crate) fn store_of_image_host(
+    image_host: crate::store::ImageHost,
+    cx: &App,
+) -> Option<Entity<WorkspaceStore>> {
+    if image_host == crate::store::ImageHost::NONE {
+        return None;
+    }
+    current_shell(cx)?
+        .read(cx)
+        .links
+        .iter()
+        .find(|link| link.store.read(cx).image_host() == image_host)
+        .map(|link| link.store.clone())
+}
+
 /// Whether the window is over several hosts, so what acts on one names it.
 pub(crate) fn several_hosts(cx: &App) -> bool {
     current_shell(cx).is_some_and(|shell| shell.read(cx).links.len() > 1)

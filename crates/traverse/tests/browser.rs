@@ -342,3 +342,108 @@ fn a_bind_beyond_loopback_needs_a_password_first() {
     assert!(server.password_configured());
     server.shutdown();
 }
+
+fn raw_http(addr: SocketAddr, request: &str) -> (String, Vec<u8>) {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut bytes = Vec::new();
+    let _ = stream.read_to_end(&mut bytes);
+    let split = bytes.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let head = String::from_utf8(bytes[..split].to_vec()).unwrap();
+    (head, bytes[split + 4..].to_vec())
+}
+
+#[test]
+fn browser_downloads_host_file_with_one_time_ticket() {
+    let dir = TestDir::new("download");
+    let (runtime, mux) = real_host::spawn(&dir.0, Default::default(), |_| {});
+    configure_password(&dir.0, "secret password");
+    let server = serve(mux.clone(), config(dir.0.clone())).unwrap();
+    let addr = server.local_addr();
+    let token = login(addr, "secret password", "Chrome").1["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let file_path = dir.0.join("报告 final.txt");
+    let payload = b"hello from host file download\n";
+    std::fs::write(&file_path, payload).unwrap();
+
+    let post_download = |auth: Option<&str>, origin: Option<&str>, path: &str| {
+        let body = json!({ "path": path }).to_string();
+        let mut req = format!(
+            "POST /download HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        );
+        if let Some(auth) = auth {
+            req.push_str(&format!("Authorization: Bearer {auth}\r\n"));
+        }
+        if let Some(origin) = origin {
+            req.push_str(&format!("Origin: {origin}\r\n"));
+        }
+        req.push_str(&format!("Connection: close\r\n\r\n{body}"));
+        raw_http(addr, &req)
+    };
+
+    // Unauthenticated and foreign-origin requests are refused.
+    let (head, _) = post_download(None, None, file_path.to_str().unwrap());
+    assert!(head.starts_with("HTTP/1.1 401 Unauthorized"), "{head}");
+    let (head, _) = post_download(
+        Some(&token),
+        Some("https://evil.example"),
+        file_path.to_str().unwrap(),
+    );
+    assert!(head.starts_with("HTTP/1.1 403 Forbidden"), "{head}");
+
+    // Missing files and directories fail before issuing a ticket.
+    let missing = dir.0.join("missing.txt");
+    let (head, _) = post_download(Some(&token), None, missing.to_str().unwrap());
+    assert!(head.starts_with("HTTP/1.1 404 Not Found"), "{head}");
+    let (head, _) = post_download(Some(&token), None, dir.0.to_str().unwrap());
+    assert!(head.starts_with("HTTP/1.1 400 Bad Request"), "{head}");
+
+    // A valid file yields a one-time ticket served as an attachment.
+    let (head, body) = post_download(
+        Some(&token),
+        Some("https://localhost"),
+        file_path.to_str().unwrap(),
+    );
+    assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+    let issued: Value = serde_json::from_slice(&body).unwrap();
+    let ticket = issued["ticket"].as_str().unwrap();
+    assert_eq!(issued["filename"].as_str(), Some("报告 final.txt"));
+
+    let (head, downloaded) = raw_http(
+        addr,
+        &format!(
+            "GET /download?ticket={ticket} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+    let headers: Vec<&str> = head.lines().collect();
+    assert!(
+        headers.contains(&"Content-Type: application/octet-stream"),
+        "{head}"
+    );
+    assert!(
+        headers.contains(&"X-Content-Type-Options: nosniff"),
+        "{head}"
+    );
+    assert!(
+        headers.contains(&"Content-Disposition: attachment; filename=\"__ final.txt\"; filename*=UTF-8''%E6%8A%A5%E5%91%8A%20final.txt"),
+        "{head}"
+    );
+    assert_eq!(downloaded, payload);
+
+    // Tickets are single-use.
+    let (head, _) = raw_http(
+        addr,
+        &format!(
+            "GET /download?ticket={ticket} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(head.starts_with("HTTP/1.1 404 Not Found"), "{head}");
+
+    server.shutdown();
+    real_host::stop(runtime, &mux);
+}

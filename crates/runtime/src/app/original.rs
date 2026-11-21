@@ -48,13 +48,16 @@ impl AppState {
                 }
                 let mut source = match &target {
                     OriginalTarget::File { path } => {
-                        let requested_path = path.clone();
+                        let requested_path = expand_home(path);
                         host.unblock(move || {
                             let path = requested_path.canonicalize().map_err(io_error)?;
                             let mut file = File::open(&path).map_err(io_error)?;
                             let metadata = file.metadata().map_err(io_error)?;
                             if !metadata.is_file() {
-                                return Err(error("original is not a regular file"));
+                                return Err(ProtocolError {
+                                    code: "not_a_file".into(),
+                                    message: "not a regular file".into(),
+                                });
                             }
                             let identity = (metadata.len(), metadata.modified().map_err(io_error)?);
                             let dimensions = image_previews::dimensions(&mut file);
@@ -303,6 +306,19 @@ fn changed() -> ProtocolError {
         code: "changed".into(),
         message: "original changed during the read".into(),
     }
+}
+
+fn expand_home(path: &std::path::Path) -> std::path::PathBuf {
+    let Some(raw) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let rest = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\"));
+    let Some(rest) = rest else {
+        return path.to_path_buf();
+    };
+    std::env::home_dir()
+        .map(|home| home.join(rest))
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 fn io_error(err: io::Error) -> ProtocolError {

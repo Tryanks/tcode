@@ -408,8 +408,28 @@ impl MarkdownState {
         self.base_dir.as_deref()
     }
 
-    pub(super) fn resolve_link(&self, url: &str) -> LinkTarget {
-        super::link_target::resolve_link(url, self.base_dir())
+    pub(super) fn resolve_link(&self, url: &str, cx: &gpui::App) -> LinkTarget {
+        super::link_target::resolve_link(url, self.base_dir(), self.is_remote_host(cx))
+    }
+
+    pub(super) fn open_link(
+        view: &gpui::Entity<Self>,
+        url: &str,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) {
+        let (target, image_host) = {
+            let state = view.read(cx);
+            (state.resolve_link(url, cx), state.image_host)
+        };
+        target.open(image_host, window, cx);
+    }
+
+    fn is_remote_host(&self, cx: &gpui::App) -> bool {
+        if let Some(link) = crate::store::images::HostImages::link(self.image_host, cx) {
+            return link.is_remote();
+        }
+        crate::shell::current_store(cx).is_some_and(|store| store.read(cx).is_remote())
     }
 
     /// The image drawn in the text. A host file is drawn from its largest preview, whose key

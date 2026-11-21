@@ -904,7 +904,7 @@ fn render_paragraph(
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
                             if let Some(link) = &link {
-                                view.read(cx).resolve_link(&link.url).open(window, cx);
+                                MarkdownState::open_link(&view, &link.url, window, cx);
                             } else {
                                 crate::image_viewer::open(
                                     opened.clone(),
