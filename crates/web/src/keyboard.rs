@@ -1,12 +1,20 @@
-//! Bringing back a software keyboard the user dismissed.
+//! Browser input workarounds for `gpui-fast-web`.
 //!
-//! gpui-fast-web summons a dismissed keyboard for a tap into the
-//! focused field by blurring and focusing its hidden input in one task; iOS
-//! coalesces that pair into nothing, so on an iPad the keyboard stays down.
-//! Blurring the input in the tap's own `pointerdown` puts the two in
-//! separate tasks: the `pointerup` that requests the keyboard then focuses
-//! an input that is not focused, which iOS honours as a user gesture.
-//! The blur does not deactivate the window: GPUI follows `document.hasFocus`.
+//! 1. Software keyboard restoration on iOS: gpui-fast-web summons a dismissed
+//!    keyboard for a tap into the focused field by blurring and focusing its
+//!    hidden input in one task; iOS coalesces that pair into nothing, so on an
+//!    iPad the keyboard stays down. Blurring the input in the tap's own
+//!    `pointerdown` puts the two in separate tasks: the `pointerup` that
+//!    requests the keyboard then focuses an input that is not focused, which
+//!    iOS honours as a user gesture. The blur does not deactivate the window:
+//!    GPUI follows `document.hasFocus`.
+//! 2. Linux middle-button paste suppression: gpui-fast-web cancels
+//!    `pointerdown` and `pointerup` on the canvas, not `mousedown`, `mouseup`,
+//!    or `auxclick`. On Linux (e.g. Firefox with `middlemouse.paste`), an
+//!    uncanceled middle-button `auxclick` dispatches `paste` with the primary
+//!    selection onto `document.activeElement` — the focused hidden IME
+//!    textarea — whenever the user middle-clicks or finishes a middle-button
+//!    scroll anywhere on the canvas.
 
 use wasm_bindgen::{JsCast as _, prelude::*};
 
@@ -60,6 +68,29 @@ pub(crate) fn install() {
     let _ = window.add_event_listener_with_callback("pointerup", up.as_ref().unchecked_ref());
     down.forget();
     up.forget();
+
+    suppress_middle_click_paste(&window);
+}
+
+/// Cancels browser middle-button mouse defaults (`mousedown`, `mouseup`,
+/// `auxclick`) so Linux primary-selection paste and native autoscroll do not
+/// fire on the hidden IME textarea while GPUI handles middle clicks and
+/// autoscroll through pointer events.
+fn suppress_middle_click_paste(window: &web_sys::Window) {
+    const MIDDLE_BUTTON: i16 = 1;
+    let handler = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(|event: web_sys::MouseEvent| {
+        if event.button() == MIDDLE_BUTTON {
+            event.prevent_default();
+        }
+    });
+    for event_name in ["mousedown", "mouseup", "auxclick"] {
+        let _ = window.add_event_listener_with_callback_and_bool(
+            event_name,
+            handler.as_ref().unchecked_ref(),
+            true,
+        );
+    }
+    handler.forget();
 }
 
 /// The hidden text input gpui-fast-web keeps focused for a focused field.
