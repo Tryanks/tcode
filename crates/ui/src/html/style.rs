@@ -93,7 +93,13 @@ pub(crate) enum GridTrack {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum GridColumns {
     Equal(u16),
-    AutoFit { min_px: f32 },
+    AutoFit {
+        min_px: f32,
+    },
+    /// As `AutoFit`, keeping the columns no item fills.
+    AutoFill {
+        min_px: f32,
+    },
     Tracks(Vec<GridTrack>),
 }
 
@@ -408,7 +414,7 @@ impl ComputedStyle {
                                 min_size: GridTemplateMinSize::Zero,
                             });
                         }
-                        GridColumns::AutoFit { min_px } => {
+                        GridColumns::AutoFit { min_px } | GridColumns::AutoFill { min_px } => {
                             let gap_px =
                                 definite_to_px(self.col_gap, self.font_size).unwrap_or(12.0);
                             let count = (((viewport_width + gap_px) / (min_px.max(40.0) + gap_px))
@@ -2086,7 +2092,11 @@ fn parse_grid_columns(val: &str, em: f32, clamped: &mut bool) -> Option<GridColu
             let track = parts[1].trim();
             if count == "auto-fit" || count == "auto-fill" {
                 let min_px = extract_minmax_min(track, em).unwrap_or(180.0);
-                return Some(GridColumns::AutoFit { min_px });
+                return Some(if count == "auto-fit" {
+                    GridColumns::AutoFit { min_px }
+                } else {
+                    GridColumns::AutoFill { min_px }
+                });
             }
             if let Some(n) = track_count(count, clamped) {
                 return Some(GridColumns::Equal(n));

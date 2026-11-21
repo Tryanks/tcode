@@ -279,6 +279,11 @@ fn render_element(
     if let Some(before) = ctx.computed.before(node_id) {
         children.push(render_pseudo(before, ctx));
     }
+    // What the box holds is laid out in the width left inside its padding
+    // and border, which is what a nested grid counts its columns from and a
+    // nested picture is fitted to.
+    let outer_width = ctx.viewport_width;
+    ctx.viewport_width = (outer_width - horizontal_chrome(style, outer_width)).max(120.0);
     children.extend(render_children(
         &ctx.doc.nodes[node_id].children,
         style,
@@ -286,6 +291,7 @@ fn render_element(
         ctx,
         cx,
     ));
+    ctx.viewport_width = outer_width;
     if let Some(after) = ctx.computed.after(node_id) {
         children.push(render_pseudo(after, ctx));
     }
@@ -1150,6 +1156,28 @@ fn render_raster_box(
         wrapper.child(image).into_any_element()
     };
     maybe_center_media(element, style)
+}
+
+/// The width a box's left and right padding and border take of `width`.
+fn horizontal_chrome(style: &ComputedStyle, width: f32) -> f32 {
+    let padding = |length: Option<DefiniteLength>| match length {
+        Some(DefiniteLength::Absolute(gpui::AbsoluteLength::Pixels(pixels))) => f32::from(pixels),
+        Some(DefiniteLength::Absolute(gpui::AbsoluteLength::Rems(rems))) => {
+            rems.0 * super::style::BASE_FONT_PX
+        }
+        Some(DefiniteLength::Fraction(share)) => width * share,
+        None => 0.0,
+    };
+    let border = |length: Option<gpui::AbsoluteLength>| match length {
+        Some(gpui::AbsoluteLength::Pixels(pixels)) => f32::from(pixels),
+        Some(gpui::AbsoluteLength::Rems(rems)) => rems.0 * super::style::BASE_FONT_PX,
+        None => 0.0,
+    };
+    (padding(style.padding_left)
+        + padding(style.padding_right)
+        + border(style.border_left_w)
+        + border(style.border_right_w))
+    .max(0.0)
 }
 
 /// The box of a picture fitted to `w` by `h`: as wide as the page asks, a
