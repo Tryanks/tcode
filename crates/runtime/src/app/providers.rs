@@ -2015,6 +2015,7 @@ pub(super) struct McpServers {
     pub(super) preview: Option<agent::McpRegistration>,
     pub(super) computer_use: Option<agent::McpRegistration>,
     pub(super) control: Option<agent::McpRegistration>,
+    pub(super) visualize: Option<agent::McpRegistration>,
 }
 
 pub(super) fn session_options(
@@ -2082,6 +2083,11 @@ pub(super) fn session_options(
                 .caps()
                 .mcp_servers
                 .then_some(servers.control)
+                .flatten(),
+            meta.provider
+                .caps()
+                .mcp_servers
+                .then_some(servers.visualize)
                 .flatten(),
         ]
         .into_iter()

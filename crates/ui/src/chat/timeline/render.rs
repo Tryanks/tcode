@@ -293,6 +293,9 @@ impl TimelineView {
                 Segment::Plan(entry) => {
                     column = column.child(self.compose_plan(entry, cwd, cx));
                 }
+                Segment::Visualize(entry) => {
+                    column = column.child(self.compose_visualize(entry, cx));
+                }
                 Segment::Withheld(entry) => {
                     let EntryContent::Withheld { bytes, row } = entry.content else {
                         unreachable!();
@@ -1180,8 +1183,41 @@ impl TimelineView {
         }
     }
 
-    /// A user-role entry, sent or still steering: the notice the host wrote,
-    /// or else the user's bubble.
+    /// A visualization: the page its call asked for, once the timeline
+    /// holds it.
+    fn compose_visualize(&mut self, entry: &TimelineEntry, cx: &mut Context<Self>) -> AnyElement {
+        use components::visualize::{FileRead, Shown};
+        let Some(visualization) = tools::visualize::card(entry) else {
+            unreachable!();
+        };
+        let page = |visual: &components::visualize::Visual| Shown::Page {
+            state: visual.state.clone(),
+            html: visual.html.clone(),
+        };
+        let shown = match (self.visuals.get(&entry.id), &visualization.page) {
+            (None, _) => Shown::Building,
+            (Some(_), tools::visualize::Page::Inline(html))
+                if visualization.running && html.trim().is_empty() =>
+            {
+                Shown::Building
+            }
+            (Some(visual), tools::visualize::Page::Inline(_)) => page(visual),
+            (Some(visual), tools::visualize::Page::File(path)) => match &visual.file {
+                None | Some(FileRead::Reading { .. }) => Shown::Building,
+                Some(FileRead::Read) => page(visual),
+                Some(FileRead::Failed(why)) => Shown::Unreadable(why.message(path)),
+            },
+        };
+        // The page is as wide as a reply's text: the body within its
+        // margins, up to the column's width.
+        let body = f32::from(self.layout.width);
+        let viewport_width = (body > 0.0).then(|| {
+            (body - 2. * crate::material::CHAT_CONTENT_MIN_PADDING)
+                .min(crate::material::CHAT_CONTENT_MAX_WIDTH)
+        });
+        components::visualize::visualization(&entry.id, shown, viewport_width, cx)
+    }
+
     /// A proposed plan's block, carrying the decision its agent waits on.
     fn compose_plan(
         &self,
@@ -1289,6 +1325,8 @@ impl TimelineView {
             .cloned()
     }
 
+    /// A user-role entry, sent or still steering: the notice the host wrote,
+    /// or else the user's bubble.
     fn compose_user_entry(
         &self,
         (turn, entry, cwd, pinned): (usize, &TimelineEntry, &Path, bool),

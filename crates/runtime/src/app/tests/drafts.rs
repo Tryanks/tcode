@@ -889,6 +889,7 @@ fn session_launch_scopes_mcp_registrations() {
     let preview = registration(agent::McpRegistration::SERVER_NAME_PREVIEW, 7);
     let computer = registration(agent::McpRegistration::SERVER_NAME_COMPUTER_USE, 10);
     let control = registration(agent::McpRegistration::SERVER_NAME_CONTROL, 11);
+    let visualize = registration(agent::McpRegistration::SERVER_NAME_VISUALIZE, 12);
     for (provider, preview_supported, computer_supported) in [
         (ProviderKind::ClaudeCode, true, true),
         (ProviderKind::Codex, true, false),
@@ -906,6 +907,7 @@ fn session_launch_scopes_mcp_registrations() {
                     preview: Some(preview.clone()),
                     computer_use: Some(computer.clone()),
                     control: Some(control.clone()),
+                    visualize: Some(visualize.clone()),
                 },
             )
             .unwrap();
@@ -914,6 +916,7 @@ fn session_launch_scopes_mcp_registrations() {
                 (preview_supported, &preview),
                 (computer_enabled && computer_supported, &computer),
                 (preview_supported, &control),
+                (preview_supported, &visualize),
             ] {
                 if enabled {
                     expected.push((&reg.name, &reg.url, &reg.bearer_token));

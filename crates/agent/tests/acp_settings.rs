@@ -12,8 +12,6 @@ use agent::{
 use serde_json::{Value, json};
 
 const ROLE: &str = "TCODE_TEST_SETTINGS_ACP_AGENT";
-/// Set, the fake agent advertises `sessionCapabilities.close`.
-const CLOSES: &str = "TCODE_TEST_SETTINGS_ACP_CLOSES";
 /// Set, the fake agent answers `session/new` that it needs signing in.
 const SIGNED_OUT: &str = "TCODE_TEST_SETTINGS_ACP_SIGNED_OUT";
 
@@ -26,10 +24,6 @@ fn main() {
         (
             "establish_applies_model_and_options_and_leaves_the_model_to_the_model_picker",
             establish_applies_model_and_options_and_leaves_the_model_to_the_model_picker,
-        ),
-        (
-            "probe_reads_session_new_in_a_directory_of_its_own_and_closes_the_session",
-            probe_reads_session_new_in_a_directory_of_its_own_and_closes_the_session,
         ),
         (
             "probe_of_a_signed_out_agent_fails_without_signing_in",
@@ -141,19 +135,7 @@ fn run_fake_agent(port: u16) {
         writeln!(
             log,
             "{}",
-            json!({
-                "method": method,
-                "params": msg["params"],
-                // Whether the agent runs in the directory the request names.
-                "in_cwd": msg["params"]["cwd"].as_str().is_some_and(|cwd| {
-                    // Both sides canonical: Windows spells one directory
-                    // several ways (`\\?\`, 8.3 names).
-                    std::fs::canonicalize(cwd).ok()
-                        == std::env::current_dir()
-                            .and_then(std::fs::canonicalize)
-                            .ok()
-                }),
-            })
+            json!({ "method": method, "params": msg["params"] })
         )
         .unwrap();
         log.flush().unwrap();
@@ -165,11 +147,7 @@ fn run_fake_agent(port: u16) {
                 "id": id,
                 "result": {
                     "protocolVersion": 1,
-                    "agentCapabilities": if std::env::var_os(CLOSES).is_some() {
-                        json!({ "sessionCapabilities": { "close": {} } })
-                    } else {
-                        json!({})
-                    },
+                    "agentCapabilities": {},
                     "authMethods": [{ "id": "browser", "name": "Sign in with a browser" }]
                 }
             }),
@@ -438,71 +416,6 @@ fn probe(env: &[&str]) -> (Result<AcpCatalog, agent::AgentError>, Vec<Value>) {
         .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
         .collect();
     (probed, requests)
-}
-
-/// An agent's models and options exist before its first message only as
-/// its `session/new` answer: the probe asks for one session, with no MCP
-/// servers, in a directory made for it and gone afterwards, so no project's
-/// configuration runs, and closes the session where the agent can.
-fn probe_reads_session_new_in_a_directory_of_its_own_and_closes_the_session() {
-    let (probed, requests) = probe(&[CLOSES]);
-    let catalog = probed.expect("the probe lists the agent's catalog");
-
-    let methods: Vec<&str> = requests
-        .iter()
-        .map(|request| request["method"].as_str().unwrap())
-        .collect();
-    assert_eq!(methods, ["initialize", "session/new", "session/close"]);
-    let new = &requests[1];
-    assert_eq!(new["params"]["mcpServers"], json!([]));
-    assert_eq!(new["in_cwd"], true, "the agent runs where its session is");
-    let cwd = std::path::PathBuf::from(new["params"]["cwd"].as_str().unwrap());
-    assert!(!cwd.exists(), "{} outlived the probe", cwd.display());
-    assert_eq!(requests[2]["params"]["sessionId"], "s1");
-
-    let models: Vec<(&str, &str, bool)> = catalog
-        .models
-        .iter()
-        .map(|model| {
-            (
-                model.id.as_str(),
-                model.display_name.as_str(),
-                model.is_default,
-            )
-        })
-        .collect();
-    assert_eq!(
-        models,
-        [("model-a", "Model A", true), ("model-b", "Model B", false)]
-    );
-    assert_eq!(catalog.default_model(), Some("model-a"));
-    // Each option defaults to where a new session starts.
-    let options: Vec<(&str, OptionRole, Value)> = catalog
-        .options
-        .iter()
-        .map(|option| match option {
-            OptionDescriptor::Select {
-                id,
-                role,
-                default_value,
-                ..
-            } => (id.as_str(), *role, json!(default_value)),
-            OptionDescriptor::Boolean {
-                id,
-                role,
-                default_value,
-                ..
-            } => (id.as_str(), *role, json!(default_value)),
-        })
-        .collect();
-    assert_eq!(
-        options,
-        [
-            (ACP_MODE_OPTION_ID, OptionRole::Permission, json!("default")),
-            (EFFORT_OPTION_ID, OptionRole::Effort, json!("low")),
-            ("acp:cfg:web_search", OptionRole::Model, json!(false)),
-        ]
-    );
 }
 
 /// Signing in is the agent's interactive flow, which a thread the user

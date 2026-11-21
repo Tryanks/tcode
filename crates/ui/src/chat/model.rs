@@ -43,6 +43,7 @@ pub(crate) enum Segment<'a> {
     User(&'a TimelineEntry),
     Assistant(&'a TimelineEntry),
     Plan(&'a TimelineEntry),
+    Visualize(&'a TimelineEntry),
     Error(&'a TimelineEntry),
     RequestRetry(&'a TimelineEntry),
     /// Consecutive warnings of the harness.
@@ -193,6 +194,11 @@ pub(crate) fn segment_entries<'a>(
             ranges.push(index..index + 1);
         };
         match &entry.content {
+            EntryContent::Item(ItemContent::ToolCall { .. })
+                if super::tools::visualize::card(entry).is_some() =>
+            {
+                single(&mut segments, &mut ranges, Segment::Visualize(entry));
+            }
             EntryContent::Item(item)
                 if matches!(item, ItemContent::ImageRead { .. })
                     || matches!(item, ItemContent::ToolCall { image_reads, status: ItemStatus::Completed, .. } if !image_reads.is_empty())
@@ -1072,6 +1078,43 @@ pub(in crate::chat) mod tests {
             if first.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>() == ["one", "two"] && second[0].id == "three")
         );
         assert_eq!(segmented.ranges, vec![0..2, 2..3, 3..4, 4..5]);
+        // A call to Tcode's own visualize tool stands in the thread as a
+        // card while it runs and once it completed. One that failed drew
+        // nothing, and another server's tool of the same name is not
+        // Tcode's: both stay activities.
+        let visualize = |id: &str, name: &str, status| {
+            entry(
+                id,
+                EntryContent::Item(ItemContent::ToolCall {
+                    name: name.into(),
+                    input: serde_json::json!({
+                        "title": "Latency",
+                        "html": "<div><strong>42ms</strong></div>"
+                    }),
+                    output: None,
+                    status,
+                    image_reads: vec![],
+                    family: None,
+                }),
+            )
+        };
+        let own = "mcp__tcode_visualize__visualize";
+        let vis_entries = [
+            command("cmd"),
+            visualize("refused", own, ItemStatus::Failed),
+            visualize("foreign", "mcp__charts__visualize", ItemStatus::Completed),
+            visualize("drawn", own, ItemStatus::Completed),
+            visualize("drawing", own, ItemStatus::InProgress),
+            entry("reply", assistant("done")),
+        ];
+        let segmented = segment_entries(&vis_entries, false);
+        assert!(matches!(
+            segmented.flow.as_slice(),
+            [Segment::ActivityRun(run), Segment::Visualize(drawn), Segment::Visualize(drawing), Segment::Assistant(_)]
+            if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>() == ["cmd", "refused", "foreign"]
+                && drawn.id == "drawn" && drawing.id == "drawing"
+        ));
+        assert_eq!(segmented.ranges, vec![0..3, 3..4, 4..5, 5..6]);
         // An old plan streamed as many rows this build cannot read shows as
         // one row of them.
         let unreadable = |id: &str| {

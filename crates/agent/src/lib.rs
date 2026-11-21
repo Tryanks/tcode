@@ -1424,6 +1424,10 @@ impl McpRegistration {
     pub const SERVER_NAME_COMPUTER_USE: &'static str = "tcode_computer_use";
     pub const SERVER_NAME_PULL_REQUESTS: &'static str = "tcode_pull_requests";
     pub const SERVER_NAME_CONTROL: &'static str = "tcode_control";
+    pub const SERVER_NAME_VISUALIZE: &'static str = "tcode_visualize";
+    /// The largest page `tcode_visualize` takes, inline or in a file, and so the most its
+    /// card reads of a file.
+    pub const VISUALIZE_MAX_HTML_BYTES: usize = 512 * 1024;
 
     /// Codex `-c` override value: an inline TOML table for a streamable-HTTP MCP
     /// server. Codex rejects a literal `bearer_token` for HTTP, so the token

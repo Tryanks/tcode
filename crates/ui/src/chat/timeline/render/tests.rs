@@ -877,3 +877,44 @@ fn a_rewind_divider_offers_what_its_harness_keeps(cx: &mut TestAppContext) {
         );
     }
 }
+
+/// A visualization passed as a file is read from the thread's host and
+/// drawn; of a file the host cannot read, the page's place says so.
+#[gpui::test]
+fn a_visualization_in_a_file_is_read_from_the_host_and_drawn(cx: &mut TestAppContext) {
+    use gpui::{px, size};
+
+    let dir = crate::store::tests::scratch_root("visualize-file");
+    std::fs::create_dir_all(&dir).unwrap();
+    let page = dir.join("page.html");
+    std::fs::write(&page, "<div>from the file</div>").unwrap();
+    let visualize = |id: &str, path: &std::path::Path| {
+        entry(
+            id,
+            EntryContent::Item(ItemContent::ToolCall {
+                name: "mcp__tcode_visualize__visualize".into(),
+                input: serde_json::json!({ "title": "Latency", "path": path }),
+                output: Some(r#"{"rendered":true,"title":"Latency"}"#.into()),
+                status: ItemStatus::Completed,
+                image_reads: vec![],
+                family: None,
+            }),
+        )
+    };
+    let mut timeline = Timeline::default();
+    timeline.turns = vec![TurnMeta::default()];
+    timeline.entries.extend([
+        entry("user", user_item("go")),
+        visualize("drawn", &page),
+        visualize("gone", &dir.join("gone.html")),
+    ]);
+    let (store, window_state, session_id, mut driver) = seed_chat_with_history(cx, timeline, false);
+    let (_view, cx) = add_chat_window(cx, |window, cx| {
+        ChatView::new(store, window_state, Some(session_id), window, cx)
+    });
+    cx.simulate_resize(size(px(1_024.), px(900.)));
+    driver.settle_until(cx, "the files to have been read", |cx| {
+        cx.debug_bounds("visualize-page-drawn").is_some()
+            && cx.debug_bounds("visualize-unreadable-gone").is_some()
+    });
+}

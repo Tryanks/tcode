@@ -33,6 +33,7 @@ pub struct HostServices {
     /// request receiver or live backend handle.
     pub computer_use: Option<computer_use_mcp::ComputerUseMcpServer>,
     pub control: Option<control_mcp::ControlMcpServer>,
+    pub visualize: Option<visualize_mcp::VisualizeMcpServer>,
     /// Why the MCP servers could not start; the host tells the user when the first thread
     /// starts without them.
     pub mcp_unavailable: Option<String>,
@@ -58,15 +59,17 @@ impl HostServices {
             let preview = preview_mcp::start(&mut host);
             let pull_requests = pull_request_mcp::start(&mut host);
             let control = control_mcp::start(&mut host);
+            let visualize = visualize_mcp::start(&mut host);
             let computer_use = computer_use.then(|| computer_use_mcp::start(&mut host));
             host.start()?;
-            std::io::Result::Ok((preview, pull_requests, control, computer_use))
+            std::io::Result::Ok((preview, pull_requests, control, visualize, computer_use))
         })();
         match started {
-            Ok((preview, pull_requests, control, computer_use)) => {
+            Ok((preview, pull_requests, control, visualize, computer_use)) => {
                 self.preview = Some(preview);
                 self.pull_requests = Some(pull_requests);
                 self.control = Some(control);
+                self.visualize = Some(visualize);
                 self.computer_use = computer_use;
             }
             Err(error) => self.mcp_unavailable = Some(error.to_string()),
@@ -281,6 +284,9 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             }
             if let Some(server) = services.control.take() {
                 state.attach_control_mcp(server);
+            }
+            if let Some(server) = services.visualize.take() {
+                state.attach_visualize_mcp(server);
             }
             state.mcp_unavailable(services.mcp_unavailable.take());
             state.login_shell_unread(services.login_shell_unread.take());

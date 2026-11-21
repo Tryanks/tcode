@@ -420,7 +420,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Apply one settings patch. Only display preferences can be changed: language, theme, diff word wrap, the live command panel, sidebar provider marks, inactive frame throttling, scrolling to the latest message on send and shortening long commands. Everything else (approvals, computer use, the browser, orchestration, settlement rules and tiers, models, tcode_control, hosting, credentials, sidebar and window state) is refused."
+        description = "Apply one settings patch. Only display preferences can be changed: language, theme, diff word wrap, the live command panel, sidebar provider marks, inactive frame throttling, scrolling to the latest message on send and shortening long commands. Everything else (approvals, computer use, the browser, orchestration, settlement rules and tiers, models, tcode_control, tcode_visualize, hosting, credentials, sidebar and window state) is refused."
     )]
     async fn patch_settings(
         &self,

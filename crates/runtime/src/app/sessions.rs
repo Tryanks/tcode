@@ -1221,6 +1221,7 @@ impl AppState {
         if control_changed {
             self.refresh_control_access();
         }
+        self.refresh_visualize_offered();
         self.forge
             .configure(self.settings.source_control.hosts.clone());
         if hosts_changed {
@@ -1576,6 +1577,7 @@ impl AppState {
             self.revoke_preview_registration(id);
             self.revoke_pull_request_registration(id);
             self.revoke_control_registration(id);
+            self.revoke_visualize_registration(id);
         }
         for id in &ids {
             self.close_orchestrator_children(id, cx);
