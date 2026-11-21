@@ -23,6 +23,7 @@ pub(in crate::chat) mod search;
 pub(in crate::chat) mod shell;
 pub(in crate::chat) mod subagent;
 pub(in crate::chat) mod threads;
+pub(in crate::chat) mod visualize;
 pub(in crate::chat) mod web;
 pub(in crate::chat) mod window;
 
@@ -140,6 +141,7 @@ const FAMILIES: &[Matcher] = &[
     threads::tool_call,
     harness::tool_call,
     question::tool_call,
+    visualize::tool_call,
     other::tool_call,
 ];
 
@@ -952,40 +954,45 @@ pub(in crate::chat) fn code_section(
                 ctx.app(),
             )),
     );
-    let code_block = open.then(|| {
-        let source = code.trim_end();
-        let theme = ctx.highlight_theme();
-        let highlighted = ctx.derived(key.clone(), source, |source| {
-            crate::highlight::highlighted(
-                source.to_owned().into(),
-                SharedString::new(language),
-                &theme,
-            )
-        });
-        let cx = ctx.app();
-        let theme = cx.theme();
-        div()
-            .id(SharedString::from(key.clone()))
-            .debug_selector(move || key.clone())
-            .w_full()
-            .min_w_0()
-            .max_h(px(OPEN_MAX_HEIGHT))
-            .overflow_y_scroll()
-            .font_family(theme.mono_font_family.clone())
-            .text_token(&theme.tokens.typography.xs)
-            .text_color(theme.foreground)
-            .child(
-                gpui::StyledText::new(highlighted.source().clone())
-                    .with_highlights(highlighted.runs().cloned()),
-            )
-            .autoscroll_target()
-    });
+    let block = open.then(|| code_block(key, code, language, ctx));
     v_flex()
         .w_full()
         .min_w_0()
         .gap_1()
         .child(control)
-        .children(code_block)
+        .children(block)
+        .into_any_element()
+}
+
+/// `code` highlighted whole as `language` in a capped scroll. `key` names it
+/// among the timeline's elements and what it derives.
+fn code_block(key: String, code: &str, language: &str, ctx: &mut ToolCtx<'_, '_>) -> AnyElement {
+    let source = code.trim_end();
+    let theme = ctx.highlight_theme();
+    let highlighted = ctx.derived(key.clone(), source, |source| {
+        crate::highlight::highlighted(
+            source.to_owned().into(),
+            SharedString::new(language),
+            &theme,
+        )
+    });
+    let cx = ctx.app();
+    let theme = cx.theme();
+    div()
+        .id(SharedString::from(key.clone()))
+        .debug_selector(move || key.clone())
+        .w_full()
+        .min_w_0()
+        .max_h(px(OPEN_MAX_HEIGHT))
+        .overflow_y_scroll()
+        .font_family(theme.mono_font_family.clone())
+        .text_token(&theme.tokens.typography.xs)
+        .text_color(theme.foreground)
+        .child(
+            gpui::StyledText::new(highlighted.source().clone())
+                .with_highlights(highlighted.runs().cloned()),
+        )
+        .autoscroll_target()
         .into_any_element()
 }
 

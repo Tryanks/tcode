@@ -277,50 +277,102 @@ fn instructions_reach_the_provider_at_launch_and_no_turn_carries_them() {
 }
 
 /// A host started the way every composition root starts one discloses the tools to each client,
-/// for the providers that receive them.
+/// for the providers that receive them, and a provider it starts is given their servers.
+/// `tcode_visualize` follows its setting: turned off, its tool is no longer disclosed, and a
+/// provider started after that is not given the server.
 #[test]
-fn the_agent_tools_are_disclosed_before_the_first_turn() {
+fn the_agent_tools_are_disclosed_before_the_first_turn_and_follow_their_setting() {
     let store = TestStore::new("tcode-pr-tools-disclosed");
-    let threads = [(ProviderKind::ClaudeCode, true), (ProviderKind::Pi, false)].map(
-        |(provider, disclosed)| {
-            let meta = SessionMeta::new(provider, PathBuf::from("/tmp/synthetic-checkout"), None);
-            store.upsert_meta(&meta).unwrap();
-            (provider, meta.id, disclosed)
-        },
-    );
-    let mut services = crate::pipe::HostServices::default();
+    let threads = [
+        (ProviderKind::ClaudeCode, true),
+        (ProviderKind::Pi, false),
+        (ProviderKind::ClaudeCode, true),
+    ]
+    .map(|(provider, disclosed)| {
+        let meta = SessionMeta::new(provider, PathBuf::from("/tmp/synthetic-checkout"), None);
+        store.upsert_meta(&meta).unwrap();
+        (provider, meta.id, disclosed)
+    });
+    let scripted = scripted_provider(ProviderKind::ClaudeCode);
+    let mut services = crate::pipe::HostServices {
+        provider_launcher: scripted.launcher.clone(),
+        ..Default::default()
+    };
     services.start_mcp_servers(false);
     assert_eq!(services.mcp_unavailable, None);
     let host = crate::pipe::spawn_host((*store).clone(), services).unwrap();
     let link = host.link();
     let events = crate::pipe::p4b_tests::observed_events(&link);
-    for (provider, id, disclosed) in threads {
-        let topic = Topic::SessionStatus { session_id: id };
+    // The tools each thread's latest status discloses; `None` for a status that shows none.
+    let mut disclosed_tools: HashMap<String, Option<Vec<(String, String)>>> = HashMap::new();
+    // What thread `id` discloses, once that is without the tool `withdrawn`.
+    let mut disclosed_once = |id: &str, withdrawn: Option<&(String, String)>| loop {
+        if let Some(tools) = disclosed_tools.get(id)
+            && !withdrawn.is_some_and(|tool| tools.as_deref().unwrap_or_default().contains(tool))
+        {
+            break tools.clone();
+        }
+        let event = events.recv_blocking().unwrap();
+        if let Topic::SessionStatus { session_id } = event.topic
+            && let tcode_protocol::ServerEvent::SessionStatusReplaced(status) = event.event
+        {
+            disclosed_tools.insert(session_id, status.injected_tools.map(|tools| tools.tools));
+        }
+    };
+    let preview = preview_mcp::tool_descriptions().remove(0);
+    let visualize = visualize_mcp::tool_descriptions().remove(0);
+    for (provider, id, disclosed) in &threads {
         link.subscribe(tcode_protocol::Subscription {
             known_index: None,
-            topic: topic.clone(),
+            topic: Topic::SessionStatus {
+                session_id: id.clone(),
+            },
             after: None,
         })
         .unwrap();
-        let status = loop {
-            let event = events.recv_blocking().unwrap();
-            if event.topic == topic
-                && let tcode_protocol::ServerEvent::SessionStatusReplaced(status) = event.event
-            {
-                break status;
-            }
-        };
-        let tools = status.injected_tools;
+        let tools = disclosed_once(id, None);
         assert_eq!(
             tools.is_some(),
-            disclosed,
+            *disclosed,
             "{provider:?}: shown exactly when its provider would receive the tools"
         );
         if let Some(tools) = tools {
-            let description = preview_mcp::tool_descriptions().into_iter().next().unwrap();
-            assert!(tools.tools.contains(&description));
+            assert!(tools.contains(&preview));
+            assert!(tools.contains(&visualize));
         }
     }
+
+    // The servers a provider started for the thread is given, by name.
+    let given = |id: &str| {
+        link.command_blocking(Command::SendTurn {
+            session_id: id.to_owned(),
+            text: "Go".into(),
+            attachment_paths: Vec::new(),
+        })
+        .unwrap();
+        let options = scripted.launches.recv_blocking().unwrap();
+        options
+            .mcp_servers
+            .into_iter()
+            .map(|server| server.name)
+            .collect::<Vec<_>>()
+    };
+    let [(_, first, _), _, (_, later, _)] = &threads;
+    let servers = given(first);
+    assert!(servers.contains(&agent::McpRegistration::SERVER_NAME_PREVIEW.to_owned()));
+    assert!(servers.contains(&agent::McpRegistration::SERVER_NAME_VISUALIZE.to_owned()));
+
+    link.command_blocking(Command::PatchSettings {
+        patch: tcode_protocol::SettingsPatch::VisualizeEnabled(false),
+    })
+    .unwrap();
+    for id in [first, later] {
+        let tools = disclosed_once(id, Some(&visualize)).unwrap();
+        assert!(tools.contains(&preview));
+    }
+    let servers = given(later);
+    assert!(servers.contains(&agent::McpRegistration::SERVER_NAME_PREVIEW.to_owned()));
+    assert!(!servers.contains(&agent::McpRegistration::SERVER_NAME_VISUALIZE.to_owned()));
     host.shutdown_blocking().unwrap();
 }
 

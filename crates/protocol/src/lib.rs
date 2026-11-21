@@ -393,6 +393,7 @@ pub use wire::{
 // can be starred per agent.
 // ProviderKind gains Antigravity (wire name `antigravity`), which an older peer
 // cannot decode because ProviderKind has no unknown fallback.
+// Settings gains visualize, with the visualize_enabled patch.
 pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]

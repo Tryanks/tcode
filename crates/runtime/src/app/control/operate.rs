@@ -105,9 +105,10 @@ fn approval_option_refusal(provider: ProviderKind, id: &str) -> Option<String> {
 
 /// The settings an agent may change: display preferences. Everything else touches
 /// authority (approvals, computer use, browser evaluation, plugins, child approval, whether
-/// threads are given `tcode_control`, hosting, credentials), automation (settlement rules and tiers, resuming, the title model)
-/// or UI state (sidebar, last project), and stays the user's. The match is exhaustive so a
-/// new setting is decided here, not allowed by default.
+/// threads are given `tcode_control` or `tcode_visualize`, hosting, credentials), automation
+/// (settlement rules and tiers, resuming, the title model) or UI state (sidebar, last
+/// project), and stays the user's. The match is exhaustive so a new setting is decided
+/// here, not allowed by default.
 pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
     match patch {
         SettingsPatch::Language(_)
@@ -140,6 +141,7 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::BrowserAllowEvaluate(_)
         | SettingsPatch::ControlEnabled(_)
         | SettingsPatch::ControlAgents(_)
+        | SettingsPatch::VisualizeEnabled(_)
         | SettingsPatch::ModelGuide(_)
         | SettingsPatch::SaveCollaboration(_)
         | SettingsPatch::RemoveCollaboration { .. }

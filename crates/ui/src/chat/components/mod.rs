@@ -8,4 +8,5 @@ pub(crate) mod images;
 pub(crate) mod indicator;
 pub(crate) mod plan;
 pub(crate) mod rewind;
+pub(crate) mod visualize;
 pub(crate) mod work_log;
