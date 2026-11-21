@@ -51,13 +51,15 @@ impl AppState {
                         let requested_path = expand_home(path);
                         host.unblock(move || {
                             let path = requested_path.canonicalize().map_err(io_error)?;
+                            // Windows rejects `File::open` on a directory with `PermissionDenied`;
+                            // check metadata before opening, then recheck the opened handle.
+                            if !std::fs::metadata(&path).map_err(io_error)?.is_file() {
+                                return Err(not_a_file());
+                            }
                             let mut file = File::open(&path).map_err(io_error)?;
                             let metadata = file.metadata().map_err(io_error)?;
                             if !metadata.is_file() {
-                                return Err(ProtocolError {
-                                    code: "not_a_file".into(),
-                                    message: "not a regular file".into(),
-                                });
+                                return Err(not_a_file());
                             }
                             let identity = (metadata.len(), metadata.modified().map_err(io_error)?);
                             let dimensions = image_previews::dimensions(&mut file);
@@ -305,6 +307,13 @@ fn changed() -> ProtocolError {
     ProtocolError {
         code: "changed".into(),
         message: "original changed during the read".into(),
+    }
+}
+
+fn not_a_file() -> ProtocolError {
+    ProtocolError {
+        code: "not_a_file".into(),
+        message: "not a regular file".into(),
     }
 }
 
