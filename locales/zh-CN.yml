@@ -255,6 +255,7 @@ markdown:
   math_show_source: "显示 LaTeX 源码"
   math_copy: "复制 LaTeX"
   math_error: "无法渲染：%{error}"
+  render_fallback: "格式化渲染出错，已回退为纯文本显示。"
   open_image: "打开图片"
   link_open: "打开链接"
   link_copy_address: "复制链接地址"

@@ -13,7 +13,7 @@ use gpui::{
     App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId, Entity, GlobalElementId,
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, InteractiveText, LayoutId,
     LongPressEvent, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, SharedString,
-    StyledText, TextLayout, TouchPhase, Window, point, px, quad,
+    StyledText, TextLayout, TextRun, TextStyle, TouchPhase, Window, point, px, quad,
 };
 
 use super::{
@@ -289,21 +289,20 @@ impl Element for Inline {
             faded = super::stream_fade::fade_highlights(&self.highlights, &fades);
             &faded
         };
-        let mut runs = Vec::new();
-        let mut ix = 0;
-        for (range, highlight) in highlights {
-            if ix < range.start {
-                runs.push(text_style.clone().to_run(range.start - ix));
-            }
-            runs.push(text_style.clone().highlight(*highlight).to_run(range.len()));
-            ix = range.end;
-        }
-        if ix < self.text.len() {
-            runs.push(text_style.to_run(self.text.len() - ix));
-        }
+        let runs = text_runs(&self.text, &text_style, highlights);
+        let len = self.text.len();
+        let font_overrides = self
+            .font_overrides
+            .iter()
+            .filter_map(|(range, family)| {
+                let start = self.text.floor_char_boundary(range.start.min(len));
+                let end = self.text.ceil_char_boundary(range.end.min(len));
+                (start < end).then(|| (start..end, family.clone()))
+            })
+            .collect::<Vec<_>>();
         let styled_text = StyledText::new(self.text.clone())
             .with_runs(runs)
-            .with_font_family_overrides(self.font_overrides.clone());
+            .with_font_family_overrides(font_overrides);
         self.text_layout = styled_text.layout().clone();
         let interactive_text = InteractiveText::new(self.id.clone(), styled_text);
         self.interactive_text = if self.links.is_empty() {
@@ -502,4 +501,52 @@ impl Element for Inline {
             }
         });
     }
+}
+
+/// Partition `0..text.len()` into valid GPUI text runs for `highlights`.
+/// Ranges are clamped to UTF-8 boundaries and normalized if unsorted or
+/// overlapping, so GPUI's shaper and `StyledText::with_runs` never receive
+/// runs whose total length diverges from `text.len()`.
+pub(super) fn text_runs(
+    text: &str,
+    style: &TextStyle,
+    highlights: &[(Range<usize>, HighlightStyle)],
+) -> Vec<TextRun> {
+    let len = text.len();
+    if len == 0 {
+        return Vec::new();
+    }
+    let mut prev_end = 0;
+    let mut needs_normalize = false;
+    let mut clamped = Vec::with_capacity(highlights.len());
+    for (range, highlight) in highlights {
+        let start = text.floor_char_boundary(range.start.min(len));
+        let end = text.ceil_char_boundary(range.end.min(len));
+        if start >= end {
+            continue;
+        }
+        if start < prev_end {
+            needs_normalize = true;
+        }
+        prev_end = end;
+        clamped.push((start..end, *highlight));
+    }
+    let normalized = if needs_normalize {
+        gpui::combine_highlights(std::iter::empty(), clamped).collect()
+    } else {
+        clamped
+    };
+    let mut runs = Vec::new();
+    let mut ix = 0;
+    for (range, highlight) in normalized {
+        if ix < range.start {
+            runs.push(style.clone().to_run(range.start - ix));
+        }
+        runs.push(style.clone().highlight(highlight).to_run(range.len()));
+        ix = range.end;
+    }
+    if ix < len {
+        runs.push(style.to_run(len - ix));
+    }
+    runs
 }

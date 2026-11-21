@@ -13,12 +13,12 @@ use gpui::{
     GlobalElementId, HighlightStyle, Hsla, InspectorElementId, InteractiveElement as _,
     IntoElement, LayoutId, LineFragment as WrapLineFragment, MouseButton, ObjectFit,
     ParentElement as _, Pixels, Role, SharedString, SharedUri, Size,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, TextRun, TextStyle, WhiteSpace,
-    Window, div, img, point, px, relative, size,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, TextStyle, WhiteSpace, Window,
+    div, img, point, px, relative, size,
 };
 
 use super::{
-    inline::{Inline, InlineState},
+    inline::{Inline, InlineState, text_runs},
     nodes::LinkMark,
     selection::RunOrigin,
     state::{MarkdownState, PendingContextTarget},
@@ -312,6 +312,7 @@ impl Element for InlineFlow {
             .collect::<Vec<_>>();
         let state = InlineFlowLayoutState::default();
         let layout_ref = state.layout.clone();
+        let fallback = self.view.read(cx).render_fallback_flag();
         let layout_id = window.request_measured_layout(Default::default(), {
             move |known_dimensions, available_space, window, _| {
                 let text_style = window.text_style();
@@ -336,13 +337,25 @@ impl Element for InlineFlow {
                         measured
                     })
                     .collect::<Vec<_>>();
-                let layout = layout_flow(
-                    &measure_items,
-                    &element_sizes,
-                    &text_style,
-                    wrap_width,
-                    window,
-                );
+                let layout = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    layout_flow(
+                        &measure_items,
+                        &element_sizes,
+                        &text_style,
+                        wrap_width,
+                        window,
+                    )
+                })) {
+                    Ok(layout) => layout,
+                    Err(_) => {
+                        log::error!(
+                            "inline markdown flow panicked during layout; falling back to plain text"
+                        );
+                        fallback.store(true, std::sync::atomic::Ordering::Relaxed);
+                        window.refresh();
+                        InlineFlowLayout::default()
+                    }
+                };
                 let size = layout.size;
                 *layout_ref.lock().unwrap() = Some(layout);
                 size
@@ -597,8 +610,12 @@ fn layout_flow(
                     code_style,
                     ..
                 } => {
-                    let local_start = line_range.start.max(item_start) - item_start;
-                    let local_end = line_range.end.min(item_end) - item_start;
+                    let local_start = text.floor_char_boundary(
+                        (line_range.start.max(item_start) - item_start).min(text.len()),
+                    );
+                    let local_end = text.ceil_char_boundary(
+                        (line_range.end.min(item_end) - item_start).min(text.len()),
+                    );
                     if local_start < local_end {
                         let subtext: SharedString = text[local_start..local_end].to_string().into();
                         let highlights =
@@ -630,7 +647,7 @@ fn layout_flow(
                             .unwrap_or_else(|| {
                                 (text_style.clone(), font_size, Pixels::ZERO, line_height)
                             });
-                        let runs = runs_for_highlights(&subtext, &fragment_style, &highlights);
+                        let runs = text_runs(&subtext, &fragment_style, &highlights);
                         let shaped = window.text_system().shape_line(
                             subtext.clone(),
                             fragment_font_size,
@@ -757,7 +774,7 @@ fn line_ranges(
                         let mut code_text_style = text_style.clone();
                         code_text_style.font_family = code.font_family.clone();
                         code_text_style.font_size = AbsoluteLength::Pixels(code.font_size);
-                        let runs = runs_for_highlights(text, &code_text_style, highlights);
+                        let runs = text_runs(text, &code_text_style, highlights);
                         let width = window
                             .text_system()
                             .shape_line(text.clone(), code.font_size, &runs, None)
@@ -766,7 +783,9 @@ fn line_ranges(
                         WrapLineFragment::element(width, text.len())
                     }
                     MeasureItem::Text { text, .. } => {
-                        WrapLineFragment::text(&text[from - item_start..to - item_start])
+                        let start = text.floor_char_boundary((from - item_start).min(text.len()));
+                        let end = text.ceil_char_boundary((to - item_start).min(text.len()));
+                        WrapLineFragment::text(&text[start..end])
                     }
                     MeasureItem::Image | MeasureItem::ImageLink => WrapLineFragment::element(
                         element_sizes[ix].unwrap_or_default().width,
@@ -822,26 +841,6 @@ fn inline_image_size_for_line(
         .map(|size| size.width / size.height)
         .unwrap_or(1.);
     size((height * ratio).max(px(1.)), height.max(px(1.)))
-}
-
-fn runs_for_highlights(
-    text: &str,
-    style: &TextStyle,
-    highlights: &[(Range<usize>, HighlightStyle)],
-) -> Vec<TextRun> {
-    let mut runs = Vec::new();
-    let mut ix = 0;
-    for (range, highlight) in highlights {
-        if ix < range.start {
-            runs.push(style.clone().to_run(range.start - ix));
-        }
-        runs.push(style.clone().highlight(*highlight).to_run(range.len()));
-        ix = range.end;
-    }
-    if ix < text.len() {
-        runs.push(style.to_run(text.len() - ix));
-    }
-    runs
 }
 
 fn slice_ranges<T, U>(

@@ -38,6 +38,11 @@ impl AppShell {
         if self.navigation.is_none() {
             return;
         }
+        if let Some(pending) = &self.pending_navigation_restore
+            && self.page_thread(cx).as_ref() == Some(&pending.thread)
+        {
+            return;
+        }
         let snapshot = self.navigation_snapshot(cx);
         let navigation = self.navigation.as_mut().expect("enabled above");
         if navigation.scheduled.as_ref() == Some(&snapshot) {
@@ -120,6 +125,7 @@ impl AppShell {
                 store.set_right_tab_for(Some(&pending.thread.session_id), tab, cx)
             });
         }
+        self.schedule_navigation_save(cx);
     }
 
     /// The hosts this device's workspace holds, in order.

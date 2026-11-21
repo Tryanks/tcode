@@ -1169,4 +1169,20 @@ mod tests {
         menu("down down down enter", cx);
         assert!(cx.debug_bounds("math-glyph-0").is_some());
     }
+
+    #[gpui::test]
+    fn inline_flow_lays_out_formatted_code_spans_beside_math(cx: &mut TestAppContext) {
+        cx.update(crate::test_client::init);
+        cx.update(crate::markdown::init);
+        let (view, cx) = right_click_window(cx);
+        let text = "前缀 **改 UI + 截图 $\\rightarrow$ 调 `council` 让多模型评审团看图打分挑刺 $\\rightarrow$ 按反馈多轮迭代**。";
+        view.update(cx, |root, cx| {
+            root.markdown.update(cx, |md, cx| md.set_text(text, cx))
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert!(cx.debug_bounds("math-glyph-0").is_some());
+        let rendered = view.read_with(cx, |root, cx| root.markdown.read(cx).rendered_text());
+        assert!(rendered.contains("调 council 让多模型评审团看图打分挑刺"));
+    }
 }

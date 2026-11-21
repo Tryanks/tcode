@@ -255,6 +255,7 @@ markdown:
   math_show_source: "Show LaTeX source"
   math_copy: "Copy LaTeX"
   math_error: "Unable to render: %{error}"
+  render_fallback: "Rendered as plain text after a formatting error."
   open_image: "Open image"
   link_open: "Open link"
   link_copy_address: "Copy link address"

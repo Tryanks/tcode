@@ -602,6 +602,60 @@ fn a_cold_start_restores_the_saved_panel_tab(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn cold_start_clears_restored_thread_checkpoint_until_baseline_settles(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let (shell, host, client, cx) = mount_restored(cx, &["threads", "thread"], true);
+    // Before the restored thread finishes loading, the checkpoint drops the
+    // thread so a crash while opening or rendering it cannot loop on relaunch.
+    let pending = client.load_preferences().unwrap().navigation.unwrap();
+    assert_eq!(pending["history"], serde_json::json!(["threads"]));
+    assert_eq!(pending["thread"], serde_json::Value::Null);
+
+    restore_index(&shell, &host, true, cx);
+    restore_status(&shell, &host, cx);
+    for (topic, event) in [
+        (
+            Topic::Settings,
+            ServerEvent::SettingsSnapshot(tcode_core::settings::Settings::default()),
+        ),
+        (
+            Topic::SessionEvents {
+                session_id: "thread-a".into(),
+            },
+            ServerEvent::SessionSnapshot {
+                from: 0,
+                end: 0,
+                records: Vec::new(),
+                total: 0,
+                total_turns: 0,
+                truncated: false,
+            },
+        ),
+    ] {
+        host.incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic,
+                    event,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    await_restore_update(&shell, cx, |store, cx| {
+        !store.chat_loading_for(Some("thread-a"), cx)
+    });
+    cx.executor().advance_clock(Duration::from_millis(151));
+    draw(cx);
+    let settled = client.load_preferences().unwrap().navigation.unwrap();
+    assert_eq!(
+        settled["thread"],
+        serde_json::json!({ "host": "last-host", "session_id": "thread-a" })
+    );
+}
+
+#[gpui::test]
 fn navigation_is_saved_with_the_thread_and_history_and_survives_a_theme_edit(
     cx: &mut TestAppContext,
 ) {
