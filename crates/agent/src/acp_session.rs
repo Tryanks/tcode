@@ -591,10 +591,7 @@ impl Session {
             .to_owned();
         let item_id = match params.get("toolCallId").and_then(Value::as_str) {
             Some(id) => format!("plan:{id}"),
-            None => self.with_state(|state| {
-                state.approval_seq += 1;
-                format!("plan:{}", state.approval_seq)
-            }),
+            None => format!("plan:{}", uuid::Uuid::new_v4()),
         };
         self.emit(AgentEvent::ItemCompleted(ThreadItem {
             id: item_id.clone(),
@@ -2209,7 +2206,6 @@ pub(crate) struct State {
     approval_seq: u64,
     inputs: HashMap<String, Sender<Map<String, Value>>>,
     input_seq: u64,
-    text_seq: u64,
     terminal_seq: u64,
     terminals: HashMap<String, Arc<Terminal>>,
     usage: Option<TokenUsage>,
@@ -2235,7 +2231,6 @@ impl State {
             approval_seq: 0,
             inputs: HashMap::new(),
             input_seq: 0,
-            text_seq: 0,
             terminal_seq: 0,
             terminals: HashMap::new(),
             usage: None,
@@ -2369,13 +2364,14 @@ impl State {
         let same_block = self.text.as_ref().is_some_and(|stream| stream.kind == kind);
         if !same_block {
             events.extend(self.flush_text());
-            self.text_seq += 1;
             let prefix = match kind {
                 DeltaKind::ReasoningText => "thought",
                 _ => "msg",
             };
+            // Random ids rather than a per-process counter so a restarted ACP
+            // session never collides with an earlier turn's entries.
             self.text = Some(TextStream {
-                id: format!("{prefix}-{}", self.text_seq),
+                id: format!("{prefix}-{}", uuid::Uuid::new_v4()),
                 kind,
                 text: String::new(),
             });
