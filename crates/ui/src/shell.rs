@@ -662,9 +662,9 @@ pub struct ShellSetup {
     /// frame, whatever the window attaches to, and the window attaches to that
     /// host only when asked again.
     pub local_failure: Option<String>,
-    /// The host the window shows first at launch, opened beside the
-    /// workspace's hosts though it is not one of them; a host reached only
-    /// alone opens alone. `None` shows the workspace's first host.
+    /// The host this launch asks for, shown first: where the view the device
+    /// kept does not hold it, it opens alone and becomes that view. `None`
+    /// asks for none, and the kept view opens.
     pub initial: Option<AttachmentTarget>,
     /// A browser link that could not be paired opens the normal form with the
     /// one-shot failure visible after its URL fragment has been cleared.
@@ -697,6 +697,9 @@ struct PendingNavigationRestore {
     thread: ThreadKey,
     panel: NavigationPanel,
     panel_open: bool,
+    /// Whether the saved checkpoint is without the thread, as it is from the
+    /// first of the thread's content until its baseline settles.
+    withheld: bool,
 }
 
 pub struct AppShell {
@@ -1035,17 +1038,6 @@ impl AppShell {
             if pane.is_none() {
                 snapshot.without_thread();
             }
-            if shell.navigation.is_some() && pane.is_some() && snapshot.thread.is_some() {
-                // Drop the thread from the saved checkpoint before opening it so
-                // a crash while loading or rendering the restored thread breaks
-                // any launch loop; `reconcile_navigation_restore` checkpoints it
-                // again once the baseline settles.
-                let mut safe = snapshot.clone();
-                safe.without_thread();
-                if let Ok(value) = serde_json::to_value(safe) {
-                    DevicePreferences::save_navigation(value, cx);
-                }
-            }
             shell
                 .window_state
                 .update(cx, |state, cx| state.restore(&snapshot, cx));
@@ -1061,6 +1053,7 @@ impl AppShell {
                     thread,
                     panel: snapshot.panel,
                     panel_open: snapshot.history.contains(&Destination::Panel),
+                    withheld: false,
                 });
             }
         }
