@@ -121,11 +121,7 @@ impl AppState {
             None
         };
         let control_registration = self.control_registration_for(&meta);
-        let visualize_registration = if meta.provider.caps().mcp_servers {
-            self.visualize_registration_for(&meta)
-        } else {
-            None
-        };
+        let visualize_registration = self.visualize_registration_for(&meta);
         let provider_launcher = self.provider_launcher.clone();
         let session_id = meta.id.clone();
         if let Some(cursor) = &meta.resume_cursor {

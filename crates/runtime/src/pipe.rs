@@ -286,7 +286,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 state.attach_control_mcp(server);
             }
             if let Some(server) = services.visualize.take() {
-                state.attach_visualize_mcp(server.url, server.tokens);
+                state.attach_visualize_mcp(server);
             }
             state.mcp_unavailable(services.mcp_unavailable.take());
             state.login_shell_unread(services.login_shell_unread.take());

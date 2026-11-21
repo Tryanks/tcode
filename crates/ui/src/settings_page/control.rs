@@ -331,8 +331,29 @@ impl SettingsPage {
             WorkspaceStore::set_control_enabled,
         );
 
-        // Everything under the switch stays as it is while the switch is off,
-        // dimmed: turning it back on restores it.
+        let visualize_reset = crate::settings_rows::reset_action(
+            "reset-visualize-enabled",
+            !settings.visualize.enabled,
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_visualize_enabled(true), cx)
+            }),
+        );
+        let visualize = self.toggle_row(
+            "visualize-enabled",
+            crate::tr!("control.settings.visualize_enabled"),
+            if settings.visualize.enabled {
+                crate::tr!("control.settings.visualize_enabled_description")
+            } else {
+                crate::tr!("control.settings.visualize_enabled_off_description")
+            },
+            settings.visualize.enabled,
+            visualize_reset,
+            cx,
+            WorkspaceStore::set_visualize_enabled,
+        );
+
+        // Everything under the `tcode_control` switch stays as it is while the
+        // switch is off, dimmed: turning it back on restores it.
         let dim = gpui_base::motion::transition(
             "control-dim",
             if control.enabled { 1. } else { 0.5 },
@@ -348,7 +369,7 @@ impl SettingsPage {
 
         v_flex()
             .gap(crate::material::section_gap(cx))
-            .child(crate::material::group(cx).child(enabled))
+            .child(crate::material::group(cx).child(enabled).child(visualize))
             .child(below.opacity(dim))
     }
 

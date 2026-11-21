@@ -344,6 +344,9 @@ impl WorkspaceStore {
     pub fn set_control_agents(&mut self, agents: tcode_core::control::AgentScope) {
         self.patch_settings(SettingsPatch::ControlAgents(agents));
     }
+    pub fn set_visualize_enabled(&mut self, enabled: bool) {
+        self.patch_settings(SettingsPatch::VisualizeEnabled(enabled));
+    }
     pub fn save_collaboration(&mut self, collaboration: Collaboration) {
         self.patch_settings(SettingsPatch::SaveCollaboration(collaboration));
     }

@@ -695,6 +695,7 @@ pub enum SettingsPatch {
     ControlEnabled(bool),
     /// The accounts and models a thread `tcode_control` starts may run.
     ControlAgents(crate::control::AgentScope),
+    VisualizeEnabled(bool),
     /// Add the collaboration, or replace the one of its id.
     SaveCollaboration(crate::collaboration::Collaboration),
     RemoveCollaboration {
@@ -886,6 +887,26 @@ impl BrowserSettings {
     }
 }
 
+/// Whether a thread's model is given `tcode_visualize`, whose calls draw as cards in the
+/// thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VisualizeSettings {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for VisualizeSettings {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl VisualizeSettings {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 // `Eq` is intentionally absent: `acp_agents` holds `AcpLaunch`, which the
 // agent crate derives only `PartialEq` for.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -995,6 +1016,9 @@ pub struct Settings {
         skip_serializing_if = "crate::control::ControlSettings::is_default"
     )]
     pub control: crate::control::ControlSettings,
+    /// Whether a thread's model is given `tcode_visualize`.
+    #[serde(default, skip_serializing_if = "VisualizeSettings::is_default")]
+    pub visualize: VisualizeSettings,
     /// The collaborations a thread can be run under, each a row of the model picker.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collaborations: Vec<crate::collaboration::Collaboration>,
@@ -1144,6 +1168,7 @@ impl Default for Settings {
             computer_use: ComputerUseSettings::default(),
             browser: BrowserSettings::default(),
             control: crate::control::ControlSettings::default(),
+            visualize: VisualizeSettings::default(),
             collaborations: Vec::new(),
             model_guides: Vec::new(),
             settlement_automation: crate::control::SettlementAutomation::default(),
@@ -1294,6 +1319,7 @@ impl Settings {
             SettingsPatch::BrowserAllowEvaluate(value) => self.browser.allow_evaluate = value,
             SettingsPatch::ControlEnabled(value) => self.control.enabled = value,
             SettingsPatch::ControlAgents(value) => self.control.agents = value,
+            SettingsPatch::VisualizeEnabled(value) => self.visualize.enabled = value,
             SettingsPatch::SaveCollaboration(collaboration) => {
                 match self
                     .collaborations
@@ -1721,6 +1747,7 @@ mod tests {
         assert!(!legacy.computer_use.enabled);
         assert!(legacy.browser.enabled);
         assert!(legacy.browser.allow_evaluate);
+        assert!(legacy.visualize.enabled);
         assert_eq!(legacy.browser.home_url, None);
 
         let partial: Settings = serde_json::from_str(

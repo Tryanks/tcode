@@ -45,6 +45,9 @@ pub(super) struct McpWiring {
     pub(super) visualize_url: Option<String>,
     pub(super) visualize_tokens: Option<visualize_mcp::TokenRegistry>,
     pub(super) visualize_registrations: HashMap<String, agent::McpRegistration>,
+    /// The visualize server's reading of the setting, which it answers a registered
+    /// thread by.
+    pub(super) visualize_offered: Option<visualize_mcp::Offered>,
     /// Why the MCP servers did not start, until the first thread that would have had them
     /// starts and the user is told.
     pub(super) unavailable: Option<String>,
@@ -71,15 +74,35 @@ impl AppState {
         self.mcp.computer_use_tokens = Some(tokens);
     }
 
-    pub fn attach_visualize_mcp(&mut self, url: String, tokens: visualize_mcp::TokenRegistry) {
-        self.mcp.visualize_url = Some(url);
-        self.mcp.visualize_tokens = Some(tokens);
+    pub fn attach_visualize_mcp(&mut self, server: visualize_mcp::VisualizeMcpServer) {
+        server.offered.set(self.settings.visualize.enabled);
+        self.mcp.visualize_url = Some(server.url);
+        self.mcp.visualize_tokens = Some(server.tokens);
+        self.mcp.visualize_offered = Some(server.offered);
+    }
+
+    /// Whether the thread's provider is given the `tcode_visualize` server when it starts.
+    pub(super) fn visualize_offered(&self, meta: &SessionMeta) -> bool {
+        self.settings.visualize.enabled
+            && self.mcp.visualize_url.is_some()
+            && meta.provider.caps().mcp_servers
+    }
+
+    /// Tell the visualize server the setting as it is now: a thread registered while it was
+    /// on keeps its connection, and is answered by it.
+    pub(super) fn refresh_visualize_offered(&self) {
+        if let Some(offered) = &self.mcp.visualize_offered {
+            offered.set(self.settings.visualize.enabled);
+        }
     }
 
     pub(super) fn visualize_registration_for(
         &mut self,
         meta: &SessionMeta,
     ) -> Option<agent::McpRegistration> {
+        if !self.visualize_offered(meta) {
+            return None;
+        }
         if let Some(registration) = self.mcp.visualize_registrations.get(&meta.id) {
             return Some(registration.clone());
         }
@@ -120,7 +143,7 @@ impl AppState {
         let computer_use =
             computer_use_attaches(provider, &self.settings) && self.mcp.computer_use_url.is_some();
         let control = self.control_offered(meta);
-        let visualize = self.mcp.visualize_url.is_some();
+        let visualize = self.visualize_offered(meta);
         if !(pull_requests || preview || computer_use || control || visualize) {
             return None;
         }

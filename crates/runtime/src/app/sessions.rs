@@ -1221,6 +1221,7 @@ impl AppState {
         if control_changed {
             self.refresh_control_access();
         }
+        self.refresh_visualize_offered();
         self.forge
             .configure(self.settings.source_control.hosts.clone());
         if hosts_changed {

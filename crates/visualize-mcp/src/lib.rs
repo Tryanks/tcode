@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use rmcp::{
     ServerHandler,
@@ -35,36 +38,69 @@ pub struct VisualizeInput {
 pub type Service = StreamableHttpService<VisualizeTools, LocalSessionManager>;
 pub type TokenRegistry = mcp_host::TokenRegistry<Service>;
 
+/// Whether threads are given the tool, as the host's settings say now. The server outlives
+/// any one reading of them, so the host writes each change here.
+#[derive(Clone)]
+pub struct Offered(Arc<AtomicBool>);
+
+impl Offered {
+    pub fn set(&self, offered: bool) {
+        self.0.store(offered, Ordering::Relaxed);
+    }
+
+    fn get(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 pub struct VisualizeMcpServer {
     pub url: String,
     pub tokens: TokenRegistry,
+    pub offered: Offered,
 }
 
 pub fn start(host: &mut mcp_host::Host) -> VisualizeMcpServer {
-    let tokens = TokenRegistry::new(move |_session_id| {
-        StreamableHttpService::new(
-            move || Ok(VisualizeTools::new()),
-            Arc::new(LocalSessionManager::default()),
-            StreamableHttpServerConfig::default(),
-        )
+    let offered = Offered(Arc::new(AtomicBool::new(true)));
+    let tokens = TokenRegistry::new({
+        let offered = offered.clone();
+        move |_session_id| {
+            let offered = offered.clone();
+            StreamableHttpService::new(
+                move || Ok(VisualizeTools::new(offered.clone())),
+                Arc::new(LocalSessionManager::default()),
+                StreamableHttpServerConfig::default(),
+            )
+        }
     });
     host.mount(mcp_host::route("/visualize", &tokens));
     VisualizeMcpServer {
         url: host.url("/visualize"),
         tokens,
+        offered,
     }
 }
 
 #[derive(Clone)]
 pub struct VisualizeTools {
     tool_router: ToolRouter<Self>,
+    offered: Offered,
 }
 
 #[tool_router]
 impl VisualizeTools {
-    fn new() -> Self {
+    /// A thread registered while the setting was on keeps its endpoint when it is turned
+    /// off: a connection opened then lists no tool, and one opened before is refused its
+    /// calls.
+    fn new(offered: Offered) -> Self {
+        let mut tool_router = Self::tool_router();
+        if !offered.get() {
+            for tool in tool_router.list_all() {
+                tool_router.remove_route(&tool.name);
+            }
+        }
         Self {
-            tool_router: Self::tool_router(),
+            tool_router,
+            offered,
         }
     }
 
@@ -72,7 +108,16 @@ impl VisualizeTools {
         description = "Show a self-contained static HTML + CSS + inline SVG visual card directly in this conversation thread. Pass the page inline as `html`, or for a very long page write it to a file on the host and pass that file's absolute `path`: the card reads the file itself, its contents are not returned to you, and the file must stay in place for the card to show. Do not announce the tool or restate everything shown in the visual; keep prose focused on what it helps the user see or decide. Use Markdown tables for simple tables and Mermaid for simple node-edge graphs; use `visualize` for richer charts, metric dashboards, architecture overviews, comparison matrices, timelines, and visual explainers. Layout: fluid width (roughly 360px on phone to 728px on desktop), let content determine height (avoid `vh` and `height: 100%`), leave the outer root without an extra redundant page frame/background. Styling: Flexbox, CSS Grid (including `repeat(auto-fit, minmax(..., 1fr))`), tables, `linear-gradient`, `box-shadow`, `light-dark()`, `color-mix()`, `@media (prefers-color-scheme)`, theme CSS variables (`--background`, `--foreground`, `--card`, `--muted`, `--muted-foreground`, `--border`, `--primary`, `--accent`, `--destructive`, `--success`, `--warning`, `--info`, `--chart-1`..`--chart-6`, `--font-sans`, `--font-mono`, `--radius`), and inline `<svg viewBox=\"...\">` (which also resolves `var(--...)` and `currentColor`). Static only: no JavaScript and no external URLs."
     )]
     async fn visualize(&self, Parameters(input): Parameters<VisualizeInput>) -> CallToolResult {
-        render_response(&input)
+        self.answer(&input)
+    }
+
+    fn answer(&self, input: &VisualizeInput) -> CallToolResult {
+        if !self.offered.get() {
+            return CallToolResult::error(vec![ContentBlock::text(
+                "tcode_visualize is turned off in Settings → Control",
+            )]);
+        }
+        render_response(input)
     }
 }
 
@@ -243,6 +288,24 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(text).unwrap();
         assert_eq!(value["rendered"], true);
         assert!(value["note"].as_str().unwrap().contains("JavaScript"));
+    }
+
+    /// A thread that started with the tool keeps its connection when the setting is turned
+    /// off; from then on its calls are refused.
+    #[test]
+    fn a_call_made_once_the_setting_is_off_is_refused() {
+        let offered = Offered(Arc::new(AtomicBool::new(true)));
+        let tools = VisualizeTools::new(offered.clone());
+        let input = VisualizeInput {
+            title: "Overview".into(),
+            html: Some("<div>hello</div>".into()),
+            path: None,
+            description: None,
+        };
+        assert_ne!(tools.answer(&input).is_error, Some(true));
+
+        offered.set(false);
+        assert_eq!(tools.answer(&input).is_error, Some(true));
     }
 
     /// A directory of the test's own.
