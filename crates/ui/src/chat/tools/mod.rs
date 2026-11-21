@@ -966,12 +966,7 @@ pub(in crate::chat) fn code_section(
 
 /// `code` highlighted whole as `language` in a capped scroll. `key` names it
 /// among the timeline's elements and what it derives.
-pub(in crate::chat) fn code_block(
-    key: String,
-    code: &str,
-    language: &str,
-    ctx: &mut ToolCtx<'_, '_>,
-) -> AnyElement {
+fn code_block(key: String, code: &str, language: &str, ctx: &mut ToolCtx<'_, '_>) -> AnyElement {
     let source = code.trim_end();
     let theme = ctx.highlight_theme();
     let highlighted = ctx.derived(key.clone(), source, |source| {

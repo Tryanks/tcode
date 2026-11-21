@@ -1,25 +1,22 @@
-//! A visualization's card in the conversation: the page a `visualize` call
-//! asked for, drawn under its title, with its HTML to read and to copy.
+//! A visualization in the conversation: the page a `visualize` call asked
+//! for, drawn into the transcript, and the read of its file from the host.
 
 use std::sync::{Arc, Weak};
 
 use gpui::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _,
-    IntoElement as _, ParentElement as _, SharedString, Styled as _, Subscription, Task, Window,
-    div, prelude::FluentBuilder as _,
+    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, SharedString, Styled as _, Subscription, Task, div,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::h_flex;
 use tcode_client::original::OriginalTransfer;
 use tcode_core::session::TimelineEntry;
 use tcode_protocol::ProtocolError;
 
 use crate::html::{HtmlState, HtmlView};
-use crate::icon::{Icon, IconName};
+use crate::icon::IconName;
 use crate::sizing::Sizable as _;
-use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::Spinner;
-use crate::widgets::copy::{action_button, copy_button};
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 
 const MAX_HTML_BYTES: usize = agent::McpRegistration::VISUALIZE_MAX_HTML_BYTES;
@@ -28,7 +25,7 @@ const MAX_HTML_BYTES: usize = agent::McpRegistration::VISUALIZE_MAX_HTML_BYTES;
 /// screen.
 pub(crate) struct Visual {
     pub(crate) state: Entity<HtmlState>,
-    /// The HTML `state` draws, which the card shows as source and copies.
+    /// The HTML `state` draws, which the context menu copies.
     pub(crate) html: Arc<str>,
     /// The entry the page was last taken from; see `MdState`'s field of the
     /// same name.
@@ -57,7 +54,7 @@ pub(crate) enum Unread {
 }
 
 impl Unread {
-    /// What the card says in the page's place.
+    /// What is said in the page's place.
     pub(crate) fn message(&self, path: &str) -> String {
         match self {
             Self::Host(error) => {
@@ -124,254 +121,71 @@ impl Visual {
     }
 }
 
-/// What a card shows under its header.
-pub(crate) enum CardBody {
+/// What stands in the conversation for a visualization.
+pub(crate) enum Shown {
     /// No page yet: the call is still running, or its file is being read.
     Building,
     /// The call's file could not be read.
     Unreadable(String),
-    /// The page, whose HTML is `html`. `source` is that HTML as code, when the
-    /// reader asked for it in place of the drawing.
+    /// The page, whose HTML is `html`.
     Page {
         state: Entity<HtmlState>,
         html: Arc<str>,
-        source: Option<AnyElement>,
     },
 }
 
-pub(crate) struct VisualizeCardData<'a> {
-    pub(crate) id: &'a str,
-    /// Empty when the call names none.
-    pub(crate) title: &'a str,
-    pub(crate) description: Option<&'a str>,
-    pub(crate) body: CardBody,
-    pub(crate) running: bool,
-    pub(crate) collapsed: bool,
-    pub(crate) copied: bool,
-    pub(crate) compact: bool,
-    pub(crate) viewport_width: Option<f32>,
-    pub(crate) motion: crate::motion::owned::Owned,
-}
-
-pub(crate) fn visualize_card(
-    data: VisualizeCardData<'_>,
-    on_toggle_collapse: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    on_toggle_source: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    on_copy: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+/// A visualization in the conversation: its page drawn straight into the
+/// transcript as a reply's own text is, with no frame, title or controls
+/// around it. Its HTML is copied from the context menu.
+pub(crate) fn visualization(
+    id: &str,
+    shown: Shown,
+    viewport_width: Option<f32>,
     cx: &App,
 ) -> AnyElement {
-    let VisualizeCardData {
-        id,
-        title,
-        description,
-        body,
-        running,
-        collapsed,
-        copied,
-        compact,
-        viewport_width,
-        motion,
-    } = data;
-
-    let theme = cx.theme();
-    let radius = crate::material::radius_card(cx);
-    let page = match &body {
-        CardBody::Page { html, source, .. } => Some((html.clone(), source.is_some())),
-        CardBody::Building | CardBody::Unreadable(_) => None,
-    };
-
-    let (collapse_icon, collapse_label) = if collapsed {
-        (IconName::ChevronDown, crate::tr!("chat.visualize_expand"))
-    } else {
-        (IconName::ChevronUp, crate::tr!("chat.visualize_collapse"))
-    };
-
-    let collapse_btn = {
-        let selector = format!("visualize-collapse-{id}");
-        action_button(
-            format!("visualize-collapse-{id}"),
-            collapse_icon,
-            collapse_label.into_owned(),
-            cx,
-        )
-        .touch(compact)
-        .motion(&motion)
-        .on_click(move |event, window, cx| {
-            cx.stop_propagation();
-            on_toggle_collapse(event, window, cx);
-        })
-        .debug_selector(move || selector)
-    };
-
-    let toggle_btn = page
-        .as_ref()
-        .filter(|_| !collapsed)
-        .map(|(_, showing_source)| {
-            let (icon, label) = if *showing_source {
-                (IconName::Eye, crate::tr!("chat.visualize_show_rendered"))
-            } else {
-                (IconName::Code, crate::tr!("chat.visualize_show_source"))
-            };
-            let selector = format!("visualize-toggle-{id}");
-            action_button(
-                format!("visualize-toggle-{id}"),
-                icon,
-                label.into_owned(),
-                cx,
-            )
-            .touch(compact)
-            .motion(&motion)
-            .on_click(move |event, window, cx| {
-                cx.stop_propagation();
-                on_toggle_source(event, window, cx);
-            })
-            .debug_selector(move || selector)
-        });
-
-    let copy_btn = page.is_some().then(|| {
-        let selector = format!("copy-visualize-{id}");
-        copy_button(
-            &format!("visualize-{id}"),
-            copied,
-            compact,
-            move |event, window, cx| {
-                cx.stop_propagation();
-                on_copy(event, window, cx);
-            },
-            cx,
-        )
-        .motion(&motion)
-        .debug_selector(move || selector)
-    });
-
-    let header = h_flex()
-        .w_full()
-        .gap_2()
-        .items_center()
-        .pl_3()
-        .pr_1p5()
-        .py_1p5()
-        .when(collapsed, |bar| bar.rounded(radius))
-        .when(!collapsed, |bar| {
-            bar.rounded_t(radius)
-                .border_b_1()
-                .border_color(theme.border)
-        })
-        .bg(theme.tokens.colors.muted)
-        .child(if running {
-            Spinner::new().small().into_any_element()
-        } else {
-            Icon::new(IconName::LayoutDashboard)
-                .small()
-                .text_color(theme.muted_foreground)
-                .into_any_element()
-        })
-        .child(
-            h_flex()
-                .flex_1()
-                .min_w_0()
-                .gap_2()
-                .items_baseline()
-                .when(!title.is_empty(), |row| {
-                    row.child(
-                        div()
-                            .text_body(false, cx)
-                            .font_semibold()
-                            .truncate()
-                            .child(title.to_string()),
-                    )
-                })
-                .when_some(description, |row, desc| {
-                    row.child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_secondary(false, cx)
-                            .truncate()
-                            .child(desc.to_string()),
-                    )
-                }),
-        )
-        .child(
-            h_flex()
-                .flex_shrink_0()
-                .items_center()
-                .gap_0p5()
-                .children(toggle_btn)
-                .children(copy_btn)
-                .child(collapse_btn),
-        );
-
     let note = |selector: String, text: String| {
         div()
             .w_full()
             .min_w_0()
-            .p_4()
             .text_secondary(false, cx)
             .whitespace_normal()
             .child(text)
             .debug_selector(move || selector)
             .into_any_element()
     };
-    let body = (!collapsed).then(|| match body {
-        CardBody::Building => note(
-            format!("visualize-building-{id}"),
-            crate::tr!("chat.visualize_building").into_owned(),
-        ),
-        CardBody::Unreadable(why) => note(format!("visualize-unreadable-{id}"), why),
-        CardBody::Page {
-            source: Some(source),
-            ..
-        } => div()
+    match shown {
+        Shown::Building => h_flex()
             .w_full()
             .min_w_0()
-            .p_3()
-            .child(source)
+            .gap_2()
+            .items_center()
+            .child(Spinner::new().small())
+            .child(note(
+                format!("visualize-building-{id}"),
+                crate::tr!("chat.visualize_building").into_owned(),
+            ))
             .into_any_element(),
-        CardBody::Page {
-            state,
-            source: None,
-            ..
-        } => {
+        Shown::Unreadable(why) => note(format!("visualize-unreadable-{id}"), why),
+        Shown::Page { state, html } => {
             let mut view = HtmlView::new(&state);
             if let Some(width) = viewport_width {
                 view = view.viewport_width(width);
             }
             let selector = format!("visualize-page-{id}");
             div()
+                .id(SharedString::from(format!("visualize-page-{id}")))
                 .w_full()
                 .min_w_0()
-                .p_3()
                 .child(view)
                 .debug_selector(move || selector)
+                .context_menu(move |menu, _, _| {
+                    menu.menu_with_icon(
+                        crate::tr!("chat.copy_html").into_owned(),
+                        IconName::Copy,
+                        Box::new(CopyText(html.to_string())),
+                    )
+                })
                 .into_any_element()
         }
-    });
-
-    let card_id = SharedString::from(format!("visualize-card-{id}"));
-    let selector = format!("visualize-card-{id}");
-    let card = v_flex()
-        .id(card_id)
-        .w_full()
-        .min_w_0()
-        .rounded(radius)
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.background)
-        .overflow_hidden()
-        .child(header)
-        .children(body)
-        .debug_selector(move || selector);
-    match page {
-        Some((html, _)) => card
-            .context_menu(move |menu, _, _| {
-                menu.menu_with_icon(
-                    crate::tr!("chat.copy_html").into_owned(),
-                    IconName::Copy,
-                    Box::new(CopyText(html.to_string())),
-                )
-            })
-            .into_any_element(),
-        None => card.into_any_element(),
     }
 }

@@ -878,12 +878,11 @@ fn a_rewind_divider_offers_what_its_harness_keeps(cx: &mut TestAppContext) {
     }
 }
 
-/// A visualization passed as a file is read from the thread's host by its
-/// card, whose Copy gives the page it drew; of a file the host cannot read
-/// the card says so in the page's place.
+/// A visualization passed as a file is read from the thread's host and
+/// drawn; of a file the host cannot read, the page's place says so.
 #[gpui::test]
-fn a_visualization_in_a_file_is_read_from_the_host_by_its_card(cx: &mut TestAppContext) {
-    use gpui::{Modifiers, px, size};
+fn a_visualization_in_a_file_is_read_from_the_host_and_drawn(cx: &mut TestAppContext) {
+    use gpui::{px, size};
 
     let dir = crate::store::tests::scratch_root("visualize-file");
     std::fs::create_dir_all(&dir).unwrap();
@@ -914,21 +913,8 @@ fn a_visualization_in_a_file_is_read_from_the_host_by_its_card(cx: &mut TestAppC
         ChatView::new(store, window_state, Some(session_id), window, cx)
     });
     cx.simulate_resize(size(px(1_024.), px(900.)));
-    driver.settle_until(cx, "the cards to have read their files", |cx| {
+    driver.settle_until(cx, "the files to have been read", |cx| {
         cx.debug_bounds("visualize-page-drawn").is_some()
             && cx.debug_bounds("visualize-unreadable-gone").is_some()
     });
-
-    let copy = cx
-        .debug_bounds("copy-visualize-drawn")
-        .expect("a drawn page can be copied");
-    cx.simulate_click(copy.center(), Modifiers::default());
-    assert_eq!(
-        cx.read_from_clipboard().and_then(|item| item.text()),
-        Some("<div>from the file</div>".into())
-    );
-    assert!(
-        cx.debug_bounds("copy-visualize-gone").is_none(),
-        "there is no page to copy"
-    );
 }

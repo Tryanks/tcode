@@ -17,8 +17,6 @@ struct Input<'a> {
     #[serde(default, borrow)]
     title: Option<&'a str>,
     #[serde(default, borrow)]
-    description: Option<&'a str>,
-    #[serde(default, borrow)]
     html: Option<&'a str>,
     #[serde(default, borrow)]
     path: Option<&'a str>,
@@ -26,9 +24,9 @@ struct Input<'a> {
 
 /// What a call to the tool asks to be drawn.
 pub(in crate::chat) struct Visualization<'a> {
-    /// Empty when the call names none.
-    pub(in crate::chat) title: &'a str,
-    pub(in crate::chat) description: Option<&'a str>,
+    /// What the Work Log names a call that drew nothing by; empty when the
+    /// call names none.
+    title: &'a str,
     pub(in crate::chat) page: Page<'a>,
     /// Whether the call is still running, so the page may yet change.
     pub(in crate::chat) running: bool,
@@ -38,7 +36,7 @@ pub(in crate::chat) struct Visualization<'a> {
 pub(in crate::chat) enum Page<'a> {
     /// In the call.
     Inline(&'a str),
-    /// In a file on the thread's host, which the card reads: the call's
+    /// In a file on the thread's host, which the timeline reads: the call's
     /// result does not carry it.
     File(&'a str),
 }
@@ -57,14 +55,13 @@ fn visualization<'a>(call: &Call<'a>) -> Option<Visualization<'a>> {
     };
     Some(Visualization {
         title: filled(input.title).unwrap_or_default(),
-        description: filled(input.description),
         page,
         running: call.status == ItemStatus::InProgress,
     })
 }
 
-/// The visualization `entry` draws as a card in the thread: a call still
-/// running or completed. One that failed, was declined or was interrupted
+/// The visualization `entry` draws into the thread: a call still running or
+/// completed. One that failed, was declined or was interrupted
 /// drew nothing, and stays a tool row that shows what the harness reported.
 pub(in crate::chat) fn card(entry: &TimelineEntry) -> Option<Visualization<'_>> {
     let call = Call::of(entry)?;
