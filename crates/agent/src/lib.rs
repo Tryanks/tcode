@@ -1377,6 +1377,7 @@ impl McpRegistration {
     pub const SERVER_NAME_COMPUTER_USE: &'static str = "tcode_computer_use";
     pub const SERVER_NAME_PULL_REQUESTS: &'static str = "tcode_pull_requests";
     pub const SERVER_NAME_CONTROL: &'static str = "tcode_control";
+    pub const SERVER_NAME_VISUALIZE: &'static str = "tcode_visualize";
 
     /// Codex `-c` override value: an inline TOML table for a streamable-HTTP MCP
     /// server. Codex rejects a literal `bearer_token` for HTTP, so the token

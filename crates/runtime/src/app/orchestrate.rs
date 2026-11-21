@@ -42,6 +42,9 @@ pub(super) struct McpWiring {
         Arc<std::sync::Mutex<HashMap<String, control_mcp::ThreadAccess>>>,
     /// The control server's record of the tools each thread's connection received.
     pub(super) control_source: Option<control_mcp::AccessSource>,
+    pub(super) visualize_url: Option<String>,
+    pub(super) visualize_tokens: Option<visualize_mcp::TokenRegistry>,
+    pub(super) visualize_registrations: HashMap<String, agent::McpRegistration>,
     /// Why the MCP servers did not start, until the first thread that would have had them
     /// starts and the user is told.
     pub(super) unavailable: Option<String>,
@@ -68,6 +71,38 @@ impl AppState {
         self.mcp.computer_use_tokens = Some(tokens);
     }
 
+    pub fn attach_visualize_mcp(&mut self, url: String, tokens: visualize_mcp::TokenRegistry) {
+        self.mcp.visualize_url = Some(url);
+        self.mcp.visualize_tokens = Some(tokens);
+    }
+
+    pub(super) fn visualize_registration_for(
+        &mut self,
+        meta: &SessionMeta,
+    ) -> Option<agent::McpRegistration> {
+        if let Some(registration) = self.mcp.visualize_registrations.get(&meta.id) {
+            return Some(registration.clone());
+        }
+        let token = self.mcp.visualize_tokens.as_ref()?.register(&meta.id);
+        let registration = agent::McpRegistration {
+            name: agent::McpRegistration::SERVER_NAME_VISUALIZE.into(),
+            url: self.mcp.visualize_url.clone()?,
+            bearer_token: token,
+        };
+        self.mcp
+            .visualize_registrations
+            .insert(meta.id.clone(), registration.clone());
+        Some(registration)
+    }
+
+    pub(super) fn revoke_visualize_registration(&mut self, session_id: &str) {
+        if let Some(registration) = self.mcp.visualize_registrations.remove(session_id)
+            && let Some(tokens) = &self.mcp.visualize_tokens
+        {
+            tokens.revoke(&registration.bearer_token);
+        }
+    }
+
     /// Every MCP tool offered to this thread's provider, and every text Tcode gives its model
     /// outside the conversation, as delivered; `None` for a provider that takes no MCP server.
     pub(super) fn injected_tools(
@@ -85,7 +120,8 @@ impl AppState {
         let computer_use =
             computer_use_attaches(provider, &self.settings) && self.mcp.computer_use_url.is_some();
         let control = self.control_offered(meta);
-        if !(pull_requests || preview || computer_use || control) {
+        let visualize = self.mcp.visualize_url.is_some();
+        if !(pull_requests || preview || computer_use || control || visualize) {
             return None;
         }
         let id = meta.id.as_str();
@@ -119,6 +155,11 @@ impl AppState {
                 agent::McpRegistration::SERVER_NAME_COMPUTER_USE,
                 computer_use_mcp::tools::INSTRUCTIONS,
                 self.mcp.computer_use_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_VISUALIZE,
+                visualize_mcp::INSTRUCTIONS,
+                self.mcp.visualize_registrations.contains_key(id),
             ),
         ];
         let control_instructions = self
@@ -176,6 +217,12 @@ impl AppState {
                     .as_ref()
                     .and_then(|source| source.offered(id))
                     .unwrap_or_else(|| control_mcp::tool_descriptions(&self.control_access(meta))),
+            );
+        }
+        if visualize {
+            offer(
+                agent::McpRegistration::SERVER_NAME_VISUALIZE,
+                visualize_mcp::tool_descriptions(),
             );
         }
         Some(tcode_protocol::InjectedTools {

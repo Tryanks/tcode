@@ -906,6 +906,7 @@ fn session_launch_scopes_mcp_registrations() {
                     preview: Some(preview.clone()),
                     computer_use: Some(computer.clone()),
                     control: Some(control.clone()),
+                    visualize: None,
                 },
             )
             .unwrap();

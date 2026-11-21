@@ -23,6 +23,7 @@ pub(in crate::chat) mod search;
 pub(in crate::chat) mod shell;
 pub(in crate::chat) mod subagent;
 pub(in crate::chat) mod threads;
+pub(in crate::chat) mod visualize;
 pub(in crate::chat) mod web;
 pub(in crate::chat) mod window;
 
@@ -140,6 +141,7 @@ const FAMILIES: &[Matcher] = &[
     threads::tool_call,
     harness::tool_call,
     question::tool_call,
+    visualize::tool_call,
     other::tool_call,
 ];
 

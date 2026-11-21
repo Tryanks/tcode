@@ -76,6 +76,12 @@ chat:
   open: "打开"
   reveal_in_file_manager: "在文件管理器中显示"
   copy_path: "复制路径"
+  copy_html: "复制 HTML"
+  visualize_show_source: "显示 HTML 源码"
+  visualize_show_rendered: "显示可视化视图"
+  visualize_collapse: "收起可视化"
+  visualize_expand: "展开可视化"
+  visualize_building: "正在渲染可视化内容…"
   open_zed: "在 Zed 中打开"
   open_zed_remote: "使用 Zed 远程打开"
   screen_open: "打开 %{name} 的截图"
@@ -2983,6 +2989,10 @@ tools:
       running: "查看中"
       done: "已查看"
       asked: "查看"
+    visualize:
+      running: "正在可视化"
+      done: "已可视化"
+      asked: "可视化"
     change:
       running: "更改中"
       done: "已更改"

@@ -293,6 +293,9 @@ impl TimelineView {
                 Segment::Plan(entry) => {
                     column = column.child(self.compose_plan(entry, cwd, cx));
                 }
+                Segment::Visualize(entry) => {
+                    column = column.child(self.compose_visualize(index, entry, cx));
+                }
                 Segment::Withheld(entry) => {
                     let EntryContent::Withheld { bytes, row } = entry.content else {
                         unreachable!();
@@ -1182,6 +1185,68 @@ impl TimelineView {
 
     /// A user-role entry, sent or still steering: the notice the host wrote,
     /// or else the user's bubble.
+    /// A standalone visualization card rendered from a visualize tool call.
+    fn compose_visualize(
+        &mut self,
+        turn: usize,
+        entry: &TimelineEntry,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(payload) = tools::visualize::payload(entry) else {
+            return div().into_any_element();
+        };
+        let html_str = payload.html.as_ref();
+        let state = if let Some((existing, _)) = self.html_states.get(&entry.id) {
+            existing.update(cx, |s, cx| s.set_html(html_str, cx));
+            existing.clone()
+        } else {
+            let created = cx.new(|cx| crate::html::HtmlState::new(html_str, cx));
+            let sub = cx.observe(&created, |_, _, cx| cx.notify());
+            self.html_states
+                .insert(entry.id.clone(), (created.clone(), sub));
+            created
+        };
+
+        let collapse_key = format!("visualize-collapsed:{}", entry.id);
+        let collapsed = self.expanded.contains(&collapse_key);
+        let source_key = format!("visualize-source:{}", entry.id);
+        let showing_source = self.expanded.contains(&source_key);
+        let copy_key = format!("visualize:{}", entry.id);
+        let copied = self.copied.is(&copy_key);
+        let html_arc: Arc<str> = Arc::from(html_str);
+        let copy_html = html_arc.clone();
+        let viewport_width = (f32::from(self.layout.width) > 0.0)
+            .then(|| (f32::from(self.layout.width) - 56.0).clamp(240.0, 760.0));
+
+        components::visualize::visualize_card(
+            components::visualize::VisualizeCardData {
+                id: &entry.id,
+                title: payload.title,
+                description: payload.description,
+                html: html_arc,
+                state,
+                status: payload.status,
+                collapsed,
+                showing_source,
+                copied,
+                compact: self.window_state.read(cx).compact,
+                viewport_width,
+                motion: self.motion.clone(),
+            },
+            cx.listener(move |this, _, _, cx| {
+                this.toggle_expanded(turn, &collapse_key, cx);
+            }),
+            cx.listener(move |this, _, _, cx| {
+                this.toggle_expanded(turn, &source_key, cx);
+            }),
+            cx.listener(move |this, _, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copy_html.to_string()));
+                this.mark_copied(copy_key.clone(), cx);
+            }),
+            cx,
+        )
+    }
+
     /// A proposed plan's block, carrying the decision its agent waits on.
     fn compose_plan(
         &self,

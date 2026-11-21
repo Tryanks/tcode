@@ -76,6 +76,12 @@ chat:
   open: "開く"
   reveal_in_file_manager: "ファイルマネージャーで表示"
   copy_path: "パスをコピー"
+  copy_html: "HTML をコピー"
+  visualize_show_source: "HTML ソースを表示"
+  visualize_show_rendered: "ビジュアルを表示"
+  visualize_collapse: "ビジュアルを折りたたむ"
+  visualize_expand: "ビジュアルを展開"
+  visualize_building: "ビジュアルを描画中…"
   open_zed: "Zed で開く"
   open_zed_remote: "Zed でリモートで開く"
   screen_open: "%{name} のスクリーンショットを開く"
@@ -2990,6 +2996,10 @@ tools:
       running: "閲覧中"
       done: "閲覧済み"
       asked: "閲覧"
+    visualize:
+      running: "可視化中"
+      done: "可視化済み"
+      asked: "可視化"
     change:
       running: "変更中"
       done: "変更済み"

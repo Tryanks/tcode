@@ -76,6 +76,12 @@ chat:
   open: "Open"
   reveal_in_file_manager: "Reveal in file manager"
   copy_path: "Copy path"
+  copy_html: "Copy HTML"
+  visualize_show_source: "Show HTML source"
+  visualize_show_rendered: "Show visual"
+  visualize_collapse: "Collapse visual"
+  visualize_expand: "Expand visual"
+  visualize_building: "Rendering visual…"
   open_zed: "Open in Zed"
   open_zed_remote: "Open remotely in Zed"
   screen_open: "Open screenshot of %{name}"
@@ -2990,6 +2996,10 @@ tools:
       running: "Viewing"
       done: "Viewed"
       asked: "View"
+    visualize:
+      running: "Visualizing"
+      done: "Visualized"
+      asked: "Visualize"
     change:
       running: "Changing"
       done: "Changed"

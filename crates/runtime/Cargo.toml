@@ -26,6 +26,7 @@ tcode-protocol = { path = "../protocol" }
 tcode-services = { path = "../services" }
 term = { path = "../term" }
 uuid = { version = "1", features = ["v4"] }
+visualize-mcp = { path = "../visualize-mcp" }
 
 [dev-dependencies]
 ureq = { version = "3", default-features = false, features = ["rustls"] }

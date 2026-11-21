@@ -68,6 +68,10 @@ pub(crate) struct TimelineView {
     /// store.
     timeline_revision: Option<u64>,
     pub(in crate::chat) history_placeholder_height: gpui::Pixels,
+    /// Whether the previously synced window still had unloaded history above
+    /// it, so the final page reaching the start of the log still completes a
+    /// partial first turn in place.
+    had_unloaded_history: bool,
     /// Distance to scroll back once a page has filled the reservation the
     /// reader had scrolled into. Applied by the render after the frame that
     /// measured the page, never between frames: GPUI resolves the wheel and
@@ -107,6 +111,8 @@ pub(crate) struct TimelineView {
     /// rows of the plans gaining and losing it.
     pub(in crate::chat) deciding_plan: Option<String>,
     pub(in crate::chat) md_states: HashMap<String, MdState>,
+    pub(in crate::chat) html_states:
+        HashMap<String, (Entity<crate::html::HtmlState>, Subscription)>,
     /// The transcript's one text selection, across its messages; each
     /// message is the entry at its index in the timeline. It goes when the
     /// focus leaves the whole chat.
@@ -247,6 +253,7 @@ impl TimelineView {
             timeline_stale: false,
             timeline_revision: None,
             history_placeholder_height: px(0.),
+            had_unloaded_history: false,
             reservation_scroll_back: None,
             carried_anchor: false,
             rows: Vec::new(),
@@ -260,6 +267,7 @@ impl TimelineView {
             shown_deliveries: Vec::new(),
             deciding_plan: None,
             md_states: HashMap::new(),
+            html_states: HashMap::new(),
             selection,
             entry_ends: None,
             selection_hold: None,
@@ -969,17 +977,18 @@ impl TimelineView {
         let awaiting_activity_snapshot = self
             .auto_activity_expansions
             .awaiting_session_snapshot(session_key.as_deref());
-        let continuity = if session_changed {
-            TimelineContinuity::NewSession
-        } else if self
+        let history_available = self
             .workspace_store
             .read(cx)
-            .history_available_for(self.session_id.as_deref())
-        {
+            .history_available_for(self.session_id.as_deref());
+        let continuity = if session_changed {
+            TimelineContinuity::NewSession
+        } else if history_available || self.had_unloaded_history {
             TimelineContinuity::PartialFirstTurn
         } else {
             TimelineContinuity::Complete
         };
+        self.had_unloaded_history = history_available;
         let old_len = self.rows.len();
         let old_last_turn = self.rows.last().map(|row| row.turn);
         let folds = self
@@ -1058,6 +1067,7 @@ impl TimelineView {
         if session_changed {
             self.painted_rows.set(None);
             self.md_states.clear();
+            self.html_states.clear();
             self.selection
                 .update(cx, |selection, cx| selection.clear(cx));
             self.pending_md_builds.clear();

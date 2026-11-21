@@ -24,6 +24,7 @@ mod haptics;
 mod harness_dialog;
 mod highlight;
 mod host_permissions;
+pub mod html;
 pub mod i18n;
 pub mod icon;
 mod image_viewer;

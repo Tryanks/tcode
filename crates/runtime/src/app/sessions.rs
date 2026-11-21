@@ -1575,6 +1575,7 @@ impl AppState {
             self.revoke_preview_registration(id);
             self.revoke_pull_request_registration(id);
             self.revoke_control_registration(id);
+            self.revoke_visualize_registration(id);
         }
         for id in &ids {
             self.close_orchestrator_children(id, cx);
