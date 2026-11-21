@@ -18,21 +18,19 @@ const MAX_HTML_BYTES: usize = agent::McpRegistration::VISUALIZE_MAX_HTML_BYTES;
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct VisualizeInput {
-    /// Short, descriptive title shown in the card header.
+    /// Short name of the visual. It is not drawn with the page; it names the call where the
+    /// page cannot be shown.
     pub title: String,
     /// Self-contained static HTML fragment with optional `<style>` and inline `<svg>`.
     /// JavaScript and external URLs are not executed or fetched. Provide either `html` or `path`.
     #[serde(default)]
     pub html: Option<String>,
     /// Absolute path of an HTML file on the host, for a page too long to pass inline: write
-    /// the file, then pass its path. The card reads the file itself each time it is shown,
+    /// the file, then pass its path. Tcode reads the file itself each time the visual is shown,
     /// so leave the file in place; its contents are not returned to you. Ignored when `html`
     /// is given.
     #[serde(default)]
     pub path: Option<String>,
-    /// Optional concise subtitle shown beside or below the title.
-    #[serde(default)]
-    pub description: Option<String>,
 }
 
 pub type Service = StreamableHttpService<VisualizeTools, LocalSessionManager>;
@@ -105,7 +103,7 @@ impl VisualizeTools {
     }
 
     #[tool(
-        description = "Show a self-contained static HTML + CSS + inline SVG visual card directly in this conversation thread. Pass the page inline as `html`, or for a very long page write it to a file on the host and pass that file's absolute `path`: the card reads the file itself, its contents are not returned to you, and the file must stay in place for the card to show. Do not announce the tool or restate everything shown in the visual; keep prose focused on what it helps the user see or decide. Use Markdown tables for simple tables and Mermaid for simple node-edge graphs; use `visualize` for richer charts, metric dashboards, architecture overviews, comparison matrices, timelines, and visual explainers. Layout: fluid width (roughly 360px on phone to 728px on desktop), let content determine height (avoid `vh` and `height: 100%`), leave the outer root without an extra redundant page frame/background. Styling: Flexbox, CSS Grid (including `repeat(auto-fit, minmax(..., 1fr))`), tables, `linear-gradient`, `box-shadow`, `light-dark()`, `color-mix()`, `@media (prefers-color-scheme)`, theme CSS variables (`--background`, `--foreground`, `--card`, `--muted`, `--muted-foreground`, `--border`, `--primary`, `--accent`, `--destructive`, `--success`, `--warning`, `--info`, `--chart-1`..`--chart-6`, `--font-sans`, `--font-mono`, `--radius`), and inline `<svg viewBox=\"...\">` (which also resolves `var(--...)` and `currentColor`). Static only: no JavaScript and no external URLs."
+        description = "Show a self-contained static HTML + CSS + inline SVG visual directly in this conversation thread. It is drawn straight into the reply column, on the thread's own background, with no frame, title bar or padding around it. Pass the page inline as `html`, or for a very long page write it to a file on the host and pass that file's absolute `path`: Tcode reads the file itself to draw it, its contents are not returned to you, and the file must stay in place for the visual to show. Do not announce the tool or restate everything shown in the visual; keep prose focused on what it helps the user see or decide. Use Markdown tables for simple tables and Mermaid for simple node-edge graphs; use `visualize` for richer charts, metric dashboards, architecture overviews, comparison matrices, timelines, and visual explainers. Layout: fluid width (roughly 360px on phone to 720px on desktop), let content determine height (avoid `vh` and `height: 100%`). Leave the outermost element with no background, border, outer card, banner title or side padding: start with the content. Look: flat and quiet, like the app around it. Where a group needs a surface of its own, give it `background: var(--card)`, a 1px `var(--border)` border and `var(--radius)` corners; a box is drawn in one border colour, so never mark one with a coloured edge on one side. Colour is for data (a chart series, a status), not decoration: no decorative gradients, glows or heavy shadows, and text stays `var(--foreground)` or `var(--muted-foreground)`. Prefer few sizes and weights, generous spacing, and alignment over boxes inside boxes. Styling: Flexbox, CSS Grid (including `repeat(auto-fit, minmax(..., 1fr))`), tables, `light-dark()`, `color-mix()`, `@media (prefers-color-scheme)`, theme CSS variables (`--background`, `--foreground`, `--card`, `--muted`, `--muted-foreground`, `--border`, `--primary`, `--accent`, `--destructive`, `--success`, `--warning`, `--info`, `--chart-1`..`--chart-6`, `--font-sans`, `--font-mono`, `--radius`), and inline `<svg viewBox=\"...\">` (which also resolves `var(--...)` and `currentColor`). Static only: no JavaScript and no external URLs."
     )]
     async fn visualize(&self, Parameters(input): Parameters<VisualizeInput>) -> CallToolResult {
         self.answer(&input)
@@ -156,8 +154,8 @@ fn render_response(input: &VisualizeInput) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(payload.to_string())])
 }
 
-/// The page in the file at `path`. The card reads the file itself, from the client; it is
-/// read here so the model is told now when the card would have nothing to draw.
+/// The page in the file at `path`. The client reads the file itself to draw it; it is read
+/// here so the model is told now when there would be nothing to draw.
 fn read_page(path: &std::path::Path) -> Result<String, String> {
     use std::io::Read as _;
 
@@ -219,16 +217,9 @@ Proactively call `tcode_visualize` (`visualize`) whenever a chart, metric dashbo
 architecture overview, comparison matrix, timeline, or visual explainer communicates \
 clearer than prose or ASCII art. Prefer standard Markdown tables for plain tables and \
 Mermaid fences for simple node-edge diagrams; use `visualize` for rich static layouts \
-and custom inline SVG graphics. Do not announce the tool or restate the visual in prose — \
-focus text only on key takeaways or decisions. Pass the page inline as `html`; for a very long \
-page, write it to a file on the host and pass that file's absolute `path` instead: the card reads \
-the file itself, its contents are not returned to you, and the file must stay in place for the \
-card to show. Output self-contained static HTML + `<style>` \
-+ inline `<svg viewBox=\"...\">` (no `<script>`, no external URLs, no `vh` or `height: 100%`, \
-no redundant outer page frame). Use built-in theme CSS variables (`--background`, `--foreground`, \
-`--card`, `--muted`, `--muted-foreground`, `--border`, `--primary`, `--accent`, `--destructive`, \
-`--success`, `--warning`, `--info`, `--chart-1`..`--chart-6`, `--font-sans`, `--font-mono`, \
-`--radius`) or `light-dark(...)` so visuals adapt automatically to light and dark themes.";
+and custom inline SVG graphics. Do not announce the tool or restate the visual in prose: \
+focus text only on key takeaways or decisions. The tool's own description says how to \
+pass a page and how it should look.";
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for VisualizeTools {
@@ -249,7 +240,6 @@ mod tests {
             title: "  ".into(),
             html: Some("<div>ok</div>".into()),
             path: None,
-            description: None,
         });
         assert_eq!(empty_title.is_error, Some(true));
 
@@ -257,7 +247,6 @@ mod tests {
             title: "Chart".into(),
             html: Some("   ".into()),
             path: None,
-            description: None,
         });
         assert_eq!(empty_html.is_error, Some(true));
     }
@@ -268,7 +257,6 @@ mod tests {
             title: "Overview".into(),
             html: Some("<div class=\"card\">hello</div>".into()),
             path: None,
-            description: Some("Summary".into()),
         });
         assert_ne!(ok.is_error, Some(true));
         let text = ok.content[0].as_text().unwrap().text.as_str();
@@ -281,7 +269,6 @@ mod tests {
             title: "With Script".into(),
             html: Some("<div>hi</div><SCRIPT>alert(1)</SCRIPT>".into()),
             path: None,
-            description: None,
         });
         assert_ne!(scripted.is_error, Some(true));
         let text = scripted.content[0].as_text().unwrap().text.as_str();
@@ -300,7 +287,6 @@ mod tests {
             title: "Overview".into(),
             html: Some("<div>hello</div>".into()),
             path: None,
-            description: None,
         };
         assert_ne!(tools.answer(&input).is_error, Some(true));
 
@@ -321,11 +307,10 @@ mod tests {
             title: "File Visual".into(),
             html: None,
             path: Some(path.to_string_lossy().into_owned()),
-            description: None,
         })
     }
 
-    /// A page passed as a file is for the card: none of it goes back to the model.
+    /// A page passed as a file is for the reader: none of it goes back to the model.
     #[test]
     fn a_file_page_is_accepted_without_returning_its_contents() {
         let dir = scratch("accepted");
