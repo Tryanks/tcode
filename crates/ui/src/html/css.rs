@@ -1,18 +1,73 @@
 //! Lightweight static CSS parser, selector matcher, media query evaluator,
 //! and custom-property (`var(--...)`) resolver.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use super::dom::{Document, ElementData, NodeId, NodeKind};
+
+/// How deep at-rules, `:not()` / `:is()` / `:where()` arguments, `var()`
+/// chains and fallbacks, and colour functions nest before what is inside is
+/// left out: each level is a level of recursion here.
+pub(crate) const MAX_NESTING: usize = 16;
+
+/// The longest value a `var()` substitution may produce. References multiply:
+/// sixteen properties that each use the next one four times are four billion
+/// copies of the last.
+pub(crate) const MAX_VALUE_BYTES: usize = 4096;
+
+/// A number as CSS and HTML attributes write one. Rust also reads `NaN` and
+/// `inf`, which no layout and no colour survives.
+pub(crate) fn number(raw: &str) -> Option<f32> {
+    raw.trim().parse::<f32>().ok().filter(|n| n.is_finite())
+}
+
+/// The work one cascade may do, counted in compound selectors tested and
+/// declarations applied. A stylesheet is as long as its author likes and
+/// every rule in it is tried on every element, so the product has to end
+/// somewhere; [`Budget::ran_out`] says when it did.
+pub(crate) struct Budget {
+    left: usize,
+    ran_out: bool,
+}
+
+impl Budget {
+    pub(crate) const CASCADE: usize = 2_000_000;
+
+    pub(crate) fn new(units: usize) -> Self {
+        Self {
+            left: units,
+            ran_out: false,
+        }
+    }
+
+    pub(crate) fn spend(&mut self, units: usize) -> bool {
+        match self.left.checked_sub(units) {
+            Some(left) => self.left = left,
+            None => self.ran_out = true,
+        }
+        !self.ran_out
+    }
+
+    pub(crate) fn ran_out(&self) -> bool {
+        self.ran_out
+    }
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct Stylesheet {
     pub(crate) rules: Vec<Rule>,
+    /// The `@media` lists rules sit under: a rule inside nested ones holds
+    /// every list on the way to it, and applies when each of them matches.
+    conditions: Vec<Vec<MediaQuery>>,
+    /// Rules nested deeper than [`MAX_NESTING`] were not read.
+    pub(crate) left_out: bool,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct Rule {
-    pub(crate) media: Option<MediaQuery>,
+    condition: Option<usize>,
     pub(crate) selectors: Vec<Selector>,
     pub(crate) declarations: Vec<Declaration>,
     pub(crate) order: usize,
@@ -26,16 +81,20 @@ pub(crate) struct Declaration {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct MediaQuery {
-    pub(crate) branches: Vec<MediaBranch>,
+struct MediaQuery {
+    branches: Vec<MediaBranch>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct MediaBranch {
-    pub(crate) color_scheme: Option<bool>, // Some(true) = dark, Some(false) = light
-    pub(crate) min_width: Option<f32>,
-    pub(crate) max_width: Option<f32>,
-    pub(crate) unsupported: bool,
+#[derive(Debug, Clone)]
+struct MediaBranch {
+    negated: bool,
+    /// It names a feature this renderer does not evaluate, so it never
+    /// matches, negated or not.
+    unknown: bool,
+    screen: bool,
+    color_scheme: Option<bool>, // Some(true) = dark, Some(false) = light
+    min_width: Option<f32>,
+    max_width: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -45,27 +104,13 @@ pub(crate) struct MediaEnv {
 }
 
 impl MediaQuery {
-    pub(crate) fn matches(&self, env: MediaEnv) -> bool {
+    fn matches(&self, env: MediaEnv) -> bool {
         self.branches.iter().any(|b| {
-            if b.unsupported {
-                return false;
-            }
-            if let Some(dark) = b.color_scheme
-                && dark != env.dark
-            {
-                return false;
-            }
-            if let Some(min_w) = b.min_width
-                && env.viewport_width < min_w
-            {
-                return false;
-            }
-            if let Some(max_w) = b.max_width
-                && env.viewport_width > max_w
-            {
-                return false;
-            }
-            true
+            let holds = b.screen
+                && b.color_scheme.is_none_or(|dark| dark == env.dark)
+                && b.min_width.is_none_or(|min| env.viewport_width >= min)
+                && b.max_width.is_none_or(|max| env.viewport_width <= max);
+            !b.unknown && holds != b.negated
         })
     }
 }
@@ -85,6 +130,9 @@ pub(crate) struct Selector {
     pub(crate) parts: Vec<(Option<Combinator>, CompoundSelector)>,
     pub(crate) pseudo_element: Option<PseudoElement>,
     pub(crate) specificity: Specificity,
+    /// Two of its combinators each try every ancestor or earlier sibling, so
+    /// a failed match can try one node for one part many times over.
+    retries: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +183,8 @@ pub(crate) enum PseudoClass {
     Not(Vec<Selector>),
     Is(Vec<Selector>),
     Where(Vec<Selector>),
+    /// A pseudo-class or pseudo-element this renderer has no state for: the
+    /// selector matches nothing.
     Unsupported,
 }
 
@@ -143,57 +193,106 @@ impl Stylesheet {
         let mut sheet = Self::default();
         let mut order = 0usize;
         for src in sources {
-            parse_rules(src, None, &mut sheet.rules, &mut order);
+            parse_rules(&strip_comments(src), None, 0, &mut sheet, &mut order);
         }
         sheet
     }
 
-    /// Collect custom-property (`--*`) declarations from `:root` / `html` / `body`.
-    pub(crate) fn root_variables(&self, env: MediaEnv) -> HashMap<String, String> {
-        let mut vars = HashMap::new();
+    /// Which of the sheet's `@media` lists hold in `env`. Two environments
+    /// with the same answer cascade alike.
+    pub(crate) fn conditions(&self, env: MediaEnv) -> Vec<bool> {
+        self.conditions
+            .iter()
+            .map(|lists| lists.iter().all(|query| query.matches(env)))
+            .collect()
+    }
+
+    /// The rules that apply under `conditions`, the answer [`Self::conditions`]
+    /// gave, with the selectors each of the three cascades matches: an
+    /// element's own and its `::before` and `::after`.
+    pub(crate) fn active(&self, conditions: &[bool]) -> ActiveRules<'_> {
+        let mut active = ActiveRules::default();
         for rule in &self.rules {
-            if let Some(media) = &rule.media
-                && !media.matches(env)
-            {
+            if rule.condition.is_some_and(|ix| !conditions[ix]) {
                 continue;
             }
-            let targets_root = rule.selectors.iter().any(|sel| {
-                sel.pseudo_element.is_none()
-                    && sel.parts.len() == 1
-                    && is_root_compound(&sel.parts[0].1)
-            });
+            for (pass, pseudo) in [
+                None,
+                Some(PseudoElement::Before),
+                Some(PseudoElement::After),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let selectors: Vec<&Selector> = rule
+                    .selectors
+                    .iter()
+                    .filter(|sel| sel.pseudo_element == pseudo)
+                    .collect();
+                if !selectors.is_empty() {
+                    active.passes[pass].push((rule, selectors));
+                }
+            }
+        }
+        active
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ActiveRules<'a> {
+    /// Every selector listed is tested when its pass visits an element, and
+    /// every test is paid for from the [`Budget`].
+    passes: [Vec<(&'a Rule, Vec<&'a Selector>)>; 3],
+}
+
+impl<'a> ActiveRules<'a> {
+    /// The custom properties `:root` / `html` / `body` rules declare, in
+    /// rule order.
+    pub(crate) fn root_properties(&self) -> Vec<(&'a str, &'a str)> {
+        let mut declared = Vec::new();
+        for (rule, selectors) in &self.passes[0] {
+            let targets_root = selectors
+                .iter()
+                .any(|sel| sel.parts.len() == 1 && is_root_compound(&sel.parts[0].1));
             if !targets_root {
                 continue;
             }
             for decl in &rule.declarations {
                 if decl.name.starts_with("--") {
-                    vars.insert(decl.name.clone(), decl.value.clone());
+                    declared.push((decl.name.as_str(), decl.value.as_str()));
                 }
             }
         }
-        vars
+        declared
     }
 
     /// Collect matching declarations for `node_id` (optionally for a pseudo-element),
     /// ordered from lowest to highest cascade priority.
-    pub(crate) fn matching_declarations<'a>(
-        &'a self,
+    pub(crate) fn matching_declarations(
+        &self,
         doc: &Document,
         node_id: NodeId,
-        env: MediaEnv,
         pseudo: Option<PseudoElement>,
+        budget: &mut Budget,
     ) -> Vec<&'a Declaration> {
+        let pass = match pseudo {
+            None => 0,
+            Some(PseudoElement::Before) => 1,
+            Some(PseudoElement::After) => 2,
+        };
+        let mut matching = Matching {
+            doc,
+            budget,
+            seen: HashMap::new(),
+        };
         let mut hits: Vec<(bool, Specificity, usize, &'a Declaration)> = Vec::new();
-        for rule in &self.rules {
-            if let Some(media) = &rule.media
-                && !media.matches(env)
-            {
-                continue;
+        for (rule, selectors) in &self.passes[pass] {
+            if matching.budget.ran_out() {
+                break;
             }
-            let best_spec = rule
-                .selectors
+            let best_spec = selectors
                 .iter()
-                .filter(|sel| sel.pseudo_element == pseudo && selector_matches(sel, doc, node_id))
+                .filter(|sel| matching.selector(sel, node_id))
                 .map(|sel| sel.specificity)
                 .max();
             if let Some(spec) = best_spec {
@@ -248,36 +347,150 @@ pub(crate) fn parse_declarations(raw: &str) -> Vec<Declaration> {
     out
 }
 
-/// Resolve all `var(--name, fallback)` references in `value` using `vars`.
-pub(crate) fn resolve_vars(value: &str, vars: &HashMap<String, String>) -> String {
-    resolve_vars_depth(value, vars, 0)
+/// The custom properties in scope for an element: its own over those it
+/// inherits. Each value is resolved where it is declared, so none holds a
+/// `var()` and a reference costs one lookup however the declarations chain.
+#[derive(Debug, Default)]
+pub(crate) struct Vars {
+    own: HashMap<String, Rc<str>>,
+    inherited: Option<Rc<Vars>>,
 }
 
-fn resolve_vars_depth(value: &str, vars: &HashMap<String, String>, depth: usize) -> String {
-    if depth >= 16 || !value.contains("var(") {
-        return value.to_string();
+impl Vars {
+    pub(crate) fn get(&self, name: &str) -> Option<&Rc<str>> {
+        let mut scope = self;
+        loop {
+            if let Some(value) = scope.own.get(name) {
+                return Some(value);
+            }
+            scope = scope.inherited.as_deref()?;
+        }
+    }
+
+    /// The scope of an element that declares `declared`, the later of two
+    /// declarations of a name winning, under `inherited`. Declarations may
+    /// use each other in any order. One that cannot be resolved (it uses a
+    /// name with no value and gives no fallback, is part of a cycle, chains
+    /// deeper than [`MAX_NESTING`] or grows past [`MAX_VALUE_BYTES`]) is not
+    /// declared, so the inherited value, if any, stays in scope, as in CSS.
+    pub(crate) fn declare(inherited: &Rc<Self>, declared: &[(&str, &str)]) -> Rc<Self> {
+        let mut declaring = Declaring {
+            raw: declared.iter().copied().collect(),
+            inherited,
+            resolved: HashMap::new(),
+            resolving: Vec::new(),
+        };
+        for (name, _) in declared {
+            declaring.resolve(name);
+        }
+        Rc::new(Self {
+            own: declaring
+                .resolved
+                .into_iter()
+                .filter_map(|(name, value)| Some((name.to_owned(), value?)))
+                .collect(),
+            inherited: Some(inherited.clone()),
+        })
+    }
+}
+
+trait Lookup {
+    fn var(&mut self, name: &str) -> Option<Rc<str>>;
+}
+
+impl Lookup for &Vars {
+    fn var(&mut self, name: &str) -> Option<Rc<str>> {
+        self.get(name).cloned()
+    }
+}
+
+struct Declaring<'a> {
+    raw: HashMap<&'a str, &'a str>,
+    inherited: &'a Vars,
+    resolved: HashMap<&'a str, Option<Rc<str>>>,
+    resolving: Vec<&'a str>,
+}
+
+impl Declaring<'_> {
+    fn resolve(&mut self, name: &str) -> Option<Rc<str>> {
+        let (&name, &raw) = self.raw.get_key_value(name)?;
+        if let Some(resolved) = self.resolved.get(name) {
+            return resolved.clone();
+        }
+        if self.resolving.contains(&name) || self.resolving.len() >= MAX_NESTING {
+            return None;
+        }
+        self.resolving.push(name);
+        let mut value = String::new();
+        let resolved = substitute(raw, self, 0, true, MAX_VALUE_BYTES, &mut value)
+            .map(|()| Rc::from(value.trim()));
+        self.resolving.pop();
+        self.resolved.insert(name, resolved.clone());
+        resolved
+    }
+}
+
+impl Lookup for Declaring<'_> {
+    fn var(&mut self, name: &str) -> Option<Rc<str>> {
+        if self.raw.contains_key(name) {
+            self.resolve(name)
+        } else {
+            self.inherited.get(name).cloned()
+        }
+    }
+}
+
+/// A declaration's value with each `var()` replaced, or `None` when one of
+/// them has neither a value nor a fallback, or the result is longer than
+/// [`MAX_VALUE_BYTES`]: the declaration is then invalid, as in CSS.
+pub(crate) fn resolve_vars<'v>(value: &'v str, vars: &Vars) -> Option<Cow<'v, str>> {
+    if find_var_call(value).is_none() {
+        return Some(Cow::Borrowed(value));
     }
     let mut out = String::with_capacity(value.len());
+    substitute(value, &mut &*vars, 0, true, MAX_VALUE_BYTES, &mut out)?;
+    Some(Cow::Owned(out))
+}
+
+/// A whole document's text (a stylesheet, an inline SVG) with each `var()`
+/// replaced, one without a value by nothing. `None` when the result would be
+/// longer than `limit`.
+pub(crate) fn resolve_vars_in_text(text: &str, vars: &Vars, limit: usize) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    substitute(text, &mut &*vars, 0, false, limit, &mut out)?;
+    Some(out)
+}
+
+fn substitute(
+    value: &str,
+    vars: &mut dyn Lookup,
+    depth: usize,
+    strict: bool,
+    limit: usize,
+    out: &mut String,
+) -> Option<()> {
+    let push = |out: &mut String, piece: &str| {
+        (out.len() + piece.len() <= limit).then(|| out.push_str(piece))
+    };
     let mut rest = value;
     while let Some(pos) = find_var_call(rest) {
-        out.push_str(&rest[..pos]);
+        push(out, &rest[..pos])?;
         let after = &rest[pos + 4..];
         let Some(close) = find_matching_paren(after) else {
-            out.push_str(&rest[pos..]);
-            return out;
+            return push(out, &rest[pos..]);
         };
-        let inner = after[..close].trim();
-        let (var_name, fallback) = split_first_top_level_comma(inner);
-        let var_name = var_name.trim();
-        if let Some(found) = vars.get(var_name) {
-            out.push_str(&resolve_vars_depth(found.trim(), vars, depth + 1));
-        } else if let Some(fb) = fallback {
-            out.push_str(&resolve_vars_depth(fb.trim(), vars, depth + 1));
+        let (name, fallback) = split_first_top_level_comma(&after[..close]);
+        match (vars.var(name.trim()), fallback) {
+            (Some(found), _) => push(out, &found)?,
+            (None, Some(fallback)) if depth < MAX_NESTING => {
+                substitute(fallback.trim(), vars, depth + 1, strict, limit, out)?
+            }
+            _ if strict => return None,
+            _ => {}
         }
         rest = &after[close + 1..];
     }
-    out.push_str(rest);
-    out
+    push(out, rest)
 }
 
 fn find_var_call(s: &str) -> Option<usize> {
@@ -338,17 +551,10 @@ fn split_first_top_level_comma(s: &str) -> (&str, Option<&str>) {
 }
 
 fn strip_important(val: &str) -> Option<&str> {
-    let trimmed = val.trim_end();
-    if trimmed.len() >= 10 && trimmed[trimmed.len() - 10..].eq_ignore_ascii_case("!important") {
-        return Some(trimmed[..trimmed.len() - 10].trim_end());
-    }
-    // Handle `! important` with whitespace
-    if let Some(bang) = trimmed.rfind('!')
-        && trimmed[bang + 1..].trim().eq_ignore_ascii_case("important")
-    {
-        return Some(trimmed[..bang].trim_end());
-    }
-    None
+    let (value, flag) = val.rsplit_once('!')?;
+    flag.trim()
+        .eq_ignore_ascii_case("important")
+        .then(|| value.trim_end())
 }
 
 fn strip_comments(src: &str) -> String {
@@ -370,8 +576,13 @@ fn strip_comments(src: &str) -> String {
     out
 }
 
-fn parse_rules(src: &str, media: Option<MediaQuery>, out: &mut Vec<Rule>, order: &mut usize) {
-    let cleaned = strip_comments(src);
+fn parse_rules(
+    cleaned: &str,
+    condition: Option<usize>,
+    depth: usize,
+    sheet: &mut Stylesheet,
+    order: &mut usize,
+) {
     let bytes = cleaned.as_bytes();
     let mut pos = 0usize;
     while pos < bytes.len() {
@@ -383,7 +594,7 @@ fn parse_rules(src: &str, media: Option<MediaQuery>, out: &mut Vec<Rule>, order:
         }
         if bytes[pos] == b'@' {
             let at_start = pos;
-            let (header_end, kind) = scan_to_block_or_semi(&cleaned, pos);
+            let (header_end, kind) = scan_to_block_or_semi(cleaned, pos);
             let header = cleaned[at_start..header_end].trim();
             if kind == b';' {
                 pos = (header_end + 1).min(bytes.len());
@@ -391,38 +602,48 @@ fn parse_rules(src: &str, media: Option<MediaQuery>, out: &mut Vec<Rule>, order:
             }
             if kind == b'{' {
                 let block_start = header_end + 1;
-                let block_end = find_matching_brace(&cleaned, block_start);
+                let block_end = find_matching_brace(cleaned, block_start);
                 let block = &cleaned[block_start..block_end];
                 pos = (block_end + 1).min(bytes.len());
                 let lower_header = header.to_ascii_lowercase();
-                if let Some(query_str) = lower_header.strip_prefix("@media") {
-                    let parsed_media = parse_media_query(query_str.trim());
-                    let combined = combine_media(media.clone(), parsed_media);
-                    parse_rules(block, Some(combined), out, order);
+                let inner = if let Some(query) = lower_header.strip_prefix("@media") {
+                    let mut lists = condition
+                        .map(|ix| sheet.conditions[ix].clone())
+                        .unwrap_or_default();
+                    lists.push(parse_media_query(query));
+                    sheet.conditions.push(lists);
+                    Some(Some(sheet.conditions.len() - 1))
                 } else if lower_header.starts_with("@supports")
                     || lower_header.starts_with("@layer")
                 {
-                    parse_rules(block, media.clone(), out, order);
+                    Some(condition)
+                } else {
+                    // @keyframes, @font-face, etc. are safely skipped.
+                    None
+                };
+                match inner {
+                    Some(_) if depth >= MAX_NESTING => sheet.left_out = true,
+                    Some(condition) => parse_rules(block, condition, depth + 1, sheet, order),
+                    None => {}
                 }
-                // @keyframes, @font-face, etc. are safely skipped.
                 continue;
             }
             break;
         }
 
         let sel_start = pos;
-        let (brace, kind) = scan_to_block_or_semi(&cleaned, pos);
+        let (brace, kind) = scan_to_block_or_semi(cleaned, pos);
         if kind != b'{' {
             pos = (brace + 1).min(bytes.len());
             continue;
         }
         let sel_str = cleaned[sel_start..brace].trim();
         let body_start = brace + 1;
-        let body_end = find_matching_brace(&cleaned, body_start);
+        let body_end = find_matching_brace(cleaned, body_start);
         let body = &cleaned[body_start..body_end];
         pos = (body_end + 1).min(bytes.len());
 
-        let selectors = parse_selector_list(sel_str);
+        let selectors = parse_selector_list(sel_str, 0, &mut sheet.left_out);
         if selectors.is_empty() {
             continue;
         }
@@ -431,8 +652,8 @@ fn parse_rules(src: &str, media: Option<MediaQuery>, out: &mut Vec<Rule>, order:
             continue;
         }
         *order += 1;
-        out.push(Rule {
-            media: media.clone(),
+        sheet.rules.push(Rule {
+            condition,
             selectors,
             declarations,
             order: *order,
@@ -538,99 +759,83 @@ fn split_declarations(s: &str) -> Vec<&str> {
 }
 
 fn parse_media_query(raw: &str) -> MediaQuery {
-    let branches = raw
-        .split(',')
-        .map(|branch| {
-            let mut mb = MediaBranch::default();
-            let lower = branch.to_ascii_lowercase();
-            if lower.contains("print") && !lower.contains("screen") {
-                mb.unsupported = true;
-                return mb;
-            }
-            let mut rest = lower.as_str();
-            while let Some(open) = rest.find('(') {
-                rest = &rest[open + 1..];
-                let Some(close) = rest.find(')') else {
-                    break;
-                };
-                let expr = rest[..close].trim();
-                rest = &rest[close + 1..];
-                if let Some((k, v)) = expr.split_once(':') {
-                    let k = k.trim();
-                    let v = v.trim();
-                    match k {
-                        "prefers-color-scheme" => {
-                            if v == "dark" {
-                                mb.color_scheme = Some(true);
-                            } else if v == "light" {
-                                mb.color_scheme = Some(false);
-                            }
-                        }
-                        "max-width" => {
-                            mb.max_width = parse_media_px(v);
-                        }
-                        "min-width" => {
-                            mb.min_width = parse_media_px(v);
-                        }
-                        _ => {}
+    MediaQuery {
+        branches: raw.split(',').map(parse_media_branch).collect(),
+    }
+}
+
+fn parse_media_branch(raw: &str) -> MediaBranch {
+    let mut branch = MediaBranch {
+        negated: false,
+        unknown: false,
+        screen: true,
+        color_scheme: None,
+        min_width: None,
+        max_width: None,
+    };
+    let mut rest = raw.trim_start();
+    while !rest.is_empty() {
+        if let Some(feature) = rest.strip_prefix('(') {
+            let Some(close) = find_matching_paren(feature) else {
+                branch.unknown = true;
+                break;
+            };
+            let known = match feature[..close].split_once(':') {
+                Some((name, value)) => match (name.trim(), value.trim()) {
+                    ("prefers-color-scheme", "dark") => {
+                        branch.color_scheme = Some(true);
+                        true
                     }
-                }
+                    ("prefers-color-scheme", "light") => {
+                        branch.color_scheme = Some(false);
+                        true
+                    }
+                    ("min-width", width) => {
+                        branch.min_width = parse_media_px(width);
+                        branch.min_width.is_some()
+                    }
+                    ("max-width", width) => {
+                        branch.max_width = parse_media_px(width);
+                        branch.max_width.is_some()
+                    }
+                    _ => false,
+                },
+                None => false,
+            };
+            branch.unknown |= !known;
+            rest = &feature[close + 1..];
+        } else {
+            let end = rest
+                .find(|c: char| c.is_ascii_whitespace() || c == '(')
+                .unwrap_or(rest.len());
+            match &rest[..end] {
+                "and" | "only" | "all" | "screen" => {}
+                "not" => branch.negated = true,
+                "or" => branch.unknown = true,
+                // Print, speech and every other medium a window is not.
+                _ => branch.screen = false,
             }
-            mb
-        })
-        .collect();
-    MediaQuery { branches }
+            rest = &rest[end..];
+        }
+        rest = rest.trim_start();
+    }
+    branch
 }
 
 fn parse_media_px(v: &str) -> Option<f32> {
     if let Some(n) = v.strip_suffix("px") {
-        n.trim().parse::<f32>().ok()
+        number(n)
     } else if let Some(n) = v.strip_suffix("rem").or_else(|| v.strip_suffix("em")) {
-        n.trim().parse::<f32>().ok().map(|x| x * 16.0)
+        number(n).map(|x| x * 16.0)
     } else {
-        v.parse::<f32>().ok()
+        number(v)
     }
 }
 
-fn combine_media(parent: Option<MediaQuery>, child: MediaQuery) -> MediaQuery {
-    let Some(parent) = parent else {
-        return child;
-    };
-    let mut branches = Vec::new();
-    for a in &parent.branches {
-        for b in &child.branches {
-            let scheme = match (a.color_scheme, b.color_scheme) {
-                (Some(x), Some(y)) if x != y => {
-                    branches.push(MediaBranch {
-                        unsupported: true,
-                        ..Default::default()
-                    });
-                    continue;
-                }
-                (Some(x), _) | (_, Some(x)) => Some(x),
-                (None, None) => None,
-            };
-            branches.push(MediaBranch {
-                color_scheme: scheme,
-                min_width: match (a.min_width, b.min_width) {
-                    (Some(x), Some(y)) => Some(x.max(y)),
-                    (x, y) => x.or(y),
-                },
-                max_width: match (a.max_width, b.max_width) {
-                    (Some(x), Some(y)) => Some(x.min(y)),
-                    (x, y) => x.or(y),
-                },
-                unsupported: a.unsupported || b.unsupported,
-            });
-        }
-    }
-    MediaQuery { branches }
-}
-
-fn parse_selector_list(raw: &str) -> Vec<Selector> {
+fn parse_selector_list(raw: &str, depth: usize, left_out: &mut bool) -> Vec<Selector> {
     split_top_level(raw, ',')
         .into_iter()
-        .filter_map(parse_selector)
+        .filter_map(|selector| parse_selector(selector, depth, left_out))
         .collect()
 }
 
@@ -662,7 +867,7 @@ fn split_top_level(input: &str, sep: char) -> Vec<&str> {
     out
 }
 
-fn parse_selector(raw: &str) -> Option<Selector> {
+fn parse_selector(raw: &str, depth: usize, left_out: &mut bool) -> Option<Selector> {
     let s = raw.trim();
     if s.is_empty() {
         return None;
@@ -701,7 +906,7 @@ fn parse_selector(raw: &str) -> Option<Selector> {
         if saw_ws && !parts.is_empty() && pending_comb.is_none() {
             pending_comb = Some(Combinator::Descendant);
         }
-        let (compound, pe) = parse_compound(s, &mut pos)?;
+        let (compound, pe) = parse_compound(s, &mut pos, depth, left_out)?;
         if pe.is_some() {
             pseudo_element = pe;
         }
@@ -712,10 +917,21 @@ fn parse_selector(raw: &str) -> Option<Selector> {
         return None;
     }
     let specificity = compute_specificity(&parts, pseudo_element.is_some());
+    let retries = parts
+        .iter()
+        .filter(|(combinator, _)| {
+            matches!(
+                combinator,
+                Some(Combinator::Descendant | Combinator::GeneralSibling)
+            )
+        })
+        .count()
+        >= 2;
     Some(Selector {
         parts,
         pseudo_element,
         specificity,
+        retries,
     })
 }
 
@@ -727,7 +943,12 @@ fn skip_ws_flag(bytes: &[u8], pos: &mut usize) -> bool {
     *pos > start
 }
 
-fn parse_compound(s: &str, pos: &mut usize) -> Option<(CompoundSelector, Option<PseudoElement>)> {
+fn parse_compound(
+    s: &str,
+    pos: &mut usize,
+    depth: usize,
+    left_out: &mut bool,
+) -> Option<(CompoundSelector, Option<PseudoElement>)> {
     let bytes = s.as_bytes();
     let mut compound = CompoundSelector::default();
     let mut pseudo_el = None;
@@ -765,8 +986,7 @@ fn parse_compound(s: &str, pos: &mut usize) -> Option<(CompoundSelector, Option<
             }
             b':' => {
                 *pos += 1;
-                let double = bytes.get(*pos) == Some(&b':');
-                if double {
+                if bytes.get(*pos) == Some(&b':') {
                     *pos += 1;
                 }
                 let name = read_ident(s, pos).to_ascii_lowercase();
@@ -801,23 +1021,21 @@ fn parse_compound(s: &str, pos: &mut usize) -> Option<(CompoundSelector, Option<
                             compound.pseudos.push(PseudoClass::Unsupported);
                         }
                     }
-                    "not" => {
-                        let inner = arg.map(parse_selector_list).unwrap_or_default();
-                        compound.pseudos.push(PseudoClass::Not(inner));
-                    }
-                    "is" => {
-                        let inner = arg.map(parse_selector_list).unwrap_or_default();
-                        compound.pseudos.push(PseudoClass::Is(inner));
-                    }
-                    "where" => {
-                        let inner = arg.map(parse_selector_list).unwrap_or_default();
-                        compound.pseudos.push(PseudoClass::Where(inner));
-                    }
-                    _ => {
-                        if !double {
-                            compound.pseudos.push(PseudoClass::Unsupported);
+                    "not" | "is" | "where" => {
+                        if depth >= MAX_NESTING {
+                            *left_out = true;
+                            return None;
                         }
+                        let inner = arg
+                            .map(|arg| parse_selector_list(arg, depth + 1, left_out))
+                            .unwrap_or_default();
+                        compound.pseudos.push(match name.as_str() {
+                            "not" => PseudoClass::Not(inner),
+                            "is" => PseudoClass::Is(inner),
+                            _ => PseudoClass::Where(inner),
+                        });
                     }
+                    _ => compound.pseudos.push(PseudoClass::Unsupported),
                 }
             }
             _ => {
@@ -963,83 +1181,122 @@ fn compute_specificity(
     Specificity(a, b, c)
 }
 
-fn selector_matches(sel: &Selector, doc: &Document, node_id: NodeId) -> bool {
-    match_parts(&sel.parts, sel.parts.len() - 1, doc, node_id)
+struct Matching<'a> {
+    doc: &'a Document,
+    budget: &'a mut Budget,
+    /// What a selector that [retries](Selector::retries) made of a node for
+    /// one of its parts, so that it is tried there once.
+    seen: HashMap<(*const Selector, usize, NodeId), bool>,
 }
 
-fn match_parts(
-    parts: &[(Option<Combinator>, CompoundSelector)],
-    idx: usize,
-    doc: &Document,
-    node_id: NodeId,
-) -> bool {
-    let (comb, compound) = &parts[idx];
-    if !compound_matches(compound, doc, node_id) {
-        return false;
+impl Matching<'_> {
+    fn selector(&mut self, sel: &Selector, node_id: NodeId) -> bool {
+        self.parts(sel, sel.parts.len() - 1, node_id)
     }
-    if idx == 0 {
-        return true;
-    }
-    match comb.unwrap_or(Combinator::Descendant) {
-        Combinator::Child => doc.nodes[node_id]
-            .parent
-            .is_some_and(|p| match_parts(parts, idx - 1, doc, p)),
-        Combinator::Descendant => {
-            let mut cur = doc.nodes[node_id].parent;
-            while let Some(p) = cur {
-                if match_parts(parts, idx - 1, doc, p) {
-                    return true;
-                }
-                cur = doc.nodes[p].parent;
-            }
-            false
-        }
-        Combinator::AdjacentSibling => doc
-            .prev_element_sibling(node_id)
-            .is_some_and(|prev| match_parts(parts, idx - 1, doc, prev)),
-        Combinator::GeneralSibling => {
-            let mut cur = doc.prev_element_sibling(node_id);
-            while let Some(prev) = cur {
-                if match_parts(parts, idx - 1, doc, prev) {
-                    return true;
-                }
-                cur = doc.prev_element_sibling(prev);
-            }
-            false
-        }
-    }
-}
 
-fn compound_matches(comp: &CompoundSelector, doc: &Document, node_id: NodeId) -> bool {
-    let Some(el) = doc.element(node_id) else {
-        return false;
-    };
-    if let Some(tag) = &comp.tag
-        && el.tag != *tag
-    {
-        return false;
+    fn parts(&mut self, sel: &Selector, idx: usize, node_id: NodeId) -> bool {
+        if !sel.retries {
+            return self.parts_untried(sel, idx, node_id);
+        }
+        let key = (std::ptr::from_ref(sel), idx, node_id);
+        if let Some(&seen) = self.seen.get(&key) {
+            return seen;
+        }
+        let matched = self.parts_untried(sel, idx, node_id);
+        self.seen.insert(key, matched);
+        matched
     }
-    if let Some(id) = &comp.id
-        && el.id.as_deref() != Some(id.as_str())
-    {
-        return false;
-    }
-    for cls in &comp.classes {
-        if !el.has_class(cls) {
+
+    fn parts_untried(&mut self, sel: &Selector, idx: usize, node_id: NodeId) -> bool {
+        let (comb, compound) = &sel.parts[idx];
+        if !self.compound(compound, node_id) {
             return false;
         }
-    }
-    for attr in &comp.attrs {
-        if !attr_matches(attr, el) {
-            return false;
+        if idx == 0 {
+            return true;
+        }
+        let doc = self.doc;
+        let nodes = &doc.nodes;
+        match comb.unwrap_or(Combinator::Descendant) {
+            Combinator::Child => nodes[node_id]
+                .parent
+                .is_some_and(|p| self.parts(sel, idx - 1, p)),
+            Combinator::Descendant => {
+                let mut cur = nodes[node_id].parent;
+                while let Some(p) = cur {
+                    if self.parts(sel, idx - 1, p) {
+                        return true;
+                    }
+                    cur = nodes[p].parent;
+                }
+                false
+            }
+            Combinator::AdjacentSibling => nodes[node_id]
+                .place
+                .previous
+                .is_some_and(|prev| self.parts(sel, idx - 1, prev)),
+            Combinator::GeneralSibling => {
+                let mut cur = nodes[node_id].place.previous;
+                while let Some(prev) = cur {
+                    if self.parts(sel, idx - 1, prev) {
+                        return true;
+                    }
+                    cur = nodes[prev].place.previous;
+                }
+                false
+            }
         }
     }
-    for pseudo in &comp.pseudos {
-        if !pseudo_matches(pseudo, doc, node_id, el) {
+
+    fn compound(&mut self, comp: &CompoundSelector, node_id: NodeId) -> bool {
+        let doc = self.doc;
+        let Some(el) = doc.element(node_id) else {
             return false;
+        };
+        self.budget.spend(1)
+            && comp.tag.as_ref().is_none_or(|tag| el.tag == *tag)
+            && comp
+                .id
+                .as_ref()
+                .is_none_or(|id| el.id.as_deref() == Some(id.as_str()))
+            && comp.classes.iter().all(|class| el.has_class(class))
+            && comp.attrs.iter().all(|attr| attr_matches(attr, el))
+            && comp
+                .pseudos
+                .iter()
+                .all(|pseudo| self.pseudo(pseudo, node_id))
+    }
+
+    fn pseudo(&mut self, pseudo: &PseudoClass, node_id: NodeId) -> bool {
+        let doc = self.doc;
+        let node = &doc.nodes[node_id];
+        let place = node.place;
+        match pseudo {
+            PseudoClass::Root => node.parent.is_none(),
+            PseudoClass::FirstChild => place.index == 1,
+            PseudoClass::LastChild => place.last,
+            PseudoClass::OnlyChild => place.index == 1 && place.last,
+            PseudoClass::FirstOfType => place.index_of_type == 1,
+            PseudoClass::LastOfType => place.last_of_type,
+            PseudoClass::Empty => node
+                .children
+                .iter()
+                .all(|&c| matches!(&doc.nodes[c].kind, NodeKind::Text(t) if t.is_empty())),
+            PseudoClass::NthChild(a, b) => {
+                let (a, diff) = (i64::from(*a), i64::from(place.index) - i64::from(*b));
+                if a == 0 {
+                    diff == 0
+                } else {
+                    diff % a == 0 && diff / a >= 0
+                }
+            }
+            PseudoClass::Not(list) => !list.iter().any(|s| self.selector(s, node_id)),
+            PseudoClass::Is(list) | PseudoClass::Where(list) => {
+                list.iter().any(|s| self.selector(s, node_id))
+            }
+            PseudoClass::Unsupported => false,
         }
     }
-    true
 }
 
 fn attr_matches(attr: &AttrMatcher, el: &ElementData) -> bool {
@@ -1053,43 +1310,5 @@ fn attr_matches(attr: &AttrMatcher, el: &ElementData) -> bool {
         AttrOp::Prefix => !attr.value.is_empty() && val.starts_with(&attr.value),
         AttrOp::Suffix => !attr.value.is_empty() && val.ends_with(&attr.value),
         AttrOp::Substring => !attr.value.is_empty() && val.contains(&attr.value),
-    }
-}
-
-fn pseudo_matches(pseudo: &PseudoClass, doc: &Document, node_id: NodeId, el: &ElementData) -> bool {
-    match pseudo {
-        PseudoClass::Root => doc.nodes[node_id].parent.is_none(),
-        PseudoClass::FirstChild => doc.element_sibling_position(node_id).0 == 1,
-        PseudoClass::LastChild => {
-            let (pos, total) = doc.element_sibling_position(node_id);
-            pos > 0 && pos == total
-        }
-        PseudoClass::OnlyChild => doc.element_sibling_position(node_id) == (1, 1),
-        PseudoClass::FirstOfType => doc.element_type_position(node_id, &el.tag).0 == 1,
-        PseudoClass::LastOfType => {
-            let (pos, total) = doc.element_type_position(node_id, &el.tag);
-            pos > 0 && pos == total
-        }
-        PseudoClass::Empty => doc.nodes[node_id]
-            .children
-            .iter()
-            .all(|&c| matches!(&doc.nodes[c].kind, NodeKind::Text(t) if t.is_empty())),
-        PseudoClass::NthChild(a, b) => {
-            let pos = doc.element_sibling_position(node_id).0 as i32;
-            if pos <= 0 {
-                return false;
-            }
-            if *a == 0 {
-                pos == *b
-            } else {
-                let diff = pos - *b;
-                diff % *a == 0 && diff / *a >= 0
-            }
-        }
-        PseudoClass::Not(list) => !list.iter().any(|s| selector_matches(s, doc, node_id)),
-        PseudoClass::Is(list) | PseudoClass::Where(list) => {
-            list.iter().any(|s| selector_matches(s, doc, node_id))
-        }
-        PseudoClass::Unsupported => false,
     }
 }

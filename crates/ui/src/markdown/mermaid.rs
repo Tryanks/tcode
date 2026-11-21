@@ -24,8 +24,7 @@
 
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet, VecDeque},
-    rc::Rc,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
@@ -40,7 +39,7 @@ use gpui::{
     InspectorElementId, InteractiveElement as _, IntoElement, LayoutId, MouseButton, ObjectFit,
     ParentElement as _, Pixels, RenderImage, Role, SharedString, StatefulInteractiveElement as _,
     Style, Styled, StyledImage as _, SvgRenderer, Task, Window, div, img,
-    prelude::FluentBuilder as _, px, relative, rems, size,
+    prelude::FluentBuilder as _, relative, rems, size,
 };
 use gpui_base::h_flex;
 use mermaid_rs_renderer::{
@@ -53,6 +52,7 @@ use super::{
     state::{MarkdownState, PendingContextTarget},
 };
 use crate::{
+    html::raster::{self, Picture},
     icon::IconName,
     motion::{CrossFade, GlideState, SizeGlide},
     recent_cache::RecentCache,
@@ -78,25 +78,6 @@ const SWAP: Duration = Duration::from_millis(200);
 /// streams in: one fade, then [`REST`].
 fn swap_interval() -> Duration {
     SWAP + REST
-}
-
-/// The most pixels a diagram is rasterized with, so a huge one does not
-/// take hundreds of megabytes; it is shown far smaller than that anyway.
-const MAX_PIXELS: f32 = 16_000_000.;
-
-/// The scale a picture of `natural` size is rasterized at: twice its own
-/// size, as GPUI rasterizes SVG, but no more than twice the size it can be
-/// shown at, never taller than [`MAX_HEIGHT`], and within [`MAX_PIXELS`].
-fn raster_scale(natural: gpui::Size<f32>) -> f32 {
-    if natural.width <= 0. || natural.height <= 0. {
-        return gpui::SMOOTH_SVG_SCALE_FACTOR;
-    }
-    let mut scale = gpui::SMOOTH_SVG_SCALE_FACTOR * (MAX_HEIGHT.as_f32() / natural.height).min(1.);
-    let pixels = natural.width * natural.height * scale * scale;
-    if pixels > MAX_PIXELS {
-        scale *= (MAX_PIXELS / pixels).sqrt();
-    }
-    scale
 }
 
 /// What the engine made of a source, off the main thread.
@@ -128,49 +109,17 @@ fn draw(source: &str, dark: bool, whole: bool, renderer: &SvgRenderer) -> Raster
     }
     let dimensions = measure_svg_dimensions(&layout, &config, None);
     let svg = render_svg(&layout, &theme, &config);
-    let scale = raster_scale(gpui::size(dimensions.width, dimensions.height));
-    match renderer.render_single_frame(svg.as_bytes(), scale / gpui::SMOOTH_SVG_SCALE_FACTOR) {
-        Ok(image) => {
-            let device = image.size(0);
-            let size = gpui::size(
-                px(device.width.0 as f32 / scale),
-                px(device.height.0 as f32 / scale),
-            );
-            Raster::Drawn(image, size)
-        }
-        Err(error) => Raster::Failed(error.to_string()),
+    // A diagram is shown at its own size, and never taller than `MAX_HEIGHT`.
+    let shown = (MAX_HEIGHT.as_f32() / dimensions.height).min(1.);
+    let scale = raster::scale(gpui::size(dimensions.width, dimensions.height), shown);
+    match raster::rasterize(svg.as_bytes(), scale, renderer) {
+        Ok((image, size)) => Raster::Drawn(image, size),
+        Err(error) => Raster::Failed(error),
     }
 }
 
 thread_local! {
     static FINALS: RefCell<Finals> = RefCell::new(Finals::default());
-}
-
-/// A rasterized diagram.
-#[derive(Clone)]
-pub(super) struct Picture(Rc<PictureData>);
-
-struct PictureData {
-    image: crate::store::images::Owned,
-    size: gpui::Size<Pixels>,
-}
-
-impl Picture {
-    fn new(image: Arc<RenderImage>, size: gpui::Size<Pixels>, cx: &mut App) -> Self {
-        Self(Rc::new(PictureData {
-            image: crate::store::images::Owned::new(image, cx),
-            size,
-        }))
-    }
-
-    fn size(&self) -> gpui::Size<Pixels> {
-        self.0.size
-    }
-
-    fn bytes(&self) -> usize {
-        let device = self.0.image.image().size(0);
-        device.width.0.max(0) as usize * device.height.0.max(0) as usize * 4
-    }
 }
 
 #[derive(Clone)]
@@ -190,36 +139,30 @@ impl Outcome {
     }
 }
 
-/// The most recent whole fences drawn, for a document rebuilt or opened
-/// again and for a theme switched back; and the sizes of many more, which a
+/// The most recent whole fences drawn, and the sizes of many more, which a
 /// fence drawn again holds while its picture is on its way.
 struct Finals {
-    entries: VecDeque<((SharedString, bool), Outcome)>,
-    bytes: usize,
+    entries: raster::Recent<(SharedString, bool), Outcome>,
     sizes: RecentCache<(SharedString, bool), gpui::Size<Pixels>>,
 }
 
 impl Default for Finals {
     fn default() -> Self {
         Self {
-            entries: VecDeque::new(),
-            bytes: 0,
+            entries: raster::Recent::new(|outcome| match outcome {
+                Outcome::Drawn(picture) => picture.bytes(),
+                Outcome::Empty | Outcome::Failed(_) => 0,
+            }),
             sizes: RecentCache::new(FINAL_SIZES_CAPACITY),
         }
     }
 }
 
-const FINALS_CAPACITY: usize = 32;
-const FINALS_BYTES: usize = 64 * 1024 * 1024;
 const FINAL_SIZES_CAPACITY: usize = 512;
 
 impl Finals {
     fn get(&mut self, key: &(SharedString, bool)) -> Option<Outcome> {
-        let ix = self.entries.iter().position(|(entry, _)| entry == key)?;
-        let entry = self.entries.remove(ix)?;
-        let outcome = entry.1.clone();
-        self.entries.push_back(entry);
-        Some(outcome)
+        self.entries.get(key)
     }
 
     fn insert(&mut self, key: (SharedString, bool), outcome: Outcome) {
@@ -227,27 +170,7 @@ impl Finals {
             self.sizes
                 .get_or_insert_with(key.clone(), || picture.size());
         }
-        if let Some(ix) = self.entries.iter().position(|(entry, _)| *entry == key)
-            && let Some((_, old)) = self.entries.remove(ix)
-        {
-            self.bytes -= weight(&old);
-        }
-        self.bytes += weight(&outcome);
-        self.entries.push_back((key, outcome));
-        while self.entries.len() > 1
-            && (self.entries.len() > FINALS_CAPACITY || self.bytes > FINALS_BYTES)
-        {
-            if let Some((_, old)) = self.entries.pop_front() {
-                self.bytes -= weight(&old);
-            }
-        }
-    }
-}
-
-fn weight(outcome: &Outcome) -> usize {
-    match outcome {
-        Outcome::Drawn(picture) => picture.bytes(),
-        Outcome::Empty | Outcome::Failed(_) => 0,
+        self.entries.insert(key, outcome);
     }
 }
 
@@ -903,7 +826,7 @@ fn picture(
     cx: &mut App,
 ) -> AnyElement {
     let label: SharedString = crate::tr!("markdown.mermaid_diagram").into_owned().into();
-    let source = picture.0.image.source();
+    let source = picture.source();
     let viewer = source.clone();
     let viewer_label = label.clone();
     let image = crate::material::accessible_clickable(

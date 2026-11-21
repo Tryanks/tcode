@@ -1,5 +1,7 @@
 use gpui::{Hsla, Rgba};
 
+use super::css::{MAX_NESTING, number};
+
 /// Parsed CSS color that may still depend on the inherited `color` property.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum CssColor {
@@ -30,14 +32,16 @@ pub(crate) fn hsla_to_css(color: Hsla) -> String {
     }
 }
 
-/// Parse a CSS color string into [`CssColor`], resolving `light-dark(...)` for light mode.
-#[cfg(test)]
-pub(crate) fn parse_color(raw: &str) -> Option<CssColor> {
-    parse_color_for_mode(raw, false)
-}
-
 /// Parse a CSS color string into [`CssColor`] for the active light/dark appearance.
 pub(crate) fn parse_color_for_mode(raw: &str, dark: bool) -> Option<CssColor> {
+    parse_nested_color(raw, dark, 0)
+}
+
+/// `light-dark()` and `color-mix()` take colours, which may be either again.
+fn parse_nested_color(raw: &str, dark: bool, depth: usize) -> Option<CssColor> {
+    if depth > MAX_NESTING {
+        return None;
+    }
     let s = raw.trim();
     if s.is_empty() {
         return None;
@@ -56,7 +60,7 @@ pub(crate) fn parse_color_for_mode(raw: &str, dark: bool) -> Option<CssColor> {
         let parts = split_top_level_commas(inner);
         if parts.len() == 2 {
             let chosen = if dark { parts[1] } else { parts[0] };
-            return parse_color_for_mode(chosen, dark);
+            return parse_nested_color(chosen, dark, depth + 1);
         }
         return None;
     }
@@ -67,7 +71,7 @@ pub(crate) fn parse_color_for_mode(raw: &str, dark: bool) -> Option<CssColor> {
         return parse_hsl(inner).map(CssColor::Exact);
     }
     if let Some(inner) = strip_func(&lower, "color-mix") {
-        return parse_color_mix(inner, dark);
+        return parse_color_mix(inner, dark, depth);
     }
     named_color(&lower).map(|rgb| CssColor::Exact(rgb_u32(rgb, 1.0)))
 }
@@ -135,9 +139,9 @@ fn parse_rgb(inner: &str) -> Option<Hsla> {
     let parse_channel = |token: &str| -> Option<f32> {
         let t = token.trim();
         if let Some(pct) = t.strip_suffix('%') {
-            Some((pct.trim().parse::<f32>().ok()? / 100.0).clamp(0.0, 1.0))
+            Some((number(pct)? / 100.0).clamp(0.0, 1.0))
         } else {
-            Some((t.parse::<f32>().ok()? / 255.0).clamp(0.0, 1.0))
+            Some((number(t)? / 255.0).clamp(0.0, 1.0))
         }
     };
     let r = parse_channel(channels[0])?;
@@ -155,8 +159,10 @@ fn parse_hsl(inner: &str) -> Option<Hsla> {
     if channels.len() < 3 {
         return None;
     }
-    let h_deg = parse_angle_deg(channels[0])?;
-    let h = ((h_deg % 360.0) + 360.0) % 360.0 / 360.0;
+    let h = parse_angle_deg(channels[0])?.rem_euclid(360.0) / 360.0;
+    if !h.is_finite() {
+        return None;
+    }
     let s = parse_percent_unit(channels[1])?;
     let l = parse_percent_unit(channels[2])?;
     let a = match alpha.or_else(|| channels.get(3).copied()) {
@@ -189,44 +195,44 @@ fn split_channels_and_alpha(inner: &str) -> (Vec<&str>, Option<&str>) {
 fn parse_angle_deg(raw: &str) -> Option<f32> {
     let t = raw.trim();
     if let Some(v) = t.strip_suffix("deg") {
-        v.trim().parse::<f32>().ok()
+        number(v)
     } else if let Some(v) = t.strip_suffix("turn") {
-        v.trim().parse::<f32>().ok().map(|x| x * 360.0)
-    } else if let Some(v) = t.strip_suffix("rad") {
-        v.trim().parse::<f32>().ok().map(f32::to_degrees)
+        number(v).map(|x| x * 360.0)
     } else if let Some(v) = t.strip_suffix("grad") {
-        v.trim().parse::<f32>().ok().map(|x| x * 0.9)
+        number(v).map(|x| x * 0.9)
+    } else if let Some(v) = t.strip_suffix("rad") {
+        number(v).map(f32::to_degrees)
     } else {
-        t.parse::<f32>().ok()
+        number(t)
     }
 }
 
 fn parse_percent_unit(raw: &str) -> Option<f32> {
     let t = raw.trim();
     if let Some(v) = t.strip_suffix('%') {
-        Some((v.trim().parse::<f32>().ok()? / 100.0).clamp(0.0, 1.0))
+        Some((number(v)? / 100.0).clamp(0.0, 1.0))
     } else {
-        Some((t.parse::<f32>().ok()? / 100.0).clamp(0.0, 1.0))
+        Some((number(t)? / 100.0).clamp(0.0, 1.0))
     }
 }
 
 fn parse_alpha(raw: &str) -> Option<f32> {
     let t = raw.trim();
     if let Some(v) = t.strip_suffix('%') {
-        Some((v.trim().parse::<f32>().ok()? / 100.0).clamp(0.0, 1.0))
+        Some((number(v)? / 100.0).clamp(0.0, 1.0))
     } else {
-        Some(t.parse::<f32>().ok()?.clamp(0.0, 1.0))
+        Some(number(t)?.clamp(0.0, 1.0))
     }
 }
 
 /// Parse `color-mix(in srgb, <color1> <pct1>?, <color2> <pct2>?)`.
-fn parse_color_mix(inner: &str, dark: bool) -> Option<CssColor> {
+fn parse_color_mix(inner: &str, dark: bool, depth: usize) -> Option<CssColor> {
     let parts = split_top_level_commas(inner);
     if parts.len() != 3 {
         return None;
     }
-    let (c1, p1) = parse_mix_arg(parts[1], dark)?;
-    let (c2, p2) = parse_mix_arg(parts[2], dark)?;
+    let (c1, p1) = parse_mix_arg(parts[1], dark, depth)?;
+    let (c2, p2) = parse_mix_arg(parts[2], dark, depth)?;
     let (w1, w2) = match (p1, p2) {
         (Some(a), Some(b)) => {
             let sum = a + b;
@@ -260,22 +266,22 @@ fn parse_color_mix(inner: &str, dark: bool) -> Option<CssColor> {
     Some(CssColor::Exact(mixed.into()))
 }
 
-fn parse_mix_arg(arg: &str, dark: bool) -> Option<(Hsla, Option<f32>)> {
+fn parse_mix_arg(arg: &str, dark: bool, depth: usize) -> Option<(Hsla, Option<f32>)> {
     let trimmed = arg.trim();
     let mut color_str = trimmed;
     let mut pct = None;
     if let Some(last_space) = find_top_level_last_space(trimmed) {
         let head = trimmed[..last_space].trim();
         let tail = trimmed[last_space + 1..].trim();
-        if let Some(p) = tail.strip_suffix('%').and_then(|s| s.parse::<f32>().ok()) {
+        if let Some(p) = tail.strip_suffix('%').and_then(number) {
             color_str = head;
             pct = Some(p / 100.0);
-        } else if let Some(p) = head.strip_suffix('%').and_then(|s| s.parse::<f32>().ok()) {
+        } else if let Some(p) = head.strip_suffix('%').and_then(number) {
             color_str = tail;
             pct = Some(p / 100.0);
         }
     }
-    match parse_color_for_mode(color_str, dark)? {
+    match parse_nested_color(color_str, dark, depth + 1)? {
         CssColor::Exact(c) => Some((c, pct)),
         CssColor::CurrentColor => None,
     }
