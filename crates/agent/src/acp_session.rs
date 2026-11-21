@@ -297,6 +297,12 @@ pub(crate) struct TurnEnd {
     pub(crate) usage: Option<TokenUsage>,
 }
 
+/// The modes and config options an earlier session came back with.
+pub(crate) type Reattached = (
+    Option<acp::SessionModeState>,
+    Option<Vec<acp::SessionConfigOption>>,
+);
+
 /// What [`Dialect::establish`] works with.
 pub(crate) struct Setup<'a> {
     pub(crate) connection: &'a Connection,
@@ -378,6 +384,53 @@ impl Setup<'_> {
         };
         self.state.lock_recover().loading = false;
         loaded
+    }
+
+    /// Make the earlier session `session_id` live again: `session/resume`
+    /// where the agent advertises it, which replays nothing, and
+    /// `session/load` where it does not or where it refused the resume.
+    /// `None` when the agent advertises neither; an error is the last
+    /// request's.
+    pub(crate) async fn reattach(
+        &self,
+        session_id: &acp::SessionId,
+        mcp_servers: &[acp::McpServer],
+        meta: Option<&acp::Meta>,
+    ) -> Option<Result<Reattached, sdk::Error>> {
+        let capabilities = &self.init.agent_capabilities;
+        let mut refused = None;
+        if capabilities.session_capabilities.resume.is_some() {
+            let mut request =
+                acp::ResumeSessionRequest::new(session_id.clone(), self.opts.cwd.clone())
+                    .mcp_servers(mcp_servers.to_vec());
+            if let Some(meta) = meta {
+                request = request.meta(meta.clone());
+            }
+            match self.connection.send_request(request).block_task().await {
+                Ok(resumed) => return Some(Ok((resumed.modes, resumed.config_options))),
+                Err(err) => refused = Some(err),
+            }
+        }
+        if !capabilities.load_session {
+            return refused.map(Err);
+        }
+        if let Some(err) = &refused {
+            log::warn!(
+                "acp[{}]: session/resume failed ({}); trying session/load",
+                self.name,
+                describe(err)
+            );
+        }
+        let mut request = acp::LoadSessionRequest::new(session_id.clone(), self.opts.cwd.clone())
+            .mcp_servers(mcp_servers.to_vec());
+        if let Some(meta) = meta {
+            request = request.meta(meta.clone());
+        }
+        Some(
+            self.load(request)
+                .await
+                .map(|loaded| (loaded.modes, loaded.config_options)),
+        )
     }
 
     /// Take the modes and config options the session started with.

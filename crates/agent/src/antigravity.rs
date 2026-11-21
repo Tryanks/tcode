@@ -241,74 +241,33 @@ impl Dialect for Antigravity {
         let resumed_id = opts
             .resume
             .as_ref()
-            .and_then(|cursor| {
-                cursor
-                    .0
-                    .get("session_id")
-                    .or_else(|| cursor.0.get("acp_session_id"))
-            })
+            .and_then(|cursor| cursor.0.get("session_id"))
             .and_then(Value::as_str)
             .map(str::to_string);
 
         let mut established_session = None;
         if let Some(session_id) = resumed_id {
             let session_id = acp::SessionId::new(session_id);
-            if setup
-                .init
-                .agent_capabilities
-                .session_capabilities
-                .resume
-                .is_some()
+            match setup
+                .reattach(&session_id, &mcp_servers, meta.as_ref())
+                .await
             {
-                let mut request =
-                    acp::ResumeSessionRequest::new(session_id.clone(), opts.cwd.clone())
-                        .mcp_servers(mcp_servers.clone());
-                if let Some(meta) = meta.clone() {
-                    request = request.meta(meta);
+                Some(Ok((modes, config_options))) => {
+                    established_session = Some((session_id, modes, config_options));
                 }
-                match setup.connection.send_request(request).block_task().await {
-                    Ok(resumed) => {
-                        established_session =
-                            Some((session_id, resumed.modes, resumed.config_options));
-                    }
-                    Err(err) => {
-                        log::warn!(
-                            "antigravity: session/resume failed ({}); starting a fresh session",
-                            describe(&err)
-                        );
-                        setup
-                            .warn(
-                                "Antigravity could not resume the previous conversation; starting a new one"
-                                    .into(),
-                            )
-                            .await;
-                    }
+                Some(Err(err)) => {
+                    log::warn!(
+                        "antigravity: the session could not be resumed ({}); starting a fresh session",
+                        describe(&err)
+                    );
+                    setup
+                        .warn(
+                            "Antigravity could not resume the previous conversation; starting a new one"
+                                .into(),
+                        )
+                        .await;
                 }
-            } else if setup.init.agent_capabilities.load_session {
-                let mut request =
-                    acp::LoadSessionRequest::new(session_id.clone(), opts.cwd.clone())
-                        .mcp_servers(mcp_servers.clone());
-                if let Some(meta) = meta.clone() {
-                    request = request.meta(meta);
-                }
-                match setup.load(request).await {
-                    Ok(loaded) => {
-                        established_session =
-                            Some((session_id, loaded.modes, loaded.config_options));
-                    }
-                    Err(err) => {
-                        log::warn!(
-                            "antigravity: session/load failed ({}); starting a fresh session",
-                            describe(&err)
-                        );
-                        setup
-                            .warn(
-                                "Antigravity could not resume the previous conversation; starting a new one"
-                                    .into(),
-                            )
-                            .await;
-                    }
-                }
+                None => {}
             }
         }
 
