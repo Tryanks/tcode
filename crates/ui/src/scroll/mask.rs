@@ -197,6 +197,9 @@ impl<H: ScrollbarHandle + Clone + 'static> Element for AreaMask<H> {
                     cx.stop_propagation();
                 } else if turn == Turn::Mine {
                     cx.stop_propagation();
+                    if !horizontal && !delta.y.is_zero() {
+                        gesture::run_out(Some(key), event, window, cx);
+                    }
                 }
             });
         });
