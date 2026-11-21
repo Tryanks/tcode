@@ -175,7 +175,7 @@ impl<'a> Parser<'a> {
                 while self.pos < self.bytes.len() && self.bytes[self.pos] != b'<' {
                     self.pos += 1;
                 }
-                let decoded = decode_entities(&self.input[start..self.pos]);
+                let decoded = decode_entities(&self.input[start..self.pos], false);
                 // Text is not head content: it ends a head left open.
                 self.in_head &= decoded.trim().is_empty();
                 if !self.in_head && !decoded.is_empty() {
@@ -376,7 +376,7 @@ impl<'a> Parser<'a> {
             if self.pos < self.bytes.len() {
                 self.pos += 1;
             }
-            decode_entities(raw)
+            decode_entities(raw, true)
         } else {
             let start = self.pos;
             while self.pos < self.bytes.len()
@@ -385,7 +385,7 @@ impl<'a> Parser<'a> {
             {
                 self.pos += 1;
             }
-            decode_entities(&self.input[start..self.pos])
+            decode_entities(&self.input[start..self.pos], true)
         }
     }
 
@@ -704,7 +704,9 @@ fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
     h.windows(n.len()).position(|w| w.eq_ignore_ascii_case(n))
 }
 
-pub(crate) fn decode_entities(input: &str) -> String {
+/// `input` with its character references decoded as HTML decodes them in
+/// text, or in an attribute's value.
+fn decode_entities(input: &str, in_attribute: bool) -> String {
     if !input.contains('&') {
         return input.to_string();
     }
@@ -713,77 +715,359 @@ pub(crate) fn decode_entities(input: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         rest = &rest[amp + 1..];
-        // No entity is longer than this; looking further makes a run of
+        // No reference is longer than this; looking further makes a run of
         // ampersands quadratic.
-        let name = &rest.as_bytes()[..rest.len().min(17)];
-        if let Some(semi) = name.iter().position(|&b| b == b';') {
-            let entity = &rest[..semi];
-            if let Some(decoded) = decode_single_entity(entity) {
-                out.push_str(decoded.as_str());
-                rest = &rest[semi + 1..];
-                continue;
+        let head = &rest.as_bytes()[..rest.len().min(17)];
+        let ended = head
+            .iter()
+            .position(|&b| b == b';')
+            .and_then(|semi| Some((semi + 1, reference(&rest[..semi])?)));
+        match ended.or_else(|| legacy_reference(rest, in_attribute)) {
+            Some((len, decoded)) => {
+                out.push(decoded);
+                rest = &rest[len..];
             }
+            None => out.push('&'),
         }
-        out.push('&');
     }
     out.push_str(rest);
     out
 }
 
-fn decode_single_entity(entity: &str) -> Option<String> {
-    if let Some(hex) = entity
-        .strip_prefix("#x")
-        .or_else(|| entity.strip_prefix("#X"))
-    {
-        let code = u32::from_str_radix(hex, 16).ok()?;
-        return char::from_u32(code).map(|c| c.to_string());
-    }
-    if let Some(dec) = entity.strip_prefix('#') {
-        let code = dec.parse::<u32>().ok()?;
-        return char::from_u32(code).map(|c| c.to_string());
-    }
-    let s = match entity {
-        "amp" => "&",
-        "lt" => "<",
-        "gt" => ">",
-        "quot" => "\"",
-        "apos" => "'",
-        "nbsp" => "\u{00a0}",
-        "ndash" => "–",
-        "mdash" => "—",
-        "hellip" => "…",
-        "times" => "×",
-        "divide" => "÷",
-        "plusmn" => "±",
-        "minus" => "−",
-        "rarr" => "→",
-        "larr" => "←",
-        "uarr" => "↑",
-        "darr" => "↓",
-        "harr" => "↔",
-        "bull" => "•",
-        "middot" => "·",
-        "copy" => "©",
-        "reg" => "®",
-        "trade" => "™",
-        "deg" => "°",
-        "check" => "✓",
-        "cross" => "✗",
-        "euro" => "€",
-        "pound" => "£",
-        "yen" => "¥",
-        "laquo" => "«",
-        "raquo" => "»",
-        "lsquo" => "‘",
-        "rsquo" => "’",
-        "ldquo" => "“",
-        "rdquo" => "”",
-        "le" => "≤",
-        "ge" => "≥",
-        "ne" => "≠",
-        "approx" => "≈",
-        "infin" => "∞",
-        _ => return None,
+/// What a C1 control's number stands for: HTML reads it as the byte of
+/// Windows-1252 it is nearly always written for.
+const WINDOWS_1252: [char; 32] = [
+    '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž', '\u{8f}',
+    '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}', 'ž', 'Ÿ',
+];
+
+/// The character a reference written between `&` and `;` stands for.
+fn reference(name: &str) -> Option<char> {
+    let Some(number) = name.strip_prefix('#') else {
+        return named_reference(name);
     };
-    Some(s.to_string())
+    let code = match number.strip_prefix(['x', 'X']) {
+        Some(hex) => u32::from_str_radix(hex, 16),
+        None => number.parse(),
+    }
+    .ok()?;
+    match code {
+        0x80..=0x9f => Some(WINDOWS_1252[code as usize - 0x80]),
+        _ => char::from_u32(code),
+    }
+}
+
+/// The longest name at the start of `rest` that HTML decodes without its
+/// semicolon, and its length: `amp`, `lt`, `gt`, `quot` and the names of
+/// ISO 8859-1, none longer than six letters. In an attribute's value HTML
+/// leaves one as written before `=`, a letter or a digit, where it is a
+/// parameter of an address far more often than a reference.
+fn legacy_reference(rest: &str, in_attribute: bool) -> Option<(usize, char)> {
+    let (len, decoded) = (2..=rest.len().min(6)).rev().find_map(|len| {
+        let name = rest.get(..len)?;
+        let decoded = named_reference(name)?;
+        (matches!(name, "amp" | "lt" | "gt" | "quot") || matches!(decoded, '\u{a0}'..='\u{ff}'))
+            .then_some((len, decoded))
+    })?;
+    let joined = rest
+        .as_bytes()
+        .get(len)
+        .is_some_and(|&next| next == b'=' || next.is_ascii_alphanumeric());
+    (!in_attribute || !joined).then_some((len, decoded))
+}
+
+/// The names of HTML 4 and, of those HTML5 added, the ones for ASCII
+/// punctuation and the few symbols models write.
+fn named_reference(name: &str) -> Option<char> {
+    Some(match name {
+        "AElig" => 'Æ',
+        "Aacute" => 'Á',
+        "Acirc" => 'Â',
+        "Agrave" => 'À',
+        "Alpha" => 'Α',
+        "Aring" => 'Å',
+        "Atilde" => 'Ã',
+        "Auml" => 'Ä',
+        "Beta" => 'Β',
+        "Ccedil" => 'Ç',
+        "Chi" => 'Χ',
+        "Dagger" => '‡',
+        "Delta" => 'Δ',
+        "ETH" => 'Ð',
+        "Eacute" => 'É',
+        "Ecirc" => 'Ê',
+        "Egrave" => 'È',
+        "Epsilon" => 'Ε',
+        "Eta" => 'Η',
+        "Euml" => 'Ë',
+        "Gamma" => 'Γ',
+        "Iacute" => 'Í',
+        "Icirc" => 'Î',
+        "Igrave" => 'Ì',
+        "Iota" => 'Ι',
+        "Iuml" => 'Ï',
+        "Kappa" => 'Κ',
+        "Lambda" => 'Λ',
+        "Mu" => 'Μ',
+        "Ntilde" => 'Ñ',
+        "Nu" => 'Ν',
+        "OElig" => 'Œ',
+        "Oacute" => 'Ó',
+        "Ocirc" => 'Ô',
+        "Ograve" => 'Ò',
+        "Omega" => 'Ω',
+        "Omicron" => 'Ο',
+        "Oslash" => 'Ø',
+        "Otilde" => 'Õ',
+        "Ouml" => 'Ö',
+        "Phi" => 'Φ',
+        "Pi" => 'Π',
+        "Prime" => '″',
+        "Psi" => 'Ψ',
+        "Rho" => 'Ρ',
+        "Scaron" => 'Š',
+        "Sigma" => 'Σ',
+        "THORN" => 'Þ',
+        "Tau" => 'Τ',
+        "Theta" => 'Θ',
+        "Uacute" => 'Ú',
+        "Ucirc" => 'Û',
+        "Ugrave" => 'Ù',
+        "Upsilon" => 'Υ',
+        "Uuml" => 'Ü',
+        "Xi" => 'Ξ',
+        "Yacute" => 'Ý',
+        "Yuml" => 'Ÿ',
+        "Zeta" => 'Ζ',
+        "aacute" => 'á',
+        "acirc" => 'â',
+        "acute" => '´',
+        "aelig" => 'æ',
+        "agrave" => 'à',
+        "alefsym" => 'ℵ',
+        "alpha" => 'α',
+        "amp" => '&',
+        "and" => '∧',
+        "ang" => '∠',
+        "apos" => '\'',
+        "approx" => '≈',
+        "aring" => 'å',
+        "ast" => '*',
+        "asymp" => '≈',
+        "atilde" => 'ã',
+        "auml" => 'ä',
+        "bdquo" => '„',
+        "beta" => 'β',
+        "brvbar" => '¦',
+        "bsol" => '\\',
+        "bull" => '•',
+        "cap" => '∩',
+        "ccedil" => 'ç',
+        "cedil" => '¸',
+        "cent" => '¢',
+        "check" => '✓',
+        "checkmark" => '✓',
+        "chi" => 'χ',
+        "circ" => 'ˆ',
+        "clubs" => '♣',
+        "colon" => ':',
+        "comma" => ',',
+        "commat" => '@',
+        "cong" => '≅',
+        "copy" => '©',
+        "crarr" => '↵',
+        "cross" => '✗',
+        "cup" => '∪',
+        "curren" => '¤',
+        "dArr" => '⇓',
+        "dagger" => '†',
+        "darr" => '↓',
+        "deg" => '°',
+        "delta" => 'δ',
+        "diams" => '♦',
+        "divide" => '÷',
+        "dollar" => '$',
+        "eacute" => 'é',
+        "ecirc" => 'ê',
+        "egrave" => 'è',
+        "empty" => '∅',
+        "emsp" => '\u{2003}',
+        "ensp" => '\u{2002}',
+        "epsilon" => 'ε',
+        "equals" => '=',
+        "equiv" => '≡',
+        "eta" => 'η',
+        "eth" => 'ð',
+        "euml" => 'ë',
+        "euro" => '€',
+        "excl" => '!',
+        "exist" => '∃',
+        "fnof" => 'ƒ',
+        "forall" => '∀',
+        "frac12" => '½',
+        "frac14" => '¼',
+        "frac34" => '¾',
+        "frasl" => '⁄',
+        "gamma" => 'γ',
+        "ge" => '≥',
+        "grave" => '`',
+        "gt" => '>',
+        "hArr" => '⇔',
+        "harr" => '↔',
+        "hearts" => '♥',
+        "hellip" => '…',
+        "iacute" => 'í',
+        "icirc" => 'î',
+        "iexcl" => '¡',
+        "igrave" => 'ì',
+        "image" => 'ℑ',
+        "infin" => '∞',
+        "int" => '∫',
+        "iota" => 'ι',
+        "iquest" => '¿',
+        "isin" => '∈',
+        "iuml" => 'ï',
+        "kappa" => 'κ',
+        "lArr" => '⇐',
+        "lambda" => 'λ',
+        "lang" => '〈',
+        "laquo" => '«',
+        "larr" => '←',
+        "lbrace" => '{',
+        "lbrack" => '[',
+        "lceil" => '⌈',
+        "lcub" => '{',
+        "ldquo" => '“',
+        "le" => '≤',
+        "lfloor" => '⌊',
+        "lowast" => '∗',
+        "lowbar" => '_',
+        "loz" => '◊',
+        "lpar" => '(',
+        "lrm" => '\u{200e}',
+        "lsaquo" => '‹',
+        "lsqb" => '[',
+        "lsquo" => '‘',
+        "lt" => '<',
+        "macr" => '¯',
+        "mdash" => '—',
+        "micro" => 'µ',
+        "middot" => '·',
+        "minus" => '−',
+        "mu" => 'μ',
+        "nabla" => '∇',
+        "nbsp" => '\u{a0}',
+        "ndash" => '–',
+        "ne" => '≠',
+        "ni" => '∋',
+        "not" => '¬',
+        "notin" => '∉',
+        "nsub" => '⊄',
+        "ntilde" => 'ñ',
+        "nu" => 'ν',
+        "num" => '#',
+        "oacute" => 'ó',
+        "ocirc" => 'ô',
+        "oelig" => 'œ',
+        "ograve" => 'ò',
+        "oline" => '‾',
+        "omega" => 'ω',
+        "omicron" => 'ο',
+        "oplus" => '⊕',
+        "or" => '∨',
+        "ordf" => 'ª',
+        "ordm" => 'º',
+        "oslash" => 'ø',
+        "otilde" => 'õ',
+        "otimes" => '⊗',
+        "ouml" => 'ö',
+        "para" => '¶',
+        "part" => '∂',
+        "percnt" => '%',
+        "period" => '.',
+        "permil" => '‰',
+        "perp" => '⊥',
+        "phi" => 'φ',
+        "pi" => 'π',
+        "piv" => 'ϖ',
+        "plus" => '+',
+        "plusmn" => '±',
+        "pound" => '£',
+        "prime" => '′',
+        "prod" => '∏',
+        "prop" => '∝',
+        "psi" => 'ψ',
+        "quest" => '?',
+        "quot" => '"',
+        "rArr" => '⇒',
+        "radic" => '√',
+        "rang" => '〉',
+        "raquo" => '»',
+        "rarr" => '→',
+        "rbrace" => '}',
+        "rbrack" => ']',
+        "rceil" => '⌉',
+        "rcub" => '}',
+        "rdquo" => '”',
+        "real" => 'ℜ',
+        "reg" => '®',
+        "rfloor" => '⌋',
+        "rho" => 'ρ',
+        "rlm" => '\u{200f}',
+        "rpar" => ')',
+        "rsaquo" => '›',
+        "rsqb" => ']',
+        "rsquo" => '’',
+        "sbquo" => '‚',
+        "scaron" => 'š',
+        "sdot" => '⋅',
+        "sect" => '§',
+        "semi" => ';',
+        "shy" => '\u{ad}',
+        "sigma" => 'σ',
+        "sigmaf" => 'ς',
+        "sim" => '∼',
+        "sol" => '/',
+        "spades" => '♠',
+        "star" => '☆',
+        "starf" => '★',
+        "sub" => '⊂',
+        "sube" => '⊆',
+        "sum" => '∑',
+        "sup" => '⊃',
+        "sup1" => '¹',
+        "sup2" => '²',
+        "sup3" => '³',
+        "supe" => '⊇',
+        "szlig" => 'ß',
+        "tau" => 'τ',
+        "there4" => '∴',
+        "theta" => 'θ',
+        "thetasym" => 'ϑ',
+        "thinsp" => '\u{2009}',
+        "thorn" => 'þ',
+        "tilde" => '˜',
+        "times" => '×',
+        "trade" => '™',
+        "uArr" => '⇑',
+        "uacute" => 'ú',
+        "uarr" => '↑',
+        "ucirc" => 'û',
+        "ugrave" => 'ù',
+        "uml" => '¨',
+        "upsih" => 'ϒ',
+        "upsilon" => 'υ',
+        "uuml" => 'ü',
+        "verbar" => '|',
+        "vert" => '|',
+        "weierp" => '℘',
+        "xi" => 'ξ',
+        "yacute" => 'ý',
+        "yen" => '¥',
+        "yuml" => 'ÿ',
+        "zeta" => 'ζ',
+        "zwj" => '\u{200d}',
+        "zwnj" => '\u{200c}',
+        _ => return None,
+    })
 }

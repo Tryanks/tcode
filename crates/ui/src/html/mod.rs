@@ -569,6 +569,20 @@ pub(crate) mod tests {
         assert_eq!(cx.opened_url().as_deref(), Some("https://example.com/a"));
     }
 
+    #[gpui::test]
+    fn an_address_is_the_one_its_character_references_spell(cx: &mut TestAppContext) {
+        let (_, cx) = show(
+            r#"<a href="https://example.com/&copy/&#x96;&rarr;?a=1&copy=2&amp;b=3">link</a>"#,
+            cx,
+        );
+        let link = cx.debug_bounds("visual").unwrap().origin + point(px(4.0), px(4.0));
+        cx.simulate_click(link, Modifiers::default());
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("https://example.com/©/–→?a=1&copy=2&b=3")
+        );
+    }
+
     /// Markup written without the tags HTML implies, each with a selector
     /// that matches only in the tree a browser builds from it.
     #[gpui::test]
