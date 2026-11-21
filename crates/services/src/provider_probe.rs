@@ -179,6 +179,7 @@ pub async fn probe_provider(
             .await
             .as_deref()
             .and_then(parse_grok_models_auth),
+        ProviderKind::Antigravity => probe_antigravity_auth(&program, &env).await,
         // Authentication over ACP is surfaced by the session protocol.
         ProviderKind::Acp => None,
     };
@@ -254,6 +255,79 @@ fn parse_grok_models_auth(output: &str) -> Option<ProviderAuth> {
         label: label.map(str::to_string),
         email: None,
     })
+}
+
+fn env_configured(env: &[(String, String)], key: &str) -> Option<String> {
+    match env.iter().rev().find(|(name, _)| name == key) {
+        Some((_, value)) => (!value.trim().is_empty()).then(|| value.clone()),
+        None => std::env::var(key)
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
+    }
+}
+
+async fn probe_antigravity_auth(program: &str, env: &[(String, String)]) -> Option<ProviderAuth> {
+    if env_configured(env, "GEMINI_API_KEY").is_some() {
+        return Some(ProviderAuth {
+            status: AuthStatus::Authenticated,
+            label: Some("Gemini API Key".into()),
+            email: None,
+        });
+    }
+    if env_configured(env, "AGY_ADC_AUTH")
+        .is_some_and(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+    {
+        return Some(ProviderAuth {
+            status: AuthStatus::Authenticated,
+            label: Some("Google Cloud ADC".into()),
+            email: None,
+        });
+    }
+    let output = provider_command(program, env)
+        .args(["--print", "/usage", "--output-format", "json"])
+        .output()
+        .await
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    parse_antigravity_usage_auth(output.status.success(), &stdout, &stderr)
+}
+
+fn parse_antigravity_usage_auth(success: bool, stdout: &str, stderr: &str) -> Option<ProviderAuth> {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+        if json.get("status").and_then(serde_json::Value::as_str) == Some("SUCCESS") {
+            return Some(ProviderAuth {
+                status: AuthStatus::Authenticated,
+                label: None,
+                email: None,
+            });
+        }
+        if let Some(error) = json.get("error").and_then(serde_json::Value::as_str)
+            && mentions_unauthenticated(error)
+        {
+            return Some(ProviderAuth {
+                status: AuthStatus::Unauthenticated,
+                label: None,
+                email: None,
+            });
+        }
+    }
+    if !success && (mentions_unauthenticated(stderr) || mentions_unauthenticated(stdout)) {
+        return Some(ProviderAuth {
+            status: AuthStatus::Unauthenticated,
+            label: None,
+            email: None,
+        });
+    }
+    None
+}
+
+fn mentions_unauthenticated(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("authentication required")
+        || lower.contains("not authenticated")
+        || lower.contains("not signed in")
+        || lower.contains("unauthenticated")
 }
 
 fn finalize_probe(
@@ -389,6 +463,7 @@ mod tests {
                 None,
             ),
             (ProviderKind::Cursor, "2025.01.02-abc1234", "2025.1.2", None),
+            (ProviderKind::Antigravity, "1.5.13", "1.5.13", None),
             (
                 ProviderKind::Codex,
                 "codex-cli (dev build)",

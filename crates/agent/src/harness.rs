@@ -131,6 +131,18 @@ const CODEX_ENDPOINT: Endpoint = Endpoint {
     presets: &[],
 };
 
+// Antigravity signs in through the OS keyring; GEMINI_API_KEY and AGY_ADC_AUTH
+// switch it off the Google account subscription whose quotas `/usage` reports.
+const ANTIGRAVITY_ENDPOINT: Endpoint = Endpoint {
+    base_url_env: "",
+    native_base_url: "",
+    key_envs: &["GEMINI_API_KEY"],
+    model_env: None,
+    backend_switches: &["AGY_ADC_AUTH"],
+    profiles: false,
+    presets: &[],
+};
+
 impl ProviderKind {
     /// This harness's CLI facts. ACP agents bring their own launch recipe and
     /// negotiate everything else over the session protocol.
@@ -234,6 +246,18 @@ impl ProviderKind {
                 sign_in_command: Some("grok login"),
                 config_dir_env: Some("GROK_HOME"),
                 default_config_dir: Some("~/.grok"),
+                ..none
+            },
+            ProviderKind::Antigravity => HarnessFacts {
+                binary_name: "agy",
+                install_command: Some(if windows {
+                    "irm https://antigravity.google/cli/install.ps1 | iex"
+                } else {
+                    "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+                }),
+                sign_in_command: Some("agy acp --login"),
+                endpoint: Some(ANTIGRAVITY_ENDPOINT),
+                native_mcp: Some(NativeMcpConfig::McpServersJson),
                 ..none
             },
             ProviderKind::Acp => none,

@@ -13,6 +13,8 @@ mod acp_session;
 #[cfg(feature = "process")]
 mod actor;
 #[cfg(feature = "process")]
+pub mod antigravity;
+#[cfg(feature = "process")]
 pub mod claude;
 mod claude_context;
 #[cfg(feature = "process")]
@@ -77,6 +79,7 @@ pub enum ProviderKind {
     OpenCode,
     Cursor,
     Grok,
+    Antigravity,
     /// Any agent speaking the Agent Client Protocol. Which one is carried
     /// separately ([`SessionOptions::acp`]) so this stays `Copy`: the native
     /// providers keep their own clients, and ACP covers the rest of the
@@ -318,13 +321,14 @@ pub enum OptionDescriptors {
 impl ProviderKind {
     /// The natively maintained providers, in the order provider lists present
     /// them.
-    pub const NATIVE: [ProviderKind; 6] = [
+    pub const NATIVE: [ProviderKind; 7] = [
         ProviderKind::ClaudeCode,
         ProviderKind::Codex,
         ProviderKind::Pi,
         ProviderKind::OpenCode,
         ProviderKind::Cursor,
         ProviderKind::Grok,
+        ProviderKind::Antigravity,
     ];
 
     /// Provider behavior consumed by runtime and UI policy.
@@ -696,6 +700,44 @@ impl ProviderKind {
                 session_transfer: false,
                 session_move: false,
             },
+            ProviderKind::Antigravity => Caps {
+                // `agy acp` steers a running turn when a second `session/prompt`
+                // arrives on the same session.
+                supports_steering: true,
+                supports_fork: false,
+                fork_at: false,
+                rewind: None,
+                manual_compaction: false,
+                goals: None,
+                per_turn_effort: false,
+                options_apply_live: true,
+                live_option_push: OptionIds::All,
+                confirmed_options: OptionIds::All,
+                background: None,
+                live_settings: true,
+                mcp_servers: true,
+                native_computer_use: false,
+                launch_args: true,
+                option_descriptors: OptionDescriptors::Wire,
+                home_path: false,
+                trust_project_extensions: false,
+                plugin_management: PluginManagement {
+                    actions: &[
+                        PluginActionKind::Install,
+                        PluginActionKind::Uninstall,
+                        PluginActionKind::Enable,
+                        PluginActionKind::Disable,
+                    ],
+                    marketplaces: false,
+                    scopes: &[PluginScope::User],
+                    source_install: true,
+                    unmanaged: None,
+                },
+                instruction_channel: InstructionChannel::SessionAppend,
+                account_login: false,
+                session_transfer: false,
+                session_move: false,
+            },
         }
     }
 
@@ -707,6 +749,7 @@ impl ProviderKind {
             ProviderKind::OpenCode => "OpenCode",
             ProviderKind::Cursor => "Cursor",
             ProviderKind::Grok => "Grok",
+            ProviderKind::Antigravity => "Antigravity",
             ProviderKind::Acp => "ACP agent",
         }
     }
@@ -1041,6 +1084,7 @@ pub async fn list_plugins(
         ProviderKind::ClaudeCode => claude_plugins::list(context).await,
         ProviderKind::Codex => codex::plugins::list(context).await,
         ProviderKind::Grok => grok::plugins::list(context).await,
+        ProviderKind::Antigravity => antigravity::plugins::list(context).await,
         ProviderKind::Pi => source_plugins::list_pi(context).await,
         ProviderKind::OpenCode => source_plugins::list_opencode(context).await,
         ProviderKind::Cursor | ProviderKind::Acp => Err(no_plugin_management(provider)),
@@ -1058,6 +1102,7 @@ pub async fn run_plugin_op(
         ProviderKind::ClaudeCode => claude_plugins::run(context, op).await,
         ProviderKind::Codex => codex::plugins::run(context, op).await,
         ProviderKind::Grok => grok::plugins::run(context, op).await,
+        ProviderKind::Antigravity => antigravity::plugins::run(context, op).await,
         ProviderKind::Pi => source_plugins::run_pi(context, op).await,
         ProviderKind::OpenCode => source_plugins::run_opencode(context, op).await,
         ProviderKind::Cursor | ProviderKind::Acp => Err(no_plugin_management(provider)),
@@ -1082,6 +1127,7 @@ pub fn transfer_session(
         | ProviderKind::OpenCode
         | ProviderKind::Cursor
         | ProviderKind::Grok
+        | ProviderKind::Antigravity
         | ProviderKind::Acp => Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             format!(
@@ -1111,7 +1157,7 @@ fn no_plugin_management(provider: ProviderKind) -> AgentError {
 
 /// Registry agents never offered for new sessions because they duplicate a
 /// native integration.
-pub const HIDDEN_ACP_AGENT_IDS: [&str; 7] = [
+pub const HIDDEN_ACP_AGENT_IDS: [&str; 8] = [
     "claude-acp",
     "codex-acp",
     "pi-acp",
@@ -1119,6 +1165,7 @@ pub const HIDDEN_ACP_AGENT_IDS: [&str; 7] = [
     "opencode-v2",
     "cursor",
     "grok-build",
+    "antigravity-acp",
 ];
 
 /// One ACP agent a session can run: its registry identity plus how to launch it.
@@ -1325,7 +1372,7 @@ impl LaunchEnv {
                 ProviderKind::Pi => &["PI_CODING_AGENT_DIR"],
                 ProviderKind::Cursor => &["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"],
                 ProviderKind::Grok => &["GROK_HOME"],
-                ProviderKind::OpenCode => &[],
+                ProviderKind::OpenCode | ProviderKind::Antigravity => &[],
                 // ACP agents carry their own env in the launch recipe; there is
                 // no protocol-level home concept to override.
                 ProviderKind::Acp => &[],
@@ -1721,6 +1768,39 @@ fn permission_table(provider: ProviderKind) -> Option<PermissionTable> {
                 ),
             ] as &[(&str, &str, &str, ApprovalClass)],
         ),
+        ProviderKind::Antigravity => (
+            "mode",
+            ApplyTiming::Live,
+            "default",
+            "auto",
+            "auto",
+            &[
+                (
+                    "default",
+                    "Default",
+                    "Ask before edits and commands, per your permission settings.",
+                    ApprovalClass::Manual,
+                ),
+                (
+                    "accept-edits",
+                    "Accept edits",
+                    "Approve file edits in the workspace without asking.",
+                    ApprovalClass::Manual,
+                ),
+                (
+                    "auto",
+                    "Auto",
+                    "Approve edits and safe commands; ask before irreversible actions.",
+                    ApprovalClass::Reviewed,
+                ),
+                (
+                    "plan",
+                    "Plan",
+                    "Plan carefully before executing a task.",
+                    ApprovalClass::Manual,
+                ),
+            ] as &[(&str, &str, &str, ApprovalClass)],
+        ),
         ProviderKind::Pi | ProviderKind::Acp => return None,
     })
 }
@@ -1882,6 +1962,14 @@ mod permission_tests {
                 "unrestricted",
                 "unrestricted",
                 "unrestricted",
+            ),
+            (
+                ProviderKind::Antigravity,
+                "mode",
+                ApplyTiming::Live,
+                "default",
+                "auto",
+                "auto",
             ),
         ] {
             let OptionDescriptor::Select {
@@ -2241,6 +2329,9 @@ pub async fn list_models(
         ProviderKind::OpenCode => opencode::list_models(binary_path, launch_env, processes).await,
         ProviderKind::Cursor => cursor::list_models(binary_path, launch_env, processes).await,
         ProviderKind::Grok => grok::list_models(binary_path, launch_env, processes).await,
+        ProviderKind::Antigravity => {
+            antigravity::list_models(binary_path, launch_env, processes).await
+        }
         // Each ACP agent has its own models, which `acp::probe_catalog` lists.
         ProviderKind::Acp => Ok(Vec::new()),
     }?;
@@ -2513,6 +2604,7 @@ pub async fn start_session(
         ProviderKind::OpenCode => opencode::start(opts).await,
         ProviderKind::Cursor => cursor::start(opts).await,
         ProviderKind::Grok => grok::start(opts).await,
+        ProviderKind::Antigravity => antigravity::start(opts).await,
         ProviderKind::Acp => acp::start(opts).await,
     }
 }
@@ -3764,6 +3856,7 @@ mod launch_env_tests {
                 &["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"],
             ),
             (ProviderKind::Grok, &["GROK_HOME"]),
+            (ProviderKind::Antigravity, &[]),
             (ProviderKind::OpenCode, &[]),
             (ProviderKind::Acp, &[]),
         ] {
@@ -4017,6 +4110,7 @@ mod thread_item_serde_tests {
         for (kind, wire) in [
             (ProviderKind::Cursor, r#""cursor""#),
             (ProviderKind::Grok, r#""grok""#),
+            (ProviderKind::Antigravity, r#""antigravity""#),
         ] {
             assert_eq!(serde_json::to_string(&kind).unwrap(), wire);
             assert_eq!(serde_json::from_str::<ProviderKind>(wire).unwrap(), kind);

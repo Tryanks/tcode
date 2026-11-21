@@ -64,8 +64,8 @@ pub fn npm_package(provider: ProviderKind) -> &'static str {
         ProviderKind::Pi => "@earendil-works/pi-coding-agent",
         ProviderKind::OpenCode => "@opencode/cli",
         ProviderKind::Grok => "@xai-official/grok",
-        // Cursor's CLI is not published to npm.
-        ProviderKind::Cursor | ProviderKind::Acp => "",
+        // Cursor and Antigravity CLIs are not published to npm.
+        ProviderKind::Cursor | ProviderKind::Antigravity | ProviderKind::Acp => "",
     }
 }
 

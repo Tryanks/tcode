@@ -25,10 +25,11 @@ is derived from it. **Process** is how to build, check and submit work.
    downward: `app → ui/runtime/services`, `ui → runtime/core`,
    `runtime → services/core` and lower adapters, `services → core`.
 
-3. **Six native providers, then ACP.** Claude Code, Codex, pi, OpenCode, Cursor
-   and Grok are maintained natively, permanently, over each CLI's own protocol.
-   No seventh native integration is planned; every other agent connects over
-   ACP, and ACP registry entries that duplicate a native integration are hidden.
+3. **Seven native providers, then ACP.** Claude Code, Codex, pi, OpenCode,
+   Cursor, Grok and Antigravity are maintained natively, permanently, over each
+   CLI's own protocol. No eighth native integration is planned; every other
+   agent connects over ACP, and ACP registry entries that duplicate a native
+   integration are hidden.
 
 4. **One canonical event stream.** Every provider normalizes into one
    `AgentEvent` stream and accepts one `SessionCommand` set
@@ -128,8 +129,9 @@ is derived from it. **Process** is how to build, check and submit work.
 ### Reporting bugs and asking for features
 
 Open an [issue](https://github.com/Tryanks/tcode/issues). For a bug, include
-your OS, which agent (Claude Code, Codex, pi, OpenCode, Cursor, Grok, or which
-ACP agent), what you did, what happened and what you expected. A screenshot
+your OS, which agent (Claude Code, Codex, pi, OpenCode, Cursor, Grok,
+Antigravity, or which ACP agent), what you did, what happened and what you
+expected. A screenshot
 beats a paragraph for anything visual. If you are unsure whether something is a
 bug or intended, open an issue anyway — the answer is worth writing down either
 way.
@@ -180,7 +182,7 @@ Platform prerequisites:
   unavailable.
 
 Provider CLIs are resolved from `PATH` (`claude`, `codex`, `pi`, `opencode`,
-`cursor-agent`, `grok`) and can be overridden in **Settings → Harnesses**.
+`cursor-agent`, `grok`, `agy`) and can be overridden in **Settings → Harnesses**.
 
 ### Before you open a pull request
 
@@ -353,8 +355,8 @@ crates/ios, crates/android, crates/web
                          `tcode_ui::run_shell`
 crates/platform/*        GPUI platform backends for iOS and Android
 crates/agent             provider clients (no GPUI) — claude.rs, codex.rs, pi.rs,
-                         opencode.rs, cursor.rs, grok.rs, acp.rs; the ACP
-                         session they share is acp_session.rs
+                         opencode.rs, cursor.rs, grok.rs, antigravity.rs, acp.rs;
+                         the ACP session they share is acp_session.rs
 crates/term              terminal implementation (PTY, host-side emulator)
 crates/mcp-host          shared authenticated loopback host for in-process MCP servers
 crates/preview-mcp       MCP server exposing the preview browser to the agent

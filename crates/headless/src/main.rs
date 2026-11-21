@@ -739,6 +739,7 @@ mod tests {
             ProviderKind::OpenCode,
             ProviderKind::Cursor,
             ProviderKind::Grok,
+            ProviderKind::Antigravity,
         ] {
             assert!(!settings.provider(kind).enabled);
         }

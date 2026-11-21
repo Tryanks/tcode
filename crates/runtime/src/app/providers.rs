@@ -1591,7 +1591,8 @@ impl AppState {
             | ProviderKind::Pi
             | ProviderKind::OpenCode
             | ProviderKind::Cursor
-            | ProviderKind::Grok => self
+            | ProviderKind::Grok
+            | ProviderKind::Antigravity => self
                 .settings
                 .resolved_profile(
                     profile_id.unwrap_or_else(|| Settings::builtin_profile_id(provider)),
@@ -2044,7 +2045,8 @@ pub(super) fn session_options(
             ProviderKind::ClaudeCode
             | ProviderKind::OpenCode
             | ProviderKind::Cursor
-            | ProviderKind::Grok => provider_settings.extra_args(),
+            | ProviderKind::Grok
+            | ProviderKind::Antigravity => provider_settings.extra_args(),
             ProviderKind::Pi => provider_settings.extra_args().map(|mut extra_args| {
                 if provider_settings.pi.trust_project_extensions {
                     extra_args.push("--approve".into());

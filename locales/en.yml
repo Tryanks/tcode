@@ -1212,6 +1212,7 @@ permission:
     permissions: "Permissions"
     approvalMode: "Permissions"
     permission_mode: "Permissions"
+    mode: "Permissions"
   unavailable:
     "1": "Not allowed by your configuration"
     "2": "Inherited permission configuration"
@@ -1266,6 +1267,11 @@ permission:
       full_access: "No sandbox and no prompts."
     approvalMode:
       unrestricted: "Every tool call runs without asking"
+    mode:
+      default: "Ask before edits and commands, per your permission settings."
+      accept-edits: "Approve file edits in the workspace without asking."
+      auto: "Approve edits and safe commands; ask before irreversible actions."
+      plan: "Plan carefully before executing a task."
 approval:
   command_requested: "Command approval requested"
   file_read_requested: "File-read approval requested"

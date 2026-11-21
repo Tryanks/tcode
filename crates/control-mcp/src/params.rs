@@ -367,7 +367,7 @@ pub struct StartThreadParams {
     pub provider: String,
     #[serde(default)]
     #[schemars(
-        description = "Installed ACP agent id from list_providers' acp_agents (for example custom:antigravity); required when provider is acp and refused for native providers."
+        description = "Installed ACP agent id from list_providers' acp_agents (for example gemini); required when provider is acp and refused for native providers."
     )]
     pub acp_agent: Option<String>,
     #[serde(default)]

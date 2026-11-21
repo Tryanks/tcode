@@ -1,6 +1,6 @@
 //! Headless end-to-end probe for provider clients.
 //!
-//! Catalog mode: `probe --list-models <codex|claude|pi|opencode|cursor|grok> [--binary <path>]`.
+//! Catalog mode: `probe --list-models <codex|claude|pi|opencode|cursor|grok|antigravity> [--binary <path>]`.
 //! Plugin mode: `probe plugins <provider> [--home <dir>] [--project <dir>] [<op> …]`
 //! lists the native plugin catalog after running the optional operation:
 //! `install|update <id> <scope> [--accept <sha256>]`, `uninstall|enable|disable <id> <scope>`,
@@ -47,11 +47,11 @@ enum ProbeMode {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: probe <codex|claude|pi|opencode|cursor|grok|acp> <prompt> [cwd] \
+        "usage: probe <codex|claude|pi|opencode|cursor|grok|antigravity|acp> <prompt> [cwd] \
          [--option <id>=<value>] [acp-command args…] [flags]"
     );
     eprintln!(
-        "       probe --list-models <codex|claude|pi|opencode|cursor|grok> [--binary <path>]"
+        "       probe --list-models <codex|claude|pi|opencode|cursor|grok|antigravity> [--binary <path>]"
     );
     eprintln!("       probe plugins <provider> [--home <dir>] [--project <dir>] [<op> …]");
     std::process::exit(2);
@@ -155,6 +155,7 @@ fn parse_provider(arg: Option<&str>) -> ProviderKind {
         Some("opencode") => ProviderKind::OpenCode,
         Some("cursor") => ProviderKind::Cursor,
         Some("grok") => ProviderKind::Grok,
+        Some("antigravity") | Some("agy") => ProviderKind::Antigravity,
         Some("acp") => ProviderKind::Acp,
         _ => usage(),
     }

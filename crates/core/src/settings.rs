@@ -219,6 +219,7 @@ pub fn provider_key(provider: ProviderKind) -> &'static str {
         ProviderKind::OpenCode => "opencode",
         ProviderKind::Cursor => "cursor",
         ProviderKind::Grok => "grok",
+        ProviderKind::Antigravity => "antigravity",
         // ACP agents are not one provider but many: their per-agent settings
         // live in `Settings::acp_agents`, keyed by registry id. This bucket only
         // ever holds the shared fallbacks (it is never written by the ACP card).
@@ -472,7 +473,8 @@ impl ResolvedProfile {
                     || (endpoint.backend_switches.contains(&var.name.as_str())
                         && var.value != "0"
                         && var.value != "false")
-                    || (var.name == endpoint.base_url_env
+                    || (!endpoint.base_url_env.is_empty()
+                        && var.name == endpoint.base_url_env
                         && (var.sensitive
                             || var.value.trim().trim_end_matches('/').to_ascii_lowercase()
                                 != endpoint.native_base_url)))
@@ -487,7 +489,8 @@ impl ResolvedProfile {
         };
         !Settings::is_builtin_profile_id(&self.id)
             && self.settings.env.iter().any(|var| {
-                var.name == endpoint.base_url_env || endpoint.key_envs.contains(&var.name.as_str())
+                (!endpoint.base_url_env.is_empty() && var.name == endpoint.base_url_env)
+                    || endpoint.key_envs.contains(&var.name.as_str())
             })
     }
 }
@@ -1357,6 +1360,7 @@ impl Settings {
         match kind {
             ProviderKind::Cursor => "native:cursor",
             ProviderKind::Grok => "native:grok",
+            ProviderKind::Antigravity => "native:antigravity",
             ProviderKind::ClaudeCode
             | ProviderKind::Codex
             | ProviderKind::Pi

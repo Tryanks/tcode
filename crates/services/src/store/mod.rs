@@ -827,6 +827,7 @@ impl SessionStore {
             ProviderKind::OpenCode => "opencode",
             ProviderKind::Cursor => "cursor",
             ProviderKind::Grok => "grok",
+            ProviderKind::Antigravity => "antigravity",
             // ACP agents publish their models over the wire at session start
             // (`AgentEvent::ProviderOptions`), so there is no catalog to cache.
             ProviderKind::Acp => "acp",
@@ -844,6 +845,7 @@ impl SessionStore {
                     ProviderKind::OpenCode => "opencode",
                     ProviderKind::Cursor => "cursor",
                     ProviderKind::Grok => "grok",
+                    ProviderKind::Antigravity => "antigravity",
                     ProviderKind::Acp => "acp",
                 };
                 let home = home.as_deref().map_or_else(

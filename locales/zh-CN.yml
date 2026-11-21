@@ -1205,6 +1205,7 @@ permission:
     permissions: "权限"
     approvalMode: "权限"
     permission_mode: "权限"
+    mode: "权限"
   unavailable:
     "1": "你的配置不允许"
     "2": "继承的权限配置"
@@ -1259,6 +1260,11 @@ permission:
       full_access: "没有沙箱，也不会询问。"
     approvalMode:
       unrestricted: "每次工具调用都无需询问直接运行"
+    mode:
+      default: "按照你的权限设置，在编辑和执行命令前询问。"
+      accept-edits: "无需询问即批准工作区内的文件编辑。"
+      auto: "自动批准编辑和安全命令；不可逆操作前询问你。"
+      plan: "执行任务前先仔细规划。"
 approval:
   command_requested: "请求批准执行命令"
   file_read_requested: "请求批准读取文件"

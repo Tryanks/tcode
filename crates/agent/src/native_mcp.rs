@@ -88,6 +88,7 @@ fn path(provider: ProviderKind, launch_env: &LaunchEnv) -> Option<PathBuf> {
         ProviderKind::ClaudeCode => crate::claude::account_file(launch_env),
         ProviderKind::Codex => crate::codex::home_dir(launch_env).map(|h| h.join("config.toml")),
         ProviderKind::Pi => crate::pi::agent_dir(launch_env).map(|dir| dir.join("mcp.json")),
+        ProviderKind::Antigravity => crate::antigravity::mcp_config_path(launch_env),
         ProviderKind::OpenCode | ProviderKind::Cursor | ProviderKind::Grok | ProviderKind::Acp => {
             None
         }
@@ -114,13 +115,22 @@ fn parse(config: NativeMcpConfig, text: &str) -> Result<Vec<NativeMcpServer>, St
         .filter_map(|(name, server)| {
             let (remote, target) = match server.get("command") {
                 Some(command) => (false, command.as_str()?.to_owned()),
-                None => (true, origin(server.get("url")?.as_str()?)),
+                None => (
+                    true,
+                    origin(
+                        server
+                            .get("url")
+                            .or_else(|| server.get("serverUrl"))?
+                            .as_str()?,
+                    ),
+                ),
             };
             Some(NativeMcpServer {
                 name: name.clone(),
                 remote,
                 target,
-                enabled: server.get("enabled").and_then(Value::as_bool) != Some(false),
+                enabled: server.get("enabled").and_then(Value::as_bool) != Some(false)
+                    && server.get("disabled").and_then(Value::as_bool) != Some(true),
             })
         })
         .collect())
@@ -184,6 +194,10 @@ mod tests {
             "probe-stdio": {"command": "/usr/bin/true", "args": ["--flag"], "env": {"SECRET": "s3cret"}},
             "probe-http": {"url": "https://mcp.example.com/mcp"}
         }}"#;
+        let antigravity = r#"{"mcpServers": {
+            "probe-stdio": {"command": "/usr/bin/true", "args": ["--flag"]},
+            "probe-http": {"serverUrl": "https://user:s3cret@mcp.example.com/mcp?token=s3cret", "disabled": true}
+        }}"#;
         for (config, text, http_target, http_enabled) in [
             (
                 NativeMcpConfig::McpServersJson,
@@ -202,6 +216,12 @@ mod tests {
                 pi,
                 "https://mcp.example.com",
                 true,
+            ),
+            (
+                NativeMcpConfig::McpServersJson,
+                antigravity,
+                "https://mcp.example.com",
+                false,
             ),
         ] {
             let mut listed = parse(config, text).unwrap();
