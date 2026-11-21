@@ -11,8 +11,7 @@ use rmcp::{
 };
 use serde::Deserialize;
 
-/// Maximum accepted HTML payload size (512 KiB).
-const MAX_HTML_BYTES: usize = 512 * 1024;
+const MAX_HTML_BYTES: usize = agent::McpRegistration::VISUALIZE_MAX_HTML_BYTES;
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct VisualizeInput {
@@ -22,8 +21,10 @@ pub struct VisualizeInput {
     /// JavaScript and external URLs are not executed or fetched. Provide either `html` or `path`.
     #[serde(default)]
     pub html: Option<String>,
-    /// Optional absolute path to a local `.html` file on the host. When provided, its contents
-    /// are read and embedded into the tool result so remote clients and history keep working.
+    /// Absolute path of an HTML file on the host, for a page too long to pass inline: write
+    /// the file, then pass its path. The card reads the file itself each time it is shown,
+    /// so leave the file in place; its contents are not returned to you. Ignored when `html`
+    /// is given.
     #[serde(default)]
     pub path: Option<String>,
     /// Optional concise subtitle shown beside or below the title.
@@ -68,7 +69,7 @@ impl VisualizeTools {
     }
 
     #[tool(
-        description = "Show a self-contained static HTML + CSS + inline SVG visual card directly in this conversation thread (pass inline `html` or a host `.html` file `path`). Do not announce the tool or restate everything shown in the visual; keep prose focused on what it helps the user see or decide. Use Markdown tables for simple tables and Mermaid for simple node-edge graphs; use `visualize` for richer charts, metric dashboards, architecture overviews, comparison matrices, timelines, and visual explainers. Layout: fluid width (roughly 360px on phone to 728px on desktop), let content determine height (avoid `vh` and `height: 100%`), leave the outer root without an extra redundant page frame/background. Styling: Flexbox, CSS Grid (including `repeat(auto-fit, minmax(..., 1fr))`), tables, `linear-gradient`, `box-shadow`, `light-dark()`, `color-mix()`, `@media (prefers-color-scheme)`, theme CSS variables (`--background`, `--foreground`, `--card`, `--muted`, `--muted-foreground`, `--border`, `--primary`, `--accent`, `--destructive`, `--success`, `--warning`, `--info`, `--chart-1`..`--chart-6`, `--font-sans`, `--font-mono`, `--radius`), and inline `<svg viewBox=\"...\">` (which also resolves `var(--...)` and `currentColor`). Static only: no JavaScript and no external URLs."
+        description = "Show a self-contained static HTML + CSS + inline SVG visual card directly in this conversation thread. Pass the page inline as `html`, or for a very long page write it to a file on the host and pass that file's absolute `path`: the card reads the file itself, its contents are not returned to you, and the file must stay in place for the card to show. Do not announce the tool or restate everything shown in the visual; keep prose focused on what it helps the user see or decide. Use Markdown tables for simple tables and Mermaid for simple node-edge graphs; use `visualize` for richer charts, metric dashboards, architecture overviews, comparison matrices, timelines, and visual explainers. Layout: fluid width (roughly 360px on phone to 728px on desktop), let content determine height (avoid `vh` and `height: 100%`), leave the outer root without an extra redundant page frame/background. Styling: Flexbox, CSS Grid (including `repeat(auto-fit, minmax(..., 1fr))`), tables, `linear-gradient`, `box-shadow`, `light-dark()`, `color-mix()`, `@media (prefers-color-scheme)`, theme CSS variables (`--background`, `--foreground`, `--card`, `--muted`, `--muted-foreground`, `--border`, `--primary`, `--accent`, `--destructive`, `--success`, `--warning`, `--info`, `--chart-1`..`--chart-6`, `--font-sans`, `--font-mono`, `--radius`), and inline `<svg viewBox=\"...\">` (which also resolves `var(--...)` and `currentColor`). Static only: no JavaScript and no external URLs."
     )]
     async fn visualize(&self, Parameters(input): Parameters<VisualizeInput>) -> CallToolResult {
         render_response(&input)
@@ -76,72 +77,67 @@ impl VisualizeTools {
 }
 
 fn render_response(input: &VisualizeInput) -> CallToolResult {
+    let refused = |reason: String| CallToolResult::error(vec![ContentBlock::text(reason)]);
     let title = input.title.trim();
     if title.is_empty() {
-        return CallToolResult::error(vec![ContentBlock::text("title must not be empty")]);
+        return refused("title must not be empty".into());
     }
-    let (html, from_path) = match (&input.html, &input.path) {
-        (Some(html), _) if !html.trim().is_empty() => (html.clone(), false),
-        (_, Some(path)) if !path.trim().is_empty() => {
-            let trimmed = path.trim();
-            let p = std::path::Path::new(trimmed);
-            if !p.is_absolute() {
-                return CallToolResult::error(vec![ContentBlock::text(
-                    "path must be an absolute file path",
-                )]);
-            }
-            let meta = match std::fs::metadata(p) {
-                Ok(m) => m,
-                Err(e) => {
-                    return CallToolResult::error(vec![ContentBlock::text(format!(
-                        "failed to read html file {trimmed}: {e}"
-                    ))]);
-                }
-            };
-            if meta.len() > MAX_HTML_BYTES as u64 {
-                return CallToolResult::error(vec![ContentBlock::text(format!(
-                    "html file exceeds maximum size of {MAX_HTML_BYTES} bytes"
-                ))]);
-            }
-            match std::fs::read_to_string(p) {
-                Ok(contents) => (contents, true),
-                Err(e) => {
-                    return CallToolResult::error(vec![ContentBlock::text(format!(
-                        "failed to read html file {trimmed}: {e}"
-                    ))]);
-                }
-            }
+    let inline = input.html.as_deref().filter(|html| !html.trim().is_empty());
+    let path = input.path.as_deref().map(str::trim).unwrap_or_default();
+    let html = match inline {
+        Some(html) if html.len() > MAX_HTML_BYTES => {
+            return refused(format!(
+                "html exceeds maximum size of {MAX_HTML_BYTES} bytes"
+            ));
         }
-        _ => {
-            return CallToolResult::error(vec![ContentBlock::text(
-                "either non-empty `html` or `path` must be provided",
-            )]);
+        Some(html) => std::borrow::Cow::Borrowed(html),
+        None if path.is_empty() => {
+            return refused("either non-empty `html` or `path` must be provided".into());
         }
+        None => match read_page(std::path::Path::new(path)) {
+            Ok(html) => std::borrow::Cow::Owned(html),
+            Err(reason) => return refused(format!("cannot show {path}: {reason}")),
+        },
     };
-    if html.trim().is_empty() {
-        return CallToolResult::error(vec![ContentBlock::text("html must not be empty")]);
-    }
-    if html.len() > MAX_HTML_BYTES {
-        return CallToolResult::error(vec![ContentBlock::text(format!(
-            "html exceeds maximum size of {MAX_HTML_BYTES} bytes"
-        ))]);
-    }
-    let has_script = contains_script_tag(&html);
     let mut payload = serde_json::json!({
         "rendered": true,
         "title": title,
     });
-    // Embed file-backed HTML into the tool result so remote clients and
-    // persisted transcripts stay self-contained even if the host file changes.
-    if from_path {
-        payload["html"] = serde_json::Value::String(html);
-    }
-    if has_script {
+    if contains_script_tag(&html) {
         payload["note"] = serde_json::Value::String(
             "JavaScript (<script>) is not executed; only static HTML, CSS, and inline SVG are rendered.".into(),
         );
     }
     CallToolResult::success(vec![ContentBlock::text(payload.to_string())])
+}
+
+/// The page in the file at `path`. The card reads the file itself, from the client; it is
+/// read here so the model is told now when the card would have nothing to draw.
+fn read_page(path: &std::path::Path) -> Result<String, String> {
+    use std::io::Read as _;
+
+    if !path.is_absolute() {
+        return Err("path must be an absolute file path".into());
+    }
+    // Before it is opened: opening a FIFO waits for a writer, and a device has no end.
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("not a regular file".into());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(MAX_HTML_BYTES as u64 + 1).read_to_end(&mut bytes))
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > MAX_HTML_BYTES {
+        return Err(format!(
+            "file exceeds maximum size of {MAX_HTML_BYTES} bytes"
+        ));
+    }
+    let html = String::from_utf8(bytes).map_err(|_| "file is not UTF-8 text".to_owned())?;
+    if html.trim().is_empty() {
+        return Err("file is empty".into());
+    }
+    Ok(html)
 }
 
 fn contains_script_tag(html: &str) -> bool {
@@ -179,7 +175,10 @@ architecture overview, comparison matrix, timeline, or visual explainer communic
 clearer than prose or ASCII art. Prefer standard Markdown tables for plain tables and \
 Mermaid fences for simple node-edge diagrams; use `visualize` for rich static layouts \
 and custom inline SVG graphics. Do not announce the tool or restate the visual in prose — \
-focus text only on key takeaways or decisions. Output self-contained static HTML + `<style>` \
+focus text only on key takeaways or decisions. Pass the page inline as `html`; for a very long \
+page, write it to a file on the host and pass that file's absolute `path` instead: the card reads \
+the file itself, its contents are not returned to you, and the file must stay in place for the \
+card to show. Output self-contained static HTML + `<style>` \
 + inline `<svg viewBox=\"...\">` (no `<script>`, no external URLs, no `vh` or `height: 100%`, \
 no redundant outer page frame). Use built-in theme CSS variables (`--background`, `--foreground`, \
 `--card`, `--muted`, `--muted-foreground`, `--border`, `--primary`, `--accent`, `--destructive`, \
@@ -246,22 +245,54 @@ mod tests {
         assert!(value["note"].as_str().unwrap().contains("JavaScript"));
     }
 
-    #[test]
-    fn reads_html_from_path_and_embeds_into_result() {
-        let dir = std::env::temp_dir();
-        let file = dir.join(format!("tcode-vis-test-{}.html", std::process::id()));
-        std::fs::write(&file, "<div>from file</div>").unwrap();
-        let res = render_response(&VisualizeInput {
+    /// A directory of the test's own.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("tcode-visualize-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn from_file(path: &std::path::Path) -> CallToolResult {
+        render_response(&VisualizeInput {
             title: "File Visual".into(),
             html: None,
-            path: Some(file.to_string_lossy().into_owned()),
+            path: Some(path.to_string_lossy().into_owned()),
             description: None,
-        });
-        let _ = std::fs::remove_file(&file);
-        assert_ne!(res.is_error, Some(true));
-        let text = res.content[0].as_text().unwrap().text.as_str();
-        let value: serde_json::Value = serde_json::from_str(text).unwrap();
-        assert_eq!(value["rendered"], true);
-        assert_eq!(value["html"], "<div>from file</div>");
+        })
+    }
+
+    /// A page passed as a file is for the card: none of it goes back to the model.
+    #[test]
+    fn a_file_page_is_accepted_without_returning_its_contents() {
+        let dir = scratch("accepted");
+        let page = dir.join("page.html");
+        std::fs::write(&page, "<div>from file</div>").unwrap();
+        let result = from_file(&page);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_ne!(result.is_error, Some(true));
+        let text = result.content[0].as_text().unwrap().text.as_str();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(text).unwrap(),
+            serde_json::json!({ "rendered": true, "title": "File Visual" })
+        );
+    }
+
+    #[test]
+    fn a_path_that_is_no_readable_page_is_refused() {
+        let dir = scratch("refused");
+        let oversized = dir.join("oversized.html");
+        std::fs::write(&oversized, "a".repeat(MAX_HTML_BYTES + 1)).unwrap();
+        let refused = [
+            ("a directory", from_file(&dir)),
+            ("a missing file", from_file(&dir.join("missing.html"))),
+            ("an oversized file", from_file(&oversized)),
+        ];
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        for (what, result) in refused {
+            assert_eq!(result.is_error, Some(true), "{what} was accepted");
+        }
     }
 }
