@@ -316,7 +316,7 @@ impl Element for MarkdownView {
                                     title,
                                 }),
                             );
-                            match state.read(cx).resolve_link(&url) {
+                            match state.read(cx).resolve_link(&url, cx) {
                                 LinkTarget::Web(address) => menu.menu(
                                     crate::tr!("markdown.image_copy_address").into_owned(),
                                     Box::new(CopyText(address)),

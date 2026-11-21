@@ -1449,6 +1449,7 @@ errors:
   provider_closed: "%{harness} のセッションが予期せず終了しました。"
   persist_event: "イベントを保存できませんでした：%{error}"
   export_thread: "スレッドをエクスポートできませんでした：%{error}"
+  download_file: "%{name} をダウンロードできませんでした：%{error}"
   worktree_add: "ワークツリーを作成できませんでした：%{error}"
   worktree_remove: "ワークツリーを削除できませんでした：%{error}"
   orphan_sweep_skipped: "スレッドを読み込めなかったため、放置されたワークツリーを整理しませんでした：%{error}"

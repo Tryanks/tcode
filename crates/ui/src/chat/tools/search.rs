@@ -168,6 +168,7 @@ fn result_row(id: &str, index: usize, hit: &SearchHit, ctx: &ToolCtx<'_, '_>) ->
     };
     let selector = format!("tool-result-{id}-{index}");
     let open = full.clone();
+    let host = ctx.chat.workspace_store.read(cx).image_host();
     let menu_path = full.to_string_lossy().into_owned();
     let menu_base = ctx.cwd.to_path_buf();
     let accent = theme.accent;
@@ -200,7 +201,7 @@ fn result_row(id: &str, index: usize, hit: &SearchHit, ctx: &ToolCtx<'_, '_>) ->
                     .child(crate::widgets::fade_text(text.trim().to_owned())),
             )
         })
-        .on_click(move |_, _, cx| cx.open_with_system(&open))
+        .on_click(move |_, window, cx| crate::host_file::open(host, &open, window, cx))
         .context_menu(move |menu, _, _| menu.path_items(&menu_path, Some(&menu_base)))
         .into_any_element()
 }
