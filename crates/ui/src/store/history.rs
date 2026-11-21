@@ -1,7 +1,7 @@
 use super::*;
 use tcode_core::session::{Author, MessageOrigin};
 
-pub(crate) const HISTORY_WINDOW_SCREENS: f32 = 6.;
+pub(super) const HISTORY_WINDOW_SCREENS: f32 = 6.;
 
 /// How long the reader stays at the tail before the pages fetched above it
 /// are dropped, so a glance down and back up does not fetch them again.

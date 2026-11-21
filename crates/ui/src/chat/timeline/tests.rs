@@ -1355,3 +1355,69 @@ fn a_page_with_reused_item_ids_keeps_the_reader_in_place(cx: &mut TestAppContext
     );
     assert_same_position(cx, "after unrelated store notify");
 }
+
+/// The scrollbar spans the whole thread before it is held: the turns not
+/// held yet are reserved at the height of those held. A reader who goes to
+/// the top stays at the top, as the scrollbar shows them, while the pages
+/// fill the thread in below them.
+#[gpui::test]
+fn a_reader_at_the_top_stays_there_as_the_pages_fill_the_thread_in(cx: &mut TestAppContext) {
+    use gpui::{FollowMode, ListOffset, px};
+    use std::time::Duration;
+
+    const TURNS: usize = 40;
+    let events: Vec<_> = (0..TURNS)
+        .flat_map(|turn| {
+            [
+                agent::AgentEvent::TurnStarted {
+                    turn_id: turn.to_string(),
+                },
+                user_event(&format!("user-{turn}"), &format!("Question {turn}")),
+                answer_event(
+                    &format!("answer-{turn}"),
+                    &format!("Answer {turn}, one paragraph of several.\n\n").repeat(8),
+                ),
+                agent::AgentEvent::TurnCompleted {
+                    turn_id: turn.to_string(),
+                    status: agent::TurnStatus::Completed,
+                    usage: None,
+                },
+            ]
+        })
+        .collect();
+    // The window holds the last eight turns, four records each.
+    let mut thread = ScriptedThread::new(cx, events, 4 * (TURNS - 8), false);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (view, cx) = thread.open(cx);
+    draw_settled(cx);
+    let list = view.read_with(cx, |chat, _| chat.list_state.clone());
+    let extent = list.max_offset_for_scrollbar().y;
+
+    list.set_follow_mode(FollowMode::Normal);
+    list.scroll_to(ListOffset {
+        item_ix: 0,
+        offset_in_item: px(0.),
+    });
+    view.update(cx, |_, cx| cx.notify());
+    draw_settled(cx);
+    let mut pages = 0;
+    // Pages of four turns.
+    while thread.answer_page(16).is_some() {
+        pages += 1;
+        cx.run_until_parked();
+        draw_settled(cx);
+        assert_eq!(
+            list.scroll_px_offset_for_scrollbar().y,
+            px(0.),
+            "page {pages} moved the reader off the top"
+        );
+        cx.executor().advance_clock(Duration::from_millis(250));
+        draw_settled(cx);
+    }
+    assert_eq!(pages, (TURNS - 8) / 4, "the pages filled the thread in");
+    let whole = list.max_offset_for_scrollbar().y;
+    assert!(
+        (whole - extent).abs() < whole * 0.05,
+        "the thread spanned {extent:?} before it was held, {whole:?} after"
+    );
+}

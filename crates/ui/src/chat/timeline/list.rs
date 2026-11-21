@@ -6,6 +6,9 @@ const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 /// How long what is drawn here only some of the time takes to come in or go.
 const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// The height of the activity shown while a page of history loads.
+const HISTORY_ACTIVITY_HEIGHT: f32 = 24.;
+
 impl TimelineView {
     /// The timeline's virtual list: one element per [`TimelineRow`], each
     /// drawn in the centred content column with the rhythm around it.
@@ -42,6 +45,21 @@ impl TimelineView {
         let item_cwd = cwd.to_path_buf();
         // Read before the list lays out, which holds its state.
         let following = self.list_state.is_following_tail();
+        // Where the reservation's activity stands: amid the screen while the
+        // reader is in the reservation, at its foot once the held turns show.
+        let reservation = self.history_placeholder_height;
+        let activity_top = {
+            let top = self.list_state.logical_scroll_top();
+            let height = self.list_state.viewport_bounds().size.height;
+            let foot = reservation - px(HISTORY_ACTIVITY_HEIGHT);
+            if top.item_ix == 0 {
+                (top.offset_in_item - px(TIMELINE_EDGE_PADDING)
+                    + (height - px(HISTORY_ACTIVITY_HEIGHT)) / 2.)
+                    .clamp(px(0.), foot.max(px(0.)))
+            } else {
+                foot
+            }
+        };
         list(
             self.list_state.clone(),
             cx.processor(move |this, index: usize, window, cx| {
@@ -323,36 +341,33 @@ impl TimelineView {
                     // output). Without it this flex item grows to that content
                     // and the column runs past the page inset instead of
                     // scrolling inside it.
-                    .when(
-                        index == 0 && this.history_placeholder_height > px(0.),
-                        |item| {
-                            item.child(
-                                div()
-                                    .w_full()
-                                    .h(this.history_placeholder_height)
-                                    .flex_none()
-                                    .flex()
-                                    .flex_col()
-                                    .justify_end()
-                                    .children(history_activity.map(|shown| {
-                                        shown.fade(
-                                            div()
-                                                .id("history-activity")
-                                                .w_full()
-                                                .h(px(24.))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .child(
-                                                    crate::widgets::spinner::Spinner::new()
-                                                        .xsmall()
-                                                        .color(cx.theme().muted_foreground),
-                                                ),
-                                        )
-                                    })),
-                            )
-                        },
-                    )
+                    .when(index == 0 && reservation > px(0.), |item| {
+                        item.child(
+                            div()
+                                .w_full()
+                                .h(reservation)
+                                .flex_none()
+                                .relative()
+                                .children(history_activity.map(|shown| {
+                                    shown.fade(
+                                        div()
+                                            .id("history-activity")
+                                            .absolute()
+                                            .top(activity_top)
+                                            .w_full()
+                                            .h(px(HISTORY_ACTIVITY_HEIGHT))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(
+                                                crate::widgets::spinner::Spinner::new()
+                                                    .xsmall()
+                                                    .color(cx.theme().muted_foreground),
+                                            ),
+                                    )
+                                })),
+                        )
+                    })
                     .child(
                         div()
                             .w_full()
