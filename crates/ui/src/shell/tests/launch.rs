@@ -602,18 +602,33 @@ fn a_cold_start_restores_the_saved_panel_tab(cx: &mut TestAppContext) {
     );
 }
 
+/// The thread a cold start restores stays in the saved checkpoint for as
+/// long as its host has said nothing of it, so a launch the host never
+/// answers comes back to it the next time. From the first of its content
+/// until its baseline settles the checkpoint is without it: a launch that
+/// dies loading or first drawing the thread does not open it again.
 #[gpui::test]
-fn cold_start_clears_restored_thread_checkpoint_until_baseline_settles(cx: &mut TestAppContext) {
+fn a_restored_thread_leaves_the_checkpoint_only_while_its_content_loads(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, client, cx) = mount_restored(cx, &["threads", "thread"], true);
-    // Before the restored thread finishes loading, the checkpoint drops the
-    // thread so a crash while opening or rendering it cannot loop on relaunch.
-    let pending = client.load_preferences().unwrap().navigation.unwrap();
-    assert_eq!(pending["history"], serde_json::json!(["threads"]));
-    assert_eq!(pending["thread"], serde_json::Value::Null);
-
+    let thread = ThreadKey {
+        host: HostKey::Remote("last-host".into()),
+        session_id: "thread-a".into(),
+    };
+    let next_launch_opens = |client: &ReturningClient| {
+        let saved = client.load_preferences().unwrap().navigation.unwrap();
+        NavigationSnapshot::from_preferences(saved).unwrap().thread
+    };
+    assert_eq!(next_launch_opens(&client).as_ref(), Some(&thread));
     restore_index(&shell, &host, true, cx);
+    assert_eq!(
+        next_launch_opens(&client).as_ref(),
+        Some(&thread),
+        "the host lists the thread and has sent nothing of it"
+    );
+
     restore_status(&shell, &host, cx);
+    assert_eq!(next_launch_opens(&client), None, "its content is arriving");
     for (topic, event) in [
         (
             Topic::Settings,
@@ -649,11 +664,7 @@ fn cold_start_clears_restored_thread_checkpoint_until_baseline_settles(cx: &mut 
     });
     cx.executor().advance_clock(Duration::from_millis(151));
     draw(cx);
-    let settled = client.load_preferences().unwrap().navigation.unwrap();
-    assert_eq!(
-        settled["thread"],
-        serde_json::json!({ "host": "last-host", "session_id": "thread-a" })
-    );
+    assert_eq!(next_launch_opens(&client), Some(thread));
 }
 
 #[gpui::test]
