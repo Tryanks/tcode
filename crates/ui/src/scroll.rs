@@ -77,7 +77,7 @@ pub(crate) fn page_viewport<H: ScrollbarHandle + Clone + 'static>(
 ) -> impl IntoElement {
     let id = id.into();
     let element = reveal::reveals((id.clone(), "reveals"), handle, element);
-    report_room(handle, ScrollBounce::new(id, handle, element))
+    report_room(handle, ScrollBounce::new(id, handle, element)).page()
 }
 
 /// How far a reader rising from the end of a list following its tail goes
@@ -1195,6 +1195,110 @@ mod tests {
         let (page, area) = offsets(&view, cx);
         assert_eq!(area, px(-300.), "the area runs to its end");
         assert_eq!(page, px(0.), "and keeps the rest of its flick there");
+    }
+
+    /// A page that begins with a 100 px nested area, over a button that
+    /// counts its taps.
+    struct Tapped {
+        page: ScrollHandle,
+        area: ScrollHandle,
+        taps: usize,
+    }
+
+    impl Render for Tapped {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(200.))
+                .h(px(300.))
+                .flex()
+                .flex_col()
+                .child(gesture_recorder())
+                .child(page_viewport(
+                    "tapped-page-bounce",
+                    &self.page,
+                    div()
+                        .id("tapped-page")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .lock_scroll_axis()
+                        .track_scroll(&self.page)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .id("tapped-area")
+                                        .debug_selector(|| "tapped-area".into())
+                                        .h(px(100.))
+                                        .flex_none()
+                                        .overflow_y_scroll_area()
+                                        .track_scroll(&self.area)
+                                        .child(div().h(px(400.)).flex_none()),
+                                )
+                                .child(
+                                    div()
+                                        .debug_selector(|| "tapped-rest".into())
+                                        .h(px(1000.))
+                                        .flex_none(),
+                                ),
+                        ),
+                ))
+                .child(
+                    div()
+                        .id("tapped-button")
+                        .debug_selector(|| "tapped-button".into())
+                        .h(px(60.))
+                        .flex_none()
+                        .on_click(cx.listener(|this, _, _, _| this.taps += 1)),
+                )
+        }
+    }
+
+    /// A flick that runs into the end of the area it belongs to is over
+    /// there: the next touch is a tap, not spent on catching momentum
+    /// nothing moves for.
+    #[gpui::test]
+    fn a_fling_ends_where_it_runs_into_the_end_of_its_area(cx: &mut TestAppContext) {
+        cx.update(crate::test_client::init);
+        // The page is at its top and the finger flicks down; the nested area
+        // is flicked up past all it has to give.
+        for (from, travel) in [("tapped-rest", 100.), ("tapped-area", -400.)] {
+            let (view, cx) = cx.add_window_view(|_, _| Tapped {
+                page: ScrollHandle::new(),
+                area: ScrollHandle::new(),
+                taps: 0,
+            });
+            crate::test_frames::draw_settled(cx);
+            let touch = |cx: &mut VisualTestContext, phase, position| {
+                cx.simulate_event(gpui::TouchEvent {
+                    id: gpui::TouchId(1),
+                    phase,
+                    position,
+                    predicted_position: None,
+                    force: None,
+                });
+                crate::test_frames::draw(cx);
+            };
+            let start = cx.debug_bounds(from).unwrap().origin + point(px(100.), px(20.));
+            let end = start + point(px(0.), px(travel));
+            touch(cx, TouchPhase::Started, start);
+            touch(
+                cx,
+                TouchPhase::Moved,
+                start + point(px(0.), px(travel / 5.)),
+            );
+            touch(cx, TouchPhase::Moved, end);
+            touch(cx, TouchPhase::Ended, end);
+            // The frame after the release brings the fling's first packet.
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+
+            let button = cx.debug_bounds("tapped-button").unwrap().center();
+            touch(cx, TouchPhase::Started, button);
+            touch(cx, TouchPhase::Ended, button);
+            assert_eq!(view.read_with(cx, |view, _| view.taps), 1, "{from}");
+        }
     }
 
     /// A page whose content begins with a 100 px wide strip of 400 px.
