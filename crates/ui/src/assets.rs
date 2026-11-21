@@ -1,6 +1,9 @@
 use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
+/// The interface's font where the platform has no system font to draw it in;
+/// see `theme::interface_font`.
+#[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
 pub const DM_SANS: &[u8] = include_bytes!("../../../assets/fonts/DMSans[wght].ttf");
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub const LILEX_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/lilex/Lilex-Regular.ttf");
@@ -14,7 +17,6 @@ pub const LILEX_BOLD_ITALIC: &[u8] =
 #[cfg(target_family = "wasm")]
 pub const TERMINAL_SYMBOLS: &[u8] =
     include_bytes!("../../../assets/fonts/nerd-symbols/TcodeTerminalSymbols.ttf");
-const DM_SANS_PATH: &str = "fonts/DMSans[wght].ttf";
 
 /// Additional Tcode icons.
 const EXTRA_ICONS: &[(&str, &[u8])] = &[
@@ -160,9 +162,6 @@ pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if path == DM_SANS_PATH {
-            return Ok(Some(Cow::Borrowed(DM_SANS)));
-        }
         if let Some((_, bytes)) = EXTRA_ICONS.iter().find(|(name, _)| *name == path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
@@ -175,9 +174,6 @@ impl AssetSource for Assets {
             .filter(|(name, _)| name.starts_with(path))
             .map(|(name, _)| SharedString::from(*name))
             .collect::<Vec<_>>();
-        if DM_SANS_PATH.starts_with(path) {
-            paths.push(DM_SANS_PATH.into());
-        }
         for (name, _) in EXTRA_ICONS {
             if name.starts_with(path) {
                 paths.push((*name).into());

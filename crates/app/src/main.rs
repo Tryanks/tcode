@@ -807,7 +807,7 @@ fn main() {
             Cow::Borrowed(assets::LILEX_BOLD_ITALIC),
         ];
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let application_fonts: Vec<Cow<'static, [u8]>> = vec![Cow::Borrowed(assets::DM_SANS)];
+        let application_fonts: Vec<Cow<'static, [u8]>> = Vec::new();
         // Translucent canvas colors composite over macOS vibrancy, Windows
         // Acrylic and a Wayland compositor's blur. Opaque windows flatten
         // them to the solid base; macOS fullscreen applies the same fallback in

@@ -6,7 +6,7 @@
     {
       "name": "tcode Light",
       "mode": "light",
-      "font.family": "DM Sans",
+      "font.family": ".SystemUIFont",
       "radius": 10,
       "radius.lg": 14,
       "colors": {
@@ -55,7 +55,7 @@
     {
       "name": "tcode Dark",
       "mode": "dark",
-      "font.family": "DM Sans",
+      "font.family": ".SystemUIFont",
       "radius": 10,
       "radius.lg": 14,
       "colors": {
