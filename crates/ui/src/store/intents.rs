@@ -56,10 +56,12 @@ impl WorkspaceStore {
                 Command::ToggleFavoriteModel {
                     provider,
                     profile_id,
+                    acp_agent_id,
                     model,
                 } => self.settings_replica.toggle_favorite_model(
                     *provider,
                     profile_id.clone(),
+                    acp_agent_id.clone(),
                     model.clone(),
                 ),
                 Command::MarkSessionRead {
@@ -1405,12 +1407,14 @@ impl WorkspaceStore {
         &mut self,
         provider: agent::ProviderKind,
         profile_id: Option<String>,
+        acp_agent_id: Option<String>,
         model: String,
         cx: &mut Context<Self>,
     ) {
         self.dispatch(Command::ToggleFavoriteModel {
             provider,
             profile_id,
+            acp_agent_id,
             model,
         });
         self.local_settings_changed(cx);

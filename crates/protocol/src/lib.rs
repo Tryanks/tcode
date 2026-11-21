@@ -389,6 +389,8 @@ pub use wire::{
 // SetActiveCollaboration, ResearchModel and RefreshCollaborationTemplates
 // commands and the CollaborationTemplates query; and InjectedChannel gains
 // collaboration.
+// FavoriteModel::Row and ToggleFavoriteModel gain acp_agent_id so ACP models
+// can be starred per agent.
 pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]

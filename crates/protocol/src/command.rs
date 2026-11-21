@@ -680,6 +680,8 @@ pub enum Command {
     ToggleFavoriteModel {
         provider: ProviderKind,
         profile_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        acp_agent_id: Option<String>,
         model: String,
     },
     /// Rewind the thread to before the prompt that opened absolute turn

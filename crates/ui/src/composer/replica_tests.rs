@@ -982,6 +982,184 @@ fn a_favorite_under_the_second_account_stars_only_that_row(cx: &mut TestAppConte
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Starring an ACP agent's model lights only that agent's row, floats it to
+/// the top of the agent's rail, lists it in Favorites, and picks that agent
+/// and model from Favorites.
+#[gpui::test]
+fn an_acp_model_can_be_starred_and_picked_from_favorites(cx: &mut TestAppContext) {
+    use crate::test_frames::draw_settled;
+    use agent::ProviderKind;
+
+    cx.update(|cx| cx.set_reduce_motion(true));
+    cx.update(crate::test_client::init);
+    cx.update(crate::markdown::init);
+    let root = crate::store::tests::scratch_root("acp-favorites");
+    let project = tcode_core::project::Project::from_root(root.clone());
+    let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
+    disk.upsert_project(&project).unwrap();
+    let spec = |id: &str| agent::ModelSpec {
+        id: id.into(),
+        display_name: id.into(),
+        is_default: false,
+        options: Vec::new(),
+    };
+    let models = vec![spec("first-model"), spec("shared-model")];
+    disk.save_models(ProviderKind::ClaudeCode, &models).unwrap();
+    let catalog = agent::AcpCatalog {
+        models,
+        options: Vec::new(),
+    };
+    let acp_agent = |id: &str, name: &str| tcode_core::acp::InstalledAcpAgent {
+        id: id.into(),
+        name: name.into(),
+        version: String::new(),
+        icon: None,
+        launch: agent::AcpLaunch::Custom {
+            command: id.into(),
+            args: Vec::new(),
+            env: Vec::new(),
+        },
+        enabled: true,
+        env: Vec::new(),
+        launch_args: None,
+    };
+    let mut settings = tcode_core::settings::Settings::default();
+    for (id, name) in [("custom:alpha", "Alpha"), ("custom:beta", "Beta")] {
+        disk.save_acp_catalog(id, &catalog).unwrap();
+        settings.acp_agents.insert(id.into(), acp_agent(id, name));
+    }
+    tcode_services::settings::SettingsStore::new(root.clone())
+        .save(&settings)
+        .unwrap();
+    let scripted = tcode_runtime::app::scripted_provider(ProviderKind::ClaudeCode);
+    let host = tcode_runtime::pipe::spawn_host(
+        disk,
+        tcode_runtime::pipe::HostServices {
+            provider_launcher: scripted.launcher.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+    let link = driver.link.clone();
+    let tcode_protocol::CommandResponse::SessionId(Some(session_id)) = driver
+        .await_with_events(
+            cx,
+            link.command(tcode_protocol::Command::StartDraft {
+                project_id: project.id.clone(),
+                cwd: root.clone(),
+            }),
+        )
+        .unwrap()
+    else {
+        panic!("the host starts a draft");
+    };
+    let store = cx.new(|cx| {
+        WorkspaceStore::new_attached(
+            driver.link.clone(),
+            crate::store::WorkspaceAttachment::Local,
+            None,
+            None,
+            cx,
+        )
+    });
+    driver.wait_until(cx, "workspace baseline", |cx| {
+        store.read_with(cx, |store, _| store.baseline_ready())
+    });
+    store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
+    driver.wait_until(cx, "the draft's status", |cx| {
+        store.read_with(cx, |store, cx| {
+            store
+                .composer_state_for(Some(&session_id), cx)
+                .active_model
+                .is_some()
+        })
+    });
+
+    let session = Some(session_id.clone());
+    let (composer, cx) =
+        cx.add_window_view(|window, cx| Composer::new(store.clone(), session, window, cx));
+    cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+    draw_settled(cx);
+
+    open_picker(cx);
+    show_rail(&composer, PickerRail::Acp("custom:alpha".into()), cx);
+    let star = cx
+        .debug_bounds("model-fav-1")
+        .expect("the second ACP model's star");
+    cx.simulate_click(star.center(), Modifiers::default());
+    driver.wait_until(cx, "the ACP star to reach the host", |cx| {
+        store.read_with(cx, |store, _| !store.settings().favorite_models.is_empty())
+    });
+    draw_settled(cx);
+
+    let acp_order = |agent: &str, cx: &gpui::VisualTestContext| {
+        store.read_with(cx, |store, _| {
+            store
+                .picker_models_for_acp(agent)
+                .into_iter()
+                .map(|model| (model.id, model.favorite))
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(
+        acp_order("custom:alpha", cx),
+        [("shared-model".into(), true), ("first-model".into(), false),]
+    );
+    assert_eq!(
+        acp_order("custom:beta", cx),
+        [
+            ("first-model".into(), false),
+            ("shared-model".into(), false),
+        ]
+    );
+    assert!(store.read_with(cx, |store, _| {
+        store
+            .picker_models_for_profile("claude")
+            .into_iter()
+            .all(|model| !model.favorite)
+    }));
+
+    show_rail(&composer, PickerRail::Favorites, cx);
+    assert!(cx.debug_bounds("model-fav-0").is_some());
+    assert!(
+        cx.debug_bounds("model-fav-1").is_none(),
+        "Favorites lists only the starred ACP model"
+    );
+    open_picker(cx);
+    open_picker(cx);
+    show_rail(&composer, PickerRail::Favorites, cx);
+    cx.simulate_keystrokes("secondary-1");
+    driver.wait_until(cx, "the ACP favourite's pick", |cx| {
+        store.read_with(cx, |store, cx| {
+            store
+                .composer_state_for(Some(&session_id), cx)
+                .active_model
+                .is_some_and(|active| {
+                    active.provider == ProviderKind::Acp
+                        && active.acp_agent_id.as_deref() == Some("custom:alpha")
+                        && active.model.as_deref() == Some("shared-model")
+                })
+        })
+    });
+
+    // Reopening the picker with no explicit rail lands on Favorites even while
+    // running on an ACP agent, and marks the starred ACP model as selected.
+    composer.update(cx, |composer, cx| {
+        composer.picker_rail = None;
+        cx.notify();
+    });
+    draw_settled(cx);
+    open_picker(cx);
+    assert!(
+        cx.debug_bounds("model-row-current").is_some(),
+        "Favorites opens on the running ACP model"
+    );
+
+    driver.shutdown(cx, &host);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[gpui::test]
 fn switching_language_relocalizes_the_model_search_placeholder(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();

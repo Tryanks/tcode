@@ -810,7 +810,13 @@ fn member_sidebar_and_read_preferences_change_without_host_commands(cx: &mut Tes
     workspace.update(cx, |store, cx| {
         store.toggle_project_collapsed("shared".into(), cx);
         store.cycle_project_sort(cx);
-        store.toggle_favorite_model(agent::ProviderKind::Codex, None, "team-model".into(), cx);
+        store.toggle_favorite_model(
+            agent::ProviderKind::Codex,
+            None,
+            None,
+            "team-model".into(),
+            cx,
+        );
         store.mark_session_unread("shared-thread".into(), cx);
         assert!(store.session_unread("shared-thread"));
         store.dispatch(Command::MarkSessionRead {
@@ -828,6 +834,7 @@ fn member_sidebar_and_read_preferences_change_without_host_commands(cx: &mut Tes
             [tcode_core::settings::FavoriteModel::Row {
                 provider: agent::ProviderKind::Codex,
                 profile_id: None,
+                acp_agent_id: None,
                 model: "team-model".into(),
             }]
         );

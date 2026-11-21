@@ -103,6 +103,7 @@ fn reset_settings_clears_preferences_but_keeps_credentials_installs_and_unknown_
     let favorite = FavoriteModel::Row {
         provider: ProviderKind::Codex,
         profile_id: Some("work-codex".into()),
+        acp_agent_id: None,
         model: "gpt-5.6-sol".into(),
     };
     settings.favorite_models.push(favorite.clone());
@@ -823,8 +824,32 @@ fn deleting_a_profile_takes_its_stars_with_it() {
             },
         );
         for profile_id in [Some("second-account".to_owned()), None] {
-            state.toggle_favorite_model(ProviderKind::Codex, profile_id, "model".into(), cx);
+            state.toggle_favorite_model(ProviderKind::Codex, profile_id, None, "model".into(), cx);
         }
+        state.settings.acp_agents.insert(
+            "custom:alpha".into(),
+            tcode_core::acp::InstalledAcpAgent {
+                id: "custom:alpha".into(),
+                name: "Alpha".into(),
+                version: String::new(),
+                icon: None,
+                launch: agent::AcpLaunch::Custom {
+                    command: "alpha".into(),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                },
+                enabled: true,
+                env: Vec::new(),
+                launch_args: None,
+            },
+        );
+        state.toggle_favorite_model(
+            ProviderKind::Acp,
+            None,
+            Some("custom:alpha".into()),
+            "model".into(),
+            cx,
+        );
         state
             .settings
             .favorite_models
@@ -838,6 +863,28 @@ fn deleting_a_profile_takes_its_stars_with_it() {
                 FavoriteModel::Row {
                     provider: ProviderKind::Codex,
                     profile_id: None,
+                    acp_agent_id: None,
+                    model: "model".into(),
+                },
+                FavoriteModel::Row {
+                    provider: ProviderKind::Acp,
+                    profile_id: None,
+                    acp_agent_id: Some("custom:alpha".into()),
+                    model: "model".into(),
+                },
+                FavoriteModel::Id("older".into()),
+            ]
+        );
+
+        state.remove_acp_agent("custom:alpha", cx);
+
+        assert_eq!(
+            state.settings.favorite_models,
+            [
+                FavoriteModel::Row {
+                    provider: ProviderKind::Codex,
+                    profile_id: None,
+                    acp_agent_id: None,
                     model: "model".into(),
                 },
                 FavoriteModel::Id("older".into()),

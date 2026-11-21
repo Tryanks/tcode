@@ -214,6 +214,15 @@ impl AppState {
             return;
         }
         self.settings.acp_agents.remove(id);
+        self.settings.favorite_models.retain(|favorite| {
+            !matches!(
+                favorite,
+                FavoriteModel::Row {
+                    acp_agent_id: Some(starred),
+                    ..
+                } if starred == id
+            )
+        });
         self.persist_settings(cx);
         self.providers.cancel_acp_refresh(id);
         self.providers.acp_catalogs.remove(id);
