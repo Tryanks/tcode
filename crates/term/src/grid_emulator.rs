@@ -242,7 +242,7 @@ impl GridSize {
 
 impl GridEmulator {
     /// An emulator keeping `history` lines of scrollback rather than a live
-    /// terminal's 1,000: for output read back whole.
+    /// terminal's 1,000: none, for output of which only the screen is read.
     pub fn with_scrollback(cols: usize, rows: usize, history: usize) -> Self {
         Self::build(cols, rows, String::new(), history)
     }

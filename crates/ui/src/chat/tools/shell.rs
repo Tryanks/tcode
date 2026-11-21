@@ -1,20 +1,21 @@
 //! The terminal window: a command line, its output, how it exited.
 //!
 //! A `CommandExecution` shows what its host renders. No client owns a
-//! terminal emulator: the output is the screen the host renders at the width
-//! the panel subscribed to, and what scrolled off it, pushed again while the
-//! command runs; both parts paint as terminal grids, and the output's scrolls
-//! within the window's height. A command is only ever a `CommandExecution`:
-//! the adapter or importer that knows its harness's shell tool says so.
+//! terminal emulator: the output is the last rows of it the host renders at
+//! the width the panel subscribed to, pushed again while the command runs.
+//! Command and output paint as terminal grids; the output's shows the latest
+//! rows the window has room for, says how many came before, and does not
+//! scroll: the whole output is the record's, which Copy output copies. A
+//! command is only ever a `CommandExecution`: the adapter or importer that
+//! knows its harness's shell tool says so.
 
 use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use agent::{ItemContent, ItemStatus};
 use gpui::{
-    AnyElement, App, Bounds, ContentMask, FocusHandle, HitboxBehavior, Hsla,
-    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, Pixels, Point, Rgba, ScrollEvent, Styled as _, Window,
-    canvas, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, Bounds, ContentMask, FocusHandle, Hsla, InteractiveElement as _, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point,
+    Rgba, Styled as _, Window, canvas, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{ElementExt as _, v_flex};
 use tcode_core::session::{EntryContent, TimelineEntry};
@@ -102,11 +103,9 @@ pub(in crate::chat) struct ShellRun<'a> {
     pub(in crate::chat) running: bool,
 }
 
-/// Every shell window's body: the command line and what it printed, all of
-/// it, in the terminal grid, which scrolls through it inside the window's
-/// height and follows its end while it grows, then the lines written to its
-/// stdin. The host lays its screen out from the whole output it holds, so
-/// there is nothing to load.
+/// Every shell window's body: the command line and the latest rows of what
+/// it printed, in the terminal grid, which follows the output's end while it
+/// grows, then the lines written to its stdin.
 pub(in crate::chat) fn shell_body(run: ShellRun<'_>, ctx: &mut ToolCtx<'_, '_>) -> AnyElement {
     let ShellRun {
         entry,
@@ -190,13 +189,10 @@ pub(in crate::chat) fn shell_body(run: ShellRun<'_>, ctx: &mut ToolCtx<'_, '_>) 
 }
 
 type Handler<E> = Box<dyn Fn(&E, &mut Window, &mut App) + 'static>;
-/// Scrolls an output, answering whether it moved.
-type Wheel = Box<dyn Fn(&ScrollEvent, &mut App) -> bool + 'static>;
 
-/// What the reader does in a panel's output: the wheel scrolls it, a press
-/// and a drag select in it, and Copy takes the selection.
+/// What the reader does in a panel's output: a press and a drag select in
+/// it, and Copy takes the selection.
 pub(crate) struct OutputHandlers {
-    wheel: Wheel,
     press: Handler<MouseDownEvent>,
     drag: Handler<MouseMoveEvent>,
     release: Handler<MouseUpEvent>,
@@ -204,21 +200,6 @@ pub(crate) struct OutputHandlers {
 }
 
 fn output_handlers(id: &str, ctx: &mut ToolCtx<'_, '_>) -> OutputHandlers {
-    let wheel = {
-        let id = id.to_owned();
-        let view = ctx.cx.entity().downgrade();
-        move |event: &ScrollEvent, cx: &mut App| {
-            let delta = f32::from(event.delta.pixel_delta(px(TERMINAL_CELL_HEIGHT)).y);
-            view.update(cx, |this, cx| {
-                let moved = this.command_panels.borrow_mut().scroll(&id, delta);
-                if moved {
-                    cx.notify();
-                }
-                moved
-            })
-            .unwrap_or(false)
-        }
-    };
     let press = {
         let id = id.to_owned();
         ctx.cx
@@ -267,52 +248,11 @@ fn output_handlers(id: &str, ctx: &mut ToolCtx<'_, '_>) -> OutputHandlers {
             })
     };
     OutputHandlers {
-        wheel: Box::new(wheel),
         press: Box::new(press),
         drag: Box::new(drag),
         release: Box::new(release),
         copy: Box::new(copy),
     }
-}
-
-/// Takes the wheel over an output for `wheel` before the timeline around it
-/// does: the timeline's bounce takes a wheel event as it is captured, ahead
-/// of anything the output would hear as it bubbles. A gesture goes by
-/// [`crate::scroll::gesture`], as a nested area's does.
-///
-/// Gap: [`crate::scroll::AreaMask`] is that capture for a `ScrollbarHandle`,
-/// which is read and moved without a context; an output's rows are the
-/// view's, scrolled through it.
-fn wheel_capture(key: crate::scroll::gesture::AreaKey, wheel: Wheel) -> impl IntoElement {
-    use crate::scroll::gesture::{self, Turn};
-    canvas(
-        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
-        move |_, hitbox, window, _| {
-            let hitbox = hitbox.id;
-            window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
-                if !(phase.capture() && hitbox.should_handle_scroll(window)) {
-                    return;
-                }
-                let turn = gesture::turn(key, event, window, cx);
-                if turn == Turn::Theirs {
-                    return;
-                }
-                if wheel(event, cx) {
-                    if turn == Turn::Open {
-                        gesture::take(key, event, window, cx);
-                    }
-                    // The timeline stays where it is while the output scrolls.
-                    cx.stop_propagation();
-                } else if turn == Turn::Mine {
-                    cx.stop_propagation();
-                }
-            });
-        },
-    )
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
 }
 
 const DEFAULT_COLS: u16 = 80;
@@ -386,33 +326,6 @@ impl CommandPanelCache {
             panel.command_model = None;
         }
         panel.render(id, output, screen, on_cols_change, handlers, cx)
-    }
-
-    /// Scrolls `id`'s output by `delta`, up into what scrolled off for a
-    /// positive one, a row for every row's height it adds up to: whether it
-    /// moved, or would have had the delta reached a row.
-    pub(crate) fn scroll(&mut self, id: &str, delta: f32) -> bool {
-        let Some(panel) = self.entries.get_mut(id) else {
-            return false;
-        };
-        let Some(built) = panel.output_model.as_mut() else {
-            return false;
-        };
-        let total = panel.scroll_remainder + delta;
-        let lines = (total / TERMINAL_CELL_HEIGHT).trunc() as i32;
-        panel.scroll_remainder = total - lines as f32 * TERMINAL_CELL_HEIGHT;
-        let before = built.model.display_offset();
-        built.model.scroll(lines);
-        let history = built.lines.saturating_sub(built.rows);
-        let room = if delta > 0. {
-            before < history
-        } else {
-            before > 0
-        };
-        if !room {
-            panel.scroll_remainder = 0.;
-        }
-        room || built.model.display_offset() != before
     }
 
     /// A press at `position` in `id`'s output starts a selection there, or
@@ -510,10 +423,10 @@ struct OutputModel {
     cols: u16,
     budget: usize,
     model: TerminalModel,
-    /// The rows the output shows at once.
+    /// The rows of the output it shows.
     rows: usize,
-    /// Every row it holds, what scrolled off included.
-    lines: usize,
+    /// The lines of the output before them.
+    before: u64,
 }
 
 #[derive(Default)]
@@ -539,8 +452,6 @@ struct Panel {
     focus: Option<FocusHandle>,
     /// A press in the output is selecting as the pointer drags.
     selecting: bool,
-    /// Wheel travel short of a row, kept for the next.
-    scroll_remainder: f32,
 }
 
 impl Panel {
@@ -619,33 +530,26 @@ impl Panel {
             selection: cx.theme().primary.opacity(0.28),
         };
         let command = grid_element(command_model, command_rows, cols, palette);
-        let (output, output_rows) = match screen.frame {
+        let (output, output_rows, before) = match screen.frame {
             Some(frame) => {
                 if !self.output_model.as_ref().is_some_and(|built| {
                     std::ptr::eq(built.frame.as_ptr(), Rc::as_ptr(frame)) && built.budget == budget
                 }) {
-                    let (mut model, rows, lines) = output_model(frame, budget);
-                    // Scrolled back, the reader keeps reading what they
-                    // were while more arrives; at the end, it follows.
-                    if let Some(built) = &self.output_model
-                        && built.model.display_offset() > 0
-                    {
-                        let grown = lines.saturating_sub(built.lines);
-                        model.scroll((built.model.display_offset() + grown) as i32);
-                    }
+                    let (model, rows, before) = output_model(frame, budget);
                     self.output_model = Some(OutputModel {
                         frame: Rc::downgrade(frame),
                         cols: frame.cols,
                         budget,
                         model,
                         rows,
-                        lines,
+                        before,
                     });
                 }
                 let built = self.output_model.as_ref().expect("output model");
                 (
                     grid_element(&built.model, built.rows, built.cols, palette),
                     built.rows,
+                    built.before,
                 )
             }
             // Space for the rows the output is likely to need, so the screen
@@ -658,17 +562,18 @@ impl Panel {
                         .h(px(rows as f32 * TERMINAL_CELL_HEIGHT))
                         .into_any_element(),
                     rows,
+                    0,
                 )
             }
         };
-        let rows = command_rows + output_rows;
+        // The note of what came before is a row of the panel's own.
+        let rows = command_rows + output_rows + usize::from(before > 0);
         self.resized |= self.shown_rows.is_some_and(|shown| shown != rows);
         self.shown_rows = Some(rows);
 
         let watched = screen.watched;
         let output_id = id.to_string();
-        let output_key =
-            crate::scroll::gesture::AreaKey::named(&format!("command-output-{output_id}"));
+        let before_id = id.to_string();
         let output_bounds = self.output_bounds.clone();
         let focus = self.focus.clone();
         // The rows held for the screen are a guess; when the host's screen
@@ -679,9 +584,16 @@ impl Panel {
             .overflow_hidden()
             .bg(palette.background)
             .child(command)
+            .when(before > 0, |panel| {
+                panel.child(
+                    div()
+                        .debug_selector(move || format!("command-output-before-{before_id}"))
+                        .text_secondary(false, cx)
+                        .child(crate::tr!("tools.lines_left_out", count = before).into_owned()),
+                )
+            })
             .when(output_rows > 0, |panel| {
                 let OutputHandlers {
-                    wheel,
                     press,
                     drag,
                     release,
@@ -693,7 +605,6 @@ impl Panel {
                             "command-output-{output_id}"
                         )))
                         .debug_selector(move || format!("command-output-{output_id}"))
-                        .relative()
                         .overflow_hidden()
                         .cursor_text()
                         .when_some(focus, |output, focus| output.track_focus(&focus))
@@ -702,8 +613,7 @@ impl Panel {
                         .on_mouse_move(drag)
                         .on_mouse_up(MouseButton::Left, release)
                         .on_action(copy)
-                        .child(output)
-                        .child(wheel_capture(output_key, wheel)),
+                        .child(output),
                 )
             })
             .when_some(on_cols_change, |panel, on_cols_change| {
@@ -725,38 +635,6 @@ impl Panel {
     }
 }
 
-/// `text` as one row of cells, as far as `cols` holds it.
-fn note_row(text: &str, cols: usize) -> TerminalRow {
-    let mut row = TerminalRow::default();
-    let mut col = 0;
-    for grapheme in text.graphemes(true) {
-        let width = grapheme.width().min(2);
-        if width == 0 {
-            continue;
-        }
-        if col + width > cols {
-            break;
-        }
-        row.cells.push(TerminalCell {
-            text: grapheme.to_string(),
-            width: if width == 2 {
-                CellWidth::Wide
-            } else {
-                CellWidth::Narrow
-            },
-            ..TerminalCell::default()
-        });
-        if width == 2 {
-            row.cells.push(TerminalCell {
-                width: CellWidth::Spacer,
-                ..TerminalCell::default()
-            });
-        }
-        col += width;
-    }
-    row
-}
-
 /// Which half of its cell `position` is over, as a terminal selects.
 fn side_of(
     position: Point<Pixels>,
@@ -771,27 +649,20 @@ fn side_of(
     }
 }
 
-/// The host renders a screen and what scrolled off it; the panel shows the
-/// last `budget` rows of all of it, and the rest above them to scroll back
-/// through: the rows it shows, and every row it holds.
-fn output_model(frame: &TerminalFrame, budget: usize) -> (TerminalModel, usize, usize) {
+/// The rows of `frame` a panel with room for `budget` shows, its last ones:
+/// their model, how many they are, and how many lines of the output come
+/// before them.
+fn output_model(frame: &TerminalFrame, budget: usize) -> (TerminalModel, usize, u64) {
     let mut frame = frame.clone();
-    let mut lines = std::mem::take(&mut frame.history);
-    // What the frame leaves out is said where it would be, first, and how to
-    // have all of it.
-    if frame.lines_evicted > 0 {
-        let note = crate::tr!("tools.lines_left_out", count = frame.lines_evicted);
-        lines.insert(0, note_row(&note, usize::from(frame.cols)));
-    }
-    lines.append(&mut frame.visible);
-    let total = lines.len();
-    let rows = total.min(budget);
-    frame.visible = lines.split_off(total - rows);
-    frame.history = lines;
+    let mut held = std::mem::take(&mut frame.history);
+    held.append(&mut frame.visible);
+    let rows = held.len().min(budget);
+    let before = frame.lines_evicted + (held.len() - rows) as u64;
+    frame.visible = held.split_off(held.len() - rows);
     frame.rows = rows.min(u16::MAX as usize) as u16;
     let mut model = TerminalModel::new(String::new());
     model.apply_frame(frame);
-    (model, rows, total)
+    (model, rows, before)
 }
 
 /// Roughly the rows the host's screen of `output` will take: one per line of

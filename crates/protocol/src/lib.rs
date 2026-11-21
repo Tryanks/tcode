@@ -60,10 +60,10 @@ pub use query::{
     HostedDevice, HostingAction, HostingState, IconImageEntry, MAX_STORED_OUTPUT_COLS,
     MAX_THREAD_EXPORT_BYTES, ModelGrant, OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo, PathKind,
     Query, QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES,
-    STORED_OUTPUT_BYTES, STORED_OUTPUT_HISTORY, STORED_OUTPUT_ROWS, SessionContentHits,
-    SessionSearchHit, SourceTool, SpaceAction, SpaceApproval, SpaceInfo, SpacePolicy,
-    TraverseLookupState, TraverseLookupStatus, TraverseManifestState, TraverseManifestStatus,
-    TraverseRelayStatus, TraverseSourceStatus, WorkspaceListing,
+    STORED_OUTPUT_ROWS, SessionContentHits, SessionSearchHit, SourceTool, SpaceAction,
+    SpaceApproval, SpaceInfo, SpacePolicy, TraverseLookupState, TraverseLookupStatus,
+    TraverseManifestState, TraverseManifestStatus, TraverseRelayStatus, TraverseSourceStatus,
+    WorkspaceListing,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
@@ -394,6 +394,8 @@ pub use wire::{
 // ProviderKind gains Antigravity (wire name `antigravity`), which an older peer
 // cannot decode because ProviderKind has no unknown fallback.
 // Settings gains visualize, with the visualize_enabled patch.
+// A command output frame holds the output's last rows and no history, and
+// its lines_evicted counts every row before them.
 pub const PROTOCOL_VERSION: u32 = 30;
 
 #[cfg(test)]
