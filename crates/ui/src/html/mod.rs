@@ -608,6 +608,16 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    fn a_word_wider_than_its_box_is_not_broken(cx: &mut TestAppContext) {
+        let narrow = |text: &str| format!(r#"<div style="width:1em">{text}</div>"#);
+        let line = drawn(&narrow("1"), &mut cx.new_app()).size.height;
+        let word = drawn(&narrow("100%"), &mut cx.new_app()).size.height;
+        assert_eq!(word, line);
+        // The same measure sees a line broken where it may be.
+        assert!(drawn(&narrow("1 0 0 %"), cx).size.height > line);
+    }
+
+    #[gpui::test]
     fn a_visual_cut_at_a_limit_says_so(cx: &mut TestAppContext) {
         let cases = [
             ("<p>x</p>".repeat(5_000), "html-left-out-nodes"),

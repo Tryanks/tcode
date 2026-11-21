@@ -154,7 +154,7 @@ fn render_children(
                     if !normalized.trim().is_empty() {
                         let transformed =
                             apply_text_transform(&normalized, parent_style.text_transform);
-                        out.push(div().child(transformed).into_any_element());
+                        out.push(text_box(&transformed).child(transformed).into_any_element());
                     }
                 } else {
                     inline_run.push(cid);
@@ -837,13 +837,11 @@ fn render_inline_run(
         } else if text.is_empty() {
             return None;
         }
+        let styled = text_box(&text).w_full().min_w_0();
         let styled = if highlights.is_empty() {
-            div().w_full().min_w_0().child(text)
+            styled.child(text)
         } else {
-            div()
-                .w_full()
-                .min_w_0()
-                .child(StyledText::new(text).with_highlights(highlights))
+            styled.child(StyledText::new(text).with_highlights(highlights))
         };
         return Some(styled.into_any_element());
     }
@@ -862,7 +860,7 @@ fn render_inline_run(
                 let norm = normalize_text(t, parent_style.white_space);
                 if !norm.trim().is_empty() {
                     let transformed = apply_text_transform(&norm, parent_style.text_transform);
-                    row = row.child(div().child(transformed));
+                    row = row.child(text_box(&transformed).child(transformed));
                     any_visible = true;
                 }
             }
@@ -1244,6 +1242,30 @@ fn fitted_media_size(
         h *= scale;
     }
     (w.max(1.0), h.max(1.0))
+}
+
+/// The box a run of text is drawn in. GPUI breaks a word that is wider than
+/// its box wherever the box ends, `100%` into `100` and `%`; a browser
+/// breaks only at a break opportunity and lets the word overflow. A run that
+/// plainly has none, neither whitespace nor a CJK character, is not wrapped.
+fn text_box(text: &str) -> gpui::Div {
+    let breaks = |c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '\u{3040}'..='\u{30ff}'
+                    | '\u{3400}'..='\u{4dbf}'
+                    | '\u{4e00}'..='\u{9fff}'
+                    | '\u{ac00}'..='\u{d7af}'
+                    | '\u{f900}'..='\u{faff}'
+                    | '\u{20000}'..='\u{2fa1f}'
+            )
+    };
+    if text.trim().chars().any(breaks) {
+        div()
+    } else {
+        div().whitespace_nowrap()
+    }
 }
 
 fn normalize_text(text: &str, mode: WhiteSpaceMode) -> String {
