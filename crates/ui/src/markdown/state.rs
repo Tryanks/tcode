@@ -17,9 +17,9 @@ use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::copy::CopiedMark;
 use gpui::{
-    Bounds, ClipboardItem, Context, FocusHandle, ImageSource, IntoElement, ListAlignment,
-    ListState, ParentElement as _, Pixels, Point, Render, ScrollHandle, SharedString, SharedUri,
-    Size, Styled as _, Window, div, px,
+    App, Bounds, ClipboardItem, Context, Entity, FocusHandle, ImageSource, IntoElement,
+    ListAlignment, ListState, ParentElement as _, Pixels, Point, Render, ScrollHandle,
+    SharedString, SharedUri, Size, Styled as _, Window, div, px,
 };
 use gpui_base::{ElementExt as _, v_flex};
 
@@ -408,28 +408,19 @@ impl MarkdownState {
         self.base_dir.as_deref()
     }
 
-    pub(super) fn resolve_link(&self, url: &str, cx: &gpui::App) -> LinkTarget {
-        super::link_target::resolve_link(url, self.base_dir(), self.is_remote_host(cx))
+    /// What the link `url` names. Its files are the attached host's, as its
+    /// images are.
+    pub(super) fn resolve_link(&self, url: &str, cx: &App) -> LinkTarget {
+        let elsewhere = crate::store::images::HostImages::link(self.image_host, cx)
+            .is_some_and(|link| link.is_remote());
+        super::link_target::resolve_link(url, self.base_dir(), elsewhere)
     }
 
-    pub(super) fn open_link(
-        view: &gpui::Entity<Self>,
-        url: &str,
-        window: &mut Window,
-        cx: &mut gpui::App,
-    ) {
-        let (target, image_host) = {
-            let state = view.read(cx);
-            (state.resolve_link(url, cx), state.image_host)
-        };
-        target.open(image_host, window, cx);
-    }
-
-    fn is_remote_host(&self, cx: &gpui::App) -> bool {
-        if let Some(link) = crate::store::images::HostImages::link(self.image_host, cx) {
-            return link.is_remote();
-        }
-        crate::shell::current_store(cx).is_some_and(|store| store.read(cx).is_remote())
+    /// Open the link `url` of `view`'s document.
+    pub(super) fn open_link(view: &Entity<Self>, url: &str, window: &mut Window, cx: &mut App) {
+        let state = view.read(cx);
+        let (target, host) = (state.resolve_link(url, cx), state.image_host);
+        target.open(host, window, cx);
     }
 
     /// The image drawn in the text. A host file is drawn from its largest preview, whose key

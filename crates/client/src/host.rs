@@ -440,22 +440,6 @@ pub trait ClientHost: 'static {
         Err("this client cannot save files".into())
     }
 
-    /// Whether [`ClientHost::download_host_file`] can hand a file on a remote
-    /// host directly to the user (for example a browser download).
-    fn supports_host_file_download(&self) -> bool {
-        false
-    }
-
-    /// Trigger a client download of `path` on `host_id`. Callers must check
-    /// [`ClientHost::supports_host_file_download`] first.
-    fn download_host_file(
-        &self,
-        _host_id: &str,
-        _path: &std::path::Path,
-    ) -> HostFuture<'static, Result<(), String>> {
-        Box::pin(async { Err("this client cannot download host files".into()) })
-    }
-
     /// Open a path in the user's external editor. `None` means this client has
     /// no editor integration; the path is always one this client can reach.
     fn open_in_editor(&self, _path: &std::path::Path) -> Option<Result<(), String>> {

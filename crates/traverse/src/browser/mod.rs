@@ -104,8 +104,6 @@ struct Shared {
     connections: AtomicUsize,
     /// Sockets open per browser device, for the hosting list.
     live: Mutex<HashMap<uuid::Uuid, usize>>,
-    /// One-time short-lived tickets issued for browser-native file downloads.
-    download_tickets: Mutex<HashMap<String, original::DownloadTicket>>,
     /// Marked when the browser devices in the hosting list change: one
     /// logs in, renames itself, connects, disconnects or is revoked.
     devices_changed: tokio::sync::watch::Sender<()>,
@@ -178,7 +176,6 @@ pub fn serve(mux: HostMux, config: BrowserConfig) -> io::Result<BrowserServer> {
         shutdown: shutdown_rx.clone(),
         connections: AtomicUsize::new(0),
         live: Mutex::new(HashMap::new()),
-        download_tickets: Mutex::new(HashMap::new()),
         devices_changed: tokio::sync::watch::Sender::new(()),
     });
     let accept_shared = shared.clone();
@@ -289,8 +286,6 @@ where
 {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/original") => original::serve(stream, request, shared).await,
-        ("POST", "/download") => original::request_download(stream, request, shared).await,
-        ("GET", "/download") => original::serve_download(stream, request, shared).await,
         ("GET", "/auth/state") => {
             let configured = shared.auth.lock().unwrap().password_configured();
             json_response(

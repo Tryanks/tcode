@@ -1843,23 +1843,6 @@ impl WorkspaceStore {
         }
     }
 
-    /// Whether this client can trigger a direct download of a file on a remote host.
-    pub fn supports_host_file_download(&self) -> bool {
-        self.client_host
-            .as_ref()
-            .is_some_and(|host| host.supports_host_file_download())
-    }
-
-    pub fn download_host_file(
-        &self,
-        path: &std::path::Path,
-    ) -> tcode_client::host::HostFuture<'static, Result<(), String>> {
-        match (&self.client_host, self.remote_host_id()) {
-            (Some(host), Some(host_id)) => host.download_host_file(host_id, path),
-            _ => Box::pin(async { Err("this device cannot download host files".into()) }),
-        }
-    }
-
     /// Open a *client-local* path in the user's editor. `None` when this client
     /// has no editor integration at all.
     pub fn open_in_editor(&self, path: &std::path::Path) -> Option<Result<(), String>> {

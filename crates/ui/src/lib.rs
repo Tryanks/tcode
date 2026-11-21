@@ -24,6 +24,7 @@ pub(crate) mod git;
 mod haptics;
 mod harness_dialog;
 mod highlight;
+mod host_file;
 mod host_permissions;
 pub mod i18n;
 pub mod icon;

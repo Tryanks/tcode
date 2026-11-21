@@ -250,22 +250,6 @@ impl ClientHost for WebHost {
         download(name, mime, bytes)
             .map_err(|error| error.as_string().unwrap_or_else(|| format!("{error:?}")))
     }
-
-    fn supports_host_file_download(&self) -> bool {
-        true
-    }
-
-    fn download_host_file(
-        &self,
-        host_id: &str,
-        path: &std::path::Path,
-    ) -> HostFuture<'static, Result<(), String>> {
-        let Some(token) = token_for(host_id) else {
-            return Box::pin(async { Err("not signed in".into()) });
-        };
-        let path = path.to_string_lossy().into_owned();
-        Box::pin(async move { download_from_host(&token, &path).await.map_err(js_error) })
-    }
 }
 
 /// A browser hands files only to a file input a user gesture opened; the
@@ -322,58 +306,6 @@ fn download(name: &str, mime: &str, bytes: &[u8]) -> Result<(), JsValue> {
     anchor.set_download(name);
     anchor.click();
     web_sys::Url::revoke_object_url(&url)?;
-    Ok(())
-}
-
-/// Exchange the bearer token for a one-time download ticket, then hand the
-/// resulting URL to a synthetic `<a download>` so the browser streams the file
-/// directly to disk instead of buffering it in WASM memory.
-async fn download_from_host(token: &str, path: &str) -> Result<(), JsValue> {
-    let init = web_sys::RequestInit::new();
-    init.set_method("POST");
-    let body = serde_json::json!({ "path": path }).to_string();
-    init.set_body(&JsValue::from_str(&body));
-    let request = web_sys::Request::new_with_str_and_init("/download", &init)?;
-    request
-        .headers()
-        .set("Authorization", &format!("Bearer {token}"))?;
-    request.headers().set("Content-Type", "application/json")?;
-    let response: web_sys::Response =
-        wasm_bindgen_futures::JsFuture::from(window().fetch_with_request(&request))
-            .await?
-            .dyn_into()?;
-    let text = wasm_bindgen_futures::JsFuture::from(response.text()?)
-        .await?
-        .as_string()
-        .unwrap_or_default();
-    if !response.ok() {
-        let message = if text.trim().is_empty() {
-            format!("HTTP {}", response.status())
-        } else {
-            text.trim().to_owned()
-        };
-        return Err(JsValue::from_str(&message));
-    }
-    let payload: serde_json::Value =
-        serde_json::from_str(&text).map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let ticket = payload["ticket"]
-        .as_str()
-        .ok_or_else(|| JsValue::from_str("missing download ticket"))?;
-    let filename = payload["filename"].as_str().unwrap_or("download");
-    let document = window()
-        .document()
-        .ok_or_else(|| JsValue::from_str("no document"))?;
-    let anchor: web_sys::HtmlAnchorElement = document.create_element("a")?.dyn_into()?;
-    anchor.set_href(&format!("/download?ticket={ticket}"));
-    anchor.set_download(filename);
-    // Firefox ignores clicks on detached anchors pointing at HTTP downloads.
-    if let Some(body) = document.body() {
-        let _ = body.append_child(&anchor);
-        anchor.click();
-        let _ = body.remove_child(&anchor);
-    } else {
-        anchor.click();
-    }
     Ok(())
 }
 
