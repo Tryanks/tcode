@@ -231,11 +231,13 @@ impl RowShows {
         let settled = meta.is_settled();
         let line_three = match RowStatus::of(state, working) {
             Some(status) => LineThree::Status(status),
-            None => LineThree::Model(meta.model.as_deref().map(|model| {
-                store
+            // With no model chosen, the harness runs its own default: name the harness.
+            None => LineThree::Model(Some(match meta.model.as_deref() {
+                Some(model) => store
                     .thread_model_name(&meta.id, model)
                     .unwrap_or_else(|| model.to_owned())
-                    .into()
+                    .into(),
+                None => meta.provider.display_name().into(),
             })),
         };
         Self {
