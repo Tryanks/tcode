@@ -1157,7 +1157,6 @@ impl Entries {
                     .into_owned()
                     .into();
                 gpui_base::Button::new("agents-settled")
-                    .debug_selector(|| "agents-settled".into())
                     .accessibility_label(label.clone())
                     .aria_expanded(*expanded)
                     .w_full()

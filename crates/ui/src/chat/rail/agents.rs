@@ -5,9 +5,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, App, Context, Entity, IntoElement, ParentElement as _, Role, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_core::settlement::AgentExecution;
@@ -297,7 +296,6 @@ fn row(
                 .into_any_element(),
         )
     });
-    let key = line.key.clone();
     let origin = SharedString::from(format!("rail-agent-{}", line.key));
     let row = crate::material::accessible_clickable(
         v_flex(),
@@ -306,7 +304,6 @@ fn row(
         label,
         cx,
     )
-    .debug_selector(move || format!("rail-agent-{key}"))
     .relative()
     .w_full()
     .min_w_0()
