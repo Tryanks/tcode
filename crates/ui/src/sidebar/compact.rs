@@ -128,11 +128,7 @@ impl SessionsSidebar {
                     };
                     let host_name = (recent && sectioned).then(|| store.read(cx).host_title());
                     rows.push(CompactListRow::Thread(Rc::new(CompactThreadRow {
-                        title: meta.title.clone().into(),
                         row_id: format!("compact-thread-row-{}", listed.name).into(),
-                        label: crate::tr!("sidebar.thread", title = meta.title.clone())
-                            .into_owned()
-                            .into(),
                         timestamp,
                         relative_time: humanize_ago(
                             store.read(cx).host_now_secs(cx).saturating_sub(timestamp),
@@ -529,7 +525,7 @@ impl SessionsSidebar {
             .w_full()
             .child(self.render_compact_thread(row, window, cx))
             .when(row.separator, |list| {
-                list.child(crate::material::row_hairline(px(COMPACT_PAGE_INSET), cx))
+                list.child(crate::material::row_hairline(px(row::PHONE_ROW_INSET), cx))
             })
             .into_any_element()
     }
@@ -671,7 +667,7 @@ impl SessionsSidebar {
                             list.child(thread_list_scrollbar(
                                 "compact-thread-scrollbar",
                                 &this.compact_list_state,
-                                compact_thread_row_height(cx),
+                                COMPACT_THREAD_ROW_HEIGHT,
                             ))
                         })
                         .into_any_element()
@@ -885,7 +881,7 @@ impl SessionsSidebar {
         )
     }
 
-    /// One 56pt thread row. Long press opens the shared thread context menu.
+    /// One thread row. Long press opens the shared thread context menu.
     pub(super) fn render_compact_thread(
         &self,
         cached: &CompactThreadRow,
@@ -893,82 +889,56 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let meta = &cached.meta;
-        let state = &cached.state;
+        // A rename does not rebuild the list's model: the row reads it live.
+        let state = &ThreadRowState {
+            renaming: self
+                .renaming
+                .as_ref()
+                .filter(|rename| rename.thread == cached.state.thread)
+                .map(|rename| rename.input.clone()),
+            ..cached.state.clone()
+        };
         let Some(store) = self.store_of(&state.thread.host) else {
             return div().into_any_element();
         };
         let working = cached.working;
-        let project_name = cached.project_name.clone();
-        let project = if project_name.is_some() {
-            store
-                .read(cx)
-                .project(meta.project_id.as_deref().unwrap_or_default())
-                .cloned()
-        } else {
-            None
-        };
         let name = state.name.clone();
-        let status = faded_status(
-            format!("compact-status-{name}"),
-            compact_status_line(state, working, cx)
-                .map(|(label, color)| (SharedString::from(label), color)),
-            window,
-            cx,
-            |(label, color), _, cx| {
-                h_flex()
-                    .gap(cx.theme().tokens.spacing.xs)
-                    .child(
-                        div()
-                            .whitespace_nowrap()
-                            .text_color(*color)
-                            .child(crate::widgets::fade_text(label.clone())),
-                    )
-                    .child("·")
-                    .into_any_element()
-            },
-        );
         let click = state.thread.clone();
-        let renaming = self
-            .renaming
-            .as_ref()
-            .filter(|rename| rename.thread == state.thread);
-        let mark = Self::provider_mark(
+        let shows = row::RowShows::of(
             store.read(cx),
             meta,
-            &name,
-            crate::material::LIST_ROW_MIN_HEIGHT,
-            COMPACT_PAGE_INSET,
+            state,
+            working,
+            cached.project_name.clone(),
+            cached.host_name.clone(),
         );
-
-        // Rows needing the user carry a 6% semantic wash; everything else
-        // sits on the paper with only hover and pressed tints. The fill
-        // glides between them.
-        let fill = if state.waiting_for_approval {
-            cx.theme().warning.opacity(0.06)
-        } else if state.waiting_for_input {
-            cx.theme().primary.opacity(0.06)
-        } else {
-            cx.theme().list_active.opacity(0.)
-        };
         let fill = transition(
             (cached.row_id.clone(), "fill"),
-            fill,
+            row::row_fill(RowLight::None, shows.pinned, cx),
             gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
-        let label = crate::pull_requests::badge_label(&meta.pull_requests, cx).map_or_else(
-            || cached.label.to_string(),
-            |badge| format!("{}, {badge}", cached.label),
+        // The row is the touch target, so it speaks for its badge too.
+        let label = crate::i18n::join_list(
+            std::iter::once(crate::tr!("sidebar.thread", title = meta.title.clone()).into_owned())
+                .chain(shows.details())
+                .chain(crate::pull_requests::badge_label(&meta.pull_requests, cx)),
         );
+        let time = div()
+            .flex_none()
+            .whitespace_nowrap()
+            .child(crate::widgets::fade_text(cached.relative_time.clone()))
+            .into_any_element();
+        let lines = self.row_lines(&store, meta, state, &shows, time, true, window, cx);
         let row = crate::material::list_row(cached.row_id.clone(), label.into(), cx)
             .debug_selector({
                 let name = name.clone();
                 move || format!("compact-row-{name}")
             })
-            // First child so the row's content paints over the mark.
-            .relative()
-            .children(mark)
+            .h(px(row::PHONE_ROW_HEIGHT))
+            .px(px(row::PHONE_ROW_INSET))
+            .py_0()
             .bg(fill)
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this
@@ -989,255 +959,7 @@ impl SessionsSidebar {
                     store.show_thread(click.session_id.clone(), cx);
                 });
             }))
-            .child(compact_status_glyph(
-                store.read(cx).image_host(),
-                &name,
-                CompactGlyph::of(state, working, cx),
-                project.as_ref(),
-                window,
-                cx,
-            ))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(cx.theme().tokens.spacing.xxs)
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .min_w_0()
-                            .gap(px(6.))
-                            .child(if let Some(rename) = renaming {
-                                self.rename_input(&rename.input, cx).into_any_element()
-                            } else {
-                                sidebar_label(cached.title.clone())
-                                    .text_body(true, cx)
-                                    .text_color(if meta.is_settled() {
-                                        cx.theme().muted_foreground
-                                    } else {
-                                        cx.theme().foreground
-                                    })
-                                    .when(!meta.is_settled(), |title| title.font_medium())
-                                    .when(state.show_unread, |title| title.font_semibold())
-                                    .debug_selector({
-                                        let name = name.clone();
-                                        move || format!("compact-title-{name}")
-                                    })
-                                    .into_any_element()
-                            })
-                            .children(
-                                crate::motion::shown(
-                                    SharedString::from(format!("compact-pin-{name}")),
-                                    (meta.pinned_at.is_some() && !meta.is_settled()).then_some(()),
-                                    SHOW,
-                                    window,
-                                    cx,
-                                )
-                                .map(|shown| {
-                                    shown.fold_across_gap(
-                                        px(6.),
-                                        Icon::new(IconName::Pin)
-                                            .flex_none()
-                                            .text_color(cx.theme().muted_foreground),
-                                    )
-                                }),
-                            )
-                            .when_some(
-                                Self::fading_spinner(
-                                    format!("title-spinner-{}", state.row_key),
-                                    state.title_generating,
-                                    window,
-                                    cx,
-                                ),
-                                |row, spinner| row.child(spinner),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .min_w_0()
-                            .gap(cx.theme().tokens.spacing.xs)
-                            .text_secondary(true, cx)
-                            .when_some(project_name, |line, name| {
-                                line.child(
-                                    div()
-                                        .min_w_0()
-                                        .debug_selector({
-                                            let name = name.clone();
-                                            move || format!("compact-project-{name}")
-                                        })
-                                        .overflow_hidden()
-                                        .child(crate::widgets::fade_text(name)),
-                                )
-                                .child(div().flex_none().child("·"))
-                            })
-                            .when_some(cached.host_name.clone(), |line, host| {
-                                line.child(
-                                    div()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .child(crate::widgets::fade_text(host)),
-                                )
-                                .child(div().flex_none().child("·"))
-                            })
-                            .children(status)
-                            .when_some(
-                                crate::pull_requests::badge(&meta.pull_requests, cx),
-                                |line, badge| line.child(badge).child("·"),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .child(crate::widgets::fade_text(cached.relative_time.clone())),
-                            ),
-                    ),
-            );
+            .child(lines.flex_1());
         self.thread_context_menu(row, meta, state, working, true, cx)
-    }
-}
-
-/// What the status slot at the head of a compact row shows.
-#[derive(Clone, Copy, PartialEq)]
-enum CompactGlyph {
-    Approval,
-    Input,
-    Failed,
-    Spinner(gpui::Hsla),
-    /// Dispatched agents await the settle.
-    Unsettled,
-    /// Background work goes on.
-    Background,
-    Unread,
-    Idle,
-}
-
-impl CompactGlyph {
-    pub(super) fn of(state: &ThreadRowState, working: bool, cx: &App) -> Self {
-        if state.waiting_for_approval {
-            Self::Approval
-        } else if state.waiting_for_input {
-            Self::Input
-        } else if state.failed {
-            Self::Failed
-        } else if working {
-            Self::Spinner(cx.theme().primary)
-        } else if state.unsettled {
-            Self::Unsettled
-        } else if state.background != (0, 0) {
-            Self::Background
-        } else if state.show_unread {
-            Self::Unread
-        } else {
-            Self::Idle
-        }
-    }
-}
-
-/// The 20×20 status slot at the head of a compact row; a change of status
-/// cross-fades. The slot is always taken so titles line up. Idle ungrouped
-/// rows show their project artwork.
-fn compact_status_glyph(
-    image_host: crate::store::ImageHost,
-    id: &str,
-    glyph: CompactGlyph,
-    project: Option<&tcode_core::project::Project>,
-    window: &mut Window,
-    cx: &mut App,
-) -> gpui::AnyElement {
-    let project = project.cloned();
-    div()
-        .flex_none()
-        .size(px(20.))
-        .child(crate::motion::cross_fade(
-            SharedString::from(format!("compact-glyph-{id}")),
-            glyph,
-            CHANGE,
-            window,
-            cx,
-            move |glyph, _, cx| {
-                compact_glyph(image_host, *glyph, project.as_ref(), cx).into_any_element()
-            },
-        ))
-        .into_any_element()
-}
-
-fn compact_glyph(
-    image_host: crate::store::ImageHost,
-    glyph: CompactGlyph,
-    project: Option<&tcode_core::project::Project>,
-    cx: &App,
-) -> gpui::Div {
-    let slot = div().size(px(20.)).flex().items_center().justify_center();
-    match glyph {
-        CompactGlyph::Approval => slot.rounded_full().bg(cx.theme().warning).child(
-            div()
-                .text_token(&cx.theme().tokens.typography.xs)
-                .font_semibold()
-                .text_color(gpui::white())
-                .child("!"),
-        ),
-        CompactGlyph::Input => slot.rounded_full().bg(cx.theme().primary).child(
-            div()
-                .text_token(&cx.theme().tokens.typography.xs)
-                .font_semibold()
-                .text_color(cx.theme().primary_foreground)
-                .child("?"),
-        ),
-        CompactGlyph::Failed => slot.child(
-            Icon::new(IconName::TriangleAlert)
-                .size(px(16.))
-                .text_color(cx.theme().danger),
-        ),
-        CompactGlyph::Spinner(color) => slot.child(Spinner::new().small().color(color)),
-        CompactGlyph::Unsettled => slot.child(crate::material::status_dot(cx.theme().warning)),
-        CompactGlyph::Background => slot.child(crate::widgets::BreathingDot::new(
-            cx.theme().muted_foreground,
-        )),
-        CompactGlyph::Unread => slot.child(crate::material::status_dot(cx.theme().primary)),
-        CompactGlyph::Idle => slot
-            .text_color(cx.theme().muted_foreground)
-            .when_some(project, |slot, project| {
-                slot.child(crate::project_icon::artwork(image_host, project, 20.))
-            }),
-    }
-}
-
-/// What a thread with a turn running or a request open says of itself: the
-/// request it waits on the user for, else that it works.
-pub(super) fn busy_status(state: &ThreadRowState, cx: &App) -> (Cow<'static, str>, gpui::Hsla) {
-    if state.waiting_for_approval {
-        (crate::tr!("mobile.approval"), cx.theme().warning)
-    } else if state.waiting_for_input {
-        (crate::tr!("mobile.answer"), cx.theme().primary)
-    } else {
-        (crate::tr!("mobile.working"), cx.theme().primary)
-    }
-}
-
-/// Status label and color, or `None` for an idle thread that shows only its time.
-pub(super) fn compact_status_line(
-    state: &ThreadRowState,
-    working: bool,
-    cx: &App,
-) -> Option<(Cow<'static, str>, gpui::Hsla)> {
-    if state.waiting() {
-        Some(busy_status(state, cx))
-    } else if state.failed {
-        Some((crate::tr!("sidebar.failed"), cx.theme().danger))
-    } else if working {
-        Some(busy_status(state, cx))
-    } else if state.unsettled {
-        Some((crate::tr!("sidebar.unsettled"), cx.theme().warning))
-    } else if state.background != (0, 0) {
-        Some((
-            crate::tr!("sidebar.background"),
-            cx.theme().muted_foreground,
-        ))
-    } else if state.show_unread {
-        Some((crate::tr!("mobile.unread"), cx.theme().primary))
-    } else if !state.wakes.is_empty() {
-        Some((crate::tr!("sidebar.waiting"), cx.theme().muted_foreground))
-    } else {
-        None
     }
 }

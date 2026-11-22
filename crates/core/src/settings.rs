@@ -665,7 +665,6 @@ pub enum SettingsPatch {
     WordWrapDiffs(bool),
     SkipDeleteConfirmation(bool),
     LiveCommandPanelDisabled(bool),
-    SidebarProviderMarks(bool),
     ProviderUpdateChecksDisabled(bool),
     InactiveFrameThrottleDisabled(bool),
     ScrollToLatestOnSend(bool),
@@ -954,10 +953,6 @@ pub struct Settings {
     /// legacy settings keep the feature enabled.
     #[serde(default)]
     pub live_command_panel_disabled: bool,
-    /// Whether sidebar thread rows show their provider's mark. Off by
-    /// default and absent in legacy files.
-    #[serde(default)]
-    pub sidebar_provider_marks: bool,
     /// Whether the on-launch provider version check is DISABLED. Stored inverted
     /// so it remains enabled for legacy settings files that lack the field.
     #[serde(default)]
@@ -1152,7 +1147,6 @@ impl Default for Settings {
             word_wrap_diffs: false,
             skip_delete_confirmation: false,
             live_command_panel_disabled: false,
-            sidebar_provider_marks: false,
             provider_update_checks_disabled: false,
             inactive_frame_throttle_disabled: false,
             scroll_to_latest_on_send: true,
@@ -1260,9 +1254,6 @@ impl Settings {
             }
             SettingsPatch::LiveCommandPanelDisabled(value) => {
                 self.live_command_panel_disabled = value;
-            }
-            SettingsPatch::SidebarProviderMarks(value) => {
-                self.sidebar_provider_marks = value;
             }
             SettingsPatch::ProviderUpdateChecksDisabled(value) => {
                 self.provider_update_checks_disabled = value;
@@ -1734,10 +1725,12 @@ mod tests {
 
     #[test]
     fn older_settings_preserve_access_policy_and_accept_partial_feature_blocks() {
-        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
+        // v0.4.7 wrote sidebar_provider_marks, a setting since removed.
+        let legacy: Settings =
+            serde_json::from_str(r#"{"theme_mode":"system","sidebar_provider_marks":true}"#)
+                .unwrap();
         assert_eq!(legacy.auto_settle_after_days, Some(3.0));
         assert!(!legacy.auto_settle_on_merge);
-        assert!(!legacy.sidebar_provider_marks);
         assert!(legacy.scroll_to_latest_on_send);
         assert!(!legacy.sidebar_collapsed);
         assert!(!legacy.remote_hosting_enabled);

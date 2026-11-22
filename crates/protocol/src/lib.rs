@@ -406,6 +406,8 @@ pub use wire::{
 // Unreleased: SessionActivity gains asking, the harness's own subagents that
 // wait on the user through the thread; the agent event stream's
 // user_input_requested and PendingUserInput gain parent_item_id.
+// Unreleased: Settings loses sidebar_provider_marks, and SettingsPatch its
+// sidebar_provider_marks patch.
 pub const PROTOCOL_VERSION: u32 = 32;
 
 #[cfg(test)]

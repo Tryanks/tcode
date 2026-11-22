@@ -872,6 +872,7 @@ where
     selectable_surface_with(
         el,
         selectable_row_height(compact),
+        cx.theme().tokens.radius.md,
         selected,
         compact,
         Some((motion, key)),
@@ -925,14 +926,40 @@ fn selectable_surface<E>(el: E, height: f32, selected: bool, compact: bool, cx: 
 where
     E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
 {
-    selectable_surface_with(el, height, selected, compact, None, cx)
+    selectable_surface_with(
+        el,
+        height,
+        cx.theme().tokens.radius.md,
+        selected,
+        compact,
+        None,
+        cx,
+    )
+}
+
+/// A desktop [`selectable_row`] of its list's own `height` and corner
+/// `radius`, which no shared row size fits. It draws no selected fill: its
+/// list glides that itself.
+pub(crate) fn selectable_row_shaped<E>(
+    el: E,
+    height: f32,
+    radius: Pixels,
+    selected: bool,
+    cx: &App,
+) -> E
+where
+    E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
+{
+    selectable_surface_with(el, height, radius, selected, false, None, cx)
 }
 
 /// [`selectable_surface`] whose hover fill's clock is kept by the owner and
 /// key `owned` names, when one does.
+#[allow(clippy::too_many_arguments)]
 fn selectable_surface_with<E>(
     el: E,
     height: f32,
+    radius: Pixels,
     selected: bool,
     compact: bool,
     owned: Option<(&crate::motion::owned::Owned, SharedString)>,
@@ -949,7 +976,6 @@ where
         px(6.)
     };
     let inset = selectable_row_inset(compact);
-    let radius = theme.tokens.radius.md;
     el.h(px(height))
         .relative()
         .flex()

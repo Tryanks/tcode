@@ -1,4 +1,4 @@
-use crate::sidebar::compact::compact_status_line;
+use crate::sidebar::row::{RowStatus, StatusKind};
 
 use super::*;
 use agent::ProviderKind;
@@ -41,20 +41,69 @@ fn session(id: &str, parent_id: Option<&str>) -> SessionMeta {
     meta
 }
 
-#[gpui::test]
-fn a_phone_row_says_whether_its_thread_works_runs_background_work_or_waits(
-    cx: &mut TestAppContext,
-) {
-    use tcode_protocol::{
-        EventEnvelope, HostMessage, IndexSnapshot, IndexSummary, ServerEvent, SessionActivity,
-        Topic, encode_line,
-    };
-    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
-    cx.update(crate::test_client::init);
-    let (to_host, _outgoing) = async_channel::unbounded();
-    let (incoming, from_host) = async_channel::unbounded();
-    let send = |topic, event| {
+/// A store over a link the test speaks for the host on: it holds
+/// `sessions` in `project` with `summary`'s activity, and `send` says more.
+struct ScriptedHost {
+    store: Entity<WorkspaceStore>,
+    incoming: async_channel::Sender<String>,
+    _outgoing: async_channel::Receiver<String>,
+    _pump: gpui::Task<()>,
+}
+
+impl ScriptedHost {
+    fn new(
+        cx: &mut TestAppContext,
+        sessions: Vec<SessionMeta>,
+        project: Project,
+        summary: tcode_protocol::IndexSummary,
+    ) -> Self {
+        use tcode_protocol::{IndexSnapshot, ServerEvent, Topic};
+        cx.update(crate::test_client::init);
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let send = |topic, event| Self::say(&incoming, topic, event);
+        send(
+            Topic::Settings,
+            ServerEvent::SettingsSnapshot(Default::default()),
+        );
+        send(
+            Topic::Index,
+            ServerEvent::IndexSnapshot(IndexSnapshot {
+                sessions,
+                projects: vec![project],
+                summary,
+            }),
+        );
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let pump = cx.background_executor.spawn(async move {
+            pump_link.pump().await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                cx,
+            )
+        });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        Self {
+            store,
+            incoming,
+            _outgoing: outgoing,
+            _pump: pump,
+        }
+    }
+
+    fn say(
+        incoming: &async_channel::Sender<String>,
+        topic: tcode_protocol::Topic,
+        event: tcode_protocol::ServerEvent,
+    ) {
+        use tcode_protocol::{EventEnvelope, HostMessage, encode_line};
         incoming
             .try_send(
                 encode_line(&HostMessage::Event(EventEnvelope {
@@ -65,7 +114,54 @@ fn a_phone_row_says_whether_its_thread_works_runs_background_work_or_waits(
                 .unwrap(),
             )
             .unwrap();
-    };
+    }
+
+    fn send(&self, topic: tcode_protocol::Topic, event: tcode_protocol::ServerEvent) {
+        Self::say(&self.incoming, topic, event);
+    }
+}
+
+/// A thread's activity with nothing of it going on.
+fn at_rest() -> tcode_protocol::SessionActivity {
+    tcode_protocol::SessionActivity {
+        working: false,
+        turn_running: false,
+        background: Default::default(),
+        unsettled: 0,
+        wakes: Default::default(),
+        waiting_for_approval: false,
+        waiting_for_input: false,
+        asking: Vec::new(),
+        settle_blocked: false,
+        failed: false,
+        unread: false,
+        last_activity_at: None,
+        fork: tcode_protocol::ForkAvailability::Available,
+        agent: None,
+        latest_activity: None,
+    }
+}
+
+/// The phone row of thread `id` as the list last built it.
+fn phone_row(sidebar: &SessionsSidebar, id: &str) -> Rc<CompactThreadRow> {
+    sidebar
+        .compact_model
+        .as_ref()
+        .unwrap()
+        .rows
+        .iter()
+        .find_map(|row| match row {
+            CompactListRow::Thread(row) if row.state.thread.session_id == id => Some(row.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the phone lists {id}"))
+}
+
+#[gpui::test]
+fn a_phone_row_says_whether_its_thread_works_runs_background_work_or_waits(
+    cx: &mut TestAppContext,
+) {
+    use tcode_protocol::{IndexSummary, ServerEvent, Topic};
     // The thread runs a turn, or only its background work goes on, or
     // nothing of it runs and a watched pull request will wake it.
     #[derive(Clone, Copy, PartialEq)]
@@ -77,14 +173,13 @@ fn a_phone_row_says_whether_its_thread_works_runs_background_work_or_waits(
     let summary = |doing: Doing| IndexSummary {
         activity: HashMap::from([(
             "background".into(),
-            SessionActivity {
+            tcode_protocol::SessionActivity {
                 working: doing == Doing::Turn,
                 turn_running: doing == Doing::Turn,
                 background: tcode_protocol::BackgroundActivity {
                     tasks: (doing == Doing::Background).into(),
                     agents: 0,
                 },
-                unsettled: 0,
                 wakes: tcode_protocol::ThreadWakes {
                     pull_requests: if doing == Doing::Watch {
                         vec![tcode_core::pull_request::PullRequestKey::new(
@@ -97,16 +192,7 @@ fn a_phone_row_says_whether_its_thread_works_runs_background_work_or_waits(
                     },
                     ..Default::default()
                 },
-                waiting_for_approval: false,
-                waiting_for_input: false,
-                asking: Vec::new(),
-                settle_blocked: false,
-                failed: false,
-                unread: false,
-                last_activity_at: None,
-                fork: tcode_protocol::ForkAvailability::Available,
-                agent: None,
-                latest_activity: None,
+                ..at_rest()
             },
         )]),
         ..Default::default()
@@ -114,34 +200,8 @@ fn a_phone_row_says_whether_its_thread_works_runs_background_work_or_waits(
     let project = Project::from_root(PathBuf::from("/project"));
     let mut meta = session("background", None);
     meta.project_id = Some(project.id.clone());
-    send(
-        Topic::Settings,
-        ServerEvent::SettingsSnapshot(Default::default()),
-    );
-    send(
-        Topic::Index,
-        ServerEvent::IndexSnapshot(IndexSnapshot {
-            sessions: vec![meta],
-            projects: vec![project],
-            summary: summary(Doing::Background),
-        }),
-    );
-    let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
-    let link = tcode_client::HostLink::new(to_host, from_host);
-    let pump_link = link.clone();
-    let _pump = cx.background_executor.spawn(async move {
-        pump_link.pump().await;
-    });
-    let store = cx.new(|cx| {
-        WorkspaceStore::new_attached(
-            link,
-            crate::store::WorkspaceAttachment::Local,
-            None,
-            None,
-            cx,
-        )
-    });
-    crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+    let host = ScriptedHost::new(cx, vec![meta], project, summary(Doing::Background));
+    let store = host.store.clone();
     store.update(cx, |store, cx| store.show_alone("background".into(), cx));
     let window_state = cx.new(|_| WindowState::default().with_compact(true));
     let (sidebar, cx) = cx.add_window_view(|_, cx| {
@@ -149,11 +209,11 @@ fn a_phone_row_says_whether_its_thread_works_runs_background_work_or_waits(
     });
     cx.simulate_resize(size(px(393.), px(852.)));
     for (doing, expected) in [
-        (Doing::Background, "Background"),
-        (Doing::Turn, "Working"),
-        (Doing::Watch, "Waiting"),
+        (Doing::Background, StatusKind::Background),
+        (Doing::Turn, StatusKind::Working),
+        (Doing::Watch, StatusKind::Waiting),
     ] {
-        send(
+        host.send(
             Topic::Index,
             ServerEvent::IndexSummaryReplaced(summary(doing)),
         );
@@ -161,24 +221,91 @@ fn a_phone_row_says_whether_its_thread_works_runs_background_work_or_waits(
         cx.run_until_parked();
         draw(cx);
         assert!(cx.debug_bounds("compact-row-background").is_some());
-        sidebar.read_with(cx, |sidebar, cx| {
-            let row = sidebar
-                .compact_model
-                .as_ref()
-                .unwrap()
-                .rows
-                .iter()
-                .find_map(|row| match row {
-                    CompactListRow::Thread(row) if row.state.thread.session_id == "background" => {
-                        Some(row)
-                    }
-                    _ => None,
-                })
-                .expect("rendered phone thread");
-            let (label, _) = compact_status_line(&row.state, row.working, cx).unwrap();
-            assert_eq!(label, expected);
+        sidebar.read_with(cx, |sidebar, _| {
+            let row = phone_row(sidebar, "background");
+            let status = RowStatus::of(&row.state, row.working).unwrap();
+            assert_eq!(status.kind, expected);
         });
     }
+}
+
+/// A dispatched agent that waits on the user is named on its lead's row,
+/// after the verb: the verb keeps its whole width however long the agent's
+/// title, and the row keeps its height beside one that says nothing.
+#[gpui::test]
+fn a_lead_row_names_its_waiting_agent_after_a_whole_verb(cx: &mut TestAppContext) {
+    let long = "Implement CSV export for every report ".repeat(12);
+    let project = Project::from_root(PathBuf::from("/project"));
+    let sessions = [
+        ("idle", None, "idle"),
+        ("lead-short", None, "lead-short"),
+        ("agent-short", Some("lead-short"), "Explore"),
+        ("lead-long", None, "lead-long"),
+        ("agent-long", Some("lead-long"), long.as_str()),
+    ]
+    .map(|(id, parent, title)| {
+        let mut meta = session(id, parent);
+        meta.title = title.into();
+        meta.project_id = Some(project.id.clone());
+        meta
+    });
+    let waiting = tcode_protocol::SessionActivity {
+        waiting_for_input: true,
+        ..at_rest()
+    };
+    let summary = tcode_protocol::IndexSummary {
+        activity: HashMap::from([
+            ("agent-short".into(), waiting.clone()),
+            ("agent-long".into(), waiting),
+        ]),
+        ..Default::default()
+    };
+    let host = ScriptedHost::new(cx, sessions.to_vec(), project, summary);
+    let store = host.store.clone();
+    let window_state = cx.new(|_| WindowState::default());
+    let (sidebar, cx) = cx.add_window_view(|_, cx| {
+        SessionsSidebar::new(vec![store.clone()], window_state.clone(), cx)
+    });
+    for (compact, width, row) in [(false, 320., "sidebar-thread"), (true, 393., "compact-row")] {
+        window_state.update(cx, |state, cx| state.set_compact(compact, cx));
+        cx.simulate_resize(size(px(width), px(800.)));
+        crate::test_frames::draw_settled(cx);
+        let bounds = |selector: String, cx: &mut VisualTestContext| {
+            cx.debug_bounds(selector.clone().leak())
+                .unwrap_or_else(|| panic!("{selector} is drawn"))
+        };
+        assert_eq!(
+            bounds(format!("{row}-idle"), cx).size.height,
+            bounds(format!("{row}-lead-long"), cx).size.height,
+            "a row is as tall with a status as without"
+        );
+        let (short, long_verb) = (
+            bounds("row-status-verb-lead-short".into(), cx),
+            bounds("row-status-verb-lead-long".into(), cx),
+        );
+        assert_eq!(
+            short.size.width, long_verb.size.width,
+            "a long name takes none of the verb's width"
+        );
+        assert!(long_verb.right() < bounds(format!("{row}-lead-long"), cx).right());
+    }
+    sidebar.read_with(cx, |sidebar, _| {
+        for (lead, agent) in [("lead-short", "Explore"), ("lead-long", long.as_str())] {
+            let row = phone_row(sidebar, lead);
+            assert_eq!(
+                RowStatus::of(&row.state, row.working),
+                Some(RowStatus {
+                    kind: StatusKind::Answer,
+                    name: Some(agent.to_owned().into()),
+                }),
+                "{lead}'s row names its agent"
+            );
+        }
+    });
+    assert!(
+        cx.debug_bounds("compact-row-agent-short").is_none(),
+        "the agent has no row of its own"
+    );
 }
 
 /// A host of its own holding `threads` (id and last activity) in one
@@ -439,102 +566,6 @@ fn canceling_inline_rename_on_the_phone_discards_the_unsaved_title(cx: &mut Test
 }
 
 #[gpui::test]
-fn thread_rows_carry_the_provider_mark_until_the_setting_is_off(cx: &mut TestAppContext) {
-    cx.update(crate::test_client::init);
-    let root = crate::store::tests::scratch_root("provider-mark");
-    let disk = SessionStore::open_at(root.clone()).unwrap();
-    let project = Project::from_root(root.clone());
-    let mut codex = session("codex-thread", None);
-    codex.project_id = Some(project.id.clone());
-    let mut claude = session("claude-thread", None);
-    claude.provider = ProviderKind::ClaudeCode;
-    claude.project_id = Some(project.id.clone());
-    disk.upsert_project(&project).unwrap();
-    for meta in [&codex, &claude] {
-        disk.upsert_meta(meta).unwrap();
-    }
-    let host = spawn_host(disk, HostServices::default()).unwrap();
-    let mut driver = crate::store::tests::LocalHostDriver::new(&host);
-    let store = cx.new(|cx| {
-        WorkspaceStore::new_attached(
-            driver.link.clone(),
-            crate::store::WorkspaceAttachment::Local,
-            None,
-            None,
-            cx,
-        )
-    });
-    driver.wait_until(cx, "sidebar baseline", |cx| {
-        store.read_with(cx, |store, _| store.baseline_ready())
-    });
-    let window_state = cx.new(|_| WindowState::default());
-    let (_, cx) =
-        cx.add_window_view(|_, cx| SessionsSidebar::new(vec![store.clone()], window_state, cx));
-    let cx: &mut VisualTestContext = cx;
-    cx.simulate_resize(size(px(320.), px(600.)));
-    store.update(cx, |store, cx| store.show_alone("codex-thread".into(), cx));
-    // (row selector, mark selector); the active Codex row comes first.
-    let selectors = [
-        (
-            "sidebar-thread-codex-thread",
-            "sidebar-provider-mark-codex-thread",
-        ),
-        (
-            "sidebar-thread-claude-thread",
-            "sidebar-provider-mark-claude-thread",
-        ),
-    ];
-    let wait_for_rows =
-        |cx: &mut VisualTestContext, driver: &mut crate::store::tests::LocalHostDriver| loop {
-            driver.step(cx);
-            draw(cx);
-            let rows: Vec<_> = selectors
-                .iter()
-                .filter_map(|(row, _)| cx.debug_bounds(row))
-                .collect();
-            if rows.len() == selectors.len() {
-                return rows;
-            }
-            driver.wait_for_host("the thread rows");
-        };
-
-    let set_marks = |cx: &mut VisualTestContext,
-                     enabled: bool,
-                     driver: &mut crate::store::tests::LocalHostDriver| {
-        store.update(cx, |store, _| store.set_sidebar_provider_marks(enabled));
-        driver.wait_until(cx, "the setting to replicate", |cx| {
-            store.read_with(cx, |store, _| store.settings().sidebar_provider_marks) == enabled
-        });
-    };
-
-    // Off by default: rows render without a mark.
-    wait_for_rows(cx, &mut driver);
-    for (_, mark_selector) in selectors {
-        assert!(cx.debug_bounds(mark_selector).is_none());
-    }
-
-    set_marks(cx, true, &mut driver);
-    wait_for_rows(cx, &mut driver);
-    for (_, mark_selector) in selectors {
-        assert!(
-            cx.debug_bounds(mark_selector).is_some(),
-            "each row carries its provider mark once enabled"
-        );
-    }
-
-    set_marks(cx, false, &mut driver);
-    wait_for_rows(cx, &mut driver);
-    for (_, mark_selector) in selectors {
-        assert!(
-            cx.debug_bounds(mark_selector).is_none(),
-            "with marks off again no mark is drawn"
-        );
-    }
-    driver.shutdown(cx, &host);
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[gpui::test]
 fn dismissing_a_phone_rows_menu_keeps_the_selection_and_the_next_tap_opens(
     cx: &mut TestAppContext,
 ) {
@@ -581,7 +612,7 @@ fn dismissing_a_phone_rows_menu_keeps_the_selection_and_the_next_tap_opens(
     driver.shutdown(cx, &host);
     draw(cx);
     let a = cx.debug_bounds("compact-row-menu-0").unwrap();
-    let b = cx.debug_bounds("compact-row-menu-10").unwrap();
+    let b = cx.debug_bounds("compact-row-menu-8").unwrap();
     let send = |cx: &mut VisualTestContext, id, phase, position| {
         cx.update(|window, cx| {
             window.dispatch_event(
@@ -627,7 +658,7 @@ fn dismissing_a_phone_rows_menu_keeps_the_selection_and_the_next_tap_opens(
     crate::test_frames::draw_settled(cx);
     assert_eq!(
         store.read_with(cx, |store, _| store.open_threads()),
-        ["menu-10"]
+        ["menu-8"]
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1493,8 +1524,9 @@ fn the_threads_list_keeps_its_offset_across_the_shelf_and_selection(cx: &mut Tes
     cx.simulate_resize(size(px(393.), px(852.)));
     draw(cx);
     let list = sidebar.read_with(cx, |sidebar, _| sidebar.flat_list_state.clone());
+    // Near Active's end, the shelf's heading below it on screen.
     list.scroll_to(gpui::ListOffset {
-        item_ix: 30,
+        item_ix: 35,
         offset_in_item: px(20.),
     });
     sidebar.update(cx, |_, cx| cx.notify());
