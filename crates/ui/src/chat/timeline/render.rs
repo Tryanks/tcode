@@ -1089,6 +1089,7 @@ impl TimelineView {
         let image_host = self.workspace_store.read(cx).image_host();
         let images = attachments
             .iter()
+            .filter(|path| components::bubble::is_image_path(path))
             .map(|path| {
                 let path = PathBuf::from(path);
                 let title = path

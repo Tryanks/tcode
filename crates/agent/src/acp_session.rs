@@ -10,6 +10,7 @@
 //! services, MCP and option mapping, the standard `session/update` mapping and
 //! cancellation. What an agent family does differently is its [`Dialect`].
 
+use crate::AttachmentKind;
 use crate::write_journal::WriteJournal;
 use crate::{RewindFailure, RewindFailureReason};
 use std::collections::{HashMap, VecDeque};
@@ -665,15 +666,21 @@ impl Session {
         text: &str,
         attachments: &[Attachment],
     ) -> bool {
-        let Some((turn_id, generation)) = self.with_state(|state| {
+        let Some((turn_id, generation, capabilities)) = self.with_state(|state| {
             let turn_id = state.turn.clone()?;
             state.prompt_generation += 1;
-            Some((turn_id, state.prompt_generation))
+            Some((
+                turn_id,
+                state.prompt_generation,
+                state.prompt_capabilities.clone(),
+            ))
         }) else {
             return false;
         };
-        let request =
-            acp::PromptRequest::new(session_id.clone(), prompt_blocks(text, attachments, None));
+        let request = acp::PromptRequest::new(
+            session_id.clone(),
+            prompt_blocks(text, attachments, &capabilities, None),
+        );
         let pending = self.connection.send_request(request);
         let turn_tx = self.turn_tx.clone();
         self.connection
@@ -1435,6 +1442,7 @@ async fn handshake<D: Dialect>(
 ) -> Result<(Established, bool), AgentError> {
     let name = dialect.name();
     let init = initialize(connection, name, launch, dialect.client_services()).await?;
+    state.lock_recover().prompt_capabilities = init.agent_capabilities.prompt_capabilities.clone();
     let setup = Setup {
         connection,
         opts,
@@ -1510,7 +1518,7 @@ async fn handle_command<D: Dialect>(
         } => {
             *turn_seq += 1;
             let id = format!("turn-{turn_seq}");
-            let (generation, instructions, checkpoint) = {
+            let (generation, instructions, checkpoint, capabilities) = {
                 let mut state = state.lock_recover();
                 state.turn = Some(id.clone());
                 state.prompt_generation += 1;
@@ -1528,12 +1536,13 @@ async fn handle_command<D: Dialect>(
                     state.prompt_generation,
                     state.instructions.clone(),
                     checkpoint,
+                    state.prompt_capabilities.clone(),
                 )
             };
 
             let request = acp::PromptRequest::new(
                 session_id.clone(),
-                prompt_blocks(&text, &attachments, instructions.as_deref()),
+                prompt_blocks(&text, &attachments, &capabilities, instructions.as_deref()),
             );
             // The observed stdio writer consumes this id when the complete
             // `session/prompt` JSON-RPC line reaches the child.
@@ -2096,26 +2105,61 @@ pub(crate) fn stop_reason_status(reason: acp::StopReason) -> (TurnStatus, Option
     }
 }
 
-/// The user's text and images, then the instructions as a text block of their own. A native
-/// `/command` goes alone: the agent reads the prompt as the command's arguments.
+/// The user's text and attachments, then the instructions as a text block of their own. A
+/// native `/command` goes alone: the agent reads the prompt as the command's arguments.
+///
+/// An attachment goes as the block the agent's `promptCapabilities` take it in: an image as an
+/// image, a sound as audio, a PDF or text file as an embedded resource (`embeddedContext`);
+/// any other reaches the agent as its path in the text ([`crate::fold_attachments`]).
 fn prompt_blocks(
     text: &str,
     attachments: &[Attachment],
+    capabilities: &acp::PromptCapabilities,
     instructions: Option<&str>,
 ) -> Vec<acp::ContentBlock> {
-    let mut blocks = Vec::with_capacity(2 + attachments.len());
+    let (text, taken) =
+        crate::fold_attachments(text, attachments, |attachment| match attachment.kind() {
+            AttachmentKind::Image => capabilities.image,
+            AttachmentKind::Audio => capabilities.audio,
+            AttachmentKind::Pdf => capabilities.embedded_context,
+            AttachmentKind::Text => capabilities.embedded_context && attachment.text().is_some(),
+            AttachmentKind::Other => false,
+        });
+    let mut blocks = Vec::with_capacity(2 + taken.len());
     // A message of pictures alone carries no text block: the schema asks for
     // none, and an ACP client sends a pasted picture as an image block alone.
-    if !text.is_empty() || attachments.is_empty() {
-        blocks.push(acp::ContentBlock::Text(acp::TextContent::new(
-            text.to_string(),
-        )));
+    if !text.is_empty() || taken.is_empty() {
+        blocks.push(acp::ContentBlock::Text(acp::TextContent::new(text.clone())));
     }
-    for attachment in attachments {
-        blocks.push(acp::ContentBlock::Image(acp::ImageContent::new(
-            attachment.data_base64.clone(),
-            attachment.media_type.clone(),
-        )));
+    for attachment in taken {
+        let uri = || {
+            attachment.source_path.as_deref().map_or_else(
+                || format!("attachment:{}", attachment.file_name().unwrap_or("file")),
+                |path| file_uri(Path::new(path)),
+            )
+        };
+        blocks.push(match attachment.kind() {
+            AttachmentKind::Image => acp::ContentBlock::Image(acp::ImageContent::new(
+                attachment.data_base64.clone(),
+                attachment.media_type.clone(),
+            )),
+            AttachmentKind::Audio => acp::ContentBlock::Audio(acp::AudioContent::new(
+                attachment.data_base64.clone(),
+                attachment.media_type.clone(),
+            )),
+            AttachmentKind::Text => acp::ContentBlock::Resource(acp::EmbeddedResource::new(
+                acp::EmbeddedResourceResource::TextResourceContents(
+                    acp::TextResourceContents::new(attachment.text().unwrap_or_default(), uri())
+                        .mime_type(attachment.media_type.clone()),
+                ),
+            )),
+            _ => acp::ContentBlock::Resource(acp::EmbeddedResource::new(
+                acp::EmbeddedResourceResource::BlobResourceContents(
+                    acp::BlobResourceContents::new(attachment.data_base64.clone(), uri())
+                        .mime_type(attachment.media_type.clone()),
+                ),
+            )),
+        });
     }
     if let Some(instructions) = instructions.filter(|_| !text.starts_with('/')) {
         blocks.push(acp::ContentBlock::Text(acp::TextContent::new(
@@ -2123,6 +2167,25 @@ fn prompt_blocks(
         )));
     }
     blocks
+}
+
+/// The `file://` URI of an absolute path, its bytes outside the unreserved
+/// set and `/` percent-encoded (RFC 8089, RFC 3986).
+fn file_uri(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    let mut uri = String::from(if path.starts_with('/') {
+        "file://"
+    } else {
+        "file:///"
+    });
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~/:".contains(&byte) {
+            uri.push(byte as char);
+        } else {
+            let _ = write!(uri, "%{byte:02X}");
+        }
+    }
+    uri
 }
 
 async fn emit_provider_options(
@@ -2532,6 +2595,8 @@ pub(crate) struct State {
     /// ([`crate::Caps::relayed_history`]).
     journal: Option<Arc<Mutex<WriteJournal>>>,
     checkpoint: Option<String>,
+    /// What the agent's `initialize` says a prompt may carry besides text.
+    prompt_capabilities: acp::PromptCapabilities,
 }
 
 impl State {
@@ -2557,6 +2622,7 @@ impl State {
             instructions: None,
             journal: None,
             checkpoint: None,
+            prompt_capabilities: acp::PromptCapabilities::default(),
         }
     }
 

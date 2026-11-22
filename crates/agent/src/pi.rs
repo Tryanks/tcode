@@ -527,11 +527,11 @@ impl SessionActor for PiActor {
                 ..
             } => {
                 let id = self.request_id();
-                let mut request = json!({"id":id,"type":"prompt","message":text});
+                let mut request = json!({"id":id,"type":"prompt"});
                 if self.mapper.current_turn.is_some() {
                     request["streamingBehavior"] = json!("followUp");
                 }
-                attach_images(&mut request, attachments);
+                attach_images(&mut request, &text, &attachments);
                 send_json(&mut self.stdin, &request).map_err(|err| err.to_string())?;
                 self.events
                     .emit(AgentEvent::TurnAccepted { delivery_id })
@@ -547,10 +547,9 @@ impl SessionActor for PiActor {
                 let mut request = json!({
                     "id": native_id,
                     "type":"prompt",
-                    "message":text,
                     "streamingBehavior":"steer"
                 });
-                attach_images(&mut request, attachments);
+                attach_images(&mut request, &text, &attachments);
                 send_json(&mut self.stdin, &request).map_err(|err| err.to_string())?;
                 self.pending_steers.insert(native_id, request_id);
                 Ok(())
@@ -2148,12 +2147,19 @@ fn message_cost(usage: Option<&Value>) -> Option<f64> {
     usage?.pointer("/cost/total")?.as_f64()
 }
 
-fn attach_images(request: &mut Value, attachments: Vec<Attachment>) {
-    if attachments.is_empty() {
+/// The `prompt` RPC's `message` and `images`: pi takes images alone
+/// (`AgentSession.prompt` of pi-coding-agent 1.6.0), so any other attachment
+/// is a path in the message.
+fn attach_images(request: &mut Value, text: &str, attachments: &[Attachment]) {
+    let (message, images) = crate::fold_attachments(text, attachments, |attachment| {
+        attachment.kind() == crate::AttachmentKind::Image
+    });
+    request["message"] = json!(message);
+    if images.is_empty() {
         return;
     }
     request["images"] = Value::Array(
-        attachments
+        images
             .into_iter()
             .map(|attachment| {
                 json!({

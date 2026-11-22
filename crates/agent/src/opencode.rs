@@ -1599,11 +1599,20 @@ fn same_directory(a: &Path, b: &Path) -> bool {
         )
 }
 
+/// A prompt's body: the text, and each attachment OpenCode takes as a file
+/// part with a `data:` URI (an image, a PDF, a text file); any other is a path
+/// in the text.
 fn prompt_body(text: String, attachments: &[Attachment], delivery: &str) -> Value {
+    let (text, files) = crate::fold_attachments(&text, attachments, |attachment| {
+        matches!(
+            attachment.kind(),
+            crate::AttachmentKind::Image | crate::AttachmentKind::Pdf | crate::AttachmentKind::Text
+        )
+    });
     let mut body = json!({ "text": text, "delivery": delivery });
-    if !attachments.is_empty() {
-        body["files"] = attachments
-            .iter()
+    if !files.is_empty() {
+        body["files"] = files
+            .into_iter()
             .map(|attachment| {
                 let mut file = json!({
                     "uri": format!(

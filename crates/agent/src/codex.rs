@@ -1362,7 +1362,10 @@ impl SessionActor for Actor {
                         "expectedTurnId": turn_id,
                         "input": user_input(&text, &attachments),
                     }),
-                    PendingRequest::Steer { request_id, text },
+                    PendingRequest::Steer {
+                        request_id,
+                        text: requests::input_text(&text, &attachments),
+                    },
                 )
             }
             SessionCommand::Rewind {

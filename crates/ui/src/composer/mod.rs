@@ -98,7 +98,9 @@ use crate::settings::provider_label;
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::{ComposerState, WorkspaceStore};
 use crate::workspace_walk::filter_entries;
-use tcode_core::attachments::{mime_from_path, text_with_file_paths, validate_attachment};
+use tcode_core::attachments::{
+    is_image_attachment, mime_from_path, text_with_file_paths, validate_attachment,
+};
 use tcode_core::provider_models::{FastLevel, FastMode};
 use tcode_core::ui::WorkspaceMode;
 use tcode_protocol::WorkspaceListing;
@@ -685,7 +687,8 @@ impl Composer {
 
     /// The prompt a rewind this client asked for gave back goes into the
     /// ordinary composer to edit or resend: first, with what the user had
-    /// typed after it, never in its place; its images join the strip.
+    /// typed after it, never in its place; its images join the strip, its
+    /// other files the chips.
     fn sync_native_rewind_prefill(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let prefill = self.workspace_store.update(cx, |store, cx| {
             store.take_native_rewind_prefill_for(self.session_id.as_deref(), cx)
@@ -696,6 +699,10 @@ impl Composer {
         self.sync_images_session(cx);
         for path in prefill.attachments {
             let path = PathBuf::from(path);
+            if !is_image_attachment(&mime_from_path(&path)) {
+                self.restore_file(path);
+                continue;
+            }
             let name = path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
@@ -921,13 +928,15 @@ impl Composer {
                     return;
                 }
             };
+            let (whole, paths) = self.carried_files();
             let attachment_paths = self
                 .pending_images
                 .iter()
                 .map(|image| image.path.clone())
+                .chain(whole)
                 .collect();
             input.update(cx, |state, cx| state.replace_all("", window, cx));
-            let message = text_with_file_paths(&message, &self.file_paths());
+            let message = text_with_file_paths(&message, &paths);
             self.pending_images.clear();
             self.pending_files.clear();
             self.image_load_generation = self.image_load_generation.wrapping_add(1);
@@ -1013,11 +1022,13 @@ impl Composer {
             cx.notify();
             return;
         }
-        let sent_text = text_with_file_paths(&text, &self.file_paths());
+        let (whole, paths) = self.carried_files();
+        let sent_text = text_with_file_paths(&text, &paths);
         let attachment_paths = self
             .pending_images
             .iter()
             .map(|image| image.path.clone())
+            .chain(whole)
             .collect::<Vec<_>>();
         if let Some((from, to)) = self.composer_state(cx).relay_confirmation.clone() {
             let composer = cx.entity();
@@ -1290,7 +1301,8 @@ impl Composer {
     }
 
     /// Put messages Stop took back before delivery into the composer: their
-    /// text after what is typed, their images in the strip.
+    /// text after what is typed, their images in the strip, their other
+    /// files as chips.
     fn take_back_unsent(
         &mut self,
         messages: Vec<tcode_protocol::UnsentMessage>,
@@ -1311,6 +1323,12 @@ impl Composer {
             }
         });
         for attachment in messages.into_iter().flat_map(|message| message.attachments) {
+            if attachment.kind() != agent::AttachmentKind::Image
+                && let Some(path) = &attachment.source_path
+            {
+                self.restore_file(PathBuf::from(path));
+                continue;
+            }
             let name = attachment
                 .source_path
                 .as_deref()

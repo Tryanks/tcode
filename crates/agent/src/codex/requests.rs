@@ -1,4 +1,5 @@
 use super::*;
+use crate::AttachmentKind;
 
 pub(super) fn approval_choices(
     method: &str,
@@ -242,21 +243,47 @@ pub(super) fn snake_case(value: &str) -> String {
     result
 }
 
+/// The text a message sends Codex: what was typed, with the path of each
+/// attachment [`user_input`] does not carry appended.
+pub(super) fn input_text(text: &str, attachments: &[Attachment]) -> String {
+    crate::fold_attachments(text, attachments, takes).0
+}
+
+/// What the app-server takes as user input besides text (`UserInput` of
+/// codex-cli 0.171.0): an image, and a sound by the path of its file
+/// (`localAudio`). It has no document input.
+fn takes(attachment: &Attachment) -> bool {
+    match attachment.kind() {
+        AttachmentKind::Image => true,
+        AttachmentKind::Audio => attachment.source_path.is_some(),
+        _ => false,
+    }
+}
+
 /// The `input: UserInput[]` array shared by `turn/start` and `turn/steer`: text
-/// first, then one `image` entry per attachment carrying a
-/// `data:<mime>;base64,<data>` URL (the Codex app-server image-input shape).
+/// first, then one `image` entry per image carrying a
+/// `data:<mime>;base64,<data>` URL (the Codex app-server image-input shape)
+/// and one `localAudio` entry per sound. Any other attachment is a path in
+/// the text ([`input_text`]).
 pub(super) fn user_input(text: &str, attachments: &[Attachment]) -> Value {
+    let (text, taken) = crate::fold_attachments(text, attachments, takes);
     // A message of pictures alone carries no text item, as ChatGPT.app and
     // Codex's own TUI send one.
-    let mut input = Vec::with_capacity(1 + attachments.len());
-    if !text.is_empty() || attachments.is_empty() {
+    let mut input = Vec::with_capacity(1 + taken.len());
+    if !text.is_empty() || taken.is_empty() {
         input.push(json!({ "type": "text", "text": text, "text_elements": [] }));
     }
-    for attachment in attachments {
-        input.push(json!({
-            "type": "image",
-            "url": format!("data:{};base64,{}", attachment.media_type, attachment.data_base64),
-        }));
+    for attachment in taken {
+        input.push(match attachment.kind() {
+            AttachmentKind::Audio => json!({
+                "type": "localAudio",
+                "path": attachment.source_path,
+            }),
+            _ => json!({
+                "type": "image",
+                "url": format!("data:{};base64,{}", attachment.media_type, attachment.data_base64),
+            }),
+        });
     }
     Value::Array(input)
 }

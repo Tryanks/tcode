@@ -1584,20 +1584,29 @@ fn hidden_model_is_skipped_and_fast_tiers_say_so() {
     }
 }
 
+/// Codex takes an image as a `data:` URL and a sound by its file's path
+/// (`localAudio`); a PDF or any other file reaches it as its path after the
+/// text.
 #[test]
-fn turn_input_carries_image_entries() {
-    let attachments = vec![Attachment {
-        media_type: "image/png".into(),
+fn turn_input_carries_images_and_sounds_and_other_files_by_path() {
+    let file = |media_type: &str, path: &str| Attachment {
+        media_type: media_type.into(),
         data_base64: "AAAA".into(),
-        source_path: None,
-    }];
-    let payload = user_input("what color?", &attachments);
-    let input = payload.as_array().unwrap();
-    assert_eq!(input.len(), 2);
-    assert_eq!(input[0]["type"], "text");
-    assert_eq!(input[0]["text"], "what color?");
-    assert_eq!(input[1]["type"], "image");
-    assert_eq!(input[1]["url"], "data:image/png;base64,AAAA");
+        source_path: Some(path.into()),
+    };
+    let attachments = vec![
+        file("image/png", "/up/a.png"),
+        file("audio/wav", "/up/c.wav"),
+        file("application/pdf", "/up/b.pdf"),
+    ];
+    assert_eq!(
+        user_input("what is this?", &attachments),
+        json!([
+            { "type": "text", "text": "what is this?\n\n/up/b.pdf", "text_elements": [] },
+            { "type": "image", "url": "data:image/png;base64,AAAA" },
+            { "type": "localAudio", "path": "/up/c.wav" },
+        ])
+    );
 }
 
 #[test]

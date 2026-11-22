@@ -593,7 +593,8 @@ impl AppState {
     }
 
     /// Whether `path` may be sent as an attachment by someone confined to `projects`: a file
-    /// inside the attachments folder of one of their threads, never an arbitrary file.
+    /// inside the attachments folder of one of their threads, or one they uploaded to one of
+    /// them, never an arbitrary file.
     pub(super) fn authorize_attachment(
         &self,
         path: &Path,
@@ -601,6 +602,12 @@ impl AppState {
         cx: &HostCx,
     ) -> Result<(), ProtocolError> {
         self.authorize_path(path, projects, PathAccess::AttachmentDescendant, cx)
+            .or_else(|refused| {
+                self.scoped_metas(projects)
+                    .any(|meta| self.user_directories.is_upload_of(&meta.id, path))
+                    .then_some(())
+                    .ok_or(refused)
+            })
     }
 
     fn authorize_path(

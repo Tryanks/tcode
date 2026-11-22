@@ -1,8 +1,11 @@
-//! Pure image-attachment validation.
+//! Pure attachment rules: what a file is, and what a client may attach.
 
 use std::path::Path;
 
-/// Maximum bytes per image as stored on the host and sent to the model.
+/// Maximum bytes per image as stored on the host and sent to the model, and
+/// of any file a message carries whole rather than as its path: a message the
+/// host gives back unsent carries its attachments' bytes in one protocol line
+/// (the protocol's `MAX_LINE_BYTES` fits one this size in base64).
 pub const MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// Longest edge a client keeps when fitting an image before upload, and says
 /// so on the attachment when it shrinks one. Anthropic rejects an image over
@@ -42,7 +45,31 @@ pub fn mime_from_path(path: &Path) -> String {
         "svg" => "image/svg+xml",
         "bmp" => "image/bmp",
         "tif" | "tiff" => "image/tiff",
+        "pdf" => "application/pdf",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "ogg" | "oga" => "audio/ogg",
+        "flac" => "audio/flac",
         _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+/// The MIME type a message gives an attached file: by its extension, else a
+/// PDF by its signature, else text where its bytes are UTF-8 with no NUL.
+pub fn attachment_media_type(path: &Path, bytes: &[u8]) -> String {
+    let by_extension = mime_from_path(path);
+    if by_extension != "application/octet-stream" {
+        return by_extension;
+    }
+    if bytes.starts_with(b"%PDF-") {
+        "application/pdf"
+    } else if !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok() {
+        "text/plain"
+    } else {
+        "application/octet-stream"
     }
     .to_string()
 }
