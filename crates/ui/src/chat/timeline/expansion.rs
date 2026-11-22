@@ -1,7 +1,7 @@
 use super::*;
 
 /// Target minimum time for the latest activity and its immediate predecessor.
-/// An activity with two newer successors folds immediately instead.
+/// An activity with two settled successors folds immediately instead.
 const AUTO_ACTIVITY_MIN_VISIBILITY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,6 +347,127 @@ mod tests {
     use crate::chat::tests::*;
     use crate::test_frames::draw_settled;
     use gpui::TestAppContext;
+
+    /// A successor with nothing to show yet does not take an open detail's
+    /// place: the latest command stays open while the edit after it waits
+    /// for its diff, and folds as the edit opens on it.
+    #[gpui::test]
+    fn an_edit_before_its_diff_leaves_the_latest_open(cx: &mut TestAppContext) {
+        use agent::{FileChange, FileChangeKind, ItemStatus};
+        use gpui::{VisualTestContext, px, size};
+
+        let mut threads = seed_two_threads(cx, Timeline::default(), Timeline::default());
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let window_state = cx.new(|_| WindowState::default());
+        let store = threads.store.clone();
+        let thread = threads.first.clone();
+        let (_view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(thread.clone()),
+                window,
+                cx,
+            )
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(900.)));
+        let turn = scripted_turn(
+            &threads.scripts,
+            &mut threads.driver,
+            &thread,
+            agent::ProviderKind::ClaudeCode,
+            cx,
+        );
+        let send = |threads: &mut TwoThreads,
+                    event: agent::AgentEvent,
+                    cx: &mut VisualTestContext| {
+            let (agent::AgentEvent::ItemStarted(item) | agent::AgentEvent::ItemCompleted(item)) =
+                &event
+            else {
+                unreachable!("an item event")
+            };
+            let expected = item.content.clone();
+            turn.1.try_send(event).unwrap();
+            let store = threads.store.clone();
+            threads.driver.wait_until(cx, "the item", |cx| {
+                store.read_with(cx, |store, cx| {
+                    store
+                        .with_timeline_for(
+                            store.sole_thread().as_deref(),
+                            |timeline| {
+                                timeline.entries.iter().any(|entry| {
+                                    entry.content == EntryContent::Item(expected.clone())
+                                })
+                            },
+                            cx,
+                        )
+                        .unwrap_or(false)
+                })
+            });
+            draw_settled(cx);
+        };
+        let edit = |status: ItemStatus, diff: Option<&str>| agent::ThreadItem {
+            id: "edit".into(),
+            parent_item_id: None,
+            content: ItemContent::FileChange {
+                changes: vec![FileChange {
+                    path: "src/lib.rs".into(),
+                    kind: FileChangeKind::Modify,
+                    diff: diff.map(str::to_owned),
+                }],
+                status,
+                output: None,
+                command: None,
+            },
+        };
+
+        turn.1
+            .try_send(agent::AgentEvent::TurnStarted {
+                turn_id: "turn".into(),
+            })
+            .unwrap();
+        let EntryContent::Item(command) = command_with_output("done").content.clone() else {
+            unreachable!("a command is an item")
+        };
+        send(
+            &mut threads,
+            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: "done".into(),
+                parent_item_id: None,
+                content: command,
+            }),
+            cx,
+        );
+        assert!(command_open(cx, "done").is_some());
+
+        send(
+            &mut threads,
+            agent::AgentEvent::ItemStarted(edit(ItemStatus::InProgress, None)),
+            cx,
+        );
+        cx.executor().advance_clock(Duration::from_millis(1_000));
+        draw_settled(cx);
+        assert!(
+            command_open(cx, "done").is_some(),
+            "an edit with nothing to show folded the command before it"
+        );
+
+        send(
+            &mut threads,
+            agent::AgentEvent::ItemCompleted(edit(
+                ItemStatus::Completed,
+                Some("--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n"),
+            )),
+            cx,
+        );
+        assert!(
+            command_open(cx, "done").is_none(),
+            "the command stayed open after the edit opened on its diff"
+        );
+        assert!(cx.debug_bounds("file-edit-diff").is_some());
+        threads.shutdown(cx);
+    }
 
     /// A command's half-second is its own thread's: a collapse pending for a
     /// command in the thread the pane leaves neither closes nor shortens a
