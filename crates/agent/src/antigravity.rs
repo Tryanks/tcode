@@ -571,19 +571,26 @@ impl Dialect for Antigravity {
 
             let (tx, rx) = smol::channel::unbounded();
             *self.watcher.lock().unwrap_or_else(|held| held.into_inner()) = Some(tx);
-            let watcher_state = setup.state.clone();
-            let watcher_proactive = self.proactive.clone();
-            let watcher_events = setup.events.clone();
-            let sid = session_id.0.to_string();
-            smol::spawn(subagents::run_watcher(
+            let watcher = subagents::run_watcher(
                 state_dir,
-                sid,
-                watcher_state,
-                watcher_proactive,
-                watcher_events,
+                session_id.0.to_string(),
+                setup.state.clone(),
+                self.proactive.clone(),
+                setup.events.clone(),
                 rx,
-            ))
-            .detach();
+                opts.clock.clone(),
+            );
+            // On the session's connection, the thread its notifications are
+            // handled on ([`subagents::run_watcher`]).
+            if let Err(err) = setup.connection.spawn(async move {
+                watcher.await;
+                Ok(())
+            }) {
+                log::warn!(
+                    "antigravity: could not follow the session's subagents: {}",
+                    describe(&err)
+                );
+            }
         }
 
         Ok(Established {

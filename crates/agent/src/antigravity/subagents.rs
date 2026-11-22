@@ -655,9 +655,14 @@ fn read_subagent_files(state_dir: &Path, parent_session_id: &str) -> Vec<Subagen
     files
 }
 
-/// Background task for one Antigravity session: sleeps while idle, polls child
-/// subagent transcripts while any subagent is running, and checks for flushed
-/// proactive-turn completion steps while an agent-started turn is open.
+/// The task that follows one Antigravity session's subagents and the turns
+/// the agent starts on its own: idle until told of one, then reading their
+/// records every [`POLL_INTERVAL`] of the host's clock while one runs.
+///
+/// It runs on the session's own connection, the thread its notifications are
+/// handled on, so what it reports never overtakes what the agent sent before
+/// it: the files are read off that thread, and the session's state is changed
+/// and the events sent back on it with nothing awaited in between.
 pub(super) async fn run_watcher(
     state_dir: PathBuf,
     session_id: String,
@@ -665,8 +670,12 @@ pub(super) async fn run_watcher(
     proactive: Arc<Mutex<ProactiveTracker>>,
     events: Sender<AgentEvent>,
     controls: Receiver<WatcherCommand>,
+    clock: crate::Clock,
 ) {
-    let mut watcher = WatcherState::new(state_dir.clone(), session_id.clone());
+    let mut watcher = {
+        let (state_dir, session_id) = (state_dir.clone(), session_id.clone());
+        crate::process::unblock(move || WatcherState::new(state_dir, session_id)).await
+    };
     let db_path = record::path(&state_dir, &session_id);
     let transcript_path = record::transcript_path(&state_dir, &session_id);
 
@@ -682,8 +691,9 @@ pub(super) async fn run_watcher(
         let next_command = if closing {
             None
         } else if need_poll {
+            let due = clock.timer_at(clock.now() + POLL_INTERVAL);
             future::or(async { Some(controls.recv().await) }, async {
-                smol::Timer::after(POLL_INTERVAL).await;
+                due.await;
                 None
             })
             .await
@@ -708,69 +718,75 @@ pub(super) async fn run_watcher(
             }
         }
 
-        let polled = watcher.poll();
-        for event in immediate_events.into_iter().chain(polled) {
-            if events.send(event).await.is_err() {
-                return;
-            }
-        }
+        // Whether an open turn the agent started has finished on disk: its
+        // terminal step flushed after `usage_update`, or an upstream error
+        // step in the record.
+        let proactive_check = proactive
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .active
+            .as_ref()
+            .map(|active| (active.turn_id.clone(), active.since, active.usage_seen));
+        let context = acp_state
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .usage();
+        let (db, transcript) = (db_path.clone(), transcript_path.clone());
+        let (polled_watcher, polled, ended) = crate::process::unblock(move || {
+            let polled = watcher.poll();
+            let ended = proactive_check.and_then(|(turn_id, since, usage_seen)| {
+                let end = if usage_seen {
+                    record::proactive_turn_end(&db, &transcript, since, context)
+                } else {
+                    record::last_step(&db)
+                        .filter(|last| last.error && last.index > since)
+                        .map(|last| record::ProactiveEnd {
+                            step_index: last.index,
+                            status: TurnStatus::Failed,
+                            usage: context,
+                        })
+                };
+                end.map(|end| (turn_id, end))
+            });
+            (watcher, polled, ended)
+        })
+        .await;
+        watcher = polled_watcher;
 
-        // Check whether an open proactive turn has finished on disk (either
-        // its terminal transcript step flushed after `usage_update`, or an
-        // upstream error step appeared in the SQLite record).
-        let proactive_check = {
-            let tracker = proactive.lock().unwrap_or_else(|held| held.into_inner());
-            tracker
+        // Back on the session's thread: nothing is awaited from here to the
+        // last event sent.
+        let mut out = immediate_events;
+        out.extend(polled);
+        if let Some((turn_id, end)) = ended {
+            let mut tracker = proactive.lock().unwrap_or_else(|held| held.into_inner());
+            if tracker
                 .active
                 .as_ref()
-                .map(|active| (active.turn_id.clone(), active.since, active.usage_seen))
-        };
-        if let Some((turn_id, since, usage_seen)) = proactive_check {
-            let context = acp_state
-                .lock()
-                .unwrap_or_else(|held| held.into_inner())
-                .usage();
-            let completed = if usage_seen {
-                record::proactive_turn_end(&db_path, &transcript_path, since, context)
-            } else {
-                record::last_step(&db_path)
-                    .filter(|last| last.error && last.index > since)
-                    .map(|last| record::ProactiveEnd {
-                        step_index: last.index,
-                        status: TurnStatus::Failed,
-                        usage: context,
-                    })
-            };
-            if let Some(end) = completed {
-                let end_events = {
-                    let mut tracker = proactive.lock().unwrap_or_else(|held| held.into_inner());
-                    if tracker
-                        .active
-                        .as_ref()
-                        .is_some_and(|active| active.turn_id == turn_id)
-                    {
-                        tracker.active = None;
-                        tracker.seen = Some(end.step_index);
-                        acp_state
-                            .lock()
-                            .unwrap_or_else(|held| held.into_inner())
-                            .end_turn(
-                                &turn_id,
-                                TurnEnd {
-                                    status: end.status,
-                                    message: None,
-                                    usage: end.usage,
-                                },
-                            )
-                    } else {
-                        Vec::new()
-                    }
-                };
-                for event in end_events {
-                    if events.send(event).await.is_err() {
-                        return;
-                    }
-                }
+                .is_some_and(|active| active.turn_id == turn_id)
+            {
+                tracker.active = None;
+                tracker.seen = Some(end.step_index);
+                drop(tracker);
+                out.extend(
+                    acp_state
+                        .lock()
+                        .unwrap_or_else(|held| held.into_inner())
+                        .end_turn(
+                            &turn_id,
+                            TurnEnd {
+                                status: end.status,
+                                message: None,
+                                usage: end.usage,
+                            },
+                        ),
+                );
+            }
+        }
+        for event in out {
+            // The session's event channel is unbounded: a send fails only
+            // once its reader is gone.
+            if events.try_send(event).is_err() {
+                return;
             }
         }
 

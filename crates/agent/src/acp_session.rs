@@ -2513,7 +2513,7 @@ pub(crate) struct State {
     modes: Option<acp::SessionModeState>,
     /// [`SessionOptions::instructions`] while the session attached Tcode's MCP servers.
     instructions: Option<String>,
-    /// The thread's record of what its sessions write through Tcode, and the
+    /// The thread's record of what its sessions report writing, and the
     /// restore point of the turn whose writes it takes: the latest sent, which
     /// what the agent does on its own afterwards still belongs to
     /// ([`crate::Caps::relayed_history`]).
@@ -3572,27 +3572,6 @@ impl Client {
                     format!("could not create {}: {err}", parent.display()),
                 )
             })?;
-        }
-        let kept = {
-            let state = self.state.lock_recover();
-            state.journal.clone().zip(state.checkpoint.clone())
-        };
-        if let Some((journal, checkpoint)) = kept {
-            let (path, content) = (path.clone(), args.content.clone());
-            let kept = crate::process::unblock(move || {
-                journal
-                    .lock_recover()
-                    .before_write(&checkpoint, &path, content.as_bytes())
-            })
-            .await;
-            // The write is the agent's to make either way; one the journal
-            // could not take is one a rewind leaves as it is.
-            if let Err(err) = kept {
-                log::warn!(
-                    "acp: could not keep what a write to {} replaces: {err}",
-                    self.state.lock_recover().cwd.join(&args.path).display()
-                );
-            }
         }
         // What the file held decides whether the write created or modified
         // it. One that cannot be read as text is left to the call's own

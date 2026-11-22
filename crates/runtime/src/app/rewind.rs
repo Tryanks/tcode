@@ -275,7 +275,7 @@ impl AppState {
         }
     }
 
-    /// Where the thread's record of what its sessions wrote through Tcode is
+    /// Where the thread's record of what its sessions wrote, as their agent reported it, is
     /// kept ([`agent::write_journal`]): in Tcode's data, never the workspace.
     pub(super) fn write_journal_dir(&self, session_id: &str) -> PathBuf {
         self.store.root().join("write-journals").join(session_id)
@@ -295,7 +295,7 @@ impl AppState {
 
     /// Make a rewind for a harness that has none
     /// ([`agent::Caps::relayed_history`]), which is asked for nothing: the
-    /// files its sessions wrote through Tcode from the turn on are put back,
+    /// files its sessions reported writing from the turn on are put back,
     /// and for the conversation the thread leaves its session, the log being
     /// cut as a harness's own rewind cuts it. The next message starts a
     /// session anew and hands it what the cut left.

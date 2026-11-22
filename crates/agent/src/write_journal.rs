@@ -1,17 +1,18 @@
-//! What a thread's sessions wrote through Tcode, kept so the writes can be
-//! taken back for a harness with no rewind of its own (CONTRIBUTING,
-//! Principle 1).
+//! What a thread's sessions wrote, kept so the writes can be taken back for
+//! a harness with no rewind of its own (CONTRIBUTING, Principle 1).
 //!
 //! The journal holds, for the first write to a file in each turn, the bytes
-//! the write replaced, and for every write a digest of what it left. It lives
-//! in Tcode's own data, never in the workspace, and costs what the sessions
-//! themselves overwrote: nothing is scanned, snapshotted or hashed but the
-//! files an agent wrote, as it wrote them.
+//! the write replaced, and for every write a digest of what it left, as the
+//! agent reported the write: Antigravity 1.5.14 edits files itself and
+//! reports each completed edit as a whole-file before and after, and makes no
+//! `fs/write_text_file` call. It lives in Tcode's own data, never in the
+//! workspace, and costs what the sessions themselves overwrote: nothing is
+//! scanned, snapshotted or hashed but the files an agent reported writing.
 //!
 //! A restore undoes a suffix of the journal: every write from the first one
 //! of the turns it is given, in the order they were made. Files the agent
-//! changed by running commands were never written through Tcode and are not
-//! in it ([`crate::RewindControl::restores_command_edits`]).
+//! changed by running commands are in no such report and not in it
+//! ([`crate::RewindControl::restores_command_edits`]).
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::{self, Write as _};
@@ -74,30 +75,9 @@ impl WriteJournal {
         Self { dir, kept }
     }
 
-    /// Keep what a write of `content` to `path` in the turn of `checkpoint`
-    /// is about to replace. Called before the write is made, so a write that
-    /// then fails leaves a record that restores the file to what it still is.
-    pub fn before_write(
-        &mut self,
-        checkpoint: &str,
-        path: &Path,
-        content: &[u8],
-    ) -> io::Result<()> {
-        self.append(
-            checkpoint,
-            path,
-            |journal| match std::fs::read(path) {
-                Ok(bytes) => Ok(Before::Blob(journal.keep_blob(&bytes)?)),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Before::Absent),
-                Err(err) => Err(err),
-            },
-            content,
-        )
-    }
-
-    /// Record a write an agent already performed itself and reported as a
-    /// whole-file before/after pair: `before` is `None` when the write created
-    /// `path`, or the file's exact bytes before the write.
+    /// Record a write the agent made and reported as a whole-file before and
+    /// after in the turn of `checkpoint`: `before` is `None` where the write
+    /// created `path`, and otherwise the file's bytes before it.
     pub fn record_write(
         &mut self,
         checkpoint: &str,
@@ -105,29 +85,14 @@ impl WriteJournal {
         before: Option<&[u8]>,
         after: &[u8],
     ) -> io::Result<()> {
-        self.append(
-            checkpoint,
-            path,
-            |journal| match before {
-                Some(bytes) => Ok(Before::Blob(journal.keep_blob(bytes)?)),
-                None => Ok(Before::Absent),
-            },
-            after,
-        )
-    }
-
-    fn append(
-        &mut self,
-        checkpoint: &str,
-        path: &Path,
-        before: impl FnOnce(&Self) -> io::Result<Before>,
-        after: &[u8],
-    ) -> io::Result<()> {
         let key = (checkpoint.to_owned(), path.to_path_buf());
         let before = if self.kept.contains(&key) {
             None
         } else {
-            Some(before(self)?)
+            Some(match before {
+                Some(bytes) => Before::Blob(self.keep_blob(bytes)?),
+                None => Before::Absent,
+            })
         };
         let line = Line {
             checkpoint: key.0.clone(),
@@ -332,11 +297,15 @@ mod tests {
             self.0.join("work").join(name)
         }
 
-        /// A session's write of `content` to `name` in the turn of `checkpoint`.
+        /// A session's write of `content` to `name` in the turn of
+        /// `checkpoint`, reported with what it replaced.
         fn write(&self, journal: &mut WriteJournal, checkpoint: &str, name: &str, content: &[u8]) {
             let path = self.file(name);
-            journal.before_write(checkpoint, &path, content).unwrap();
-            std::fs::write(path, content).unwrap();
+            let before = std::fs::read(&path).ok();
+            std::fs::write(&path, content).unwrap();
+            journal
+                .record_write(checkpoint, &path, before.as_deref(), content)
+                .unwrap();
         }
 
         fn read(&self, name: &str) -> Option<Vec<u8>> {
@@ -374,28 +343,38 @@ mod tests {
     /// turn's first write found it, whatever later turns wrote, removes the
     /// files those turns created, and leaves earlier turns' writes alone. The
     /// bytes include what a text diff does not carry: carriage returns, a
-    /// missing final newline, and bytes that are no text.
+    /// missing final newline, and bytes that are no text; an empty file is a
+    /// file, not one the write created.
     #[test]
     fn a_restore_puts_back_what_the_turns_first_writes_replaced() {
         let scratch = Scratch::new();
         std::fs::write(scratch.file("kept.txt"), b"one\r\ntwo").unwrap();
         std::fs::write(scratch.file("binary"), [0xff, 0x00, 0xfe]).unwrap();
+        std::fs::write(scratch.file("empty"), b"").unwrap();
         let mut journal = WriteJournal::open(scratch.journal());
         scratch.write(&mut journal, "t1", "kept.txt", b"first turn\n");
         scratch.write(&mut journal, "t2", "kept.txt", b"second turn\n");
         scratch.write(&mut journal, "t2", "kept.txt", b"second turn again\n");
         scratch.write(&mut journal, "t2", "binary", b"text now\n");
+        scratch.write(&mut journal, "t2", "empty", b"filled\n");
         scratch.write(&mut journal, "t3", "made.txt", b"new\n");
         scratch.write(&mut journal, "t3", "kept.txt", b"third turn\n");
 
         let preview = WriteJournal::preview(&scratch.journal(), &turns(&["t2", "t3"]));
-        assert_eq!(paths(&preview.files), ["binary", "kept.txt", "made.txt"]);
+        assert_eq!(
+            paths(&preview.files),
+            ["binary", "empty", "kept.txt", "made.txt"]
+        );
         assert_eq!(preview.conflicts, []);
 
         let restored = WriteJournal::restore(&scratch.journal(), &turns(&["t2", "t3"])).unwrap();
-        assert_eq!(paths(&restored), ["binary", "kept.txt", "made.txt"]);
+        assert_eq!(
+            paths(&restored),
+            ["binary", "empty", "kept.txt", "made.txt"]
+        );
         assert_eq!(scratch.read("kept.txt").unwrap(), b"first turn\n");
         assert_eq!(scratch.read("binary").unwrap(), [0xff, 0x00, 0xfe]);
+        assert_eq!(scratch.read("empty").unwrap(), b"");
         assert_eq!(scratch.read("made.txt"), None);
 
         // The first turn's write is still the journal's to take back.
@@ -474,49 +453,5 @@ mod tests {
         WriteJournal::restore(&scratch.journal(), &turns(&["t1", "t2"])).unwrap();
         assert_eq!(scratch.read("a.txt").unwrap(), b"start\n");
         assert_eq!(scratch.read("b.txt"), None);
-    }
-
-    /// Writes recorded from whole-file before/after diffs (when an agent edits
-    /// files directly instead of calling `fs/write_text_file`) restore exact
-    /// original bytes, remove newly created files, and preserve empty files.
-    #[test]
-    fn record_write_restores_diff_reported_edits_and_creations() {
-        let scratch = Scratch::new();
-        let edited = scratch.file("edited.txt");
-        let created = scratch.file("created.txt");
-        let empty = scratch.file("empty.txt");
-        let mut journal = WriteJournal::open(scratch.journal());
-
-        // Agent edited existing CRLF file twice in turn 1.
-        std::fs::write(&edited, b"v2\r\n").unwrap();
-        journal
-            .record_write("t1", &edited, Some(b"v0\r\n"), b"v1\r\n")
-            .unwrap();
-        journal
-            .record_write("t1", &edited, Some(b"v1\r\n"), b"v2\r\n")
-            .unwrap();
-
-        // Agent created a new file and overwrote a previously empty file.
-        std::fs::write(&created, b"fresh\n").unwrap();
-        journal
-            .record_write("t1", &created, None, b"fresh\n")
-            .unwrap();
-        std::fs::write(&empty, b"filled\n").unwrap();
-        journal
-            .record_write("t1", &empty, Some(b""), b"filled\n")
-            .unwrap();
-
-        let preview = WriteJournal::preview(&scratch.journal(), &turns(&["t1"]));
-        assert_eq!(
-            paths(&preview.files),
-            ["created.txt", "edited.txt", "empty.txt"]
-        );
-        assert_eq!(preview.conflicts, []);
-
-        let restored = WriteJournal::restore(&scratch.journal(), &turns(&["t1"])).unwrap();
-        assert_eq!(paths(&restored), ["created.txt", "edited.txt", "empty.txt"]);
-        assert_eq!(scratch.read("edited.txt").unwrap(), b"v0\r\n");
-        assert_eq!(scratch.read("created.txt"), None);
-        assert_eq!(scratch.read("empty.txt").unwrap(), b"");
     }
 }

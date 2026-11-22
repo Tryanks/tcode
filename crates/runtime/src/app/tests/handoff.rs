@@ -1048,7 +1048,7 @@ fn an_account_switch_relays_when_the_copy_does_not_resume() {
 }
 
 /// One finished turn of a harness with no rewind of its own, as its adapter reports it: the
-/// restore point is Tcode's own, and what the turn wrote through Tcode is in the thread's
+/// restore point is Tcode's own, and what the turn reported writing is in the thread's
 /// journal.
 fn relayed_turn(
     cx: &mut TestAppContext,
@@ -1059,9 +1059,12 @@ fn relayed_turn(
 ) -> String {
     let (delivery_id, text, events) = next_turn(cx, launches, launch);
     if let Some((journal, file, content)) = write {
-        let mut journal = agent::write_journal::WriteJournal::open(journal.to_path_buf());
-        journal.before_write(checkpoint, file, content).unwrap();
+        // As the adapter journals the whole-file diff the agent reports.
+        let before = std::fs::read(file).ok();
         std::fs::write(file, content).unwrap();
+        agent::write_journal::WriteJournal::open(journal.to_path_buf())
+            .record_write(checkpoint, file, before.as_deref(), content)
+            .unwrap();
     }
     for event in [
         AgentEvent::SessionStarted {
@@ -1097,8 +1100,8 @@ fn relayed_turn(
 }
 
 /// Antigravity, maintained natively though it has only what standard ACP carries, is asked
-/// for no rewind and no fork: Tcode makes them. A rewind puts back the files the thread's sessions wrote through Tcode
-/// from the turn on and cuts the log; the next message starts a session anew and hands it
+/// for no rewind and no fork: Tcode makes them. A rewind puts back the files the thread's
+/// sessions reported writing from the turn on and cuts the log; the next message starts a session anew and hands it
 /// what the cut left, which the thread shows. The turns before stay targets of a later
 /// rewind, and a fork is a copy of the log that its first message hands to a session of
 /// its own.

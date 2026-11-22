@@ -199,15 +199,15 @@ pub struct Caps {
     /// carries, which can neither cut nor copy a conversation, so Tcode makes
     /// its rewinds and forks itself (CONTRIBUTING, Principle 1): Antigravity,
     /// and no agent that merely connects over ACP. The harness is asked for
-    /// neither: a rewind takes back the files its sessions wrote through
-    /// Tcode ([`write_journal`]) and leaves the session for a new one, a fork
+    /// neither: a rewind takes back the files its sessions reported writing
+    /// ([`write_journal`]) and leaves the session for a new one, a fork
     /// is a new session, and each is handed the conversation so far with the
     /// next message ([`AgentEvent::ProviderRelay`]).
     pub relayed_history: bool,
 }
 
 /// What Tcode's own rewind does ([`Caps::relayed_history`]). The files are
-/// those the sessions wrote through Tcode, each put back as its turn's first
+/// those the sessions reported writing, each put back as its turn's first
 /// write found it; one changed outside the sessions since is listed first.
 const RELAYED_REWIND: RewindControl = RewindControl {
     modes: &[
