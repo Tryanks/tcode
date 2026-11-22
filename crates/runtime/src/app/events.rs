@@ -548,6 +548,9 @@ impl AppState {
 
         self.record_approval_event(session_id, &event);
         self.record_handover(session_id, &event, &handed_over, cx);
+        if let AgentEvent::ItemStarted(item) = &event {
+            self.background_command_under_steer(session_id, item);
+        }
 
         let retry_pending = self.resident(session_id).is_some_and(|resident| {
             resident

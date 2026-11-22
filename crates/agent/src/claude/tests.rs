@@ -2312,28 +2312,72 @@ fn background_tasks_are_listed_and_stopped_one_request_each() {
 
 /// Moving a call to the background is Ctrl+B for that call: the
 /// `background_tasks` control request naming it (Claude Code 2.1.319's
-/// SDK schema). A refusal is the only word of one that did nothing.
+/// SDK schema). Claude Code 2.1.330 can move a Bash call only once it has run
+/// for two seconds and its `task_started` has come: a call asked for sooner
+/// is moved then, and one that returns first is left alone, without a word.
 #[test]
-fn a_call_moves_to_the_background_and_a_refusal_says_so() {
+fn a_call_asked_into_the_background_too_early_moves_once_it_can() {
     let mut m = Mapper::new();
+    feed(
+        &mut m,
+        r#"{"type":"assistant","message":{"id":"msg-bash","content":[{"type":"tool_use","id":"toolu-bash","name":"Bash","input":{"command":"sleep 5","description":"Wait 5 seconds"}}]}}"#,
+    );
+    let refuse = |m: &mut Mapper, request: &Value| {
+        let id = request["request_id"].as_str().unwrap().to_owned();
+        m.on_message(json!({"type":"control_response","response":{
+            "subtype":"success","request_id": id,"response":{"backgrounded":false}}}))
+    };
+
     let request = m.move_to_background_request("toolu-bash".into());
     assert_eq!(
         request["request"],
         json!({"subtype": "background_tasks", "tool_use_id": "toolu-bash"})
     );
-    let id = request["request_id"].as_str().unwrap().to_owned();
-    let refused = m.on_message(json!({"type":"control_response","response":{
-            "subtype":"success","request_id": id,"response":{"backgrounded":false}}}));
+    let early = refuse(&mut m, &request);
+    assert!(early.is_empty(), "{early:?}");
     assert!(
-        matches!(refused.as_slice(), [AgentEvent::Warning { .. }]),
-        "{refused:?}"
+        m.take_outgoing().is_empty(),
+        "nothing to ask until Claude can move it"
     );
 
+    feed(
+        &mut m,
+        r#"{"type":"system","subtype":"task_started","task_id":"bzmuz4elk","run_id":"0mwsbmg2e-aa43feeb","tool_use_id":"toolu-bash","description":"Wait 5 seconds","is_backgrounded":false,"task_type":"local_bash","session_id":"native"}"#,
+    );
+    let [again] = m.take_outgoing().try_into().expect("asked again");
+    assert_eq!(again["request"], request["request"]);
+
+    // It finished as the request reached Claude.
+    let late = refuse(&mut m, &again);
+    assert!(late.is_empty(), "{late:?}");
+    assert!(m.take_outgoing().is_empty());
+
+    // A call that returns before Claude can move it is not asked about again.
+    feed(
+        &mut m,
+        r#"{"type":"assistant","message":{"id":"msg-quick","content":[{"type":"tool_use","id":"toolu-quick","name":"Bash","input":{"command":"true","description":"Quick"}}]}}"#,
+    );
+    let request = m.move_to_background_request("toolu-quick".into());
+    refuse(&mut m, &request);
+    feed(
+        &mut m,
+        r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu-quick","type":"tool_result","content":"","is_error":false}]},"tool_use_result":{"stdout":"","stderr":"","interrupted":false}}"#,
+    );
+    feed(
+        &mut m,
+        r#"{"type":"system","subtype":"task_started","task_id":"bquick","tool_use_id":"toolu-quick","description":"Quick","is_backgrounded":false,"task_type":"local_bash","session_id":"native"}"#,
+    );
+    assert!(m.take_outgoing().is_empty());
+
+    // Claude refusing the request itself is said.
     let request = m.move_to_background_request("toolu-agent".into());
     let id = request["request_id"].as_str().unwrap().to_owned();
-    let moved = m.on_message(json!({"type":"control_response","response":{
-            "subtype":"success","request_id": id,"response":{"backgrounded":true}}}));
-    assert!(moved.is_empty(), "{moved:?}");
+    let failed = m.on_message(json!({"type":"control_response","response":{
+            "subtype":"error","request_id": id,"error":"Background tasks are disabled in this session."}}));
+    assert!(
+        matches!(failed.as_slice(), [AgentEvent::Warning { .. }]),
+        "{failed:?}"
+    );
 }
 
 /// A task stopped through `stop_task` starts no follow-up turn: the CLI

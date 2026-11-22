@@ -25,6 +25,12 @@ impl Mapper {
                 });
             }
         }
+        if self.deferred_background_moves.remove(tool_use_id)
+            && msg.get("is_backgrounded").and_then(Value::as_bool) != Some(true)
+        {
+            let request = self.move_to_background_request(tool_use_id.to_owned());
+            self.outgoing.push(request);
+        }
         // An agent a subagent starts is reported here too, naming that
         // subagent's task. Its call is in the subagent's transcript, which
         // may reach us later or never, so the call is known from this event

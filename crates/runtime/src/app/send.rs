@@ -1167,6 +1167,35 @@ impl AppState {
         Ok(())
     }
 
+    /// A command the running turn starts while a steer still waits on the
+    /// turn holds that steer back just as one already running does.
+    pub(super) fn background_command_under_steer(&mut self, session_id: &str, item: &ThreadItem) {
+        let started_command = item.parent_item_id.is_none()
+            && matches!(
+                item.content,
+                ItemContent::CommandExecution {
+                    status: agent::ItemStatus::InProgress,
+                    ..
+                }
+            );
+        let movable = self.resident(session_id).is_some_and(|active| {
+            !active.pending_steers.is_empty()
+                && active
+                    .meta
+                    .provider
+                    .caps()
+                    .background
+                    .is_some_and(|control| control.move_running)
+        });
+        if started_command
+            && movable
+            && self.settings.background_commands_on_steer
+            && let Err(error) = self.move_to_background(session_id, item.id.clone())
+        {
+            log::warn!("steer: could not move a running command to the background: {error:?}");
+        }
+    }
+
     /// Move the commands the thread's running turn is waiting on into the
     /// background, where its harness can: a steer the harness holds until the
     /// running command returns then reaches the model at once. The user asks
