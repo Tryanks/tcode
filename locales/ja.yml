@@ -3332,7 +3332,6 @@ tools:
   copy_diff: "差分をコピー"
   line_range: "%{first}–%{last} 行目"
   copy_content: "内容をコピー"
-  lines_left_out: "… 前の %{count} 行はここに表示されていません。「出力をコピー」ですべてコピーできます"
   lines_not_shown: "ほか %{count} 行は表示されていません。内容をコピーして確認してください"
   results: "%{count} 件の結果"
   more_results: "ほか %{count} 件"
