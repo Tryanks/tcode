@@ -1890,7 +1890,7 @@ fn permission_table(provider: ProviderKind) -> Option<PermissionTable> {
                     ApprovalClass::Manual,
                 ),
                 (
-                    "full-access",
+                    ANTIGRAVITY_FULL_ACCESS_MODE,
                     "Full access",
                     "Auto-approve all tool permission requests without asking.",
                     ApprovalClass::Unrestricted,
@@ -1900,6 +1900,11 @@ fn permission_table(provider: ProviderKind) -> Option<PermissionTable> {
         ProviderKind::Pi | ProviderKind::Acp => return None,
     })
 }
+
+/// The launch-only permission choice that passes `--dangerously-skip-permissions`
+/// to `agy acp` (auto-approves every tool permission request). Defined here
+/// rather than in `antigravity` because that module is gated on `process`.
+pub(crate) const ANTIGRAVITY_FULL_ACCESS_MODE: &str = "full-access";
 
 /// Pre-session controls; a session's ProviderOptions is authoritative.
 pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
@@ -1918,7 +1923,7 @@ pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
                 summary: None,
                 approval: Some(*class),
                 apply: (provider == ProviderKind::Antigravity
-                    && *value == antigravity::FULL_ACCESS_MODE)
+                    && *value == ANTIGRAVITY_FULL_ACCESS_MODE)
                     .then_some(ApplyTiming::Restart),
             })
             .collect(),

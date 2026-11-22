@@ -1133,7 +1133,7 @@ fn antigravity_mode_appends_full_access_and_honors_launch_override() {
     assert!(registry.value_requires_restart("mode", &json!("full-access")));
 
     let mut launched = OptionRegistry::new(ProviderKind::Antigravity);
-    launched.set_launch_override("mode".into(), json!(crate::antigravity::FULL_ACCESS_MODE));
+    launched.set_launch_override("mode".into(), json!(crate::ANTIGRAVITY_FULL_ACCESS_MODE));
     launched.ingest(None, Some(&config));
     assert_eq!(launched.value("mode"), Some(&json!("full-access")));
     assert!(launched.value_requires_restart("mode", &json!("default")));

@@ -1028,7 +1028,7 @@ async fn run_actor<D: Dialect>(
     {
         state.options.set_launch_override(
             "mode".to_owned(),
-            Value::String(crate::antigravity::FULL_ACCESS_MODE.to_owned()),
+            Value::String(crate::ANTIGRAVITY_FULL_ACCESS_MODE.to_owned()),
         );
     }
     let state = Arc::new(Mutex::new(state));

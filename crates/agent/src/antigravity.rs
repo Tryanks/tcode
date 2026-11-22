@@ -27,10 +27,6 @@ use crate::{
     TokenUsage,
 };
 
-/// The launch-only permission choice that passes `--dangerously-skip-permissions`
-/// to `agy acp` (auto-approves every tool permission request).
-pub(crate) const FULL_ACCESS_MODE: &str = "full-access";
-
 /// The directories the Antigravity CLI launched with `launch_env` keeps its
 /// configuration and conversation state in: `~/.gemini/antigravity-cli`.
 pub fn state_dirs(launch_env: &LaunchEnv) -> Vec<PathBuf> {
@@ -430,7 +426,8 @@ impl Dialect for Antigravity {
     fn launch(&self, opts: &SessionOptions) -> Result<Launch, AgentError> {
         let program = crate::resolve_binary(opts.binary_path.as_deref(), "agy")?;
         let full_access = opts.option_selections.iter().any(|selection| {
-            selection.id == "mode" && selection.value.as_str() == Some(FULL_ACCESS_MODE)
+            selection.id == "mode"
+                && selection.value.as_str() == Some(crate::ANTIGRAVITY_FULL_ACCESS_MODE)
         });
         let args = launch_args(!opts.mcp_servers.is_empty(), full_access, &opts.extra_args);
         Ok(Launch {
