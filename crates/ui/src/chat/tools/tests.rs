@@ -1001,10 +1001,10 @@ fn step_until(
 }
 
 /// A command that printed more lines than its window has room for shows
-/// the last of them and says that more came before, with nothing to load:
-/// the 16-row window holds the command's row and the output's last 15.
+/// the last of them, with nothing to load: the 16-row window holds the
+/// command's row and the output's last 15.
 #[gpui::test]
-fn a_long_command_shows_its_last_lines_and_says_more_came_before(cx: &mut TestAppContext) {
+fn a_long_command_shows_its_last_lines(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let log = shell_log("count", 300);
@@ -1020,7 +1020,6 @@ fn a_long_command_shows_its_last_lines_and_says_more_came_before(cx: &mut TestAp
         shown.starts_with("line 286 of the run\n"),
         "its last rows: {shown}"
     );
-    assert!(shows(cx, "command-output-before-count"));
     assert!(!shows(cx, "load-output-count"), "nothing left to load");
     thread.shutdown(cx);
 }

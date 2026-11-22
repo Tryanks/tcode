@@ -4,8 +4,8 @@
 //! terminal emulator: the output is the last rows of it the host renders at
 //! the width the panel subscribed to, pushed again while the command runs.
 //! Command and output paint as terminal grids; the output's shows the latest
-//! rows the window has room for, says how many came before, and does not
-//! scroll: the whole output is the record's, which Copy output copies. A
+//! rows the window has room for and does not scroll: the whole output is the
+//! record's, which Copy output copies. A
 //! command is only ever a `CommandExecution`: the adapter or importer that
 //! knows its harness's shell tool says so.
 
@@ -425,8 +425,6 @@ struct OutputModel {
     model: TerminalModel,
     /// The rows of the output it shows.
     rows: usize,
-    /// The lines of the output before them.
-    before: u64,
 }
 
 #[derive(Default)]
@@ -530,26 +528,24 @@ impl Panel {
             selection: cx.theme().primary.opacity(0.28),
         };
         let command = grid_element(command_model, command_rows, cols, palette);
-        let (output, output_rows, before) = match screen.frame {
+        let (output, output_rows) = match screen.frame {
             Some(frame) => {
                 if !self.output_model.as_ref().is_some_and(|built| {
                     std::ptr::eq(built.frame.as_ptr(), Rc::as_ptr(frame)) && built.budget == budget
                 }) {
-                    let (model, rows, before) = output_model(frame, budget);
+                    let (model, rows) = output_model(frame, budget);
                     self.output_model = Some(OutputModel {
                         frame: Rc::downgrade(frame),
                         cols: frame.cols,
                         budget,
                         model,
                         rows,
-                        before,
                     });
                 }
                 let built = self.output_model.as_ref().expect("output model");
                 (
                     grid_element(&built.model, built.rows, built.cols, palette),
                     built.rows,
-                    built.before,
                 )
             }
             // Space for the rows the output is likely to need, so the screen
@@ -562,18 +558,15 @@ impl Panel {
                         .h(px(rows as f32 * TERMINAL_CELL_HEIGHT))
                         .into_any_element(),
                     rows,
-                    0,
                 )
             }
         };
-        // The note of what came before is a row of the panel's own.
-        let rows = command_rows + output_rows + usize::from(before > 0);
+        let rows = command_rows + output_rows;
         self.resized |= self.shown_rows.is_some_and(|shown| shown != rows);
         self.shown_rows = Some(rows);
 
         let watched = screen.watched;
         let output_id = id.to_string();
-        let before_id = id.to_string();
         let output_bounds = self.output_bounds.clone();
         let focus = self.focus.clone();
         // The rows held for the screen are a guess; when the host's screen
@@ -584,14 +577,6 @@ impl Panel {
             .overflow_hidden()
             .bg(palette.background)
             .child(command)
-            .when(before > 0, |panel| {
-                panel.child(
-                    div()
-                        .debug_selector(move || format!("command-output-before-{before_id}"))
-                        .text_secondary(false, cx)
-                        .child(crate::tr!("tools.lines_left_out", count = before).into_owned()),
-                )
-            })
             .when(output_rows > 0, |panel| {
                 let OutputHandlers {
                     press,
@@ -650,19 +635,17 @@ fn side_of(
 }
 
 /// The rows of `frame` a panel with room for `budget` shows, its last ones:
-/// their model, how many they are, and how many lines of the output come
-/// before them.
-fn output_model(frame: &TerminalFrame, budget: usize) -> (TerminalModel, usize, u64) {
+/// their model and how many they are.
+fn output_model(frame: &TerminalFrame, budget: usize) -> (TerminalModel, usize) {
     let mut frame = frame.clone();
     let mut held = std::mem::take(&mut frame.history);
     held.append(&mut frame.visible);
     let rows = held.len().min(budget);
-    let before = frame.lines_evicted + (held.len() - rows) as u64;
     frame.visible = held.split_off(held.len() - rows);
     frame.rows = rows.min(u16::MAX as usize) as u16;
     let mut model = TerminalModel::new(String::new());
     model.apply_frame(frame);
-    (model, rows, before)
+    (model, rows)
 }
 
 /// Roughly the rows the host's screen of `output` will take: one per line of
