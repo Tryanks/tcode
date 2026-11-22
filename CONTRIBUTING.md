@@ -10,12 +10,17 @@ is derived from it. **Process** is how to build, check and submit work.
 
 ## Principles
 
-1. **Tcode is a native GUI proxy for TUI coding agents.** When a native harness
-   already has a capability, Tcode surfaces it as it is instead of building its
-   own equivalent. Tcode never hides, alters or replaces what the model would
-   see or do through the native CLI. Anything Tcode injects into a model — MCP
-   tools, prompts, transcripts — is visible to the user. Capabilities a harness
-   does not have (for example rewind outside Claude Code) are not synthesized.
+1. **Tcode is a native GUI proxy for TUI coding agents.** Tcode stays a thin
+   wrapper over a harness. When a native harness already has a capability,
+   Tcode surfaces it as it is instead of building its own equivalent. Tcode
+   never hides, alters or replaces what the model would see or do through the
+   native CLI. Anything Tcode injects into a model — MCP tools, prompts,
+   transcripts — is visible to the user. Capabilities a harness does not have
+   are not synthesized, with one exception: a harness maintained natively
+   (Principle 3) whose only protocol is standard ACP, which today is
+   Antigravity alone. For such a harness Tcode synthesizes the features it
+   lacks instead of staying a thin wrapper. An agent that merely connects
+   over ACP gets none of this.
 
 2. **Host and client.** A Tcode host owns all of its state: providers, threads,
    terminals, projects. Every client — the desktop window, a phone, a tablet, a
@@ -123,6 +128,12 @@ is derived from it. **Process** is how to build, check and submit work.
     deletion follows the other principles: whatever code existed only to
     satisfy that test goes with it, and the pull request names the test and
     where its contract is still covered, or that none is.
+
+11. **A feature is delivered whole, in one pull request.** Work is not
+    planned in stages or carried out step by step. When a goal names ten
+    features, the goal from the start is all ten, delivered together and
+    merged as a single pull request; it is never the first one or two with
+    the rest to follow.
 
 ## Process
 
