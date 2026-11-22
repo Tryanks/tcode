@@ -225,7 +225,13 @@ mod tests {
             .iter()
             .map(|segment| match segment {
                 Segment::PullRequest(entry) => format!("record {}", entry.id),
-                Segment::ControlAction(entry) => format!("divider {}", entry.id),
+                Segment::ControlAction(run) => format!(
+                    "divider {}",
+                    run.iter()
+                        .map(|entry| entry.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
                 Segment::ActivityRun(run) => format!(
                     "run {}",
                     run.iter()

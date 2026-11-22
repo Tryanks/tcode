@@ -52,7 +52,7 @@ pub(in crate::chat) struct ActivityRow {
 impl TimelineView {
     /// `model` by the name the host's model list gives it for this thread's
     /// profile, or as the harness gave it where the list does not know it.
-    fn model_name(&self, model: &str, cx: &App) -> String {
+    pub(super) fn model_name(&self, model: &str, cx: &App) -> String {
         self.session_id
             .as_deref()
             .and_then(|session_id| {
@@ -91,49 +91,10 @@ impl TimelineView {
         for segment in segments.iter() {
             match segment {
                 Segment::Relay(entry) => {
-                    let EntryContent::ProviderRelay {
-                        from_provider,
-                        to_provider,
-                        prompt,
-                        moved_from,
-                        ..
-                    } = &entry.content
-                    else {
-                        unreachable!();
-                    };
-                    column = column.child(components::dividers::relay_divider(
-                        &entry.id,
-                        *from_provider,
-                        *to_provider,
-                        moved_from.as_deref(),
-                        cx,
-                    ));
-                    if let Some(prompt) = prompt {
-                        column = column.child(
-                            self.compose_disclosure(
-                                index,
-                                format!("relay-handoff-{}", entry.id),
-                                crate::tr!("chat.relay_handoff", to = to_provider.display_name())
-                                    .into_owned()
-                                    .into(),
-                                prompt,
-                                cx,
-                            ),
-                        );
-                    }
+                    column = column.child(self.compose_relay(index, entry, cx));
                 }
                 Segment::ModelChange(entry) => {
-                    let EntryContent::ModelChanged { from, to, reason } = &entry.content else {
-                        unreachable!();
-                    };
-                    let name = |model: &str| self.model_name(model, cx);
-                    column = column.child(components::dividers::model_change_divider(
-                        &entry.id,
-                        from.as_deref().map(name).as_deref(),
-                        &name(to),
-                        reason.as_deref(),
-                        cx,
-                    ));
+                    column = column.child(self.compose_model_change(entry, cx));
                 }
                 Segment::ContextCompacted(entry) => {
                     let EntryContent::ContextCompacted(compaction) = &entry.content else {
@@ -146,17 +107,9 @@ impl TimelineView {
                         cx,
                     ));
                 }
-                Segment::ContextWindowChanged(entry) => {
-                    let EntryContent::ContextWindowChanged { window } = entry.content else {
-                        unreachable!();
-                    };
-                    column = column.child(components::dividers::context_window_changed_divider(
-                        &entry.id, window, cx,
-                    ));
-                }
-                Segment::SettingsKept(entry) => {
-                    column =
-                        column.child(components::dividers::settings_kept_divider(&entry.id, cx));
+                Segment::ContextWindowChanged(entry) | Segment::SettingsKept(entry) => {
+                    let tags = Vec::from_iter(components::notices::MessageTag::of(&entry.content));
+                    column = column.child(components::notices::message_tags(&entry.id, &tags, cx));
                 }
                 Segment::SessionMoved(entry) => {
                     let EntryContent::SessionMoved { from, to } = &entry.content else {
@@ -174,13 +127,8 @@ impl TimelineView {
                         &entry.id, request, answer, cx,
                     ));
                 }
-                Segment::ControlAction(entry) => {
-                    let EntryContent::ControlAction(action) = &entry.content else {
-                        unreachable!();
-                    };
-                    column = column.child(components::dividers::control_action_divider(
-                        &entry.id, action, cx,
-                    ));
+                Segment::ControlAction(run) => {
+                    column = column.child(self.compose_control_actions(run, cx));
                 }
                 Segment::Rewind(entry) => {
                     column = column.child(self.compose_rewound(index, entry, cx));
@@ -309,65 +257,12 @@ impl TimelineView {
                         unreachable!();
                     };
                     let read = row.map(|row| self.withheld_read(row, entry.turn, cx));
-                    column = column.child(components::dividers::record_withheld_divider(
+                    column = column.child(components::notices::withheld_placeholder(
                         &entry.id, bytes, read, cx,
                     ));
                 }
-                Segment::Unreadable(rows) => {
-                    let label = if rows.len() == 1 {
-                        crate::tr!("chat.unreadable_record_one")
-                    } else {
-                        crate::tr!("chat.unreadable_records", count = rows.len())
-                    };
-                    let lines = rows
-                        .iter()
-                        .filter_map(|entry| match &entry.content {
-                            EntryContent::Unreadable { line } => Some(line.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    column = column.child(self.compose_disclosure(
-                        index,
-                        format!("unreadable-{}", rows[0].id),
-                        label.into_owned().into(),
-                        &lines,
-                        cx,
-                    ));
-                }
-                Segment::RequestRetry(entry) => {
-                    let EntryContent::RequestRetry { message } = &entry.content else {
-                        unreachable!();
-                    };
-                    column = column.child(components::dividers::request_retry_divider(
-                        &entry.id, message, cx,
-                    ));
-                }
                 Segment::Warnings(warnings) => {
-                    let messages = warnings
-                        .iter()
-                        .filter_map(|entry| match &entry.content {
-                            EntryContent::Warning { message } => Some(message.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>();
-                    let label = match messages.as_slice() {
-                        [message] => message.lines().next().unwrap_or_default().to_owned(),
-                        _ => crate::tr!("chat.warnings", count = messages.len()).into_owned(),
-                    };
-                    let key = format!("warnings-{}", warnings[0].id);
-                    let toggle_key = key.clone();
-                    column = column.child(components::disclosure::warning_disclosure(
-                        &key,
-                        label.into(),
-                        &messages.join("\n"),
-                        self.expanded.contains(&key),
-                        cx.listener(move |this, _, _, cx| {
-                            this.toggle_expanded(index, &toggle_key, cx);
-                        }),
-                        &self.motion,
-                        cx,
-                    ));
+                    column = column.child(self.compose_warnings(index, warnings[0], cx));
                 }
                 Segment::Error(entry) => {
                     let harness = self
@@ -636,6 +531,10 @@ impl TimelineView {
             let started_here = turn
                 .start_ts
                 .map(|start| self.workspace_store.read(cx).host_moment_here(start));
+            let retry = turn
+                .running
+                .then(|| crate::chat::model::live_retry(entries))
+                .flatten();
             let turn = turn.clone();
             trailing = true;
             // The status moves with the trailer when the turn gains a last
@@ -688,6 +587,7 @@ impl TimelineView {
                                     started_here,
                                     stopping,
                                     served_model.clone(),
+                                    retry.clone(),
                                     &indicator_motion,
                                     cx,
                                 ))
@@ -911,24 +811,22 @@ impl TimelineView {
 
     /// A rewind's divider, with its removed turns to read and the Harness's
     /// undo while it lasts, then the branch it left where the Harness keeps
-    /// one; or a rewind the Harness did not make.
+    /// one.
     fn compose_rewound(
         &self,
         turn: usize,
         entry: &TimelineEntry,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let EntryContent::Rewound(rewound) = &entry.content else {
+            unreachable!("a rewind segment holds a rewind entry");
+        };
+        let undo_failure = rewound
+            .undo_token
+            .as_ref()
+            .and_then(|_| self.rewind_failure_label(&rewound.checkpoint_id, true, cx));
         let store = self.workspace_store.read(cx);
         let harness = store.harness_name_for(self.session_id.as_deref(), cx);
-        let rewound = match &entry.content {
-            EntryContent::Rewound(rewound) => rewound,
-            EntryContent::RewindFailed { mode, failure } => {
-                return components::dividers::rewind_failed_divider(
-                    &entry.id, *mode, failure, &harness, cx,
-                );
-            }
-            _ => unreachable!("a rewind segment holds a rewind entry"),
-        };
         let status = store
             .session_status_for(self.session_id.as_deref(), cx)
             .and_then(|status| status.rewind.as_ref());
@@ -953,6 +851,17 @@ impl TimelineView {
                     )))
                 }
                 _ => None,
+            })
+            .map(|undo| match (undo, undo_failure.clone()) {
+                (components::rewind::DividerUndo::Available(on_undo), Some(failure)) => {
+                    components::rewind::DividerUndo::Failed(failure, Some(on_undo))
+                }
+                (undo, _) => undo,
+            })
+            .or_else(|| {
+                undo_failure
+                    .clone()
+                    .map(|failure| components::rewind::DividerUndo::Failed(failure, None))
             })
             .or_else(|| {
                 rewound
@@ -1064,7 +973,7 @@ impl TimelineView {
 
         // A steer is a target only once its harness has a restore point for it.
         let steer = matches!(steering, Some(SteeringStatus::Accepted)).then(|| entry_id.to_owned());
-        let rewind_menu = (steering.is_none() || steer.is_some())
+        let rewind_target = (steering.is_none() || steer.is_some())
             .then(|| {
                 self.workspace_store.read(cx).chat_rewind_target_for(
                     self.session_id.as_deref(),
@@ -1073,22 +982,32 @@ impl TimelineView {
                     cx,
                 )
             })
-            .flatten()
-            .map(|target| components::bubble::RewindMenu {
-                key: entry_id.to_owned(),
-                turn,
-                steer,
-                blocked: target
-                    .rewind
-                    .blocked
-                    .filter(|_| !target.in_progress)
-                    .map(|blocked| components::rewind::blocked_reason(blocked, &target.harness)),
-                in_progress: target.in_progress,
-            });
+            .flatten();
+        // What the last rewind to the message failed at stands in its action
+        // row until a message is sent, while no other is being made.
+        let rewind_failure = rewind_target
+            .as_ref()
+            .filter(|target| !target.in_progress)
+            .and_then(|target| self.rewind_failure_label(&target.checkpoint_id, false, cx))
+            .map(|label| components::notices::rewind_failure(entry_id, label, cx));
+        let rewind_menu = rewind_target.map(|target| components::bubble::RewindMenu {
+            key: entry_id.to_owned(),
+            turn,
+            steer,
+            blocked: target
+                .rewind
+                .blocked
+                .filter(|_| !target.in_progress)
+                .map(|blocked| components::rewind::blocked_reason(blocked, &target.harness)),
+            in_progress: target.in_progress,
+        });
         let rewind = rewind_menu.map(|menu| {
             let action = self.compose_rewind(&menu, cx);
             (menu, action)
         });
+        let tags = self.message_tags_of(turn, entry_id, cx);
+        let tags =
+            (!tags.is_empty()).then(|| components::notices::message_tags(entry_id, &tags, cx));
         let markdown = self.md_states.get(entry_id).map(|md| md.state.clone());
         let copy_key = format!("user:{entry_id}");
         let copied = self.copied.is(&copy_key);
@@ -1148,6 +1067,8 @@ impl TimelineView {
                 copied,
                 markdown,
                 rewind,
+                rewind_failure,
+                tags,
                 hover: self.hover.clone(),
                 motion: self.motion.clone(),
             },
@@ -1353,16 +1274,9 @@ impl TimelineView {
                 cx,
             );
         };
-        // A notice is the host's, never the user's words: centered disclosure
-        // rows without an action row.
+        // A notice is the host's, never the user's words: a card, or the
+        // message coming in, without an action row.
         let pending = steering == Some(SteeringStatus::Pending);
-        let label = |label: String| -> SharedString {
-            if pending {
-                format!("{label} · {}", crate::tr!("chat.steering")).into()
-            } else {
-                label.into()
-            }
-        };
         let mut column = v_flex().w_full().gap_2();
         let mut keys = notice_keys(&notice, &entry.id).into_iter();
         let mut key = || keys.next().expect("a key per notice row");
@@ -1388,11 +1302,10 @@ impl TimelineView {
                 ));
             }
             HostNotice::ReportReminder | HostNotice::Control(_) => {
-                column = column.child(self.compose_disclosure(
-                    turn,
-                    key(),
-                    label(components::disclosure::notice_label(&notice)),
-                    text,
+                column = column.child(self.compose_host_message(
+                    (entry, text, cwd, steering),
+                    &notice,
+                    window,
                     cx,
                 ));
             }
@@ -1815,29 +1728,6 @@ impl TimelineView {
         }
     }
 
-    fn compose_disclosure(
-        &self,
-        turn: usize,
-        key: String,
-        label: SharedString,
-        full_text: &str,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let expanded = self.expanded.contains(&key);
-        let toggle_key = key.clone();
-        components::disclosure::disclosure(
-            &key,
-            label,
-            full_text,
-            expanded,
-            cx.listener(move |this, _, _, cx| {
-                this.toggle_expanded(turn, &toggle_key, cx);
-            }),
-            &self.motion,
-            cx,
-        )
-    }
-
     /// Prepare one stateless Work Log capsule, or the part of an expanded one
     /// that `part` names.
     fn compose_work_log(
@@ -1885,8 +1775,10 @@ impl TimelineView {
         let mut flow = v_flex().w_full().gap_1();
         if !folded.is_empty() {
             let segment_counts = work_log_counts(folded);
-            let mut capsule_label = work_log_capsule_label(&segment_counts, folded.len());
-            if capsule_label.is_empty() {
+            let mut capsule_label =
+                work_log_capsule_label(&segment_counts, folded.len() - segment_counts.retries);
+            let retries = crate::chat::model::work_log_retries_label(&segment_counts);
+            if capsule_label.is_empty() && retries.is_none() {
                 capsule_label = crate::tr!("chat.work_log").into_owned();
             }
             let duration = activity_run_duration_ms(folded).map(format_elapsed);
@@ -1914,6 +1806,7 @@ impl TimelineView {
                     index,
                     segment_id: segment_id.to_string(),
                     capsule_label,
+                    retries,
                     duration,
                     outcome,
                     expanded,
@@ -2059,6 +1952,9 @@ impl TimelineView {
             return vec![self.compose_computer_run(activities, cwd, live_reasoning_id, window, cx)];
         }
         let entry = activities[0];
+        if let EntryContent::RequestRetry { message } = &entry.content {
+            return vec![components::notices::retry_row(&entry.id, message, cx)];
+        }
         let recency = AutoActivityRecency::from_newer_activity_count(newer);
         if let Some(edit) = tools::diff::edit(entry, cwd) {
             if edit.by_command && edit.files.len() > 1 {
@@ -2590,8 +2486,8 @@ impl TimelineView {
         row: u64,
         turn: usize,
         cx: &mut Context<Self>,
-    ) -> components::dividers::WithheldRead {
-        use components::dividers::WithheldRead;
+    ) -> components::notices::WithheldRead {
+        use components::notices::WithheldRead;
         let load = || -> components::changed_files::ClickHandler {
             Box::new(cx.listener(move |this, _, _, cx| this.load_withheld(row, turn, cx)))
         };

@@ -5,6 +5,7 @@ use gpui::WeakEntity;
 mod expansion;
 mod glide;
 mod list;
+mod notices;
 mod pull_request;
 mod render;
 mod residency;

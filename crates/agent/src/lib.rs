@@ -3201,9 +3201,8 @@ pub enum AgentEvent {
         message: String,
     },
     /// The harness tries a failed request again inside its open turn.
-    /// `message` is its account of this attempt, which stands in for the
-    /// attempt before it; a request that fails for good is an
-    /// [`Self::Error`] or ends the turn.
+    /// `message` is its account of this attempt; a request that fails for
+    /// good is an [`Self::Error`] or ends the turn.
     RequestRetry {
         message: String,
     },

@@ -33,6 +33,8 @@ pub(crate) struct WorkLogData {
     pub(crate) compact: bool,
     pub(crate) segment_id: String,
     pub(crate) capsule_label: String,
+    /// The attempts made again at failed requests, told apart in amber.
+    pub(crate) retries: Option<String>,
     /// How long the run took, when its times say.
     pub(crate) duration: Option<String>,
     pub(crate) outcome: TurnStatus,
@@ -58,6 +60,7 @@ pub(crate) fn work_log(
         compact,
         segment_id,
         capsule_label,
+        retries,
         duration,
         outcome,
         expanded,
@@ -66,6 +69,12 @@ pub(crate) fn work_log(
         hover,
         motion,
     } = data;
+    let warning = cx.theme().warning;
+    let aria_label = match &retries {
+        Some(retries) if capsule_label.is_empty() => retries.clone(),
+        Some(retries) => format!("{capsule_label} · {retries}"),
+        None => capsule_label.clone(),
+    };
     let muted = cx.theme().muted_foreground;
     let key = format!("worklog-header-{index}-{segment_id}");
     let radius = crate::material::radius_button(cx);
@@ -76,7 +85,7 @@ pub(crate) fn work_log(
         h_flex(),
         SharedString::from(key.clone()),
         Role::Button,
-        capsule_label.clone(),
+        aria_label,
         cx,
     )
     .debug_selector(move || key)
@@ -103,13 +112,24 @@ pub(crate) fn work_log(
         .owned(&motion)
         .text_color(muted),
     )
-    .child(capsule_label.clone())
+    .when(!capsule_label.is_empty(), |row| {
+        row.child(capsule_label.clone())
+    })
+    .when_some(retries.clone(), |row, retries| {
+        let lead = (!capsule_label.is_empty()).then(|| div().child("·"));
+        row.children(lead).child(
+            div()
+                .debug_selector(move || format!("worklog-retries-{index}"))
+                .text_color(warning)
+                .child(retries),
+        )
+    })
     .child(settled_state(
         &motion,
         SharedString::from(format!("worklog-state-{index}-{segment_id}")),
         running,
         outcome,
-        capsule_label,
+        retries.unwrap_or(capsule_label),
         duration,
         cx,
     ));

@@ -295,6 +295,11 @@ impl TimelineView {
                         )
                     })
                     .flatten();
+                // Atop the thread's timeline, once: the records this build
+                // cannot read.
+                let unreadable = (index == 0)
+                    .then(|| this.compose_unreadable_banner(row.turn, cx))
+                    .flatten();
                 let painted = this.painted_rows.clone();
                 let (left, right) = this.column_insets(cx);
                 let overhang = this.layout.overhang;
@@ -375,6 +380,10 @@ impl TimelineView {
                             .max_w(px(CONTENT_MAX_WIDTH))
                             .flex()
                             .flex_col()
+                            .children(
+                                unreadable
+                                    .map(|banner| div().w_full().pb(px(SEGMENT_GAP)).child(banner)),
+                            )
                             .children(above)
                             .child(
                                 RowGlide::new(

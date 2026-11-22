@@ -556,7 +556,8 @@ pub enum EntryContent {
     Warning {
         message: String,
     },
-    /// The harness's latest attempt at a request it is trying again.
+    /// One attempt the harness makes again at a request that failed, in its
+    /// own words.
     RequestRetry {
         message: String,
     },
@@ -608,6 +609,8 @@ pub enum EntryContent {
     Rewound(Box<Rewound>),
     /// A rewind, or the undo of one, the harness did not make.
     RewindFailed {
+        /// The checkpoint the rewind went to, or the undo was asked of.
+        checkpoint_id: String,
         mode: Option<agent::RewindMode>,
         failure: agent::RewindFailure,
     },
@@ -1528,12 +1531,15 @@ impl Timeline {
                     self.undo_rewind(checkpoint_id);
                 }
             }
-            AgentEvent::RewindFailed { mode, failure, .. } => {
-                self.push_rewind_failure(ts, Some(*mode), failure)
-            }
-            AgentEvent::RewindUndoFailed { failure, .. } => {
-                self.push_rewind_failure(ts, None, failure)
-            }
+            AgentEvent::RewindFailed {
+                checkpoint_id,
+                mode,
+                failure,
+            } => self.push_rewind_failure(ts, checkpoint_id, Some(*mode), failure),
+            AgentEvent::RewindUndoFailed {
+                checkpoint_id,
+                failure,
+            } => self.push_rewind_failure(ts, checkpoint_id, None, failure),
             AgentEvent::RewindPreviewed { .. } => {}
             AgentEvent::TurnCompleted { status, usage, .. } => {
                 let newly_completed = self
@@ -1701,28 +1707,17 @@ impl Timeline {
             }
             AgentEvent::RequestRetry { message } => {
                 let turn = self.ensure_turn();
-                let content = EntryContent::RequestRetry {
-                    message: message.clone(),
-                };
-                match self.entries.last_mut() {
-                    Some(last) if matches!(last.content, EntryContent::RequestRetry { .. }) => {
-                        *last = Arc::new(TimelineEntry {
-                            content,
-                            ..(**last).clone()
-                        });
-                    }
-                    _ => {
-                        let id = self.synthetic_id("retry", ts);
-                        self.entries.push(Arc::new(TimelineEntry {
-                            id,
-                            content,
-                            ts,
-                            finished_ts: None,
-                            background: false,
-                            turn,
-                        }));
-                    }
-                }
+                let id = self.synthetic_id("retry", ts);
+                self.entries.push(Arc::new(TimelineEntry {
+                    id,
+                    content: EntryContent::RequestRetry {
+                        message: message.clone(),
+                    },
+                    ts,
+                    finished_ts: None,
+                    background: false,
+                    turn,
+                }));
             }
             AgentEvent::Warning { message } => {
                 let turn = self.ensure_turn();
@@ -2133,6 +2128,7 @@ impl Timeline {
     fn push_rewind_failure(
         &mut self,
         ts: Option<u64>,
+        checkpoint_id: &str,
         mode: Option<agent::RewindMode>,
         failure: &agent::RewindFailure,
     ) {
@@ -2143,6 +2139,7 @@ impl Timeline {
         self.entries.push(Arc::new(TimelineEntry {
             id,
             content: EntryContent::RewindFailed {
+                checkpoint_id: checkpoint_id.to_owned(),
                 mode,
                 failure: failure.clone(),
             },

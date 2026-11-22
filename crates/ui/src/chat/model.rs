@@ -8,6 +8,7 @@ use agent::{FileChange, ItemContent, ItemStatus, TurnStatus};
 use tcode_core::notice::{HostNotice, host_notice};
 use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnMeta, TurnTiming};
 
+use super::components::notices::MessageTag;
 use super::timeline::rows::TimelineRow;
 
 /// The row, its turn, the entries it renders (a Work Log header's whole run),
@@ -33,13 +34,18 @@ pub(crate) enum Segment<'a> {
     Relay(&'a TimelineEntry),
     ModelChange(&'a TimelineEntry),
     ContextCompacted(&'a TimelineEntry),
+    /// A context-window change no user message stands before to carry it.
     ContextWindowChanged(&'a TimelineEntry),
+    /// Settings kept for a message not loaded here to carry them.
     SettingsKept(&'a TimelineEntry),
     SessionMoved(&'a TimelineEntry),
     Worktree(&'a TimelineEntry),
-    ControlAction(&'a TimelineEntry),
-    /// A rewind's divider, or a rewind the harness did not make.
+    /// Consecutive actions of one other thread on this thread's run.
+    ControlAction(Vec<&'a TimelineEntry>),
+    /// A rewind's divider.
     Rewind(&'a TimelineEntry),
+    /// A user message, with the notes on its settings that follow it in its
+    /// range ([`message_tags`]).
     User(&'a TimelineEntry),
     Assistant(&'a TimelineEntry),
     Plan(&'a TimelineEntry),
@@ -49,11 +55,9 @@ pub(crate) enum Segment<'a> {
     /// A subagent, or a thread a call started.
     ThreadCard(&'a TimelineEntry),
     Error(&'a TimelineEntry),
-    RequestRetry(&'a TimelineEntry),
-    /// Consecutive warnings of the harness.
+    /// The turn's warnings of the harness, at the first; the rest are in no
+    /// segment's range.
     Warnings(Vec<&'a TimelineEntry>),
-    /// Consecutive rows of the log this build cannot read.
-    Unreadable(Vec<&'a TimelineEntry>),
     /// A record too large to send here, kept on the host.
     Withheld(&'a TimelineEntry),
 }
@@ -276,6 +280,14 @@ pub(crate) fn segment_entries<'a>(
             EntryContent::ContextCompacted(_) => {
                 single(&mut segments, &mut ranges, Segment::ContextCompacted(entry));
             }
+            // A note on the settings of the message just before it belongs
+            // to that message's range.
+            EntryContent::ContextWindowChanged { .. } | EntryContent::SettingsKept
+                if matches!(segments.last(), Some(Segment::User(_)))
+                    && ranges.last().is_some_and(|range| range.end == index) =>
+            {
+                ranges.last_mut().expect("a user segment has a range").end = index + 1;
+            }
             EntryContent::ContextWindowChanged { .. } => {
                 single(
                     &mut segments,
@@ -289,6 +301,12 @@ pub(crate) fn segment_entries<'a>(
             EntryContent::SessionMoved { .. } => {
                 single(&mut segments, &mut ranges, Segment::SessionMoved(entry));
             }
+            // The checkout row under the composer shows the worktree a
+            // thread works in; only what went wrong stands in the flow.
+            EntryContent::Worktree {
+                request: agent::WorktreeRequest::Create { .. },
+                answer: agent::WorktreeAnswer::Ready { .. },
+            } => {}
             EntryContent::Worktree { .. } => {
                 single(&mut segments, &mut ranges, Segment::Worktree(entry));
             }
@@ -311,12 +329,32 @@ pub(crate) fn segment_entries<'a>(
             EntryContent::ControlAction(action)
                 if action.action == tcode_core::control::action::START_THREAD
                     && action.detail.is_some() => {}
-            EntryContent::ControlAction(_) => {
-                single(&mut segments, &mut ranges, Segment::ControlAction(entry));
+            // What only changed the thread's own standing is the control
+            // activity record's to tell, not the conversation's.
+            EntryContent::ControlAction(action)
+                if crate::control::changes_only_the_thread(&action.action) => {}
+            EntryContent::ControlAction(action)
+                if continues_control_run(&segments, &ranges, entries, index, action) =>
+            {
+                let Some(Segment::ControlAction(run)) = segments.last_mut() else {
+                    unreachable!("a control run continues the last segment");
+                };
+                run.push(entry);
+                ranges.last_mut().expect("a control run has a range").end = index + 1;
             }
-            EntryContent::Rewound(_) | EntryContent::RewindFailed { .. } => {
+            EntryContent::ControlAction(_) => {
+                single(
+                    &mut segments,
+                    &mut ranges,
+                    Segment::ControlAction(vec![entry]),
+                );
+            }
+            EntryContent::Rewound(_) => {
                 single(&mut segments, &mut ranges, Segment::Rewind(entry));
             }
+            // Told in the action row of the message it was for, until the
+            // next message is sent.
+            EntryContent::RewindFailed { .. } => {}
             EntryContent::Item(ItemContent::AssistantMessage { .. }) => {
                 single(&mut segments, &mut ranges, Segment::Assistant(entry));
             }
@@ -326,8 +364,12 @@ pub(crate) fn segment_entries<'a>(
             EntryContent::Withheld { .. } => {
                 single(&mut segments, &mut ranges, Segment::Withheld(entry));
             }
+            // While the turn runs, the working line tells the retry; once it
+            // ended, its Work Log keeps it.
+            EntryContent::RequestRetry { .. } if turn_running => {}
             EntryContent::RequestRetry { .. } => {
-                single(&mut segments, &mut ranges, Segment::RequestRetry(entry));
+                run_start.get_or_insert(index);
+                activities.push(entry);
             }
             EntryContent::Warning { .. } => {
                 flush_activities(
@@ -337,30 +379,20 @@ pub(crate) fn segment_entries<'a>(
                     &mut run_start,
                     index,
                 );
-                if let Some(Segment::Warnings(warnings)) = segments.last_mut() {
+                // A later warning joins the turn's first, out of every range:
+                // a row re-segmenting its own entries never meets it alone.
+                if let Some(Segment::Warnings(warnings)) = segments
+                    .iter_mut()
+                    .find(|segment| matches!(segment, Segment::Warnings(_)))
+                {
                     warnings.push(entry);
-                    ranges.last_mut().expect("a run of rows has a range").end = index + 1;
                 } else {
                     segments.push(Segment::Warnings(vec![entry]));
                     ranges.push(index..index + 1);
                 }
             }
-            EntryContent::Unreadable { .. } => {
-                flush_activities(
-                    &mut segments,
-                    &mut ranges,
-                    &mut activities,
-                    &mut run_start,
-                    index,
-                );
-                if let Some(Segment::Unreadable(rows)) = segments.last_mut() {
-                    rows.push(entry);
-                    ranges.last_mut().expect("a run of rows has a range").end = index + 1;
-                } else {
-                    segments.push(Segment::Unreadable(vec![entry]));
-                    ranges.push(index..index + 1);
-                }
-            }
+            // The thread's banner tells them, once.
+            EntryContent::Unreadable { .. } => {}
         }
     }
     flush_activities(
@@ -375,6 +407,85 @@ pub(crate) fn segment_entries<'a>(
         ranges,
         pending_steers,
     }
+}
+
+/// Whether the action at `index` goes on the last segment's run of one
+/// actor's actions: nothing stands between them but actions no segment
+/// tells, none of them told by a card in `entries`.
+fn continues_control_run(
+    segments: &[Segment<'_>],
+    ranges: &[Range<usize>],
+    entries: &[Arc<TimelineEntry>],
+    index: usize,
+    action: &agent::ControlAction,
+) -> bool {
+    let (Some(Segment::ControlAction(run)), Some(range)) = (segments.last(), ranges.last()) else {
+        return false;
+    };
+    let EntryContent::ControlAction(first) = &run[0].content else {
+        return false;
+    };
+    first.actor_thread_id == action.actor_thread_id
+        && entries[range.end..index].iter().all(|between| {
+            matches!(&between.content, EntryContent::ControlAction(skipped)
+                if !super::tools::pull_request::told_by_card(skipped, entries))
+        })
+}
+
+/// The notes on its settings a user message's range carries after it.
+pub(crate) fn message_tags(range: &[Arc<TimelineEntry>]) -> Vec<MessageTag> {
+    range
+        .iter()
+        .skip(1)
+        .map_while(|entry| MessageTag::of(&entry.content))
+        .collect()
+}
+
+/// The request the harness is trying again at the end of a running turn's
+/// `entries`: how many attempts it has made, and its words for the latest.
+/// Steers waiting to be taken stand after it without ending it.
+pub(crate) fn live_retry(entries: &[Arc<TimelineEntry>]) -> Option<(usize, String)> {
+    let mut attempts = 0;
+    let mut latest = None;
+    for entry in entries.iter().rev() {
+        match &entry.content {
+            EntryContent::Steer {
+                status: SteeringStatus::Pending,
+                ..
+            } => {}
+            EntryContent::RequestRetry { message } => {
+                attempts += 1;
+                latest.get_or_insert_with(|| message.clone());
+            }
+            _ => break,
+        }
+    }
+    latest.map(|message| (attempts, message))
+}
+
+/// The rewind to `checkpoint_id`, or with `undo` its undo, that the harness
+/// last failed to make, while no message was sent since.
+pub(crate) fn standing_rewind_failure<'a>(
+    entries: &'a [Arc<TimelineEntry>],
+    checkpoint_id: &str,
+    undo: bool,
+) -> Option<(Option<agent::RewindMode>, &'a agent::RewindFailure)> {
+    for entry in entries.iter().rev() {
+        match &entry.content {
+            EntryContent::RewindFailed {
+                checkpoint_id: failed,
+                mode,
+                failure,
+            } if failed == checkpoint_id && mode.is_none() == undo => {
+                return Some((*mode, failure));
+            }
+            content if user_content(content).is_some() && user_notice(content).is_none() => {
+                return None;
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Which segment, if any, is the turn's *live* work log — the one that opens on
@@ -398,6 +509,8 @@ pub(crate) struct WorkLogCounts {
     pub(crate) searches: usize,
     pub(crate) computer: usize,
     pub(crate) tools: usize,
+    /// Attempts the harness made again at a failed request.
+    pub(crate) retries: usize,
 }
 
 /// What a run of activities did, each counted by the window it shows as.
@@ -413,6 +526,9 @@ pub(crate) fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
             Some(Family::Search) => counts.searches += 1,
             Some(Family::Computer) => counts.computer += 1,
             Some(Family::Tool) => counts.tools += 1,
+            None if matches!(entry.content, EntryContent::RequestRetry { .. }) => {
+                counts.retries += 1;
+            }
             None => {}
         }
     }
@@ -472,6 +588,15 @@ pub(crate) fn work_log_capsule_label(counts: &WorkLogCounts, activity_count: usi
         });
     }
     clauses.join(" · ")
+}
+
+/// The retries a Work Log's header tells apart from its other counts.
+pub(crate) fn work_log_retries_label(counts: &WorkLogCounts) -> Option<String> {
+    match counts.retries {
+        0 => None,
+        1 => Some(crate::tr!("chat.work_log_retry_one").into_owned()),
+        count => Some(crate::tr!("chat.work_log_retries", count = count).into_owned()),
+    }
 }
 
 /// How long a run of activities took: from the first start seen to the
@@ -923,8 +1048,7 @@ pub(crate) fn notice_keys(notice: &HostNotice, entry_id: &str) -> Vec<String> {
             .map(|index| format!("orchestrate-callback-{entry_id}-{index}"))
             .collect(),
         HostNotice::PullRequest { .. } => vec![format!("pull-request-update-{entry_id}")],
-        HostNotice::ReportReminder => vec![format!("report-reminder-{entry_id}")],
-        HostNotice::Control(_) => vec![format!("control-notice-{entry_id}")],
+        HostNotice::ReportReminder | HostNotice::Control(_) => Vec::new(),
     }
 }
 
@@ -1030,7 +1154,9 @@ pub(in crate::chat) mod tests {
     /// runs; a call that started nothing stays in its run. The starting
     /// thread's record of the start, which names the started thread, is
     /// left out for the card that tells it; the started thread's own record
-    /// stays, as do the records of other actions.
+    /// stays, as do the records of what changes its runs, one actor's in a
+    /// row on one line. A record of what only changed how the thread stands,
+    /// as a rename, is left out, and does not part the line around it.
     #[test]
     fn started_agents_and_threads_stand_as_cards_told_once() {
         let start = |id: &str, status, output: Option<&str>| {
@@ -1092,6 +1218,7 @@ pub(in crate::chat) mod tests {
             command("cmd-2"),
             record("in-child", "start_thread", None),
             record("renamed", "rename", Some("Child — Keys")),
+            record("interrupted", "interrupt", None),
         ];
         let segmented = segment_entries(&entries, false);
         assert!(matches!(
@@ -1102,21 +1229,61 @@ pub(in crate::chat) mod tests {
                 Segment::ThreadCard(started),
                 Segment::ThreadCard(starting),
                 Segment::ActivityRun(second),
-                Segment::ControlAction(in_child),
-                Segment::ControlAction(renamed),
+                Segment::ControlAction(actions),
             ] if first.len() == 1
                 && agent.id == "agent"
                 && started.id == "started"
                 && starting.id == "starting"
                 && second.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
                     == ["refused", "cmd-2"]
-                && in_child.id == "in-child"
-                && renamed.id == "renamed"
+                && actions.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
+                    == ["in-child", "interrupted"]
         ));
-        assert_eq!(
-            segmented.ranges,
-            vec![0..1, 1..2, 2..3, 3..4, 4..7, 7..8, 8..9]
-        );
+        assert_eq!(segmented.ranges, vec![0..1, 1..2, 2..3, 3..4, 4..7, 7..10]);
+    }
+
+    /// A worktree Tcode made ready for the harness stays out of the flow, the
+    /// checkout row showing where the thread works; one it could not make
+    /// stands in it.
+    #[test]
+    fn only_a_worktree_tcode_could_not_make_stands_in_the_flow() {
+        let worktree = |id: &str, answer| {
+            entry(
+                id,
+                EntryContent::Worktree {
+                    request: agent::WorktreeRequest::Create {
+                        cwd: "/repo".into(),
+                        name: "fix-upload".into(),
+                    },
+                    answer,
+                },
+            )
+        };
+        let entries = [
+            command("cmd-1"),
+            worktree(
+                "made",
+                agent::WorktreeAnswer::Ready {
+                    path: "/repo/.worktrees/fix-upload".into(),
+                    reused: false,
+                },
+            ),
+            command("cmd-2"),
+            worktree(
+                "refused",
+                agent::WorktreeAnswer::Refused {
+                    error: "the branch is checked out elsewhere".into(),
+                },
+            ),
+        ];
+        let segmented = segment_entries(&entries, false);
+        assert!(matches!(
+            segmented.flow.as_slice(),
+            [Segment::ActivityRun(run), Segment::Worktree(refused)]
+                if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
+                    == ["cmd-1", "cmd-2"]
+                && refused.id == "refused"
+        ));
     }
 
     #[test]
@@ -1168,6 +1335,64 @@ pub(in crate::chat) mod tests {
             [Segment::ActivityRun(activities), Segment::ContextWindowChanged(entry)]
                 if activities.len() == 1 && entry.id == "window"
         ));
+        // The notes the runtime writes after the message they describe are
+        // its row's, which carries them as its tags.
+        let entries = [
+            entry("user", user_item("go")),
+            entry("kept", EntryContent::SettingsKept),
+            entry(
+                "window",
+                EntryContent::ContextWindowChanged { window: 1_000_000 },
+            ),
+            command("cmd"),
+        ];
+        let segmented = segment_entries(&entries, false);
+        assert!(matches!(
+            segmented.flow.as_slice(),
+            [Segment::User(user), Segment::ActivityRun(_)] if user.id == "user"
+        ));
+        assert_eq!(segmented.ranges, vec![0..3, 3..4]);
+        assert_eq!(
+            message_tags(&entries[0..3]),
+            [
+                MessageTag::SettingsKept,
+                MessageTag::ContextWindow(1_000_000)
+            ]
+        );
+        // A turn's warnings are one line where the first stands; a retry is
+        // the working line's while the turn runs, then its Work Log's.
+        let warning = |id: &str| entry(id, EntryContent::Warning { message: id.into() });
+        let retry = |id: &str| entry(id, EntryContent::RequestRetry { message: id.into() });
+        let entries = [
+            warning("first"),
+            retry("retry-1"),
+            retry("retry-2"),
+            command("cmd"),
+            warning("second"),
+            entry("reply", assistant("done")),
+        ];
+        let settled = segment_entries(&entries, false);
+        assert!(matches!(
+            settled.flow.as_slice(),
+            [Segment::Warnings(warnings), Segment::ActivityRun(run), Segment::Assistant(_)]
+                if warnings.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
+                    == ["first", "second"]
+                && run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
+                    == ["retry-1", "retry-2", "cmd"]
+        ));
+        assert_eq!(settled.ranges, vec![0..1, 1..4, 5..6]);
+        let Segment::ActivityRun(run) = &settled.flow[1] else {
+            unreachable!();
+        };
+        assert_eq!(work_log_counts(run).retries, 2);
+        let running = segment_entries(&entries, true);
+        assert!(matches!(
+            running.flow.as_slice(),
+            [Segment::Warnings(_), Segment::ActivityRun(run), Segment::Assistant(_)]
+                if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>() == ["cmd"]
+        ));
+        assert_eq!(live_retry(&entries[..3]), Some((2, "retry-2".to_owned())));
+        assert_eq!(live_retry(&entries[..4]), None);
         let image = |id: &str| {
             entry(
                 id,
@@ -1241,28 +1466,6 @@ pub(in crate::chat) mod tests {
                 && drawn.id == "drawn" && drawing.id == "drawing"
         ));
         assert_eq!(segmented.ranges, vec![0..3, 3..4, 4..5, 5..6]);
-        // An old plan streamed as many rows this build cannot read shows as
-        // one row of them.
-        let unreadable = |id: &str| {
-            entry(
-                id,
-                EntryContent::Unreadable {
-                    line: format!("{{\"type\":\"{id}\"}}"),
-                },
-            )
-        };
-        let entries = [
-            unreadable("a"),
-            unreadable("b"),
-            command("cmd"),
-            unreadable("c"),
-        ];
-        let segmented = segment_entries(&entries, false);
-        assert!(
-            matches!(segmented.flow.as_slice(), [Segment::Unreadable(first), Segment::ActivityRun(_), Segment::Unreadable(second)]
-            if first.len() == 2 && second[0].id == "c")
-        );
-        assert_eq!(segmented.ranges, vec![0..2, 2..3, 3..4]);
         let segmented = segment_entries(&[], false);
         assert!(segmented.flow.is_empty());
         assert!(segmented.pending_steers.is_empty());
@@ -1287,6 +1490,38 @@ pub(in crate::chat) mod tests {
                 if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
                     == ["cmd-1", "edit", "cmd-2"]
         ));
+    }
+
+    /// A rewind the harness did not make is told on the message it went to,
+    /// and its undo's on the divider of the rewind, until a message is sent.
+    #[test]
+    fn a_rewind_failure_stands_until_the_next_message() {
+        let failed = |id: &str, checkpoint: &str, mode: Option<agent::RewindMode>| {
+            entry(
+                id,
+                EntryContent::RewindFailed {
+                    checkpoint_id: checkpoint.into(),
+                    mode,
+                    failure: agent::RewindFailure::new(agent::RewindFailureReason::Conflicts, None),
+                },
+            )
+        };
+        let mode = Some(agent::RewindMode::Conversation);
+        let mut entries = vec![
+            entry("user", user_item("go")),
+            failed("rewind", "c-1", mode),
+            failed("undo", "c-0", None),
+        ];
+        let standing = |entries: &[Arc<TimelineEntry>], checkpoint, undo| {
+            standing_rewind_failure(entries, checkpoint, undo).map(|(mode, _)| mode)
+        };
+        assert_eq!(standing(&entries, "c-1", false), Some(mode));
+        assert_eq!(standing(&entries, "c-1", true), None);
+        assert_eq!(standing(&entries, "c-0", true), Some(None));
+        assert_eq!(standing(&entries, "c-2", false), None);
+        entries.push(entry("next", user_item("again")));
+        assert_eq!(standing(&entries, "c-1", false), None);
+        assert_eq!(standing(&entries, "c-0", true), None);
     }
 
     #[test]
@@ -1434,6 +1669,7 @@ pub(in crate::chat) mod tests {
             searches: 2,
             computer: 4,
             tools: 1,
+            retries: 0,
         };
         let tools = WorkLogCounts {
             tools: 2,

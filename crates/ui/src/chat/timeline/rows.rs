@@ -380,6 +380,12 @@ fn index_rows_from(
                         expanded.contains(&key).hash(&mut content);
                     }
                 }
+                // The turn's first warning draws every warning of the turn.
+                if let Some(Segment::Warnings(warnings)) = segmented.flow.get(segment) {
+                    for warning in warnings {
+                        hash_entry_shape(&warning.content, &mut content);
+                    }
+                }
                 if shape_range.is_empty() {
                     // An empty turn's only row has no entry to be known by.
                     ("empty-turn", index).hash(&mut identity);
@@ -590,7 +596,11 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             to.hash(hash);
             reason.hash(hash);
         }
-        EntryContent::ContextCompacted(_) => {}
+        EntryContent::ContextCompacted(compaction) => {
+            compaction.in_progress.hash(hash);
+            compaction.trigger.hash(hash);
+            compaction.pre_tokens.hash(hash);
+        }
         EntryContent::ContextWindowChanged { window } => window.hash(hash),
         EntryContent::SettingsKept => {}
         EntryContent::SessionMoved { from, to } => {

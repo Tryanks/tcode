@@ -44,8 +44,10 @@ fn a_pending_steer_shows_as_its_bubble(cx: &mut TestAppContext) {
 /// pending, a notice is never the user's bubble. Each child callback is a
 /// card of its own, one still pending says so, and a request its child no
 /// longer waits on offers no answer and says so, its text whole on demand.
+/// Tcode's reminder and a `[control]` message come in as messages, the
+/// latter naming the thread it is about.
 #[gpui::test]
-fn steered_notices_render_as_disclosures_not_bubbles(cx: &mut TestAppContext) {
+fn steered_notices_render_as_the_hosts_not_bubbles(cx: &mut TestAppContext) {
     use gpui::{VisualTestContext, px, size};
     use tcode_core::session::SteeringStatus;
 
@@ -83,6 +85,24 @@ fn steered_notices_render_as_disclosures_not_bubbles(cx: &mut TestAppContext) {
                     SteeringStatus::Accepted,
                 ),
             ),
+            entry(
+                "reminder",
+                steer(
+                    tcode_core::notice::CHILD_REPORT_REMINDER.into(),
+                    SteeringStatus::Accepted,
+                ),
+            ),
+            entry(
+                "watch",
+                steer(
+                    format!(
+                        "{}{} idle",
+                        tcode_core::notice::CONTROL_CALLBACK_PREFIX,
+                        tcode_core::notice::control_header("worker", "Worker")
+                    ),
+                    SteeringStatus::Pending,
+                ),
+            ),
         ]);
 
     let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
@@ -91,7 +111,7 @@ fn steered_notices_render_as_disclosures_not_bubbles(cx: &mut TestAppContext) {
         ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
     });
     let cx: &mut VisualTestContext = cx;
-    cx.simulate_resize(size(px(1_024.), px(700.)));
+    cx.simulate_resize(size(px(1_024.), px(1_400.)));
     draw_settled(cx);
 
     assert!(
@@ -128,9 +148,29 @@ fn steered_notices_render_as_disclosures_not_bubbles(cx: &mut TestAppContext) {
             .is_none(),
         "a request no child waits on is offered an answer"
     );
-    for bubble in ["steering-wake", "steering-results", "steering-request"] {
+    for bubble in [
+        "steering-wake",
+        "steering-results",
+        "steering-request",
+        "steering-reminder",
+        "steering-watch",
+    ] {
         assert!(cx.debug_bounds(bubble).is_none(), "{bubble} is a bubble");
     }
+    for message in ["incoming-reminder", "incoming-watch"] {
+        assert!(
+            cx.debug_bounds(message).is_some(),
+            "{message} is not a message"
+        );
+    }
+    assert!(
+        cx.debug_bounds("incoming-open-watch-0").is_some(),
+        "the message does not name its thread"
+    );
+    assert!(
+        cx.debug_bounds("incoming-steering-watch").is_some(),
+        "the pending message is not marked"
+    );
 
     // The request the parent's model was sent is shown whole on demand.
     let body = "callback-card-body-orchestrate-callback-request-0";

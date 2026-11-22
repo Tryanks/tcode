@@ -55,6 +55,11 @@ pub(crate) struct BubbleData<'a> {
     /// The rewind the harness offers: what the context menu offers, and
     /// the action beside Copy.
     pub(crate) rewind: Option<(RewindMenu, AnyElement)>,
+    /// Why the last rewind to the message failed, leading its action row
+    /// whether or not the actions are revealed.
+    pub(crate) rewind_failure: Option<AnyElement>,
+    /// The notes on the settings the message ran on, under the bubble.
+    pub(crate) tags: Option<AnyElement>,
     /// The timeline's hover, which reveals the message's actions.
     pub(crate) hover: crate::motion::ListHover,
     /// The chat's motion, which keeps the rewind's fold and the pictures'
@@ -220,6 +225,8 @@ pub(crate) fn user_bubble(
         copied,
         markdown,
         rewind,
+        rewind_failure,
+        tags,
         hover,
         motion,
     } = data;
@@ -428,9 +435,19 @@ pub(crate) fn user_bubble(
                     .child(content)
             })
         })
-        .child(assistant::reserve_action_row(
-            actions, reveal, pinned, compact,
-        ))
+        .children(tags)
+        .child(
+            h_flex()
+                .max_w_full()
+                .min_w_0()
+                .gap_1()
+                .items_center()
+                .justify_end()
+                .children(rewind_failure)
+                .child(assistant::reserve_action_row(
+                    actions, reveal, pinned, compact,
+                )),
+        )
         .context_menu(move |menu, window, cx| menu_items(menu, window, cx))
         .into_any_element()
 }

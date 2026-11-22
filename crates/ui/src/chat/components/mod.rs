@@ -7,6 +7,7 @@ pub(crate) mod dividers;
 pub(crate) mod error_card;
 pub(crate) mod images;
 pub(crate) mod indicator;
+pub(crate) mod notices;
 pub(crate) mod plan;
 pub(crate) mod pull_request;
 pub(crate) mod rewind;
