@@ -48,20 +48,28 @@ pub(super) struct SpawnedSubagent {
 pub(super) enum WatcherCommand {
     /// A new `invoke_subagent` call was observed on the ACP wire.
     Spawned(SpawnedSubagent),
+    /// An `invoke_subagent` call failed before matching a child file.
+    SpawnFailed(String),
     /// A parent `send_message` call targeted `recipient` (possibly a subagent).
     MessageSent {
         recipient: String,
         message: Option<String>,
     },
+    /// Sync `proactive.seen` to the latest SQLite step index (e.g. after an
+    /// interrupted proactive turn so any late step does not bleed into the
+    /// next turn).
+    SyncSeen,
     /// Wake the watcher immediately (e.g. `manage_subagents` killed a child or
-    /// a proactive turn is waiting for its terminal step to flush).
+    /// a proactive `usage_update` arrived).
     Wake,
-    /// The session is closing: flush any pending child output and stop.
+    /// The session is closing: settle any still-running subagents as
+    /// interrupted, flush pending output, and stop.
     Close,
 }
 
-/// Shared proactive-turn coordination between `Antigravity::session_update`
-/// and the background watcher.
+/// Shared proactive-turn coordination between `Antigravity` callbacks
+/// and the session's watcher. Acquire `State` before `ProactiveTracker`
+/// whenever both locks are taken.
 #[derive(Default)]
 pub(super) struct ProactiveTracker {
     pub(super) active: Option<ActiveProactive>,
@@ -70,10 +78,9 @@ pub(super) struct ProactiveTracker {
 
 pub(super) struct ActiveProactive {
     pub(super) turn_id: String,
-    pub(super) since: i64,
-    /// True once a `usage_update` arrived after streaming/tool updates, so the
-    /// watcher may safely complete the turn as soon as the terminal transcript
-    /// step finishes flushing.
+    pub(super) since: Option<i64>,
+    /// True once a `usage_update` arrived after the latest tool call, so the
+    /// watcher may check for the terminal transcript step on disk.
     pub(super) usage_seen: bool,
 }
 
@@ -275,6 +282,7 @@ pub(super) struct ChildTailer {
     last_reported: Option<String>,
     last_assistant: Option<String>,
     last_step_index: i64,
+    last_error_step: Option<i64>,
     turn_done: bool,
 }
 
@@ -296,6 +304,7 @@ impl ChildTailer {
             last_reported: None,
             last_assistant: None,
             last_step_index: -1,
+            last_error_step: None,
             turn_done: false,
         }
     }
@@ -351,7 +360,8 @@ impl ChildTailer {
                     )));
                 }
                 let tool_calls = step.tool_calls.unwrap_or_default();
-                if !tool_calls.is_empty() {
+                let has_new_tools = !tool_calls.is_empty();
+                if has_new_tools {
                     self.turn_done = false;
                     for (index, call) in tool_calls.into_iter().enumerate() {
                         let input = decode_transcript_args(&call.args);
@@ -384,7 +394,11 @@ impl ChildTailer {
                         },
                     )));
                 }
-                if step.status == "DONE" && self.pending_tools.is_empty() {
+                if step.status == "DONE" && !has_new_tools {
+                    while let Some(tool) = self.pending_tools.pop_front() {
+                        let content = tool.content(ItemStatus::Completed, None);
+                        events.push(AgentEvent::ItemCompleted(self.child_item(tool.id, content)));
+                    }
                     self.turn_done = true;
                 }
             }
@@ -414,15 +428,25 @@ impl ChildTailer {
             .or_else(|| self.last_assistant.clone())
     }
 
-    fn failed_in_db(&self) -> bool {
-        record::last_step(&self.db_path)
-            .is_some_and(|last| last.error && last.index > self.last_step_index)
+    fn failed_in_db(&mut self) -> bool {
+        let Some(last) = record::last_step(&self.db_path) else {
+            return false;
+        };
+        if last.error
+            && last.index >= self.last_step_index
+            && self.last_error_step != Some(last.index)
+        {
+            self.last_error_step = Some(last.index);
+            true
+        } else {
+            false
+        }
     }
 }
 
-/// `agy`'s `transcript.jsonl` encodes each tool argument value as a JSON string
-/// (e.g. `{"Path": "\"/repo/a.txt\""}`). Decode string values back into JSON so
-/// child tool cards render cleanly.
+/// `agy` 1.5.14 serializes each tool argument in `transcript.jsonl` as a
+/// JSON-encoded string (e.g. `{"Path": "\"/repo/a.txt\""}`, `{"DurationSeconds": "10"}`).
+/// Unwrap JSON-encoded strings back into structured values for display.
 fn decode_transcript_args(raw: &Value) -> Value {
     match raw {
         Value::Object(map) => Value::Object(
@@ -469,7 +493,7 @@ impl TrackedSubagent {
     }
 }
 
-/// Stateful coordinator driven by [`run_watcher`] and unit-tested directly.
+/// Stateful coordinator driven by [`run_watcher`].
 pub(super) struct WatcherState {
     state_dir: PathBuf,
     parent_session_id: String,
@@ -507,6 +531,41 @@ impl WatcherState {
 
     pub(super) fn on_spawn(&mut self, spawn: SpawnedSubagent) {
         self.unmatched_spawns.push_back(spawn);
+    }
+
+    pub(super) fn on_spawn_failed(&mut self, tool_call_id: &str) {
+        self.unmatched_spawns
+            .retain(|spawn| spawn.tool_call_id != tool_call_id);
+    }
+
+    /// Close any still-running matched subagents and unmatched spawns as
+    /// interrupted when the session closes so their mirrors do not stay open.
+    pub(super) fn finish_all_interrupted(&mut self) -> Vec<AgentEvent> {
+        let mut events = Vec::new();
+        for child in self.children.values_mut() {
+            if child.status == ItemStatus::InProgress {
+                child.status = ItemStatus::Interrupted;
+                let summary = child.tailer.summary();
+                events.push(AgentEvent::ItemCompleted(
+                    child.snapshot(ItemStatus::Interrupted, summary),
+                ));
+            }
+        }
+        for spawn in self.unmatched_spawns.drain(..) {
+            events.push(AgentEvent::ItemCompleted(ThreadItem {
+                id: spawn.tool_call_id,
+                parent_item_id: None,
+                content: ItemContent::Subagent {
+                    agent_type: spawn.agent_type,
+                    description: spawn.description,
+                    status: ItemStatus::Interrupted,
+                    summary: None,
+                    model: spawn.model,
+                    effort: None,
+                },
+            }));
+        }
+        events
     }
 
     pub(super) fn on_message_sent(
@@ -622,12 +681,13 @@ impl WatcherState {
             spawn.agent_type == file.subagent_descriptor.type_name
                 && spawn.description == file.subagent_descriptor.role
         });
-        let by_type = exact.or_else(|| {
-            self.unmatched_spawns
-                .iter()
-                .position(|spawn| spawn.agent_type == file.subagent_descriptor.type_name)
-        });
-        let index = by_type.or_else(|| (!self.unmatched_spawns.is_empty()).then_some(0))?;
+        let index = exact.or_else(|| {
+            file.subagent_descriptor.role.is_empty().then(|| {
+                self.unmatched_spawns
+                    .iter()
+                    .position(|spawn| spawn.agent_type == file.subagent_descriptor.type_name)
+            })?
+        })?;
         self.unmatched_spawns.remove(index)
     }
 }
@@ -702,15 +762,18 @@ pub(super) async fn run_watcher(
         };
 
         let mut immediate_events = Vec::new();
+        let mut sync_seen = false;
         for cmd in next_command
             .into_iter()
             .chain(std::iter::from_fn(|| controls.try_recv().ok().map(Ok)))
         {
             match cmd {
                 Ok(WatcherCommand::Spawned(spawn)) => watcher.on_spawn(spawn),
+                Ok(WatcherCommand::SpawnFailed(id)) => watcher.on_spawn_failed(&id),
                 Ok(WatcherCommand::MessageSent { recipient, message }) => {
                     immediate_events.extend(watcher.on_message_sent(&recipient, message));
                 }
+                Ok(WatcherCommand::SyncSeen) => sync_seen = true,
                 Ok(WatcherCommand::Wake) => {}
                 Ok(WatcherCommand::Close) | Err(_) => {
                     closing = true;
@@ -718,9 +781,8 @@ pub(super) async fn run_watcher(
             }
         }
 
-        // Whether an open turn the agent started has finished on disk: its
-        // terminal step flushed after `usage_update`, or an upstream error
-        // step in the record.
+        // Release `proactive` before locking `acp_state` so the watcher and
+        // notification callbacks never invert lock order (`acp_state` -> `proactive`).
         let proactive_check = proactive
             .lock()
             .unwrap_or_else(|held| held.into_inner())
@@ -732,14 +794,14 @@ pub(super) async fn run_watcher(
             .unwrap_or_else(|held| held.into_inner())
             .usage();
         let (db, transcript) = (db_path.clone(), transcript_path.clone());
-        let (polled_watcher, polled, ended) = crate::process::unblock(move || {
+        let (polled_watcher, polled, ended, synced_step) = crate::process::unblock(move || {
             let polled = watcher.poll();
             let ended = proactive_check.and_then(|(turn_id, since, usage_seen)| {
                 let end = if usage_seen {
                     record::proactive_turn_end(&db, &transcript, since, context)
                 } else {
                     record::last_step(&db)
-                        .filter(|last| last.error && last.index > since)
+                        .filter(|last| last.error && since.is_none_or(|seen| last.index > seen))
                         .map(|last| record::ProactiveEnd {
                             step_index: last.index,
                             status: TurnStatus::Failed,
@@ -748,39 +810,49 @@ pub(super) async fn run_watcher(
                 };
                 end.map(|end| (turn_id, end))
             });
-            (watcher, polled, ended)
+            let synced_step = sync_seen
+                .then(|| record::last_step(&db).map(|step| step.index))
+                .flatten();
+            (watcher, polled, ended, synced_step)
         })
         .await;
         watcher = polled_watcher;
 
         // Back on the session's thread: nothing is awaited from here to the
-        // last event sent.
+        // last event sent. Lock `acp_state` before `proactive` consistently.
         let mut out = immediate_events;
         out.extend(polled);
-        if let Some((turn_id, end)) = ended {
+        {
+            let mut state = acp_state.lock().unwrap_or_else(|held| held.into_inner());
             let mut tracker = proactive.lock().unwrap_or_else(|held| held.into_inner());
-            if tracker
-                .active
-                .as_ref()
-                .is_some_and(|active| active.turn_id == turn_id)
+            if let Some(step) = synced_step
+                && tracker.seen.is_none_or(|seen| step > seen)
+            {
+                tracker.seen = Some(step);
+            }
+            if let Some((turn_id, end)) = ended
+                && tracker
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.turn_id == turn_id)
             {
                 tracker.active = None;
-                tracker.seen = Some(end.step_index);
-                drop(tracker);
-                out.extend(
-                    acp_state
-                        .lock()
-                        .unwrap_or_else(|held| held.into_inner())
-                        .end_turn(
-                            &turn_id,
-                            TurnEnd {
-                                status: end.status,
-                                message: None,
-                                usage: end.usage,
-                            },
-                        ),
-                );
+                if state.turn() == Some(turn_id.as_str()) {
+                    tracker.seen = Some(end.step_index);
+                    drop(tracker);
+                    out.extend(state.end_turn(
+                        &turn_id,
+                        TurnEnd {
+                            status: end.status,
+                            message: None,
+                            usage: end.usage,
+                        },
+                    ));
+                }
             }
+        }
+        if closing {
+            out.extend(watcher.finish_all_interrupted());
         }
         for event in out {
             // The session's event channel is unbounded: a send fails only
@@ -1091,5 +1163,89 @@ mod tests {
             }) if id == "call_b" && description == "Reader B"
         )));
         assert!(watcher.has_active_subagents());
+
+        // Closing interrupts still-running subagents and clears pending work.
+        let closing = watcher.finish_all_interrupted();
+        assert!(matches!(
+            closing.as_slice(),
+            [AgentEvent::ItemCompleted(ThreadItem {
+                id,
+                parent_item_id: None,
+                content: ItemContent::Subagent {
+                    status: ItemStatus::Interrupted,
+                    description,
+                    ..
+                },
+            })] if id == "call_a" && description == "Reader A"
+        ));
+        assert!(!watcher.has_active_subagents());
+    }
+
+    #[test]
+    fn failed_spawn_and_mismatched_type_do_not_cross_wire_or_wedge_watcher() {
+        let scratch = Scratch::new();
+        let mut watcher = WatcherState::new(scratch.0.clone(), "parent-3".into());
+        watcher.on_spawn(SpawnedSubagent {
+            tool_call_id: "call_explore".into(),
+            agent_type: "explore".into(),
+            description: "Task A".into(),
+            prompt: None,
+            model: None,
+        });
+        scratch.write_subagent(
+            "parent-3",
+            "child-other",
+            "research",
+            "Task A",
+            "SUBAGENT_STATE_ALIVE",
+            2,
+        );
+        // A different typeName must not grab `call_explore`.
+        assert!(watcher.poll().is_empty());
+
+        // A failed spawn is removed cleanly from `unmatched_spawns`.
+        watcher.on_spawn_failed("call_explore");
+        assert!(!watcher.has_active_subagents());
+
+        // Even if an earlier child tool call had no `GENERIC` step, the final
+        // `PLANNER_RESPONSE` drains it and settles the child.
+        watcher.on_spawn(SpawnedSubagent {
+            tool_call_id: "call_res".into(),
+            agent_type: "research".into(),
+            description: "Task A".into(),
+            prompt: None,
+            model: None,
+        });
+        scratch.append_transcript(
+            "child-other",
+            &json!({
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "tool_calls": [{ "name": "read_file", "args": {} }]
+            }),
+        );
+        scratch.append_transcript(
+            "child-other",
+            &json!({
+                "step_index": 2,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "content": "Finished"
+            }),
+        );
+        let events = watcher.poll();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ItemCompleted(ThreadItem {
+                id,
+                parent_item_id: None,
+                content: ItemContent::Subagent {
+                    status: ItemStatus::Completed,
+                    summary: Some(summary),
+                    ..
+                },
+            }) if id == "call_res" && summary == "Finished"
+        )));
     }
 }

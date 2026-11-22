@@ -231,10 +231,8 @@ impl AppState {
                     .map(|selection| selection.value.clone())
                     .or_else(|| default.clone())
             };
-            descriptor.value_apply(pick(&active.meta.option_selections).as_ref())
-                == ApplyTiming::Restart
-                || descriptor.value_apply(pick(&active.live_option_selections).as_ref())
-                    == ApplyTiming::Restart
+            descriptor.value_requires_restart(pick(&active.meta.option_selections).as_ref())
+                || descriptor.value_requires_restart(pick(&active.live_option_selections).as_ref())
         });
         let permission_push = is_permission && !permission_restart;
         if (permission_push

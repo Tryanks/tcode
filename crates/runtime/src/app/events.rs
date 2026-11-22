@@ -288,10 +288,9 @@ impl AppState {
                                 .find(|selection| selection.id == id)
                                 .map(|selection| selection.value.clone())
                                 .or(default);
-                            (descriptor.value_apply(selected.as_ref()) == ApplyTiming::Restart
-                                || descriptor.value_apply(incoming.as_ref())
-                                    == ApplyTiming::Restart)
-                                .then_some(id)
+                            (descriptor.value_requires_restart(selected.as_ref())
+                                || descriptor.value_requires_restart(incoming.as_ref()))
+                            .then_some(id)
                         });
                     // An agent's own option is set by the agent, and the thread
                     // follows it. A catalog option is the user's choice, which

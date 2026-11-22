@@ -54,7 +54,7 @@ const CONFIG_OPTION_PREFIX: &str = "acp:cfg:";
 /// The canonical mode option id for `provider`. Antigravity exposes its live
 /// permission modes under `"mode"` (`crate::permission_control`), while generic
 /// ACP agents and other dialects use [`MODE_OPTION_ID`].
-fn mode_option_id(provider: ProviderKind) -> &'static str {
+pub(crate) fn mode_option_id(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Antigravity => "mode",
         _ => MODE_OPTION_ID,
@@ -264,6 +264,19 @@ pub(crate) trait Dialect: Send + Sync + 'static {
     /// names an agent's model option whatever its `configId` is.
     fn owned_config_options(&self) -> &'static [&'static str] {
         &[]
+    }
+
+    /// A launch-flag option override derived from [`Self::launch`] arguments
+    /// that supersedes the wire value reported at startup.
+    fn launch_option_override(&self, _launch: &Launch) -> Option<(String, Value)> {
+        None
+    }
+
+    /// Called after an interrupt notification when the user stops the session,
+    /// so a dialect can close an agent-initiated turn that has no pending
+    /// `session/prompt` response.
+    fn on_interrupt(&self, _state: &mut State) -> Vec<AgentEvent> {
+        Vec::new()
     }
 
     /// Called once when the session's command loop ends, before
@@ -1020,16 +1033,8 @@ async fn run_actor<D: Dialect>(
             .map(|dir| Arc::new(Mutex::new(WriteJournal::open(dir))));
     }
     state.owned_options = dialect.owned_config_options();
-    if provider == ProviderKind::Antigravity
-        && launch
-            .args
-            .iter()
-            .any(|arg| arg == "--dangerously-skip-permissions")
-    {
-        state.options.set_launch_override(
-            "mode".to_owned(),
-            Value::String(crate::ANTIGRAVITY_FULL_ACCESS_MODE.to_owned()),
-        );
+    if let Some((id, value)) = dialect.launch_option_override(&launch) {
+        state.options.set_launch_override(id, value);
     }
     let state = Arc::new(Mutex::new(state));
     let (turn_tx, turn_done) = smol::channel::unbounded::<TurnOutcome>();
@@ -1562,8 +1567,15 @@ async fn handle_command<D: Dialect>(
                 .detach();
         }
         // The agent still owes us the `session/prompt` response carrying
-        // `stopReason: cancelled`; the turn completes when it lands.
-        SessionCommand::Interrupt => session.interrupt(session_id).await,
+        // `stopReason: cancelled`; the turn completes when it lands, or in
+        // `on_interrupt` for an agent-initiated turn with no prompt request.
+        SessionCommand::Interrupt => {
+            session.interrupt(session_id).await;
+            let interrupted = dialect.on_interrupt(&mut state.lock_recover());
+            for event in interrupted {
+                let _ = events.send(event).await;
+            }
+        }
         SessionCommand::RespondApproval {
             request_id,
             decision,
@@ -2173,9 +2185,10 @@ impl OptionRegistry {
             .iter()
             .find(|record| record.selection.id == id)
             .is_some_and(|record| {
-                record.descriptor.value_apply(Some(value)) == crate::ApplyTiming::Restart
-                    || record.descriptor.value_apply(Some(&record.selection.value))
-                        == crate::ApplyTiming::Restart
+                record.descriptor.value_requires_restart(Some(value))
+                    || record
+                        .descriptor
+                        .value_requires_restart(Some(&record.selection.value))
             })
     }
 
@@ -2603,6 +2616,15 @@ impl State {
         tool.journalled = true;
         let mut journal = journal.lock_recover();
         for (path, before, after) in entries {
+            // Confirm `newText` matches the bytes on disk so a partial diff
+            // missing metadata can never replace a whole file on restore.
+            if !std::fs::read(&path).is_ok_and(|disk| disk == after) {
+                log::warn!(
+                    "acp: skipping write journal for {} because its reported newText did not match disk",
+                    path.display()
+                );
+                continue;
+            }
             if let Err(err) = journal.record_write(&checkpoint, &path, before.as_deref(), &after) {
                 log::warn!(
                     "acp: could not keep what a write to {} replaces: {err}",

@@ -1685,6 +1685,12 @@ impl OptionDescriptor {
         }
     }
 
+    /// Whether a single option value takes effect only after restarting the
+    /// provider process.
+    pub fn value_requires_restart(&self, value: Option<&serde_json::Value>) -> bool {
+        self.value_apply(value) == ApplyTiming::Restart
+    }
+
     /// Whether switching this option between `live` and `selected` requires
     /// restarting the provider process rather than applying live.
     pub fn requires_restart(
@@ -1693,8 +1699,7 @@ impl OptionDescriptor {
         selected: Option<&serde_json::Value>,
     ) -> bool {
         live != selected
-            && (self.value_apply(live) == ApplyTiming::Restart
-                || self.value_apply(selected) == ApplyTiming::Restart)
+            && (self.value_requires_restart(live) || self.value_requires_restart(selected))
     }
 }
 

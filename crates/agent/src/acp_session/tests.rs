@@ -1076,8 +1076,9 @@ fn completed_whole_file_diffs_journal_writes_for_relayed_rewind() {
         [AgentEvent::ItemCompleted(_)]
     ));
 
-    // Hunk diffs with `_meta.old_line` are not whole-file snapshots and are
-    // skipped by the journal.
+    // Hunk diffs with `_meta.old_line` and diffs whose `newText` does not match
+    // the file on disk are skipped by the journal so restore never truncates a
+    // file to a fragment.
     let hunk_file = work.join("hunk.txt");
     std::fs::write(&hunk_file, b"untouched\n").unwrap();
     let _ = state.apply_update(update(json!({
@@ -1094,6 +1095,21 @@ fn completed_whole_file_diffs_journal_writes_for_relayed_rewind() {
             "_meta": { "old_line": 10, "new_line": 10 }
         }]
     })));
+    let mismatch_file = work.join("mismatch.txt");
+    std::fs::write(&mismatch_file, b"line 1\nnew fragment\nline 3\n").unwrap();
+    let _ = state.apply_update(update(json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": "mismatch-1",
+        "title": "Fragment diff",
+        "kind": "edit",
+        "status": "completed",
+        "content": [{
+            "type": "diff",
+            "path": mismatch_file,
+            "oldText": "old fragment\n",
+            "newText": "new fragment\n"
+        }]
+    })));
 
     let preview = WriteJournal::preview(&journal_dir, &["cp-1".into()]);
     assert_eq!(preview.files.files.len(), 2);
@@ -1103,6 +1119,10 @@ fn completed_whole_file_diffs_journal_writes_for_relayed_rewind() {
     assert_eq!(std::fs::read(&edited).unwrap(), b"before\r\n");
     assert!(!created.exists());
     assert_eq!(std::fs::read(&hunk_file).unwrap(), b"untouched\n");
+    assert_eq!(
+        std::fs::read(&mismatch_file).unwrap(),
+        b"line 1\nnew fragment\nline 3\n"
+    );
 
     std::fs::remove_dir_all(dir).unwrap();
 }

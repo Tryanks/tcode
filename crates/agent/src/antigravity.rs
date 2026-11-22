@@ -335,8 +335,7 @@ pub(crate) fn session_meta(
 
 #[derive(Default)]
 struct Antigravity {
-    /// The agent's own record of the session (`conversations/<id>.db` and
-    /// `brain/<id>/.system_generated/logs/transcript.jsonl`).
+    /// The agent's own record of the session (`conversations/<id>.db`).
     record: Mutex<Option<SessionRecord>>,
     /// Tracks the last seen step index and any open autonomous (proactive)
     /// turn so both `session_update` and the background watcher stay in sync.
@@ -352,7 +351,6 @@ struct Antigravity {
 #[derive(Clone)]
 struct SessionRecord {
     path: PathBuf,
-    transcript: PathBuf,
 }
 
 impl Antigravity {
@@ -409,6 +407,7 @@ impl Antigravity {
 fn chunk_is_empty(block: &acp::ContentBlock) -> bool {
     match block {
         acp::ContentBlock::Text(text) => text.text.is_empty(),
+        acp::ContentBlock::Image(_) | acp::ContentBlock::Audio(_) => false,
         acp::ContentBlock::ResourceLink(link) => link.name.is_empty() && link.uri.is_empty(),
         acp::ContentBlock::Resource(resource) => match &resource.resource {
             acp::EmbeddedResourceResource::TextResourceContents(text) => text.text.is_empty(),
@@ -418,6 +417,34 @@ fn chunk_is_empty(block: &acp::ContentBlock) -> bool {
     }
 }
 
+fn tool_error_summary(
+    content: Option<&[acp::ToolCallContent]>,
+    raw_output: Option<&Value>,
+) -> Option<String> {
+    if let Some(blocks) = content {
+        let parts: Vec<String> = blocks
+            .iter()
+            .filter_map(|item| match item {
+                acp::ToolCallContent::Content(block) => match &block.content {
+                    acp::ContentBlock::Text(text) if !text.text.trim().is_empty() => {
+                        Some(text.text.trim().to_owned())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        if !parts.is_empty() {
+            return Some(parts.join("\n"));
+        }
+    }
+    raw_output.and_then(|raw| match raw.as_str() {
+        Some(text) if !text.trim().is_empty() => Some(text.trim().to_owned()),
+        None if !raw.is_null() => Some(raw.to_string()),
+        _ => None,
+    })
+}
+
 impl Dialect for Antigravity {
     fn name(&self) -> &str {
         "Antigravity"
@@ -425,8 +452,9 @@ impl Dialect for Antigravity {
 
     fn launch(&self, opts: &SessionOptions) -> Result<Launch, AgentError> {
         let program = crate::resolve_binary(opts.binary_path.as_deref(), "agy")?;
+        let mode_id = acp_session::mode_option_id(ProviderKind::Antigravity);
         let full_access = opts.option_selections.iter().any(|selection| {
-            selection.id == "mode"
+            selection.id == mode_id
                 && selection.value.as_str() == Some(crate::ANTIGRAVITY_FULL_ACCESS_MODE)
         });
         let args = launch_args(!opts.mcp_servers.is_empty(), full_access, &opts.extra_args);
@@ -436,6 +464,19 @@ impl Dialect for Antigravity {
             env: Vec::new(),
             client_meta: None,
         })
+    }
+
+    fn launch_option_override(&self, launch: &Launch) -> Option<(String, Value)> {
+        launch
+            .args
+            .iter()
+            .any(|arg| arg == "--dangerously-skip-permissions")
+            .then(|| {
+                (
+                    acp_session::mode_option_id(ProviderKind::Antigravity).to_owned(),
+                    json!(crate::ANTIGRAVITY_FULL_ACCESS_MODE),
+                )
+            })
     }
 
     fn accepts_http_mcp(&self, _init: &acp::InitializeResponse) -> bool {
@@ -552,7 +593,6 @@ impl Dialect for Antigravity {
 
         if let Some(state_dir) = state_dirs(&opts.launch_env).into_iter().next() {
             let path = record::path(&state_dir, &session_id.0);
-            let transcript = record::transcript_path(&state_dir, &session_id.0);
             // A session that goes on has steps already; a new one has none.
             let seen = if resumed && !anew {
                 let path = path.clone();
@@ -563,7 +603,7 @@ impl Dialect for Antigravity {
                 Some(-1)
             };
             *self.record.lock().unwrap_or_else(|held| held.into_inner()) =
-                Some(SessionRecord { path, transcript });
+                Some(SessionRecord { path });
             self.proactive
                 .lock()
                 .unwrap_or_else(|held| held.into_inner())
@@ -618,7 +658,7 @@ impl Dialect for Antigravity {
                 .proactive
                 .lock()
                 .unwrap_or_else(|held| held.into_inner());
-            let since = tracker.seen.unwrap_or(-1);
+            let since = tracker.seen;
             tracker.active = Some(subagents::ActiveProactive {
                 turn_id: turn_id.clone(),
                 since,
@@ -633,6 +673,8 @@ impl Dialect for Antigravity {
                 if let Some(spawn) = subagents::parse_spawn(call) {
                     events.extend(state.flush_text());
                     if call.status == acp::ToolCallStatus::Failed {
+                        let summary =
+                            tool_error_summary(Some(&call.content), call.raw_output.as_ref());
                         events.push(AgentEvent::ItemCompleted(ThreadItem {
                             id: spawn.tool_call_id,
                             parent_item_id: None,
@@ -640,7 +682,7 @@ impl Dialect for Antigravity {
                                 agent_type: spawn.agent_type,
                                 description: spawn.description,
                                 status: ItemStatus::Failed,
-                                summary: None,
+                                summary,
                                 model: spawn.model,
                                 effort: None,
                             },
@@ -654,6 +696,15 @@ impl Dialect for Antigravity {
                         self.send_watcher(subagents::WatcherCommand::Spawned(spawn));
                     }
                     return events;
+                }
+                if let Some(active) = self
+                    .proactive
+                    .lock()
+                    .unwrap_or_else(|held| held.into_inner())
+                    .active
+                    .as_mut()
+                {
+                    active.usage_seen = false;
                 }
                 if let Some((recipient, message)) = subagents::parse_send_message(call) {
                     self.send_watcher(subagents::WatcherCommand::MessageSent {
@@ -678,6 +729,11 @@ impl Dialect for Antigravity {
                             .lock()
                             .unwrap_or_else(|held| held.into_inner())
                             .remove(id);
+                        self.send_watcher(subagents::WatcherCommand::SpawnFailed(id.to_owned()));
+                        let summary = tool_error_summary(
+                            update.fields.content.as_deref(),
+                            update.fields.raw_output.as_ref(),
+                        );
                         events.push(AgentEvent::ItemCompleted(ThreadItem {
                             id: spawn.tool_call_id,
                             parent_item_id: None,
@@ -685,7 +741,7 @@ impl Dialect for Antigravity {
                                 agent_type: spawn.agent_type,
                                 description: spawn.description,
                                 status: ItemStatus::Failed,
-                                summary: None,
+                                summary,
                                 model: spawn.model,
                                 effort: None,
                             },
@@ -700,17 +756,6 @@ impl Dialect for Antigravity {
                     self.send_watcher(subagents::WatcherCommand::Wake);
                 }
             }
-            acp::SessionUpdate::AgentMessageChunk(_) | acp::SessionUpdate::AgentThoughtChunk(_) => {
-                if let Some(active) = self
-                    .proactive
-                    .lock()
-                    .unwrap_or_else(|held| held.into_inner())
-                    .active
-                    .as_mut()
-                {
-                    active.usage_seen = false;
-                }
-            }
             _ => {}
         }
 
@@ -718,46 +763,14 @@ impl Dialect for Antigravity {
         events.extend(state.apply_update(notification.update));
 
         if is_usage_update {
-            let active_turn = {
-                let mut tracker = self
-                    .proactive
-                    .lock()
-                    .unwrap_or_else(|held| held.into_inner());
-                tracker.active.as_mut().map(|active| {
-                    active.usage_seen = true;
-                    (active.turn_id.clone(), active.since)
-                })
-            };
-            if let Some((turn_id, since)) = active_turn
-                && let Some(rec) = self.session_record()
-            {
-                if let Some(end) =
-                    record::proactive_turn_end(&rec.path, &rec.transcript, since, state.usage())
-                {
-                    let mut tracker = self
-                        .proactive
-                        .lock()
-                        .unwrap_or_else(|held| held.into_inner());
-                    if tracker
-                        .active
-                        .as_ref()
-                        .is_some_and(|active| active.turn_id == turn_id)
-                    {
-                        tracker.active = None;
-                        tracker.seen = Some(end.step_index);
-                        drop(tracker);
-                        events.extend(state.end_turn(
-                            &turn_id,
-                            TurnEnd {
-                                status: end.status,
-                                message: None,
-                                usage: end.usage,
-                            },
-                        ));
-                    }
-                } else {
-                    self.send_watcher(subagents::WatcherCommand::Wake);
-                }
+            let mut tracker = self
+                .proactive
+                .lock()
+                .unwrap_or_else(|held| held.into_inner());
+            if let Some(active) = tracker.active.as_mut() {
+                active.usage_seen = true;
+                drop(tracker);
+                self.send_watcher(subagents::WatcherCommand::Wake);
             }
         }
 
@@ -770,18 +783,20 @@ impl Dialect for Antigravity {
         result: Result<acp::PromptResponse, agent_client_protocol::Error>,
     ) -> TurnEnd {
         let (mut status, message) = prompt_status(&result);
+        let rec = self.session_record();
+        let last = rec.as_ref().and_then(|rec| record::last_step(&rec.path));
         {
             let mut tracker = self
                 .proactive
                 .lock()
                 .unwrap_or_else(|held| held.into_inner());
             tracker.active = None;
-            if status == crate::TurnStatus::Completed
-                && let Some(rec) = self.session_record()
-                && let Some(last) = record::last_step(&rec.path)
-            {
+            if let Some(last) = last {
                 // The error itself is the message the agent sent with the turn.
-                if last.error && tracker.seen.is_some_and(|seen| last.index > seen) {
+                if status == crate::TurnStatus::Completed
+                    && last.error
+                    && tracker.seen.is_some_and(|seen| last.index > seen)
+                {
                     status = crate::TurnStatus::Failed;
                 }
                 tracker.seen = Some(last.index);
@@ -810,6 +825,37 @@ impl Dialect for Antigravity {
         }
     }
 
+    fn on_interrupt(&self, state: &mut State) -> Vec<AgentEvent> {
+        let active_turn_id = {
+            let mut tracker = self
+                .proactive
+                .lock()
+                .unwrap_or_else(|held| held.into_inner());
+            let Some(turn_id) = tracker
+                .active
+                .as_ref()
+                .filter(|active| state.turn() == Some(active.turn_id.as_str()))
+                .map(|active| active.turn_id.clone())
+            else {
+                return Vec::new();
+            };
+            tracker.active = None;
+            Some(turn_id)
+        };
+        let Some(turn_id) = active_turn_id else {
+            return Vec::new();
+        };
+        self.send_watcher(subagents::WatcherCommand::SyncSeen);
+        state.end_turn(
+            &turn_id,
+            TurnEnd {
+                status: crate::TurnStatus::Interrupted,
+                message: None,
+                usage: state.usage(),
+            },
+        )
+    }
+
     async fn steer(
         &self,
         session: &Session,
@@ -822,6 +868,10 @@ impl Dialect for Antigravity {
         // on the same session: it immediately answers the superseded prompt with
         // `end_turn` and keeps streaming until the steering prompt completes.
         if session.steer_prompt(session_id, &text, &attachments) {
+            self.proactive
+                .lock()
+                .unwrap_or_else(|held| held.into_inner())
+                .active = None;
             session.emit(AgentEvent::SteerAccepted { request_id }).await;
         } else {
             session.emit(AgentEvent::SteerRejected { request_id }).await;
@@ -928,25 +978,46 @@ mod tests {
 
     /// `session/prompt.usage.totalTokens` is per-turn, not cumulative: leaving
     /// `total_processed_tokens` empty lets `Timeline` accumulate across turns.
+    /// Interrupted and failed turns also advance `seen` so the next turn does
+    /// not inherit an earlier step window.
     #[test]
-    fn turn_end_reports_per_turn_processed_tokens() {
+    fn turn_end_reports_per_turn_processed_tokens_and_advances_seen() {
+        let dir = std::env::temp_dir().join(format!("tcode-agy-turn-end-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("session.db");
+        smol::future::block_on(async {
+            let database = turso::Builder::new_local(&db.to_string_lossy())
+                .build()
+                .await
+                .unwrap();
+            let connection = database.connect().unwrap();
+            connection
+                .execute(
+                    "CREATE TABLE steps (idx integer, step_type integer NOT NULL DEFAULT 0, PRIMARY KEY (idx))",
+                    (),
+                )
+                .await
+                .unwrap();
+            for (idx, kind) in [(0_i64, 14_i64), (1, 15)] {
+                connection
+                    .execute(
+                        "INSERT INTO steps (idx, step_type) VALUES (?, ?)",
+                        (idx, kind),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+
         let dialect = Antigravity::default();
+        *dialect.record.lock().unwrap() = Some(SessionRecord { path: db.clone() });
         let mut state = State::new(ProviderKind::Antigravity, PathBuf::from("/repo"));
-        let _ = dialect.session_update(
-            &mut state,
-            notification(json!({
-                "sessionUpdate": "usage_update",
-                "used": 14836,
-                "size": 1048576
-            })),
-        );
         let response: acp::PromptResponse = serde_json::from_value(json!({
             "stopReason": "end_turn",
             "usage": {
                 "inputTokens": 2236,
                 "cachedReadTokens": 12568,
                 "outputTokens": 32,
-                "thoughtTokens": 28,
                 "totalTokens": 14836
             }
         }))
@@ -956,29 +1027,64 @@ mod tests {
         let usage = end.usage.expect("turn usage");
         assert_eq!(usage.turn_processed_tokens, Some(14836));
         assert_eq!(usage.total_processed_tokens, None);
-        assert_eq!(usage.input_tokens, Some(2236));
-        assert_eq!(usage.cached_input_tokens, Some(12568));
-        assert_eq!(usage.output_tokens, Some(32));
-        assert_eq!(usage.used_tokens, Some(14836));
-        assert_eq!(usage.context_window, Some(1_048_576));
+        assert_eq!(dialect.proactive.lock().unwrap().seen, Some(1));
+
+        // Even an interrupted turn advances `seen` so a later proactive turn
+        // will not recount steps before it.
+        smol::future::block_on(async {
+            let database = turso::Builder::new_local(&db.to_string_lossy())
+                .build()
+                .await
+                .unwrap();
+            let connection = database.connect().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO steps (idx, step_type) VALUES (?, ?)",
+                    (2_i64, 15_i64),
+                )
+                .await
+                .unwrap();
+        });
+        let cancelled: acp::PromptResponse = serde_json::from_value(json!({
+            "stopReason": "cancelled"
+        }))
+        .unwrap();
+        let end = dialect.turn_end(&mut state, Ok(cancelled));
+        assert_eq!(end.status, crate::TurnStatus::Interrupted);
+        assert_eq!(dialect.proactive.lock().unwrap().seen, Some(2));
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// Autonomous updates after a prompt returns open a proactive turn and
-    /// close it once the terminal planner step completes, while a late
-    /// `tool_call_update` on a previous turn's `schedule` tool does not open a
-    /// turn of its own.
     #[test]
-    fn proactive_reply_opens_and_closes_an_agent_turn() {
-        let dir =
-            std::env::temp_dir().join(format!("tcode-agy-proactive-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let db = dir.join("session.db");
-        let transcript = dir.join("transcript.jsonl");
+    fn launch_option_override_matches_full_access_flag() {
         let dialect = Antigravity::default();
-        *dialect.record.lock().unwrap() = Some(SessionRecord {
-            path: db.clone(),
-            transcript: transcript.clone(),
-        });
+        let plain = Launch {
+            program: PathBuf::from("agy"),
+            args: vec!["acp".into()],
+            env: Vec::new(),
+            client_meta: None,
+        };
+        assert_eq!(dialect.launch_option_override(&plain), None);
+
+        let full = Launch {
+            program: PathBuf::from("agy"),
+            args: vec!["acp".into(), "--dangerously-skip-permissions".into()],
+            env: Vec::new(),
+            client_meta: None,
+        };
+        assert_eq!(
+            dialect.launch_option_override(&full),
+            Some(("mode".into(), json!(crate::ANTIGRAVITY_FULL_ACCESS_MODE)))
+        );
+    }
+
+    /// Autonomous updates after a prompt returns open a proactive turn and can
+    /// be interrupted on Stop, while late `tool_call_update`s on an earlier
+    /// turn's `schedule` tool do not open a turn of their own.
+    #[test]
+    fn proactive_reply_opens_and_interrupts_cleanly() {
+        let dialect = Antigravity::default();
         dialect.proactive.lock().unwrap().seen = Some(3);
 
         let mut state = State::new(ProviderKind::Antigravity, PathBuf::from("/repo"));
@@ -994,6 +1100,10 @@ mod tests {
                 "status": "in_progress"
             })),
         );
+        // Stopping a sent turn does not end it prematurely in `on_interrupt`.
+        assert!(dialect.on_interrupt(&mut state).is_empty());
+        assert_eq!(state.turn(), Some("turn-1"));
+
         let _ = state.end_turn(
             "turn-1",
             TurnEnd {
@@ -1033,17 +1143,8 @@ mod tests {
         ));
         assert!(state.turn().is_some());
 
-        // Write the completed terminal planner step to transcript.jsonl, then
-        // deliver `usage_update`.
-        std::fs::write(
-            &transcript,
-            concat!(
-                r#"{"step_index":5,"type":"PLANNER_RESPONSE","status":"DONE","input_tokens":100,"cache_read_tokens":50,"output_tokens":12,"content":"Timer fired!"}"#,
-                "\n",
-            ),
-        )
-        .unwrap();
-        let closed = dialect.session_update(
+        // `usage_update` arms the watcher check without resetting on prose chunks.
+        let _ = dialect.session_update(
             &mut state,
             notification(json!({
                 "sessionUpdate": "usage_update",
@@ -1051,16 +1152,27 @@ mod tests {
                 "size": 1048576
             })),
         );
-        assert!(closed.iter().any(|event| matches!(
+        assert!(
+            dialect
+                .proactive
+                .lock()
+                .unwrap()
+                .active
+                .as_ref()
+                .is_some_and(|active| active.usage_seen)
+        );
+
+        // Interrupting an open proactive turn closes it cleanly as Interrupted.
+        let interrupted = dialect.on_interrupt(&mut state);
+        assert!(interrupted.iter().any(|event| matches!(
             event,
             AgentEvent::TurnCompleted {
-                status: crate::TurnStatus::Completed,
+                status: crate::TurnStatus::Interrupted,
                 ..
             }
         )));
         assert_eq!(state.turn(), None);
-
-        std::fs::remove_dir_all(dir).unwrap();
+        assert!(dialect.proactive.lock().unwrap().active.is_none());
     }
 
     /// `invoke_subagent` emits a `Subagent` item in progress and ignores the

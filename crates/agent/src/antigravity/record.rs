@@ -93,18 +93,18 @@ pub(super) fn last_step(record: &Path) -> Option<LastStep> {
 
 /// Whether the autonomous (proactive) work that began after `after_step` has
 /// reached a terminal step: either an `ERROR_STEP` in the session database or
-/// a completed `PLANNER_RESPONSE` with no `tool_calls` in `transcript.jsonl`
-/// that no newer step has followed.
+/// a completed `PLANNER_RESPONSE` with no `tool_calls` in `transcript.jsonl`.
+/// When `after_step` is unknown (`None`), token summation across earlier steps
+/// is skipped and only `context` is returned.
 pub(super) fn proactive_turn_end(
     record: &Path,
     transcript: &Path,
-    after_step: i64,
+    after_step: Option<i64>,
     context: Option<TokenUsage>,
 ) -> Option<ProactiveEnd> {
-    let db_last = last_step(record);
-    if let Some(last) = db_last
+    if let Some(last) = last_step(record)
         && last.error
-        && last.index > after_step
+        && after_step.is_none_or(|seen| last.index > seen)
     {
         return Some(ProactiveEnd {
             step_index: last.index,
@@ -119,21 +119,23 @@ pub(super) fn proactive_turn_end(
     let mut cached_tokens: u64 = 0;
     let mut output_tokens: u64 = 0;
     let mut saw_usage = false;
+    let mut saw_cached = false;
 
     for line in text.lines() {
         let Ok(step) = serde_json::from_str::<TranscriptStep>(line) else {
             continue;
         };
-        if step.step_index <= after_step {
+        if after_step.is_some_and(|seen| step.step_index <= seen) {
             continue;
         }
-        if step.kind == "PLANNER_RESPONSE" {
+        if after_step.is_some() && step.kind == "PLANNER_RESPONSE" {
             if let Some(input) = step.input_tokens {
                 input_tokens = input_tokens.saturating_add(input);
                 saw_usage = true;
             }
             if let Some(cached) = step.cache_read_tokens {
                 cached_tokens = cached_tokens.saturating_add(cached);
+                saw_cached = true;
                 saw_usage = true;
             }
             if let Some(output) = step.output_tokens {
@@ -150,11 +152,6 @@ pub(super) fn proactive_turn_end(
     }
 
     let latest = latest?;
-    // A newer step in SQLite means the agent has already moved on (e.g. tool
-    // execution or another model step) and this turn is not done yet.
-    if db_last.is_some_and(|last| last.index > latest.step_index) {
-        return None;
-    }
     let has_tool_calls = latest
         .tool_calls
         .as_ref()
@@ -163,7 +160,7 @@ pub(super) fn proactive_turn_end(
         return None;
     }
 
-    let usage = if saw_usage {
+    let usage = if after_step.is_some() && saw_usage {
         let total = input_tokens
             .saturating_add(cached_tokens)
             .saturating_add(output_tokens);
@@ -171,7 +168,7 @@ pub(super) fn proactive_turn_end(
             freshness: ContextFreshness::Current,
             turn_processed_tokens: Some(total),
             input_tokens: Some(input_tokens),
-            cached_input_tokens: (cached_tokens > 0).then_some(cached_tokens),
+            cached_input_tokens: saw_cached.then_some(cached_tokens),
             output_tokens: Some(output_tokens),
             used_tokens: context.and_then(|c| c.used_tokens),
             context_window: context.and_then(|c| c.context_window),
@@ -288,6 +285,10 @@ mod tests {
         }
     }
 
+    /// Synthetic fixture shaped from `agy` 1.5.14 (`conversations/<sid>.db`
+    /// and `brain/<sid>/.system_generated/logs/transcript.jsonl`): a `PLANNER_RESPONSE`
+    /// with `tool_calls` does not end a proactive turn, a terminal response sums
+    /// only steps after `after_step` when known, and `ERROR_STEP` fails it.
     #[test]
     fn proactive_turn_ends_only_on_terminal_planner_step_or_error() {
         let db = record(&[14, 15, 101, 15]);
@@ -310,7 +311,7 @@ mod tests {
             ),
         )
         .unwrap();
-        assert_eq!(proactive_turn_end(&db, &transcript, 1, context), None);
+        assert_eq!(proactive_turn_end(&db, &transcript, Some(1), context), None);
 
         // After the tool step completes and a final planner step answers
         // without tool calls, proactive_turn_end sums all steps after `seen`.
@@ -329,7 +330,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let end = proactive_turn_end(&db_done, &transcript, 1, context).unwrap();
+        let end = proactive_turn_end(&db_done, &transcript, Some(1), context).unwrap();
         assert_eq!(end.step_index, 5);
         assert_eq!(end.status, TurnStatus::Completed);
         let usage = end.usage.unwrap();
@@ -338,13 +339,15 @@ mod tests {
         assert_eq!(usage.input_tokens, Some(140));
         assert_eq!(usage.cached_input_tokens, Some(100));
         assert_eq!(usage.output_tokens, Some(40));
-        assert_eq!(usage.used_tokens, Some(420));
-        assert_eq!(usage.context_window, Some(1_048_576));
+
+        // Unknown `after_step` avoids double-counting earlier turns.
+        let end_unknown = proactive_turn_end(&db_done, &transcript, None, context).unwrap();
+        assert_eq!(end_unknown.usage, context);
 
         // An error step closes the proactive turn as Failed even without a
         // transcript line for it.
         let db_err = record(&[14, 15, 101, ERROR_STEP]);
-        let end = proactive_turn_end(&db_err, &transcript, 1, context).unwrap();
+        let end = proactive_turn_end(&db_err, &transcript, Some(1), context).unwrap();
         assert_eq!(end.step_index, 3);
         assert_eq!(end.status, TurnStatus::Failed);
 

@@ -9,10 +9,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent::{
-    AgentError, AgentEvent, ApplyTiming, ApprovalDecision, Attachment, CatalogRefresh, ItemContent,
-    ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionDescriptors, OptionSelection,
-    ProviderCommand, ProviderCommandKind, ProviderKind, RewindMode, SessionCommand, SessionHandle,
-    SessionOptions, ThreadItem, TurnOptions, TurnStatus, list_models, permission_control,
+    AgentError, AgentEvent, ApprovalDecision, Attachment, CatalogRefresh, ItemContent, ItemStatus,
+    LaunchEnv, ModelSpec, OptionDescriptor, OptionDescriptors, OptionSelection, ProviderCommand,
+    ProviderCommandKind, ProviderKind, RewindMode, SessionCommand, SessionHandle, SessionOptions,
+    ThreadItem, TurnOptions, TurnStatus, list_models, permission_control,
 };
 use base64::Engine as _;
 use serde::Serialize;
