@@ -11,6 +11,7 @@ pub(crate) use components::goal_strip::{
     status_label as goal_status_label, usage_line as goal_usage_line,
 };
 
+pub(crate) use components::approval::{Decide, approval_answerable, approval_decisions};
 pub(crate) use components::checkout::{CheckoutRowAt, checkout_row};
 use components::images::PendingImage;
 use components::steer_gesture::SteerGesture;

@@ -39,8 +39,8 @@ pub use command::{
 };
 pub use event::{
     AccountDiskUsage, AcpMarketplaceItem, AgentStatus, ArchivedSessions, BackgroundActivity,
-    BackgroundTaskStatus, ControlActivityEntry, ControlStatus, DiskUsage, DiskUsagePart,
-    DiskUsageState, EndpointDescription, EndpointPresetDescription, EventEnvelope,
+    BackgroundTaskStatus, ChildRequests, ControlActivityEntry, ControlStatus, DiskUsage,
+    DiskUsagePart, DiskUsageState, EndpointDescription, EndpointPresetDescription, EventEnvelope,
     ExternalImportState, ExternalImportStatus, ForkAvailability, ForkStatus, GitActionRequest,
     GitStatusStatus, HarnessDescription, HarnessPermission, ImportFailure, IndexSnapshot,
     IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools, LeftOrphan,
@@ -398,6 +398,10 @@ pub use wire::{
 // its lines_evicted counts every row before them.
 //
 // Version 32 (v0.4.7): SelectOption gains optional per-choice apply timing.
+//
+// SessionStatus gains child_requests, what a lead's tcode_control children
+// wait on; AgentEvent gains ChildRequestSettled, which the host records in a
+// lead when a request a child put to it in a callback is settled.
 pub const PROTOCOL_VERSION: u32 = 32;
 
 #[cfg(test)]

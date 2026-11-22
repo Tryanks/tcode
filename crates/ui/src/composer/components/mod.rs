@@ -1,4 +1,4 @@
-mod approval;
+pub(super) mod approval;
 pub(super) mod checkout;
 mod context_window;
 pub(super) mod files;

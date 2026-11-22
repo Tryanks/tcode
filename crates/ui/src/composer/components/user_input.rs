@@ -663,16 +663,7 @@ impl Composer {
         label: String,
         cx: &mut Context<Self>,
     ) {
-        let entry = self.ui_selections.entry(question.id.clone()).or_default();
-        if question.multi_select {
-            if let Some(pos) = entry.iter().position(|l| l == &label) {
-                entry.remove(pos);
-            } else {
-                entry.push(label);
-            }
-        } else {
-            *entry = vec![label];
-        }
+        toggle_user_input_option(&mut self.ui_selections, question, label);
         cx.notify();
     }
 
@@ -690,17 +681,14 @@ impl Composer {
         else {
             return;
         };
-        let text = input.read(cx).value().trim().to_string();
-        if text.is_empty() {
-            let index = self
-                .ui_question_index
-                .min(questions.len().saturating_sub(1));
-            let Some(question) = questions.get(index).filter(|question| question.optional) else {
-                return;
-            };
-            self.ui_selections.insert(question.id.clone(), Vec::new());
-        } else {
-            self.record_custom_answer(&questions, text);
+        let index = self
+            .ui_question_index
+            .min(questions.len().saturating_sub(1));
+        let text = input.read(cx).value().to_string();
+        if !questions.get(index).is_some_and(|question| {
+            submit_typed_user_input(&mut self.ui_selections, question, &text)
+        }) {
+            return;
         }
         input.update(cx, |state, cx| state.set_value("", window, cx));
         self.ui_advance_or_submit(&questions, request_id, window, cx);
@@ -715,12 +703,7 @@ impl Composer {
             .ui_question_index
             .min(questions.len().saturating_sub(1));
         if let Some(question) = questions.get(index) {
-            let entry = self.ui_selections.entry(question.id.clone()).or_default();
-            if question.multi_select {
-                entry.push(text);
-            } else {
-                *entry = vec![text];
-            }
+            record_typed_user_input(&mut self.ui_selections, question, text);
         }
     }
 
@@ -790,25 +773,24 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if user_input_all_answered(questions, &self.ui_selections) {
-            self.ui_submit(questions, request_id, window, cx);
-        } else if let Some(next) =
-            next_unanswered_question(questions, &self.ui_selections, self.ui_question_index)
-        {
-            self.ui_question_index = next;
-            self.seed_user_input_prefill(questions, window, cx);
-            cx.notify();
+        match user_input_step(questions, &self.ui_selections, self.ui_question_index) {
+            Some(UserInputStep::Send(answers)) => self.ui_submit(answers, request_id, window, cx),
+            Some(UserInputStep::Question(next)) => {
+                self.ui_question_index = next;
+                self.seed_user_input_prefill(questions, window, cx);
+                cx.notify();
+            }
+            None => {}
         }
     }
 
-    pub(in super::super) fn ui_submit(
+    fn ui_submit(
         &mut self,
-        questions: &[UserInputQuestion],
+        answers: serde_json::Map<String, serde_json::Value>,
         request_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let answers = assemble_user_input_answers(questions, &self.ui_selections);
         self.user_input_custom
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.ui_selections.clear();

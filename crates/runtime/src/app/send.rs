@@ -1379,8 +1379,10 @@ impl AppState {
         decision: ApprovalDecision,
         cx: &mut HostCx,
     ) -> Result<(), tcode_protocol::ProtocolError> {
+        let answer = self.approval_answer(target_id, &request_id, &decision);
         self.respond_session_approval(target_id, request_id.clone(), decision)
             .map_err(provider_command_error)?;
+        self.record_child_request_settled(target_id, &request_id, answer, cx);
         self.decision_authors
             .remove(&(target_id.to_string(), request_id.clone()));
         if let Some(author) = &cx.author {

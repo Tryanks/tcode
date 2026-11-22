@@ -1999,6 +1999,7 @@ fn session_status(session: &str, cwd: &std::path::Path) -> tcode_protocol::Sessi
         running_turn: None,
         pending_approvals: Vec::new(),
         pending_user_input: None,
+        child_requests: Vec::new(),
         steering_supported: false,
         // As the host describes every thread of a harness with one.
         provider_option_descriptors: agent::permission_control(agent::ProviderKind::ClaudeCode)

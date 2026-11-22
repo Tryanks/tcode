@@ -39,13 +39,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // In a space that leaves approvals to the agent's harness, a member
-        // answers none: theirs are declined at once, and the owner's are the
-        // owner's.
-        let answerable = matches!(request.kind, ApprovalKind::Plan { .. })
-            || self.workspace_store.read(cx).space_allows(|policy| {
-                policy.approval != tcode_protocol::SpaceApproval::ReviewedOnly
-            });
+        let answerable = approval_answerable(request, self.workspace_store.read(cx));
         let summary = match &request.kind {
             ApprovalKind::ExecCommand { .. } => {
                 if self.compact {
@@ -179,7 +173,6 @@ impl Composer {
             .read(cx)
             .approval_delivery_pending_for(self.session_id.as_deref(), &request.id);
         let expanded = self.approval_expanded;
-        let cancel_id = request.id.clone();
 
         // The delivery line and the offline notice fold in and away; the
         // gap under each is carried inside it, so it folds with them.
@@ -328,50 +321,23 @@ impl Composer {
                 )
             })
             .when(answerable, |card| {
-                card.child({
-                    let mut options = h_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_2()
-                        .items_center()
-                        .flex_wrap();
-                    for option in &request.options {
-                        let request_id = request.id.clone();
-                        let option_id = option.id.clone();
-                        let rejects = matches!(
-                            option.kind,
-                            ApprovalOptionKind::RejectOnce | ApprovalOptionKind::RejectAlways
-                        );
-                        let id = gpui::SharedString::from(format!("approval-option-{}", option.id));
-                        let button = Button::new(id)
-                            .motion(&self.button_motion())
-                            .chip()
-                            .touch(self.compact)
-                            .disabled(!self.interactive(cx) || pending)
-                            .label(option.label.clone())
-                            .when(rejects, |button| button.danger().outline())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.respond(
-                                    request_id.clone(),
-                                    ApprovalDecision::Option(option_id.clone()),
-                                    cx,
-                                );
-                            }));
-                        options = options.child(button);
-                    }
-                    event_card::footer(cx).items_start().child(options).child(
-                        Button::new("approval-cancel")
-                            .motion(&self.button_motion())
-                            .ghost()
-                            .chip()
-                            .touch(self.compact)
-                            .disabled(!self.interactive(cx) || pending)
-                            .label(crate::tr!("approval.cancel_turn"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.respond(cancel_id.clone(), ApprovalDecision::Cancel, cx);
-                            })),
-                    )
-                })
+                let respond = cx.entity().downgrade();
+                card.child(
+                    event_card::footer(cx)
+                        .items_start()
+                        .child(approval_decisions(
+                            "approval",
+                            request,
+                            self.interactive(cx) && !pending,
+                            self.compact,
+                            &self.button_motion(),
+                            Rc::new(move |request_id, decision, _, cx| {
+                                respond
+                                    .update(cx, |this, cx| this.respond(request_id, decision, cx))
+                                    .ok();
+                            }),
+                        )),
+                )
             })
             .into_any_element()
     }
@@ -390,6 +356,85 @@ impl Composer {
             )
         });
     }
+}
+
+/// Whether this client's user may answer `request`. In a space that leaves
+/// approvals to the agent's harness, a member answers none but a plan: theirs
+/// are declined at once, and the owner's are the owner's.
+pub(crate) fn approval_answerable(request: &ApprovalRequest, store: &WorkspaceStore) -> bool {
+    matches!(request.kind, ApprovalKind::Plan { .. })
+        || store
+            .space_allows(|policy| policy.approval != tcode_protocol::SpaceApproval::ReviewedOnly)
+}
+
+/// Sends a decision on the approval with the given id.
+pub(crate) type Decide = Rc<dyn Fn(String, ApprovalDecision, &mut Window, &mut App)>;
+
+/// What a pending approval offers whoever answers it: the harness's own
+/// options in its order and words, a rejecting one marked as such, then
+/// cancelling the turn.
+/// `id` prefixes the ids and debug selectors of its buttons.
+pub(crate) fn approval_decisions(
+    id: &str,
+    request: &ApprovalRequest,
+    enabled: bool,
+    compact: bool,
+    motion: &crate::motion::owned::Owned,
+    decide: Decide,
+) -> gpui::Div {
+    let mut options = h_flex()
+        .flex_1()
+        .min_w_0()
+        .gap_2()
+        .items_center()
+        .flex_wrap();
+    for option in &request.options {
+        let request_id = request.id.clone();
+        let option_id = option.id.clone();
+        let rejects = matches!(
+            option.kind,
+            ApprovalOptionKind::RejectOnce | ApprovalOptionKind::RejectAlways
+        );
+        let id = gpui::SharedString::from(format!("{id}-option-{}", option.id));
+        let decide = decide.clone();
+        let button = Button::new(id.clone())
+            .motion(motion)
+            .chip()
+            .touch(compact)
+            .disabled(!enabled)
+            .label(option.label.clone())
+            .when(rejects, |button| button.danger().outline())
+            .debug_selector(move || id.to_string())
+            .on_click(move |_, window, cx| {
+                decide(
+                    request_id.clone(),
+                    ApprovalDecision::Option(option_id.clone()),
+                    window,
+                    cx,
+                );
+            });
+        options = options.child(button);
+    }
+    let request_id = request.id.clone();
+    let cancel = gpui::SharedString::from(format!("{id}-cancel"));
+    h_flex()
+        .w_full()
+        .gap_2()
+        .items_start()
+        .child(options)
+        .child(
+            Button::new(cancel.clone())
+                .motion(motion)
+                .ghost()
+                .chip()
+                .touch(compact)
+                .disabled(!enabled)
+                .label(crate::tr!("approval.cancel_turn"))
+                .debug_selector(move || cancel.to_string())
+                .on_click(move |_, window, cx| {
+                    decide(request_id.clone(), ApprovalDecision::Cancel, window, cx);
+                }),
+        )
 }
 
 #[cfg(test)]

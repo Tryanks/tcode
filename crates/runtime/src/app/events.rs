@@ -541,11 +541,39 @@ impl AppState {
             | AgentEvent::PlanUpdated { .. }
             | AgentEvent::GoalUpdated { .. }
             | AgentEvent::ControlAction(_)
+            | AgentEvent::ChildRequestSettled { .. }
             | AgentEvent::UnreadableRecord { .. }
             | AgentEvent::RecordWithheld { .. }
             | AgentEvent::ProviderStartFailed { .. } => {}
         }
 
+        // An approval still pending here was settled by the harness, not by an
+        // answer the host sent, which recorded it as it went.
+        match &event {
+            AgentEvent::ApprovalResolved {
+                request_id,
+                decision,
+            } if self
+                .approval_requests(session_id)
+                .iter()
+                .any(|request| request.id == *request_id) =>
+            {
+                let answer = self.approval_answer(session_id, request_id, decision);
+                self.record_child_request_settled(session_id, request_id, answer, cx);
+            }
+            AgentEvent::UserInputResolved {
+                request_id,
+                answers,
+            } => self.record_child_request_settled(
+                session_id,
+                request_id,
+                agent::ChildRequestAnswer::Input {
+                    answers: answers.clone(),
+                },
+                cx,
+            ),
+            _ => {}
+        }
         self.record_approval_event(session_id, &event);
         self.record_handover(session_id, &event, &handed_over, cx);
         if let AgentEvent::ItemStarted(item) = &event {

@@ -1,8 +1,8 @@
 use super::*;
 use tcode_core::notice::{
     CHILD_REPORT_REMINDER, ORCHESTRATE_APPROVAL_ID_PHRASE, ORCHESTRATE_APPROVAL_PHRASE,
-    ORCHESTRATE_FALLBACK_LABEL, ORCHESTRATE_QUESTION_PHRASE, ORCHESTRATE_QUESTIONS_PHRASE,
-    ORCHESTRATE_REPORT_LABEL, callback_header,
+    ORCHESTRATE_FALLBACK_LABEL, ORCHESTRATE_QUESTION_ID_PHRASE, ORCHESTRATE_QUESTION_PHRASE,
+    ORCHESTRATE_QUESTIONS_PHRASE, ORCHESTRATE_REPORT_LABEL, callback_header,
 };
 use tcode_core::project::ChildExpectation;
 use tcode_core::settlement::{AgentDelivery, AgentReport};
@@ -785,7 +785,7 @@ impl AppState {
             serde_json::json!({ "id": option.id, "label": option.label, "kind": option.kind })
         }).collect::<Vec<_>>();
         let instruction = if self.settings.subagents.child_approval == ChildApprovalMode::Manual {
-            "The user answers in the child thread."
+            "The user answers it."
         } else {
             "You are the approver: answer with tcode_control respond_approval, passing this thread_id and approval_id with option: <exact id> or cancel: true; reject anything outside the brief's scope."
         };
@@ -840,12 +840,12 @@ impl AppState {
             "the child keeps working and reads the answer when it arrives; the question lapses when its turn ends"
         };
         let instruction = if self.settings.subagents.child_approval == ChildApprovalMode::Manual {
-            "The user answers in the child thread."
+            "The user answers it."
         } else {
             "You are the decider: answer with tcode_control respond_input, passing this thread_id and question_id with answers keyed by question id, a string (an option label or free text) for a single-choice question and an array of strings for a multi_select one, deciding from the brief and the user's instructions."
         };
         let text = format!(
-            "{} {ORCHESTRATE_QUESTION_PHRASE}question_id: {}; {delivery}{ORCHESTRATE_QUESTIONS_PHRASE}{}. {instruction}",
+            "{} {ORCHESTRATE_QUESTION_PHRASE}{ORCHESTRATE_QUESTION_ID_PHRASE}{}; {delivery}{ORCHESTRATE_QUESTIONS_PHRASE}{}. {instruction}",
             callback_header(child_id, &child.title),
             pending.request_id,
             serde_json::to_string(&pending.questions).expect("questions serialize"),

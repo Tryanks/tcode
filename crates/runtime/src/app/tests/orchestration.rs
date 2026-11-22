@@ -519,7 +519,7 @@ fn child_native_approval_callback_and_respond_approval_preserve_options_and_scop
         assert_eq!(offered, options);
         let manual = mode == ChildApprovalMode::Manual;
         if manual {
-            assert!(text.contains("The user answers in the child thread."));
+            assert!(text.contains("The user answers it."));
         } else {
             assert!(text.contains("respond_approval"));
             assert!(text.contains("option: <exact id> or cancel: true"));
@@ -567,6 +567,19 @@ fn child_native_approval_callback_and_respond_approval_preserve_options_and_scop
             assert!(next_command(&child.commands).is_err());
             assert_eq!(pending(cx), 1);
         }
+        // The lead's card answers what its child waits on while it is there.
+        assert!(
+            cx.seen()
+                .status("parent")
+                .child_requests
+                .iter()
+                .any(|waiting| waiting.child_id == "child"
+                    && waiting
+                        .approvals
+                        .iter()
+                        .any(|request| request.id == request_id)),
+            "the lead's status carries its child's request"
+        );
         let chosen = offered.first().unwrap().id.clone();
         if manual {
             state
@@ -603,6 +616,18 @@ fn child_native_approval_callback_and_respond_approval_preserve_options_and_scop
         );
         cx.run_until_parked();
         assert_eq!(pending(cx), 0);
+        assert!(cx.seen().status("parent").child_requests.is_empty());
+        // The lead's log keeps how it was answered, for its card to show.
+        assert_eq!(
+            cx.seen()
+                .timeline("parent")
+                .child_request_answers
+                .get(&("child".to_owned(), request_id.clone())),
+            Some(&agent::ChildRequestAnswer::Approval {
+                decision: decision.clone(),
+                label: (!manual).then(|| offered.first().unwrap().label.clone()),
+            })
+        );
     }
     set_mode(cx, ChildApprovalMode::AlwaysAllow);
     for (n, kinds, expected) in [
@@ -870,7 +895,7 @@ fn child_questions_reach_the_lead_and_respond_input_answers_them() {
         );
         assert!(
             text.contains(if mode == ChildApprovalMode::Manual {
-                "The user answers in the child thread."
+                "The user answers it."
             } else {
                 "respond_input"
             }),
@@ -900,6 +925,18 @@ fn child_questions_reach_the_lead_and_respond_input_answers_them() {
             assert!(refused.contains(error), "{refused}");
             assert!(next_command(&child.commands).is_err());
         }
+        assert!(
+            cx.seen()
+                .status("parent")
+                .child_requests
+                .iter()
+                .any(|waiting| waiting.child_id == "child"
+                    && waiting
+                        .user_input
+                        .as_ref()
+                        .is_some_and(|pending| pending.request_id == request_id)),
+            "the lead's status carries its child's question"
+        );
         let answers = serde_json::json!({"lang": "Rust", "targets": ["ios", "android"]});
         assert_eq!(
             respond(cx, &fleet.lead, Some(&request_id), answers.clone()).unwrap()["request_id"],
@@ -915,10 +952,18 @@ fn child_questions_reach_the_lead_and_respond_input_answers_them() {
         assert_eq!(delivered, request_id);
         assert_eq!(serde_json::Value::Object(sent.clone()), answers);
         child.play([AgentEvent::UserInputResolved {
-            request_id,
-            answers: sent,
+            request_id: request_id.clone(),
+            answers: sent.clone(),
         }]);
         cx.run_until_seen(|view| view.status("child").pending_user_input.is_none());
+        assert!(cx.seen().status("parent").child_requests.is_empty());
+        assert_eq!(
+            cx.seen()
+                .timeline("parent")
+                .child_request_answers
+                .get(&("child".to_owned(), request_id.clone())),
+            Some(&agent::ChildRequestAnswer::Input { answers: sent })
+        );
         assert!(
             respond(cx, &fleet.lead, None, serde_json::json!({}))
                 .unwrap_err()

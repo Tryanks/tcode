@@ -986,6 +986,11 @@ pub struct SessionStatus {
     pub running_turn: Option<RunningTurn>,
     pub pending_approvals: Vec<ApprovalRequest>,
     pub pending_user_input: Option<PendingUserInput>,
+    /// What this thread's `tcode_control` children wait on now, each child
+    /// that waits on something once: a lead's card for a child's callback
+    /// answers it while it is here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_requests: Vec<ChildRequests>,
     #[serde(rename = "supports_steering")]
     pub steering_supported: bool,
     pub provider_option_descriptors: Vec<OptionDescriptor>,
@@ -1025,6 +1030,17 @@ pub struct SessionStatus {
     /// takes no MCP server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<ControlStatus>,
+}
+
+/// The requests one `tcode_control` child waits on, as its own
+/// [`SessionStatus`] has them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChildRequests {
+    pub child_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approvals: Vec<ApprovalRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_input: Option<PendingUserInput>,
 }
 
 /// A thread's fork through a finished turn, where its harness has one.

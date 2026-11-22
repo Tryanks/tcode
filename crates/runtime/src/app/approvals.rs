@@ -38,6 +38,67 @@ impl AppState {
         }
     }
 
+    /// A request `child_id` put to its lead in a callback has left the host:
+    /// the lead's log records how, for its card of the callback.
+    pub(super) fn record_child_request_settled(
+        &mut self,
+        child_id: &str,
+        request_id: &str,
+        answer: agent::ChildRequestAnswer,
+        cx: &mut HostCx,
+    ) {
+        let key = (child_id.to_owned(), request_id.to_owned());
+        let delivered = match answer {
+            agent::ChildRequestAnswer::Approval { .. } => {
+                self.callback_approval_requests.contains(&key)
+            }
+            agent::ChildRequestAnswer::Input { .. } => {
+                self.callback_user_input_requests.contains(&key)
+            }
+        };
+        let Some(lead_id) = self
+            .sessions
+            .iter()
+            .find(|meta| meta.id == child_id)
+            .and_then(|meta| meta.parent_session_id.clone())
+            .filter(|_| delivered)
+        else {
+            return;
+        };
+        self.record_event(
+            &lead_id,
+            &AgentEvent::ChildRequestSettled {
+                child_id: key.0,
+                request_id: key.1,
+                answer,
+            },
+            cx,
+        );
+    }
+
+    /// The settlement of `child_id`'s pending approval `request_id` by
+    /// `decision`, naming the option it chose.
+    pub(super) fn approval_answer(
+        &self,
+        child_id: &str,
+        request_id: &str,
+        decision: &ApprovalDecision,
+    ) -> agent::ChildRequestAnswer {
+        let label = match decision {
+            ApprovalDecision::Option(id) => self
+                .approval_requests(child_id)
+                .iter()
+                .find(|request| request.id == request_id)
+                .and_then(|request| request.options.iter().find(|option| option.id == *id))
+                .map(|option| option.label.clone()),
+            ApprovalDecision::Cancel | ApprovalDecision::Feedback(_) => None,
+        };
+        agent::ChildRequestAnswer::Approval {
+            decision: decision.clone(),
+            label,
+        }
+    }
+
     /// Send a response to any resident session and clear the same request from
     /// the host authority once the provider command has accepted it.
     pub(super) fn respond_session_approval(

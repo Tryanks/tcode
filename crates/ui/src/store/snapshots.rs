@@ -317,6 +317,7 @@ mod tests {
             running_turn: None,
             pending_approvals: Vec::new(),
             pending_user_input: None,
+            child_requests: Vec::new(),
             steering_supported: true,
             provider_option_descriptors: Vec::new(),
             provider_option_selections: Vec::new(),

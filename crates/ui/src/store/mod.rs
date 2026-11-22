@@ -1142,6 +1142,14 @@ impl WorkspaceStore {
         })
     }
 
+    pub(crate) fn user_input_delivery_pending_for(&self, session: &str, request: &str) -> bool {
+        self.host.pending_commands().iter().any(|(_, command)| {
+            matches!(command,
+            Command::RespondUserInput { request_id, session_id, .. }
+            if request_id == request && session_id == session)
+        })
+    }
+
     pub(crate) fn retry_delivery(&self, key: &str, cx: &mut Context<Self>) {
         if let Err(error) = self.host.retry_failed(key) {
             cx.emit(RuntimeEvent::Error(tcode_protocol::RuntimeError::External(

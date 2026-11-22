@@ -32,6 +32,19 @@ pub(super) struct LeftRow {
     pub(super) own: Vec<Arc<TimelineEntry>>,
 }
 
+/// The answers chosen so far to a child's questions on a lead's card.
+pub(in crate::chat) struct CallbackDraft {
+    pub(in crate::chat) child_id: String,
+    pub(in crate::chat) request_id: String,
+    pub(in crate::chat) questions: Vec<agent::UserInputQuestion>,
+    /// The question shown.
+    pub(in crate::chat) index: usize,
+    pub(in crate::chat) selections: HashMap<String, Vec<String>>,
+    /// The typed answer to the question shown.
+    pub(in crate::chat) input: Entity<crate::widgets::input::TextareaState>,
+    pub(in crate::chat) _events: gpui::Subscription,
+}
+
 /// A conversation's timeline: its rows in their virtual list, everything
 /// that moves them (arrivals, folds, the followed tail, a reveal, a glide to
 /// a turn or to the end), and the state they are drawn from.
@@ -125,6 +138,12 @@ pub(crate) struct TimelineView {
     /// The row signature does not see approvals, so a change remeasures the
     /// rows of the plans gaining and losing it.
     pub(in crate::chat) deciding_plan: Option<String>,
+    /// The answers begun on each card of a child's question, by card key,
+    /// while the child waits on it.
+    pub(in crate::chat) callback_drafts: RefCell<HashMap<String, CallbackDraft>>,
+    /// Whether the lead's status had come, the children's requests pending in
+    /// it, and how many its log says were settled, as of the last frame.
+    pub(in crate::chat) callback_requests: (bool, Vec<(String, String)>, usize),
     pub(in crate::chat) md_states: HashMap<String, MdState>,
     /// The pages of the visualizations near the screen, resident and evicted
     /// as the messages' Markdown is.
@@ -286,6 +305,8 @@ impl TimelineView {
             rows_regrouped: false,
             shown_deliveries: Vec::new(),
             deciding_plan: None,
+            callback_drafts: RefCell::default(),
+            callback_requests: Default::default(),
             md_states: HashMap::new(),
             visuals: HashMap::new(),
             selection,
@@ -463,6 +484,7 @@ impl Render for TimelineView {
         if self.timeline_stale {
             self.sync_markdown_states(cx);
         }
+        self.sync_callback_requests(cx);
         self.land_sent_message(cx);
         self.inline_diffs.sweep();
         self.tool_texts.sweep(&cx.theme().highlight_theme);

@@ -888,6 +888,9 @@ pub struct Timeline {
     /// `requestUserInput` / `request_user_input_async`), if any. Cleared when
     /// the provider reports it resolved or the session closes.
     pub pending_user_input: Option<PendingUserInput>,
+    /// How each request a child put to this thread in a callback was settled,
+    /// by child id and request id.
+    pub child_request_answers: HashMap<(String, String), agent::ChildRequestAnswer>,
     pub usage: Option<TokenUsage>,
     pub resume: Option<ResumeCursor>,
     pub provider_session_id: Option<String>,
@@ -1819,6 +1822,14 @@ impl Timeline {
                 self.plan_explanation = explanation.clone();
             }
             AgentEvent::GoalUpdated { goal } => self.goal = goal.clone(),
+            AgentEvent::ChildRequestSettled {
+                child_id,
+                request_id,
+                answer,
+            } => {
+                self.child_request_answers
+                    .insert((child_id.clone(), request_id.clone()), answer.clone());
+            }
             AgentEvent::ControlAction(action) => {
                 let turn = self.ensure_turn();
                 let id = self.synthetic_id("control", ts);

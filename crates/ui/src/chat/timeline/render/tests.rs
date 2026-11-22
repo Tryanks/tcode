@@ -42,8 +42,8 @@ fn a_pending_steer_shows_as_its_bubble(cx: &mut TestAppContext) {
 
 /// The host steers its notices into a running turn: steered or still
 /// pending, a notice is never the user's bubble. Each child callback is a
-/// card of its own, one still pending says so, and one waiting on the user
-/// carries the action that opens the child and its request whole on demand.
+/// card of its own, one still pending says so, and a request its child no
+/// longer waits on offers no answer and says so, its text whole on demand.
 #[gpui::test]
 fn steered_notices_render_as_disclosures_not_bubbles(cx: &mut TestAppContext) {
     use gpui::{VisualTestContext, px, size};
@@ -119,9 +119,14 @@ fn steered_notices_render_as_disclosures_not_bubbles(cx: &mut TestAppContext) {
             .is_none()
     );
     assert!(
-        cx.debug_bounds("callback-card-open-orchestrate-callback-request-0")
+        cx.debug_bounds("callback-card-gone-orchestrate-callback-request-0")
             .is_some(),
-        "a waiting card has no action"
+        "a request no child waits on does not say so"
+    );
+    assert!(
+        cx.debug_bounds("callback-approval-orchestrate-callback-request-0-cancel")
+            .is_none(),
+        "a request no child waits on is offered an answer"
     );
     for bubble in ["steering-wake", "steering-results", "steering-request"] {
         assert!(cx.debug_bounds(bubble).is_none(), "{bubble} is a bubble");
@@ -615,6 +620,218 @@ fn a_plan_is_decided_on_its_block_and_answered_in_words_from_the_composer(cx: &m
             "decide-2".to_string(),
             agent::ApprovalDecision::Feedback("Split step one".into())
         )
+    );
+}
+
+/// A `tcode_control` child's approval and question are answered on its
+/// lead's cards for the callbacks, with what its harness offered, and each
+/// card then records how it was answered and offers nothing more.
+#[gpui::test]
+fn a_childs_requests_are_answered_on_its_leads_cards(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, VisualTestContext, px, size};
+
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let disk = chat_store(cx);
+    let lead = thread_meta(None);
+    let mut child = thread_meta(None);
+    child.parent_session_id = Some(lead.id.clone());
+    record_thread(&disk, &lead, []);
+    record_thread(&disk, &child, []);
+    let scripts = tcode_runtime::app::Scripts::default();
+    let host = spawn_chat_host(disk, scripts.launcher());
+    let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+    let store = cx.new(|cx| {
+        WorkspaceStore::new_attached(
+            driver.link.clone(),
+            crate::store::WorkspaceAttachment::Local,
+            None,
+            None,
+            cx,
+        )
+    });
+    driver.wait_until(cx, "workspace baseline", |cx| {
+        store.read_with(cx, |store, _| store.baseline_ready())
+    });
+    store.update(cx, |store, cx| store.show_alone(lead.id.clone(), cx));
+    let _lead_turn = scripted_turn(
+        &scripts,
+        &mut driver,
+        &lead.id,
+        agent::ProviderKind::ClaudeCode,
+        cx,
+    );
+    // The child runs where a client opened it.
+    store.update(cx, |store, cx| store.open_thread(&child.id, cx));
+    driver.wait_until(cx, "the child's status", |cx| {
+        store.read_with(cx, |store, cx| {
+            store.session_status_for(Some(&child.id), cx).is_some()
+        })
+    });
+    let (child_commands, child_events) = scripted_turn(
+        &scripts,
+        &mut driver,
+        &child.id,
+        agent::ProviderKind::ClaudeCode,
+        cx,
+    );
+    child_events
+        .try_send(agent::AgentEvent::ApprovalRequested(
+            agent::ApprovalRequest {
+                id: "ask-1".into(),
+                turn_id: None,
+                parent_item_id: None,
+                kind: agent::ApprovalKind::ExecCommand {
+                    command: "rm -rf build".into(),
+                    cwd: None,
+                    description: None,
+                },
+                reason: None,
+                blocked_path: None,
+                options: vec![
+                    agent::ApprovalOption {
+                        id: "allow".into(),
+                        label: "Allow once".into(),
+                        kind: agent::ApprovalOptionKind::AllowOnce,
+                    },
+                    agent::ApprovalOption {
+                        id: "deny".into(),
+                        label: "Reject".into(),
+                        kind: agent::ApprovalOptionKind::RejectOnce,
+                    },
+                ],
+            },
+        ))
+        .unwrap();
+    let window_state = cx.new(|_| crate::window_state::WindowState::default());
+    let (_chat, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
+        ChatView::new(
+            store.clone(),
+            window_state,
+            Some(lead.id.clone()),
+            window,
+            cx,
+        )
+    });
+    let cx: &mut VisualTestContext = cx;
+    cx.simulate_resize(size(px(1_024.), px(800.)));
+    // The key of the lead's `nth` callback card.
+    let callback = |nth: usize, cx: &mut VisualTestContext| -> Option<&'static str> {
+        store
+            .read_with(cx, |store, cx| {
+                store.with_timeline_for(
+                    Some(&lead.id),
+                    |timeline| {
+                        timeline
+                            .entries
+                            .iter()
+                            .filter(|entry| {
+                                matches!(
+                                    user_notice(&entry.content),
+                                    Some(HostNotice::Orchestrate(_))
+                                )
+                            })
+                            .nth(nth)
+                            .map(|entry| format!("orchestrate-callback-{}-0", entry.id))
+                    },
+                    cx,
+                )
+            })
+            .flatten()
+            .map(|key| &*key.leak())
+    };
+    driver.settle_until(cx, "the child's approval in the lead", |cx| {
+        callback(0, cx).is_some()
+    });
+    let card = callback(0, cx).unwrap();
+    let option: &'static str = format!("callback-approval-{card}-option-allow").leak();
+    driver.settle_until(cx, "the child's approval on the lead's card", |cx| {
+        cx.debug_bounds(option).is_some()
+    });
+    let allow = cx.debug_bounds(option).unwrap();
+    cx.simulate_click(allow.center(), Modifiers::default());
+    loop {
+        if let agent::SessionCommand::RespondApproval {
+            request_id,
+            decision,
+        } = driver.recv(cx, &child_commands)
+        {
+            assert_eq!(
+                (request_id.as_str(), decision),
+                ("ask-1", agent::ApprovalDecision::Option("allow".into()))
+            );
+            break;
+        }
+    }
+    let settled: &'static str = format!("callback-card-settled-{card}").leak();
+    driver.settle_until(cx, "the approval answered", |cx| {
+        cx.debug_bounds(settled).is_some()
+    });
+    assert!(
+        cx.debug_bounds(option).is_none(),
+        "an answered approval is offered again"
+    );
+
+    child_events
+        .try_send(agent::AgentEvent::UserInputRequested {
+            request_id: "ask-2".into(),
+            questions: vec![agent::UserInputQuestion {
+                id: "lang".into(),
+                header: "Language".into(),
+                question: "Which language?".into(),
+                options: vec![
+                    agent::UserInputOption {
+                        label: "Rust".into(),
+                        description: String::new(),
+                    },
+                    agent::UserInputOption {
+                        label: "Go".into(),
+                        description: String::new(),
+                    },
+                ],
+                multi_select: false,
+                prefill: None,
+                optional: false,
+            }],
+            delivery: agent::UserInputDelivery::Blocking,
+        })
+        .unwrap();
+    driver.settle_until(cx, "the child's question in the lead", |cx| {
+        callback(1, cx).is_some()
+    });
+    let card = callback(1, cx).unwrap();
+    let rust: &'static str = format!("callback-card-option-{card}-0").leak();
+    driver.settle_until(cx, "the child's question on the lead's card", |cx| {
+        cx.debug_bounds(rust).is_some()
+    });
+    let choose = cx.debug_bounds(rust).unwrap();
+    cx.simulate_click(choose.center(), Modifiers::default());
+    let answers = loop {
+        if let agent::SessionCommand::RespondUserInput {
+            request_id,
+            answers,
+        } = driver.recv(cx, &child_commands)
+        {
+            assert_eq!(request_id, "ask-2");
+            break answers;
+        }
+    };
+    assert_eq!(
+        serde_json::Value::Object(answers.clone()),
+        serde_json::json!({"lang": "Rust"})
+    );
+    child_events
+        .try_send(agent::AgentEvent::UserInputResolved {
+            request_id: "ask-2".into(),
+            answers,
+        })
+        .unwrap();
+    let settled: &'static str = format!("callback-card-settled-{card}").leak();
+    driver.settle_until(cx, "the question answered", |cx| {
+        cx.debug_bounds(settled).is_some()
+    });
+    assert!(
+        cx.debug_bounds(rust).is_none(),
+        "an answered question is offered again"
     );
 }
 

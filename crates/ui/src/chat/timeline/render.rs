@@ -1,5 +1,7 @@
 use super::*;
 use crate::chat::tools;
+use crate::widgets::input::{InputEvent, TextareaState};
+use tcode_core::notice::CallbackEvent;
 
 /// How long what is drawn here only some of the time takes to come in or go.
 const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
@@ -1372,6 +1374,7 @@ impl TimelineView {
                         key(),
                         pending,
                         callback,
+                        window,
                         cx,
                     ));
                 }
@@ -1403,8 +1406,10 @@ impl TimelineView {
         key: String,
         steering: bool,
         callback: &OrchestrateCallback,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let request = self.callback_request(turn, &key, callback, window, cx);
         let expanded = self.expanded.contains(&key);
         let child_id = callback.child_id.clone();
         let (glyph, detail) = {
@@ -1461,6 +1466,7 @@ impl TimelineView {
                 detail,
                 on_open,
             },
+            request,
             steering,
             expanded,
             cx.listener(move |this, _, _, cx| {
@@ -1475,6 +1481,337 @@ impl TimelineView {
                 .into_any_element()
         } else {
             card
+        }
+    }
+
+    /// Where the request `callback` carries stands: how the lead's log says
+    /// it was settled, else the child waits on it in the lead's status, which
+    /// the card then answers, else it is no longer pending. `None` for an
+    /// ending.
+    fn callback_request(
+        &self,
+        turn: usize,
+        key: &str,
+        callback: &OrchestrateCallback,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<components::callback_card::CallbackRequest> {
+        use components::callback_card::{CallbackRequest, QuestionForm};
+        let request_id = callback.request_id()?.to_owned();
+        let child_id = callback.child_id.clone();
+        let store = self.workspace_store.read(cx);
+        let settled = store
+            .with_timeline_for(
+                self.session_id.as_deref(),
+                |timeline| {
+                    timeline
+                        .child_request_answers
+                        .get(&(child_id.clone(), request_id.clone()))
+                        .cloned()
+                },
+                cx,
+            )
+            .flatten();
+        if let Some(answer) = settled {
+            return Some(CallbackRequest::Settled(
+                components::callback_card::settled_lines(&answer, callback),
+            ));
+        }
+        let Some(status) = store.session_status_for(self.session_id.as_deref(), cx) else {
+            return Some(CallbackRequest::Unknown);
+        };
+        let waiting = status
+            .child_requests
+            .iter()
+            .find(|waiting| waiting.child_id == child_id);
+        let online = !matches!(store.connection_state(),
+            tcode_client::ConnectionState::Offline { reason } if reason.is_terminal());
+        Some(match callback.event {
+            CallbackEvent::Approval => {
+                let Some(request) = waiting
+                    .and_then(|waiting| waiting.approvals.iter().find(|r| r.id == request_id))
+                    .cloned()
+                else {
+                    return Some(CallbackRequest::Gone);
+                };
+                let enabled =
+                    online && !store.approval_delivery_pending_for(Some(&child_id), &request.id);
+                let answerable = crate::composer::approval_answerable(&request, store);
+                let store = self.workspace_store.clone();
+                CallbackRequest::Approval {
+                    request,
+                    answerable,
+                    enabled,
+                    decide: Rc::new(move |request_id, decision, _, cx| {
+                        store.update(cx, |store, _| {
+                            store.respond_approval_for(child_id.clone(), request_id, decision)
+                        });
+                    }),
+                }
+            }
+            CallbackEvent::Question => {
+                let Some(pending) = waiting
+                    .and_then(|waiting| waiting.user_input.as_ref())
+                    .filter(|pending| pending.request_id == request_id)
+                    .cloned()
+                else {
+                    return Some(CallbackRequest::Gone);
+                };
+                let enabled =
+                    online && !store.user_input_delivery_pending_for(&child_id, &request_id);
+                let (index, selections, input) =
+                    self.callback_draft(turn, key, &child_id, &pending, window, cx);
+                let act = cx.listener({
+                    let key = key.to_owned();
+                    move |this, action: &components::callback_card::QuestionAction, window, cx| {
+                        this.act_on_callback_question(
+                            turn, &key, &child_id, &pending, action, window, cx,
+                        );
+                    }
+                });
+                CallbackRequest::Question(QuestionForm {
+                    questions: self
+                        .callback_drafts
+                        .borrow()
+                        .get(key)
+                        .map(|draft| draft.questions.clone())
+                        .unwrap_or_default(),
+                    index,
+                    selections,
+                    input,
+                    enabled,
+                    act: Rc::new(move |action, window, cx| act(&action, window, cx)),
+                })
+            }
+            CallbackEvent::Ended(_) => return None,
+        })
+    }
+
+    /// The answers chosen so far to the question card `key` shows, begun for
+    /// `pending` when the card first shows it.
+    fn callback_draft(
+        &self,
+        turn: usize,
+        key: &str,
+        child_id: &str,
+        pending: &tcode_core::session::PendingUserInput,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (usize, HashMap<String, Vec<String>>, Entity<TextareaState>) {
+        let mut drafts = self.callback_drafts.borrow_mut();
+        if let Some(draft) = drafts
+            .get(key)
+            .filter(|draft| draft.request_id == pending.request_id)
+        {
+            return (draft.index, draft.selections.clone(), draft.input.clone());
+        }
+        let prefill = pending
+            .questions
+            .first()
+            .and_then(|question| question.prefill.clone())
+            .unwrap_or_default();
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .input_action(gpui::TextInputAction::Enter)
+                .auto_grow(1, 6)
+                .submit_on_enter(true)
+                .default_value(prefill)
+        });
+        let events = cx.subscribe_in(&input, window, {
+            let key = key.to_owned();
+            let child_id = child_id.to_owned();
+            let pending = pending.clone();
+            move |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { shift: false, .. } => this.act_on_callback_question(
+                    turn,
+                    &key,
+                    &child_id,
+                    &pending,
+                    &components::callback_card::QuestionAction::SendTyped,
+                    window,
+                    cx,
+                ),
+                // A line typed or wrapped grows the card.
+                InputEvent::Change => {
+                    this.remeasure_turn(turn);
+                    cx.notify();
+                }
+                _ => {}
+            }
+        });
+        drafts.insert(
+            key.to_owned(),
+            CallbackDraft {
+                child_id: child_id.to_owned(),
+                request_id: pending.request_id.clone(),
+                questions: pending.questions.clone(),
+                index: 0,
+                selections: HashMap::new(),
+                input: input.clone(),
+                _events: events,
+            },
+        );
+        (0, HashMap::new(), input)
+    }
+
+    /// A step taken in the question card `key`, by the composer's rules:
+    /// a single-select choice or a typed answer moves on, the set goes to
+    /// the child once every question is answered.
+    #[allow(clippy::too_many_arguments)]
+    fn act_on_callback_question(
+        &mut self,
+        turn: usize,
+        key: &str,
+        child_id: &str,
+        pending: &tcode_core::session::PendingUserInput,
+        action: &components::callback_card::QuestionAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::composer::model::{
+            UserInputStep, record_typed_user_input, submit_typed_user_input,
+            toggle_user_input_option, user_input_step,
+        };
+        use components::callback_card::QuestionAction;
+        let mut drafts = self.callback_drafts.borrow_mut();
+        let Some(draft) = drafts
+            .get_mut(key)
+            .filter(|draft| draft.request_id == pending.request_id)
+        else {
+            return;
+        };
+        let questions = &pending.questions;
+        let at = draft.index.min(questions.len().saturating_sub(1));
+        let Some(question) = questions.get(at) else {
+            return;
+        };
+        let typed = draft.input.read(cx).value().to_string();
+        let moves_on = match action {
+            QuestionAction::Choose(label) => {
+                toggle_user_input_option(&mut draft.selections, question, label.clone());
+                !question.multi_select
+            }
+            QuestionAction::Go(delta) => {
+                draft.index = at
+                    .saturating_add_signed(*delta)
+                    .min(questions.len().saturating_sub(1));
+                false
+            }
+            QuestionAction::SendTyped => {
+                submit_typed_user_input(&mut draft.selections, question, &typed)
+            }
+            QuestionAction::Confirm => {
+                // What is typed and not yet sent is part of the answer.
+                if !typed.trim().is_empty() {
+                    record_typed_user_input(&mut draft.selections, question, typed.trim().into());
+                }
+                true
+            }
+        };
+        let prefill = |index: usize| {
+            questions
+                .get(index)
+                .and_then(|question| question.prefill.clone())
+                .unwrap_or_default()
+        };
+        let mut answers = None;
+        let mut value = (draft.index != at).then(|| prefill(draft.index));
+        match moves_on
+            .then(|| user_input_step(questions, &draft.selections, at))
+            .flatten()
+        {
+            Some(UserInputStep::Send(set)) => {
+                answers = Some(set);
+                draft.selections.clear();
+                draft.index = 0;
+                value = Some(String::new());
+            }
+            Some(UserInputStep::Question(next)) => {
+                draft.index = next;
+                value = Some(prefill(next));
+            }
+            None => {}
+        }
+        let input = draft.input.clone();
+        drop(drafts);
+        if let Some(value) = value {
+            input.update(cx, |state, cx| state.set_value(value, window, cx));
+        }
+        if let Some(answers) = answers {
+            self.workspace_store.update(cx, |store, _| {
+                store.respond_user_input_for(
+                    child_id.to_owned(),
+                    pending.request_id.clone(),
+                    answers,
+                )
+            });
+        }
+        self.remeasure_turn(turn);
+        cx.notify();
+    }
+
+    /// The row signature sees neither the lead's status nor what its log
+    /// says of a child's request, so when either changes, the turns that
+    /// hold a child's callback are measured again, and the answers begun for
+    /// a request no longer pending go.
+    pub(in crate::chat) fn sync_callback_requests(&mut self, cx: &mut Context<Self>) {
+        let store = self.workspace_store.read(cx);
+        let status = store.session_status_for(self.session_id.as_deref(), cx);
+        let live: Vec<(String, String)> = status
+            .into_iter()
+            .flat_map(|status| &status.child_requests)
+            .flat_map(|waiting| {
+                waiting
+                    .approvals
+                    .iter()
+                    .map(|request| request.id.clone())
+                    .chain(
+                        waiting
+                            .user_input
+                            .iter()
+                            .map(|pending| pending.request_id.clone()),
+                    )
+                    .map(|id| (waiting.child_id.clone(), id))
+            })
+            .collect();
+        let answered = store
+            .with_timeline_for(
+                self.session_id.as_deref(),
+                |timeline| timeline.child_request_answers.len(),
+                cx,
+            )
+            .unwrap_or_default();
+        let signature = (status.is_some(), live, answered);
+        if signature == self.callback_requests {
+            return;
+        }
+        let turns: std::collections::BTreeSet<usize> = store
+            .with_timeline_for(
+                self.session_id.as_deref(),
+                |timeline| {
+                    timeline
+                        .entries
+                        .iter()
+                        .filter(|entry| {
+                            matches!(
+                                user_notice(&entry.content),
+                                Some(HostNotice::Orchestrate(_))
+                            )
+                        })
+                        .map(|entry| entry.turn)
+                        .collect()
+                },
+                cx,
+            )
+            .unwrap_or_default();
+        let live = &signature.1;
+        self.callback_drafts.borrow_mut().retain(|_, draft| {
+            live.iter()
+                .any(|(child, request)| *child == draft.child_id && *request == draft.request_id)
+        });
+        self.callback_requests = signature;
+        for turn in turns {
+            self.remeasure_turn(turn);
         }
     }
 
