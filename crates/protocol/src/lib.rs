@@ -38,20 +38,21 @@ pub use command::{
     TerminalSelection, ThreadExportFormat, TurnDue, UnsentMessage,
 };
 pub use event::{
-    AccountDiskUsage, AcpMarketplaceItem, AgentStatus, ArchivedSessions, BackgroundActivity,
-    BackgroundTaskStatus, ChildRequests, ControlActivityEntry, ControlStatus, DiskUsage,
-    DiskUsagePart, DiskUsageState, EndpointDescription, EndpointPresetDescription, EventEnvelope,
-    ExternalImportState, ExternalImportStatus, ForkAvailability, ForkStatus, GitActionRequest,
-    GitStatusStatus, HarnessDescription, HarnessPermission, ImportFailure, IndexSnapshot,
-    IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools, LeftOrphan,
-    MergeWorktreeFailure, NoticeSeverity, PendingRewind, PluginCatalogState, PluginChallenge,
-    PluginChallengeKind, PluginOperationTarget, PluginStaleReason, PluginsDescription,
-    ProviderDiskUsage, ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun,
-    ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RewindBlocked, RewindStatus,
-    RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification, RuntimeOperationId,
-    RuntimeToast, Scope, ScopedProviderChoice, ServerEvent, SessionActivity, SessionPlan,
-    SessionStatus, StorageMigration, TcodeDiskUsage, TcodeUpdateStatus, TerminalContextStatus,
-    TerminalSplitStatus, TerminalStatus, ThreadWakes, Topic,
+    AccountDiskUsage, AcpMarketplaceItem, AgentStatus, ArchivedSessions, AskingKind,
+    BackgroundActivity, BackgroundTaskStatus, ChildRequests, ControlActivityEntry, ControlStatus,
+    DiskUsage, DiskUsagePart, DiskUsageState, EndpointDescription, EndpointPresetDescription,
+    EventEnvelope, ExternalImportState, ExternalImportStatus, ForkAvailability, ForkStatus,
+    GitActionRequest, GitStatusStatus, HarnessDescription, HarnessPermission, ImportFailure,
+    IndexSnapshot, IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer,
+    InjectedTools, LeftOrphan, MergeWorktreeFailure, NoticeSeverity, PendingRewind,
+    PluginCatalogState, PluginChallenge, PluginChallengeKind, PluginOperationTarget,
+    PluginStaleReason, PluginsDescription, ProviderDiskUsage, ProviderPluginCatalog,
+    ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus,
+    QueuedMessageStatus, RewindBlocked, RewindStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
+    RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice,
+    ServerEvent, SessionActivity, SessionPlan, SessionStatus, StorageMigration, SubagentAsking,
+    TcodeDiskUsage, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
+    ThreadWakes, Topic,
 };
 pub use query::{
     AgentAccess, AgentGrant, AgentScope, ControlActivityFilter, ControlActivityPage,
@@ -402,6 +403,9 @@ pub use wire::{
 // SessionStatus gains child_requests, what a lead's tcode_control children
 // wait on; AgentEvent gains ChildRequestSettled, which the host records in a
 // lead when a request a child put to it in a callback is settled.
+// Unreleased: SessionActivity gains asking, the harness's own subagents that
+// wait on the user through the thread; the agent event stream's
+// user_input_requested and PendingUserInput gain parent_item_id.
 pub const PROTOCOL_VERSION: u32 = 32;
 
 #[cfg(test)]

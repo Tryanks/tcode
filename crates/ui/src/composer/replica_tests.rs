@@ -1500,6 +1500,7 @@ fn a_chosen_option_is_the_answer_whatever_the_custom_field_holds(cx: &mut TestAp
     status.activity.turn_running = true;
     status.pending_user_input = Some(tcode_core::session::PendingUserInput {
         request_id: "ask".into(),
+        parent_item_id: None,
         questions: vec![UserInputQuestion {
             id: "color".into(),
             header: "Color".into(),
@@ -1552,6 +1553,7 @@ fn an_optional_question_is_submitted_empty(cx: &mut TestAppContext) {
     status.activity.turn_running = true;
     status.pending_user_input = Some(tcode_core::session::PendingUserInput {
         request_id: "ask".into(),
+        parent_item_id: None,
         questions: vec![question("region", false), question("note", true)],
         delivery: agent::UserInputDelivery::Blocking,
     });

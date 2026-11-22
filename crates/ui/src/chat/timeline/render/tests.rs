@@ -774,6 +774,7 @@ fn a_childs_requests_are_answered_on_its_leads_cards(cx: &mut TestAppContext) {
     child_events
         .try_send(agent::AgentEvent::UserInputRequested {
             request_id: "ask-2".into(),
+            parent_item_id: None,
             questions: vec![agent::UserInputQuestion {
                 id: "lang".into(),
                 header: "Language".into(),

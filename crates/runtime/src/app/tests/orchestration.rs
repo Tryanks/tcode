@@ -867,6 +867,7 @@ fn child_questions_reach_the_lead_and_respond_input_answers_them() {
         let request_id = format!("question-{n}");
         child.play([AgentEvent::UserInputRequested {
             request_id: request_id.clone(),
+            parent_item_id: None,
             questions: questions.clone(),
             delivery,
         }]);

@@ -341,6 +341,7 @@ fn status_carries_the_running_turn_while_in_flight_and_open_requests_while_live(
     provider.start_turn(cx, "turn-2");
     provider.play([AgentEvent::UserInputRequested {
         request_id: "ask".into(),
+        parent_item_id: None,
         questions: Vec::new(),
         delivery: agent::UserInputDelivery::Blocking,
     }]);

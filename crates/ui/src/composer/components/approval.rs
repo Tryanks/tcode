@@ -1,6 +1,7 @@
 use super::super::*;
 use crate::material::event_card::{self, CardTone};
 use crate::scroll::ScrollableElement as _;
+use gpui_base::StyledExt as _;
 
 /// How long what is drawn here only some of the time takes to come in or go.
 const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
@@ -19,16 +20,19 @@ impl Composer {
         &self,
         request: &ApprovalRequest,
         count: usize,
+        asker: Option<tcode_protocol::SubagentAsking>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.motion.cross_fade(
             self.motion_key("approval-request"),
-            request.clone(),
+            (request.clone(), asker),
             CHANGE,
             window,
             cx,
-            |request, window, cx| self.render_approval(request, count, window, cx),
+            |(request, asker), window, cx| {
+                self.render_approval(request, count, asker.as_ref(), window, cx)
+            },
         )
     }
 
@@ -36,6 +40,7 @@ impl Composer {
         &self,
         request: &ApprovalRequest,
         count: usize,
+        asker: Option<&tcode_protocol::SubagentAsking>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -310,6 +315,9 @@ impl Composer {
                     .text_color(muted),
                 ),
             )
+            .when_some(asker, |card, asker| {
+                card.child(self.render_asker(asker, cx))
+            })
             .children(delivery)
             .children(offline)
             .child(detail)
@@ -337,6 +345,59 @@ impl Composer {
                                     .ok();
                             }),
                         )),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The line naming the harness's own subagent a request on the approval
+    /// or question card comes from: it is answered in its lead's composer,
+    /// where it would otherwise pass for the lead's own.
+    pub(in super::super) fn render_asker(
+        &self,
+        asker: &tcode_protocol::SubagentAsking,
+        cx: &App,
+    ) -> AnyElement {
+        let description = asker
+            .description
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        h_flex()
+            .debug_selector(|| "request-asker".into())
+            .w_full()
+            .px(px(crate::material::CARD_INSET))
+            .pb(cx.theme().tokens.spacing.sm)
+            .min_w_0()
+            .gap_1p5()
+            .items_center()
+            .text_secondary(self.compact, cx)
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap_1()
+                    .px_1p5()
+                    .items_center()
+                    .rounded(crate::material::radius_chip(cx))
+                    .bg(cx.theme().muted)
+                    .text_caption(cx)
+                    .child(Icon::new(IconName::Bot).xsmall())
+                    .child(crate::tr!("composer.subagent")),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .font_medium()
+                    .text_color(cx.theme().foreground)
+                    .child(asker.agent_type.clone()),
+            )
+            .when(!description.is_empty(), |line| {
+                line.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(format!("· {description}"))),
                 )
             })
             .into_any_element()

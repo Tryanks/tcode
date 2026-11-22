@@ -704,6 +704,7 @@ impl<'a> ActivityProjection<'a> {
             },
             waiting_for_approval: !approvals.is_empty(),
             waiting_for_input: input.is_some(),
+            asking: self.state.subagents_asking(&meta.id, approvals, input),
             settle_blocked: self.state.settle_thread_busy(&meta.id),
             failed: self
                 .state

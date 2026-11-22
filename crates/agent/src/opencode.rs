@@ -1537,9 +1537,9 @@ impl OpenCodeActor {
         else {
             return;
         };
-        if self.mapper.scope(session_id).is_none() {
+        let Some(parent_item_id) = self.mapper.scope(session_id) else {
             return;
-        }
+        };
         let fields: Vec<&Value> = form["fields"]
             .as_array()
             .into_iter()
@@ -1568,6 +1568,7 @@ impl OpenCodeActor {
         self.events
             .emit(AgentEvent::UserInputRequested {
                 request_id: form_id.to_owned(),
+                parent_item_id,
                 questions,
                 delivery: UserInputDelivery::Blocking,
             })

@@ -2286,24 +2286,28 @@ impl Composer {
     ) -> Vec<AnyElement> {
         let approval = composer_state.pending_approval.clone();
         let approval_count = composer_state.pending_approval_count;
-        let user_input = self.pending_user_input(cx);
+        let approval_asker = composer_state.pending_approval_asker.clone();
+        let user_input = self
+            .pending_user_input(cx)
+            .map(|pending| (pending, composer_state.pending_user_input_asker.clone()));
         let mut panels = Vec::new();
         if let Some(shown) = self.motion.shown(
             self.motion_key("approval"),
-            approval.map(|request| (request, approval_count)),
+            approval.map(|request| (request, approval_count, approval_asker)),
             SHOW,
             window,
             cx,
         ) {
-            let (request, count) = &shown.value;
-            let panel = self.render_approval_panel(request, *count, window, cx);
+            let (request, count, asker) = &shown.value;
+            let panel = self.render_approval_panel(request, *count, asker.clone(), window, cx);
             panels.push(column_fold(&shown, panel));
         }
         if let Some(shown) =
             self.motion
                 .shown(self.motion_key("user-input"), user_input, SHOW, window, cx)
         {
-            let panel = self.render_user_input_panel(&shown.value, window, cx);
+            let (pending, asker) = &shown.value;
+            let panel = self.render_user_input_panel(pending, asker.clone(), window, cx);
             panels.push(column_fold(&shown, panel));
         }
         if let Some(shown) = self.motion.shown(

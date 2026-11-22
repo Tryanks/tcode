@@ -1104,6 +1104,7 @@ palette:
   projects_results: "项目"
   recent_first: "最近活跃优先"
 composer:
+  subagent: "子 agent"
   stop_unanswered: "%{harness} 没有响应停止"
   force_terminate: "强制终止"
   force_terminate_title: "强制终止 %{harness}？"

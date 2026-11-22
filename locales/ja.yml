@@ -1111,6 +1111,7 @@ palette:
   projects_results: "プロジェクト"
   recent_first: "最近のアクティビティ順"
 composer:
+  subagent: "サブエージェント"
   stop_unanswered: "%{harness} が停止に応答しません"
   force_terminate: "強制終了"
   force_terminate_title: "%{harness} を強制終了しますか？"

@@ -1146,6 +1146,7 @@ impl PiActor {
             self.events
                 .emit(AgentEvent::UserInputRequested {
                     request_id: id,
+                    parent_item_id: None,
                     questions: vec![question],
                     delivery: UserInputDelivery::Blocking,
                 })

@@ -757,6 +757,7 @@ fn a_question_answer_field_stays_above_the_keyboard(cx: &mut TestAppContext) {
     });
     status.pending_user_input = Some(tcode_core::session::PendingUserInput {
         request_id: "ask".into(),
+        parent_item_id: None,
         questions: vec![agent::UserInputQuestion {
             id: "storage".into(),
             header: "Storage".into(),

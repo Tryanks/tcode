@@ -1970,6 +1970,7 @@ fn session_status(session: &str, cwd: &std::path::Path) -> tcode_protocol::Sessi
             wakes: Default::default(),
             waiting_for_approval: false,
             waiting_for_input: false,
+            asking: Vec::new(),
             settle_blocked: false,
             failed: false,
             unread: false,

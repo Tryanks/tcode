@@ -416,6 +416,7 @@ fn repeated_compacting_status_announces_one_compaction() {
 fn structured_user_input_blocks_until_resolution() {
     let request = AgentEvent::UserInputRequested {
         request_id: "que_1".into(),
+        parent_item_id: None,
         questions: vec![UserInputQuestion {
             id: "que_1:0".into(),
             header: "Scope".into(),

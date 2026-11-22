@@ -266,6 +266,16 @@ impl Mapper {
         }
     }
 
+    /// The spawn item of the subagent a `can_use_tool` request comes from,
+    /// which Claude Code names by its `agent_id`.
+    fn asking_subagent(&self, request: &Value) -> Option<String> {
+        request
+            .get("agent_id")
+            .and_then(Value::as_str)
+            .and_then(|agent_id| self.task_tools.get(agent_id))
+            .cloned()
+    }
+
     pub(super) fn on_control_request(&mut self, msg: &Value) -> Vec<AgentEvent> {
         let request = match msg.get("request") {
             Some(r) => r,
@@ -326,6 +336,7 @@ impl Mapper {
                 },
             );
             return vec![AgentEvent::UserInputRequested {
+                parent_item_id: self.asking_subagent(request),
                 request_id,
                 questions,
                 delivery: UserInputDelivery::Blocking,
@@ -412,15 +423,10 @@ impl Mapper {
         }
         self.pending_approvals
             .insert(request_id.clone(), PendingApproval { input, suggestions });
-        let parent_item_id = request
-            .get("agent_id")
-            .and_then(Value::as_str)
-            .and_then(|agent_id| self.task_tools.get(agent_id))
-            .cloned();
         vec![AgentEvent::ApprovalRequested(ApprovalRequest {
             id: request_id,
             turn_id: self.current_turn_id.clone(),
-            parent_item_id,
+            parent_item_id: self.asking_subagent(request),
             kind,
             reason,
             blocked_path,
@@ -475,15 +481,10 @@ impl Mapper {
                 suggestions: HashMap::new(),
             },
         );
-        let parent_item_id = request
-            .get("agent_id")
-            .and_then(Value::as_str)
-            .and_then(|agent_id| self.task_tools.get(agent_id))
-            .cloned();
         events.push(AgentEvent::ApprovalRequested(ApprovalRequest {
             id: request_id,
             turn_id: self.current_turn_id.clone(),
-            parent_item_id,
+            parent_item_id: self.asking_subagent(request),
             kind: ApprovalKind::Plan { item_id, markdown },
             reason: None,
             blocked_path: None,

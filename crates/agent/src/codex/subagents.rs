@@ -228,6 +228,7 @@ impl Actor {
         self.events
             .emit(AgentEvent::UserInputRequested {
                 request_id: message_id.to_owned(),
+                parent_item_id: None,
                 questions: open,
                 delivery: UserInputDelivery::Async,
             })

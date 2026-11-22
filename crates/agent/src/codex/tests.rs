@@ -1098,6 +1098,7 @@ fn async_question_answers_steer_the_running_turn_with_codex_reply_envelope() {
         ));
         let AgentEvent::UserInputRequested {
             request_id,
+            parent_item_id: None,
             questions,
             delivery,
         } = events.try_recv().unwrap()

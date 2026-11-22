@@ -722,6 +722,9 @@ pub enum SteeringStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingUserInput {
     pub request_id: String,
+    /// Spawn item of the subagent that asks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_item_id: Option<String>,
     pub questions: Vec<UserInputQuestion>,
     pub delivery: UserInputDelivery,
 }
@@ -1663,11 +1666,13 @@ impl Timeline {
             }
             AgentEvent::UserInputRequested {
                 request_id,
+                parent_item_id,
                 questions,
                 delivery,
             } => {
                 self.pending_user_input = Some(PendingUserInput {
                     request_id: request_id.clone(),
+                    parent_item_id: parent_item_id.clone(),
                     questions: questions.clone(),
                     delivery: *delivery,
                 });

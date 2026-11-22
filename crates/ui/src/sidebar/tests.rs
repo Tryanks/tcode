@@ -99,6 +99,7 @@ fn a_phone_row_says_whether_its_thread_works_runs_background_work_or_waits(
                 },
                 waiting_for_approval: false,
                 waiting_for_input: false,
+                asking: Vec::new(),
                 settle_blocked: false,
                 failed: false,
                 unread: false,

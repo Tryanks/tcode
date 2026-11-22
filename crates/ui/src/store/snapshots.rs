@@ -49,6 +49,8 @@ pub struct ComposerState {
     pub provider_commands: Vec<agent::ProviderCommand>,
     pub attachments_dir: Option<PathBuf>,
     pub pending_user_input: Option<PendingUserInput>,
+    /// The harness's own subagent that asks `pending_user_input`.
+    pub pending_user_input_asker: Option<tcode_protocol::SubagentAsking>,
     pub active_model: Option<ComposerActiveModel>,
     pub model_pending_restart: bool,
     pub active_model_spec: Option<agent::ModelSpec>,
@@ -84,6 +86,8 @@ pub struct ComposerState {
     pub terminal_split_available: bool,
     /// The first approval the composer asks; a plan's is asked on its block.
     pub pending_approval: Option<agent::ApprovalRequest>,
+    /// The harness's own subagent that asks `pending_approval`.
+    pub pending_approval_asker: Option<tcode_protocol::SubagentAsking>,
     pub pending_approval_count: usize,
     /// The plan decision the agent waits on, which a send answers in words.
     pub pending_plan: Option<agent::ApprovalRequest>,
@@ -104,6 +108,17 @@ pub(crate) fn composer_state(
     };
     let is_plan =
         |request: &agent::ApprovalRequest| matches!(request.kind, agent::ApprovalKind::Plan { .. });
+    let asker = |item_id: Option<&str>| {
+        let item_id = item_id?;
+        status?
+            .activity
+            .asking
+            .iter()
+            .find(|asking| asking.item_id == item_id)
+            .cloned()
+    };
+    let pending_approval = approvals().find(|request| !is_plan(request)).cloned();
+    let pending_user_input = status.and_then(|status| status.pending_user_input.clone());
     let active_model_spec = status.and_then(|status| {
         let model = status.requested_model.as_deref()?;
         providers
@@ -163,7 +178,12 @@ pub(crate) fn composer_state(
             .map(|status| status.provider_commands.clone())
             .unwrap_or_default(),
         attachments_dir: status.map(|status| status.attachments_dir.clone()),
-        pending_user_input: status.and_then(|status| status.pending_user_input.clone()),
+        pending_user_input_asker: asker(
+            pending_user_input
+                .as_ref()
+                .and_then(|input| input.parent_item_id.as_deref()),
+        ),
+        pending_user_input,
         active_model: status.map(|status| ComposerActiveModel {
             provider: status.provider,
             model: status.requested_model.clone(),
@@ -226,7 +246,12 @@ pub(crate) fn composer_state(
         conversation_read_only: status.is_some_and(|status| status.conversation_read_only),
         terminal_limit_reached: status.is_some_and(|status| status.terminal_limit_reached),
         terminal_split_available: status.is_some_and(|status| status.terminal_split_available),
-        pending_approval: approvals().find(|request| !is_plan(request)).cloned(),
+        pending_approval_asker: asker(
+            pending_approval
+                .as_ref()
+                .and_then(|request| request.parent_item_id.as_deref()),
+        ),
+        pending_approval,
         pending_approval_count: approvals().filter(|request| !is_plan(request)).count(),
         pending_plan: approvals().find(|request| is_plan(request)).cloned(),
     }
@@ -288,6 +313,7 @@ mod tests {
                 wakes: Default::default(),
                 waiting_for_approval: false,
                 waiting_for_input: false,
+                asking: Vec::new(),
                 settle_blocked: false,
                 failed: false,
                 unread: false,

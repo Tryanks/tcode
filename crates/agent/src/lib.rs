@@ -3094,6 +3094,9 @@ pub enum AgentEvent {
     /// ending does not settle it; [`AgentEvent::UserInputResolved`] does.
     UserInputRequested {
         request_id: String,
+        /// Spawn item of the subagent that asks, as on [`ApprovalRequest`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_item_id: Option<String>,
         questions: Vec<UserInputQuestion>,
         #[serde(default, skip_serializing_if = "UserInputDelivery::is_blocking")]
         delivery: UserInputDelivery,
@@ -4368,6 +4371,7 @@ mod thread_item_serde_tests {
         ));
         let event = AgentEvent::UserInputRequested {
             request_id: "q".into(),
+            parent_item_id: None,
             questions: Vec::new(),
             delivery: UserInputDelivery::Async,
         };

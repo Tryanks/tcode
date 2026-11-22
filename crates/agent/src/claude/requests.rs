@@ -494,6 +494,7 @@ impl Mapper {
             .insert(request_id.clone(), PendingUserInput::Elicitation { fields });
         vec![AgentEvent::UserInputRequested {
             request_id,
+            parent_item_id: None,
             questions,
             delivery: UserInputDelivery::Blocking,
         }]

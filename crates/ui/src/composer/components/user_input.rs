@@ -63,6 +63,7 @@ impl Composer {
     pub(in super::super) fn render_user_input_panel(
         &self,
         pending: &PendingUserInput,
+        asker: Option<tcode_protocol::SubagentAsking>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -85,7 +86,7 @@ impl Composer {
                 if *hidden {
                     self.render_user_input_pill(cx)
                 } else {
-                    self.render_user_input_card(pending, window, cx)
+                    self.render_user_input_card(pending, asker.as_ref(), window, cx)
                 }
             },
         )
@@ -120,6 +121,7 @@ impl Composer {
     fn render_user_input_card(
         &self,
         pending: &PendingUserInput,
+        asker: Option<&tcode_protocol::SubagentAsking>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -285,7 +287,10 @@ impl Composer {
 
         let card = event_card::raised_event_card(CardTone::Waiting, cx)
             .debug_selector(|| "ui-card".into())
-            .child(strip);
+            .child(strip)
+            .when_some(asker, |card, asker| {
+                card.child(self.render_asker(asker, cx))
+            });
         let body = self.motion.cross_fade(
             self.motion_key(format_args!("ui-question-{request_id}")),
             index,
@@ -628,6 +633,7 @@ impl Composer {
             request_id,
             questions,
             delivery,
+            ..
         }) = self.pending_user_input(cx)
         else {
             return false;
@@ -847,6 +853,7 @@ mod tests {
                 },
                 agent::AgentEvent::UserInputRequested {
                     request_id: "ask".into(),
+                    parent_item_id: None,
                     questions,
                     delivery,
                 },

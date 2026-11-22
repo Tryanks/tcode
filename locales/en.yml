@@ -1111,6 +1111,7 @@ palette:
   projects_results: "Projects"
   recent_first: "Recent first"
 composer:
+  subagent: "Subagent"
   stop_unanswered: "%{harness} is not answering the stop"
   force_terminate: "Force terminate"
   force_terminate_title: "Force terminate %{harness}?"

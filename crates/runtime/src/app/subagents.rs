@@ -1,4 +1,5 @@
 use super::*;
+use tcode_protocol::{AskingKind, SubagentAsking};
 
 impl AppState {
     /// Reroute provider-native subagent transcript items into read-only mirror
@@ -352,6 +353,66 @@ impl AppState {
         self.residents.parked.insert(id.clone(), mirror);
         self.native_subagent_sessions.insert(key, id.clone());
         Some(id)
+    }
+
+    /// The harness's own subagents whose `approvals` and `input` wait on the
+    /// user through `session_id`, their lead.
+    pub(super) fn subagents_asking(
+        &self,
+        session_id: &str,
+        approvals: &[agent::ApprovalRequest],
+        input: Option<&tcode_core::session::PendingUserInput>,
+    ) -> Vec<SubagentAsking> {
+        let requests = approvals
+            .iter()
+            .map(|request| (request.parent_item_id.as_deref(), AskingKind::Approval))
+            .chain(input.map(|input| (input.parent_item_id.as_deref(), AskingKind::Question)));
+        let mut asking: Vec<SubagentAsking> = Vec::new();
+        for (item_id, kind) in requests {
+            let Some(item_id) = item_id else {
+                continue;
+            };
+            if asking
+                .iter()
+                .any(|asks| asks.item_id == item_id && asks.kind == kind)
+            {
+                continue;
+            }
+            if let Some((agent_type, description)) = self.native_subagent_spawn(session_id, item_id)
+            {
+                asking.push(SubagentAsking {
+                    item_id: item_id.to_owned(),
+                    agent_type: agent_type.clone(),
+                    description: description.clone(),
+                    kind,
+                });
+            }
+        }
+        asking
+    }
+
+    /// The agent type and description subagent `item_id` of `session_id`
+    /// was spawned with.
+    fn native_subagent_spawn(&self, session_id: &str, item_id: &str) -> Option<(&String, &String)> {
+        // A nested subagent's spawn is an item of the subagent that spawned it.
+        let holder = self
+            .native_subagent_sessions
+            .get(&(session_id.to_owned(), item_id.to_owned()))
+            .and_then(|mirror| self.find_meta(mirror)?.parent_session_id)
+            .unwrap_or_else(|| session_id.to_owned());
+        let timeline = &self.resident(&holder)?.timeline;
+        timeline
+            .entries
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.content {
+                EntryContent::Item(ItemContent::Subagent {
+                    agent_type,
+                    description,
+                    ..
+                }) if entry.id == item_id => Some((agent_type, description)),
+                _ => None,
+            })
     }
 
     /// The parent process is gone, so no Subagent status will ever close the

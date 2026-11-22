@@ -793,6 +793,10 @@ pub struct SessionActivity {
     pub wakes: ThreadWakes,
     pub waiting_for_approval: bool,
     pub waiting_for_input: bool,
+    /// The harness's own subagents that wait on the user through this
+    /// thread: a request of theirs is answered on it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asking: Vec<SubagentAsking>,
     /// The host refuses to settle the thread now: something of it runs or
     /// waits on the user.
     pub settle_blocked: bool,
@@ -816,6 +820,27 @@ pub struct SessionActivity {
 
 fn is_zero(count: &u32) -> bool {
     *count == 0
+}
+
+/// A harness's own subagent waiting on the user, and for what.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentAsking {
+    /// The subagent's spawn item: the `parent_item_id` of the request it
+    /// raised.
+    pub item_id: String,
+    /// Its agent type, as its spawn ([`agent::ItemContent::Subagent`])
+    /// gives it.
+    pub agent_type: String,
+    /// Its task, as its spawn gives it.
+    pub description: String,
+    pub kind: AskingKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskingKind {
+    Approval,
+    Question,
 }
 
 /// What goes on running in a thread's background, which keeps it from

@@ -146,6 +146,114 @@ fn a_native_subagents_activity_is_published_on_its_mirror() {
     assert_eq!(cx.seen().activity(&mirror).unwrap().latest_activity, None);
 }
 
+/// A request a harness's own subagent raises is answered on its lead, so the
+/// lead's index entry says which subagent waits and for what, as its spawn
+/// names it wherever it was spawned, until the request is answered.
+#[test]
+fn a_native_subagents_request_is_named_on_its_lead_until_answered() {
+    use tcode_protocol::{AskingKind, SubagentAsking};
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-subagent-asking");
+    stored_thread(
+        &test_store,
+        "lead",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("lead"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state.subscribe(cx, Topic::Index);
+    let provider = first_turn(&state, cx, &providers, "lead", 0);
+
+    provider.play([
+        AgentEvent::ItemStarted(subagent_item(
+            "spawn",
+            None,
+            "Explore",
+            "Audit the routing",
+            ItemStatus::InProgress,
+        )),
+        AgentEvent::ItemStarted(subagent_item(
+            "nested",
+            Some("spawn"),
+            "general-purpose",
+            "Read the router",
+            ItemStatus::InProgress,
+        )),
+        AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+            id: "approval".into(),
+            turn_id: None,
+            parent_item_id: Some("nested".into()),
+            kind: agent::ApprovalKind::ExecCommand {
+                command: "cp a b".into(),
+                cwd: None,
+                description: None,
+            },
+            reason: None,
+            blocked_path: None,
+            options: vec![agent::ApprovalOption {
+                id: "allow".into(),
+                label: "Allow".into(),
+                kind: agent::ApprovalOptionKind::AllowOnce,
+            }],
+        }),
+        AgentEvent::UserInputRequested {
+            request_id: "question".into(),
+            parent_item_id: Some("spawn".into()),
+            questions: Vec::new(),
+            delivery: agent::UserInputDelivery::Blocking,
+        },
+    ]);
+    let asking = |cx: &TestAppContext| cx.seen().activity("lead").unwrap().asking.clone();
+    cx.run_until_seen(|view| view.activity("lead").unwrap().asking.len() == 2);
+    assert_eq!(
+        asking(cx),
+        [
+            SubagentAsking {
+                item_id: "nested".into(),
+                agent_type: "general-purpose".into(),
+                description: "Read the router".into(),
+                kind: AskingKind::Approval,
+            },
+            SubagentAsking {
+                item_id: "spawn".into(),
+                agent_type: "Explore".into(),
+                description: "Audit the routing".into(),
+                kind: AskingKind::Question,
+            },
+        ]
+    );
+
+    state
+        .command(
+            cx,
+            Command::RespondApproval {
+                session_id: "lead".into(),
+                request_id: "approval".into(),
+                decision: ApprovalDecision::Option("allow".into()),
+            },
+        )
+        .unwrap();
+    cx.run_until_seen(|view| view.activity("lead").unwrap().asking.len() == 1);
+    assert_eq!(asking(cx)[0].kind, AskingKind::Question);
+
+    state
+        .command(
+            cx,
+            Command::RespondUserInput {
+                session_id: "lead".into(),
+                request_id: "question".into(),
+                answers: serde_json::Map::new(),
+            },
+        )
+        .unwrap();
+    provider.play([AgentEvent::UserInputResolved {
+        request_id: "question".into(),
+        answers: serde_json::Map::new(),
+    }]);
+    cx.run_until_seen(|view| view.activity("lead").unwrap().asking.is_empty());
+}
+
 /// A log whose turn a dead host left open still folds to a running timeline,
 /// but nothing is running it, so the thread reports no activity.
 #[test]
