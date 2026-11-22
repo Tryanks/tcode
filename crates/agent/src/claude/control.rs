@@ -41,22 +41,24 @@ impl Mapper {
                 ),
             }];
         }
-        if self.pending_background_moves.remove(request_id) {
-            let moved = response.get("subtype").and_then(Value::as_str) == Some("success")
-                && response
-                    .pointer("/response/backgrounded")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true);
-            if moved {
-                return Vec::new();
+        if let Some(pending) = self.pending_background_moves.remove(request_id) {
+            if response.get("subtype").and_then(Value::as_str) != Some("success") {
+                let error = response
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map_or_else(|| response.to_string(), str::to_owned);
+                return vec![AgentEvent::Warning {
+                    message: format!("claude: could not move the call to the background: {error}"),
+                }];
             }
-            let error = response
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("the call is no longer running in the foreground");
-            return vec![AgentEvent::Warning {
-                message: format!("claude: could not move the call to the background: {error}"),
-            }];
+            if response
+                .pointer("/response/backgrounded")
+                .and_then(Value::as_bool)
+                == Some(false)
+            {
+                self.on_background_move_refused(pending);
+            }
+            return Vec::new();
         }
         if self
             .pending_settings

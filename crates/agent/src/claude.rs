@@ -2041,6 +2041,14 @@ enum ChildItemStage {
     Completed,
 }
 
+/// A `background_tasks` request naming one call.
+struct PendingBackgroundMove {
+    item_id: String,
+    /// Claude had announced the call's task when it was asked, so a refusal
+    /// means the call has finished or already moved, not that it is too early.
+    task_announced: bool,
+}
+
 /// A rewind, or a preview of one, made of the control requests Claude Code's
 /// own rewind menu makes, one at a time.
 struct PendingRewind {
@@ -2116,7 +2124,12 @@ pub(crate) struct Mapper {
     pending_permission_modes: HashMap<String, String>,
     /// `background_tasks` requests awaiting Claude's answer, by control
     /// request_id: a refusal is the only word of one that did nothing.
-    pending_background_moves: HashSet<String>,
+    pending_background_moves: HashMap<String, PendingBackgroundMove>,
+    /// Calls asked into the background before Claude could move them, by
+    /// tool_use_id. Claude Code 2.1.330 makes a Bash call movable only once it
+    /// has run for two seconds, which its `task_started` announces; the move
+    /// is asked again then, and forgotten when the call returns first.
+    deferred_background_moves: HashSet<String>,
     /// [`SessionCommand::ReadAccountUsage`] askers by control request_id.
     pending_usage_reads: HashMap<String, smol::channel::Sender<Result<Value, String>>>,
     /// The `initialize` request awaiting Claude's answer.
@@ -2212,7 +2225,8 @@ impl Mapper {
             applied_permission_mode,
             auto_unavailable: None,
             pending_permission_modes: HashMap::new(),
-            pending_background_moves: HashSet::new(),
+            pending_background_moves: HashMap::new(),
+            deferred_background_moves: HashSet::new(),
             pending_usage_reads: HashMap::new(),
             pending_initialize: None,
             pending_worktrees: HashMap::new(),

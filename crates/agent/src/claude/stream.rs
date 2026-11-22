@@ -374,6 +374,7 @@ impl Mapper {
                 None => continue,
             };
             let launched_in_background = msg.pointer("/tool_use_result/backgroundTaskId").is_some();
+            self.deferred_background_moves.remove(&tool_use_id);
             let item = match self.tool_items.remove(&tool_use_id) {
                 Some(i) => i,
                 None => continue,

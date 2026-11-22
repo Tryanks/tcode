@@ -154,9 +154,35 @@ impl Mapper {
         let message =
             self.control_request(json!({ "subtype": "background_tasks", "tool_use_id": item_id }));
         if let Some(request_id) = message.get("request_id").and_then(Value::as_str) {
-            self.pending_background_moves.insert(request_id.to_owned());
+            let task_announced = self.task_tools.values().any(|call| *call == item_id);
+            self.pending_background_moves.insert(
+                request_id.to_owned(),
+                PendingBackgroundMove {
+                    item_id,
+                    task_announced,
+                },
+            );
         }
         message
+    }
+
+    /// Claude refused to move a call: too early, it is asked again once
+    /// Claude announces the call's task; too late, there is nothing to move.
+    pub(super) fn on_background_move_refused(&mut self, refused: PendingBackgroundMove) {
+        if refused.task_announced || !self.tool_items.contains_key(&refused.item_id) {
+            return;
+        }
+        // The task was announced after Claude weighed the request.
+        if self
+            .task_tools
+            .values()
+            .any(|call| *call == refused.item_id)
+        {
+            let request = self.move_to_background_request(refused.item_id);
+            self.outgoing.push(request);
+        } else {
+            self.deferred_background_moves.insert(refused.item_id);
+        }
     }
 
     /// The list again, once the call is known of a listed task that had

@@ -864,3 +864,76 @@ fn settings_restart_waits_for_the_running_turn() {
         assert!(next_command(&old.commands).is_err());
     }
 }
+
+/// With the setting on, each command a steer waits behind is asked into the
+/// background: the one running when the steer is sent and one the turn starts
+/// before the harness takes the steer. After that, commands are left to run.
+#[test]
+fn commands_holding_back_a_steer_are_moved_to_the_background() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-steer-background-test");
+    stored_thread(
+        &test_store,
+        "steered",
+        ProviderKind::ClaudeCode,
+        &test_store.root().join("steered"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &test_store);
+    state
+        .command(
+            cx,
+            Command::PatchSettings {
+                patch: SettingsPatch::BackgroundCommandsOnSteer(true),
+            },
+        )
+        .unwrap();
+    let actor = first_turn(&state, cx, &providers, "steered", 0);
+    let command = |id: &str| {
+        AgentEvent::ItemStarted(ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content: ItemContent::CommandExecution {
+                command: "cargo build".into(),
+                input: Vec::new(),
+                output: String::new(),
+                exit_code: None,
+                status: ItemStatus::InProgress,
+            },
+        })
+    };
+    let moved = |cx: &mut TestAppContext, id: &str| {
+        matches!(
+            actor.next_command(cx),
+            SessionCommand::MoveToBackground { item_id } if item_id == id
+        )
+    };
+
+    actor.play([command("toolu-build")]);
+    actor.fence(cx, "steered");
+    state
+        .command(
+            cx,
+            Command::Steer {
+                session_id: "steered".into(),
+                text: "build release instead".into(),
+                attachment_paths: Vec::new(),
+            },
+        )
+        .unwrap();
+    let SessionCommand::Steer { request_id, .. } = actor.next_command(cx) else {
+        panic!("the steer goes out first");
+    };
+    assert!(moved(cx, "toolu-build"));
+
+    actor.play([command("toolu-test")]);
+    actor.fence(cx, "steered");
+    assert!(moved(cx, "toolu-test"));
+
+    actor.play([
+        AgentEvent::SteerAccepted { request_id },
+        command("toolu-lint"),
+    ]);
+    actor.fence(cx, "steered");
+    assert!(next_command(&actor.commands).is_err());
+}
