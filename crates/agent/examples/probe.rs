@@ -200,6 +200,39 @@ fn image_attachment(path: PathBuf) -> Attachment {
     }
 }
 
+/// Any file, sent as the host sends one a message carries whole: its type by
+/// extension, a text file by its contents, and its path.
+fn file_attachment(path: PathBuf) -> Attachment {
+    let bytes = std::fs::read(&path).unwrap_or_else(|error| {
+        eprintln!("failed to read {}: {error}", path.display());
+        std::process::exit(2);
+    });
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let media_type = match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "pdf" => "application/pdf",
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        _ if std::str::from_utf8(&bytes).is_ok() => "text/plain",
+        _ => "application/octet-stream",
+    };
+    eprintln!(
+        "probe: file={} ({} bytes, {media_type})",
+        path.display(),
+        bytes.len()
+    );
+    Attachment {
+        media_type: media_type.into(),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        source_path: Some(path.to_string_lossy().into_owned()),
+    }
+}
+
 fn main() {
     env_logger::init();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -335,6 +368,10 @@ fn main() {
             "--image" => {
                 let path = args.next().map(PathBuf::from).unwrap_or_else(|| usage());
                 set_mode(&mut probe_mode, ProbeMode::Image(image_attachment(path)));
+            }
+            "--file" => {
+                let path = args.next().map(PathBuf::from).unwrap_or_else(|| usage());
+                set_mode(&mut probe_mode, ProbeMode::Image(file_attachment(path)));
             }
             _ => positional.push(arg),
         }

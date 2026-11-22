@@ -987,23 +987,54 @@ fn stop_reasons_map_to_turn_status() {
     assert!(message.is_some());
 }
 
+/// Each attachment goes as the block the agent's `promptCapabilities` take it
+/// in, after the text; one it does not take reaches it as its path appended to
+/// the text.
 #[test]
-fn prompt_carries_text_and_image_blocks() {
-    let blocks = prompt_blocks(
-        "hello",
-        &[Attachment {
-            media_type: "image/png".into(),
-            data_base64: "AAAA".into(),
-            source_path: None,
-        }],
-        None,
+fn attachments_go_as_the_blocks_the_agent_takes_and_the_rest_as_paths() {
+    use base64::Engine as _;
+    let file = |media_type: &str, bytes: &str, path: &str| Attachment {
+        media_type: media_type.into(),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        source_path: Some(path.into()),
+    };
+    let attachments = [
+        file("image/png", "png", "/up/a.png"),
+        file("application/pdf", "%PDF-", "/up/b.pdf"),
+        file("text/plain", "notes", "/up/my notes.txt"),
+        file("audio/wav", "RIFF", "/up/c.wav"),
+        file("application/zip", "PK", "/up/d.zip"),
+    ];
+    let capabilities = |json: serde_json::Value| -> acp::PromptCapabilities {
+        serde_json::from_value(json).unwrap()
+    };
+
+    let all = capabilities(json!({ "image": true, "audio": true, "embeddedContext": true }));
+    let blocks = serde_json::to_value(prompt_blocks("hello", &attachments, &all, None)).unwrap();
+    assert_eq!(
+        blocks,
+        json!([
+            { "type": "text", "text": "hello\n\n/up/d.zip" },
+            { "type": "image", "mimeType": "image/png", "data": "cG5n" },
+            { "type": "resource", "resource": {
+                "uri": "file:///up/b.pdf", "mimeType": "application/pdf", "blob": "JVBERi0="
+            } },
+            { "type": "resource", "resource": {
+                "uri": "file:///up/my%20notes.txt", "mimeType": "text/plain", "text": "notes"
+            } },
+            { "type": "audio", "mimeType": "audio/wav", "data": "UklGRg==" },
+        ])
     );
-    let value = serde_json::to_value(&blocks).unwrap();
-    assert_eq!(value[0]["type"], "text");
-    assert_eq!(value[0]["text"], "hello");
-    assert_eq!(value[1]["type"], "image");
-    assert_eq!(value[1]["mimeType"], "image/png");
-    assert_eq!(value[1]["data"], "AAAA");
+
+    let images = capabilities(json!({ "image": true }));
+    let blocks = serde_json::to_value(prompt_blocks("hello", &attachments, &images, None)).unwrap();
+    assert_eq!(
+        blocks,
+        json!([
+            { "type": "text", "text": "hello\n\n/up/b.pdf\n/up/my notes.txt\n/up/c.wav\n/up/d.zip" },
+            { "type": "image", "mimeType": "image/png", "data": "cG5n" },
+        ])
+    );
 }
 
 /// Completed whole-file `Diff` notifications record writes in `WriteJournal`

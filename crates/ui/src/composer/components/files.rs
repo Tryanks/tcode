@@ -1,4 +1,6 @@
-//! Non-image attachments: each is a chip in the composer and a path in the
+//! Non-image attachments: each is a chip in the composer. A file up to
+//! [`MAX_BYTES`] goes with the message whole, for the harness to take in its
+//! own way or read by path; a folder or larger file is its path in the
 //! message text. A file this client shares a disk with the host stays where
 //! it is; any other is uploaded in chunks and the path is the host's copy.
 
@@ -11,7 +13,9 @@ use gpui::WeakEntity;
 use std::io::Read as _;
 use std::path::Path;
 use std::sync::Arc;
-use tcode_core::attachments::{MAX_UPLOAD_BYTES, UPLOAD_CHUNK_BYTES, is_image_attachment};
+use tcode_core::attachments::{
+    MAX_BYTES, MAX_UPLOAD_BYTES, UPLOAD_CHUNK_BYTES, is_image_attachment,
+};
 
 /// Where a file's bytes come from.
 #[derive(Clone)]
@@ -67,6 +71,8 @@ pub(in super::super) struct PendingFile {
     id: u64,
     name: String,
     directory: bool,
+    /// A file small enough to go with the message whole ([`MAX_BYTES`]).
+    whole: bool,
     /// The path the message carries, once the host has reserved it for an
     /// upload.
     path: Option<PathBuf>,
@@ -200,7 +206,15 @@ impl Composer {
                 .iter()
                 .any(|file| file.path.as_ref() == Some(&path))
             {
-                self.push_file(name, metadata.is_dir(), Some(path), None, FileState::Ready);
+                let whole = !metadata.is_dir() && metadata.len() <= MAX_BYTES;
+                self.push_file(
+                    name,
+                    metadata.is_dir(),
+                    whole,
+                    Some(path),
+                    None,
+                    FileState::Ready,
+                );
                 cx.notify();
             }
         } else if metadata.is_dir() {
@@ -284,6 +298,7 @@ impl Composer {
         &mut self,
         name: String,
         directory: bool,
+        whole: bool,
         path: Option<PathBuf>,
         upload: Option<(FileSource, u64)>,
         state: FileState,
@@ -294,6 +309,7 @@ impl Composer {
             id,
             name,
             directory,
+            whole,
             path,
             upload,
             state,
@@ -312,6 +328,7 @@ impl Composer {
         let id = self.push_file(
             name,
             false,
+            size <= MAX_BYTES,
             None,
             Some((source, size)),
             FileState::Uploading { sent: 0 },
@@ -425,13 +442,46 @@ impl Composer {
             .any(|file| !matches!(file.state, FileState::Ready))
     }
 
-    /// The paths the next message carries, as the model will read them.
+    /// The paths of every attached file, as text that carries them all reads
+    /// them.
     pub(in super::super) fn file_paths(&self) -> Vec<String> {
         self.pending_files
             .iter()
             .filter_map(|file| file.path.as_ref())
             .map(|path| path.to_string_lossy().into_owned())
             .collect()
+    }
+
+    /// The files the next message carries whole, and the paths of the rest,
+    /// which its text carries.
+    pub(in super::super) fn carried_files(&self) -> (Vec<PathBuf>, Vec<String>) {
+        let mut whole = Vec::new();
+        let mut paths = Vec::new();
+        for file in &self.pending_files {
+            let Some(path) = &file.path else {
+                continue;
+            };
+            if file.whole {
+                whole.push(path.clone());
+            } else {
+                paths.push(path.to_string_lossy().into_owned());
+            }
+        }
+        (whole, paths)
+    }
+
+    /// Attach again a file a message carried whole, at the path the host
+    /// holds it at.
+    pub(in super::super) fn restore_file(&mut self, path: PathBuf) {
+        if self
+            .pending_files
+            .iter()
+            .any(|file| file.path.as_ref() == Some(&path))
+        {
+            return;
+        }
+        let name = file_name_of(&path);
+        self.push_file(name, false, true, Some(path), None, FileState::Ready);
     }
 
     /// Open the platform's file picker and add what it returns.

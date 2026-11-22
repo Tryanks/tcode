@@ -2789,15 +2789,15 @@ fn project_directory_error(error: std::io::Error) -> ProtocolError {
     }
 }
 
-/// Images at `paths` as message attachments, or the path that cannot be read
-/// and why.
+/// The files at `paths` as message attachments, or the path that cannot be
+/// read and why.
 pub(super) fn read_attachments(paths: Vec<PathBuf>) -> Result<Vec<Attachment>, String> {
     paths
         .into_iter()
         .map(|path| {
             let bytes = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
             Ok(Attachment {
-                media_type: mime_from_path(&path),
+                media_type: tcode_core::attachments::attachment_media_type(&path, &bytes),
                 data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
                 source_path: Some(path.to_string_lossy().into_owned()),
             })

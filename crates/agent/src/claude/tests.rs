@@ -1150,30 +1150,39 @@ fn extra_permission_mode_arg_updates_launch_tracker() {
     );
 }
 
+/// Images, PDFs and text files go to Claude as the Messages API's content
+/// blocks, a document titled with its file's name; any other file reaches it
+/// as its path after the text.
 #[test]
-fn user_message_carries_image_content_blocks() {
+fn user_message_carries_images_and_documents_and_other_files_by_path() {
+    use base64::Engine as _;
+    let file = |media_type: &str, bytes: &str, path: &str| Attachment {
+        media_type: media_type.into(),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        source_path: Some(path.into()),
+    };
     let attachments = vec![
-        Attachment {
-            media_type: "image/png".into(),
-            data_base64: "AAAA".into(),
-            source_path: None,
-        },
-        Attachment {
-            media_type: "image/jpeg".into(),
-            data_base64: "BBBB".into(),
-            source_path: None,
-        },
+        file("image/png", "png", "/up/a.png"),
+        file("application/pdf", "%PDF-", "/up/b.pdf"),
+        file("text/plain", "notes", "/up/notes.txt"),
+        file("audio/wav", "RIFF", "/up/c.wav"),
     ];
-    let msg = user_message("what color is this?", &attachments);
-    let content = msg["message"]["content"].as_array().unwrap();
-    assert_eq!(content.len(), 3);
-    assert_eq!(content[0]["type"], "text");
-    assert_eq!(content[0]["text"], "what color is this?");
-    assert_eq!(content[1]["type"], "image");
-    assert_eq!(content[1]["source"]["type"], "base64");
-    assert_eq!(content[1]["source"]["media_type"], "image/png");
-    assert_eq!(content[1]["source"]["data"], "AAAA");
-    assert_eq!(content[2]["source"]["media_type"], "image/jpeg");
+    let msg = user_message("read these", &attachments);
+    assert_eq!(
+        msg["message"]["content"],
+        json!([
+            { "type": "text", "text": "read these\n\n/up/c.wav" },
+            { "type": "image", "source": {
+                "type": "base64", "media_type": "image/png", "data": "cG5n"
+            } },
+            { "type": "document", "title": "b.pdf", "source": {
+                "type": "base64", "media_type": "application/pdf", "data": "JVBERi0="
+            } },
+            { "type": "document", "title": "notes.txt", "source": {
+                "type": "text", "media_type": "text/plain", "data": "notes"
+            } },
+        ])
+    );
     // Text-only stays a single text block.
     let plain = user_message("hi", &[]);
     assert_eq!(plain["message"]["content"].as_array().unwrap().len(), 1);

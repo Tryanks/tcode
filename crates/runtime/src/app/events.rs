@@ -933,7 +933,11 @@ impl AppState {
             let old_title = previous_title.clone();
             let input = host_cx
                 .unblock(move || {
-                    if let Some((source, attachments)) = first_message {
+                    if let Some((source, mut attachments)) = first_message {
+                        // A title reads a message's pictures; its other files
+                        // are long, and its words already name them.
+                        attachments
+                            .retain(|attachment| attachment.kind() == agent::AttachmentKind::Image);
                         return Ok((
                             title_generation_prompt(&source, None, !attachments.is_empty()),
                             attachments,
@@ -953,10 +957,14 @@ impl AppState {
                     }
                     let mut attachments = Vec::new();
                     let mut unreadable = Vec::new();
-                    for path in paths {
+                    for path in paths.into_iter().filter(|path| {
+                        tcode_core::attachments::is_image_attachment(
+                            &tcode_core::attachments::mime_from_path(path),
+                        )
+                    }) {
                         match fs::read(&path) {
                             Ok(bytes) => attachments.push(Attachment {
-                                media_type: mime_from_path(&path),
+                                media_type: tcode_core::attachments::mime_from_path(&path),
                                 data_base64: base64::engine::general_purpose::STANDARD
                                     .encode(bytes),
                                 source_path: Some(path.to_string_lossy().into_owned()),

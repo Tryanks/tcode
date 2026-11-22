@@ -66,7 +66,7 @@ pub use tool_name::ToolName;
 mod tool_output;
 pub use tool_output::ToolOutput;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "process")]
@@ -2356,22 +2356,106 @@ pub struct UserInputOption {
     pub description: String,
 }
 
-/// An image attachment sent alongside a turn's text. `data_base64` is the raw
-/// image bytes, standard-base64 encoded (no data-URL prefix); each provider maps
-/// it onto its native content-block shape (Claude `image`/`base64` source; Codex
-/// `image` input with a `data:` URL).
+/// A file sent alongside a turn's text: an image, a PDF, a text file, a sound.
+/// `data_base64` is the raw bytes, standard-base64 encoded (no data-URL
+/// prefix). Each provider sends the kinds its harness takes in its own
+/// content shape (Claude an `image` or `document` block, Codex an `image` or
+/// `localAudio` input, an ACP agent an image, audio or resource block, as its
+/// `promptCapabilities` say), and any other as the path appended to the text
+/// ([`fold_attachments`]), the way the model reads a file nobody attached.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
-    /// MIME type, e.g. `image/png`.
+    /// MIME type, e.g. `image/png`, `application/pdf`, `text/plain`.
     pub media_type: String,
     /// Standard-base64 of the raw bytes (no `data:...;base64,` prefix).
     pub data_base64: String,
     /// Local path of the persisted copy backing this attachment, when one
-    /// exists. Never sent to providers (their payloads are built field by
-    /// field); the runtime threads it into the recorded user-message event so
-    /// the timeline can render the image without re-encoding the base64.
+    /// exists. The runtime threads it into the recorded user-message event so
+    /// the timeline can show the file without re-encoding the base64, and a
+    /// provider that does not take the file sends this path instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
+}
+
+/// What an [`Attachment`] is to a model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentKind {
+    /// A raster image every provider's image input decodes.
+    Image,
+    Pdf,
+    /// UTF-8 text: prose, source code, data.
+    Text,
+    Audio,
+    Other,
+}
+
+impl Attachment {
+    pub fn kind(&self) -> AttachmentKind {
+        let media_type = self.media_type.as_str();
+        match media_type {
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff"
+            | "image/bmp" => AttachmentKind::Image,
+            "application/pdf" => AttachmentKind::Pdf,
+            "application/json"
+            | "application/xml"
+            | "application/javascript"
+            | "application/toml"
+            | "application/yaml"
+            | "image/svg+xml" => AttachmentKind::Text,
+            _ if media_type.starts_with("text/") => AttachmentKind::Text,
+            _ if media_type.starts_with("audio/") => AttachmentKind::Audio,
+            _ => AttachmentKind::Other,
+        }
+    }
+
+    /// The file's name, from the copy backing it.
+    pub fn file_name(&self) -> Option<&str> {
+        self.source_path
+            .as_deref()
+            .and_then(|path| Path::new(path).file_name())
+            .and_then(|name| name.to_str())
+    }
+
+    /// The file's text, for a [`AttachmentKind::Text`] attachment.
+    pub fn text(&self) -> Option<String> {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&self.data_base64)
+            .ok()?;
+        String::from_utf8(bytes).ok()
+    }
+}
+
+/// Split `attachments` into those a harness `takes` and the rest, which reach
+/// the model as their paths appended to `text`, one a line after a blank one,
+/// as a file attached by path always has. Returns the text to send and the
+/// attachments to send with it. One with no path to give is left out.
+pub fn fold_attachments<'a>(
+    text: &str,
+    attachments: &'a [Attachment],
+    takes: impl Fn(&Attachment) -> bool,
+) -> (String, Vec<&'a Attachment>) {
+    let (taken, folded): (Vec<&Attachment>, Vec<&Attachment>) =
+        attachments.iter().partition(|attachment| takes(attachment));
+    let paths: Vec<&str> = folded
+        .iter()
+        .filter_map(|attachment| {
+            let path = attachment.source_path.as_deref();
+            if path.is_none() {
+                log::warn!(
+                    "a {} attachment with no path was left out: the harness does not take it",
+                    attachment.media_type
+                );
+            }
+            path
+        })
+        .collect();
+    let text = match (text.is_empty(), paths.is_empty()) {
+        (_, true) => text.to_owned(),
+        (true, false) => paths.join("\n"),
+        (false, false) => format!("{text}\n\n{}", paths.join("\n")),
+    };
+    (text, taken)
 }
 
 /// A provider-native command or skill surfaced to the composer's `/` and `$`

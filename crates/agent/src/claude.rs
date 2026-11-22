@@ -41,13 +41,13 @@ use crate::claude_goal::GoalTranscript;
 use crate::claude_manifest::{CatalogModel, ClaudeCatalog};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
-    ApprovalRequest, AskedQuestion, Attachment, CatalogRefresh, DeltaKind, FileChange,
-    FileChangeKind, GoalStatus, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
-    OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
-    ResumeCursor, RewindMode, SearchHit, SearchScope, SessionCommand, SessionHandle,
-    SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput, TurnStatus, UserInputDelivery,
-    UserInputOption, UserInputQuestion, WebLink, WorktreeAnswer, WorktreeRequest, selection_bool,
-    selection_str,
+    ApprovalRequest, AskedQuestion, Attachment, AttachmentKind, CatalogRefresh, DeltaKind,
+    FileChange, FileChangeKind, GoalStatus, ItemContent, ItemStatus, LaunchEnv, ModelSpec,
+    OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderCommand,
+    ProviderCommandKind, ProviderKind, ResumeCursor, RewindMode, SearchHit, SearchScope,
+    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput,
+    TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion, WebLink, WorktreeAnswer,
+    WorktreeRequest, selection_bool, selection_str,
 };
 
 /// The hook callbacks `initialize` registers. With `onFailure: "block"` an error
@@ -1733,17 +1733,57 @@ fn tool_result_status(is_error: bool, output: &str) -> ItemStatus {
     }
 }
 
+/// A stream-json user message: the text, then each attachment Claude takes as
+/// a content block of the Messages API (an image, a PDF `document`, a text
+/// `document` titled with its file's name), checked against Claude Code
+/// 2.1.330; any other reaches it as its path ([`crate::fold_attachments`]).
 fn user_message(text: &str, attachments: &[Attachment]) -> Value {
+    let (text, taken) = crate::fold_attachments(text, attachments, |attachment| {
+        matches!(
+            attachment.kind(),
+            AttachmentKind::Image | AttachmentKind::Pdf
+        ) || attachment.kind() == AttachmentKind::Text && attachment.text().is_some()
+    });
     let mut content = vec![json!({ "type": "text", "text": text })];
-    for attachment in attachments {
-        content.push(json!({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": attachment.media_type,
-                "data": attachment.data_base64,
+    for attachment in taken {
+        content.push(match attachment.kind() {
+            AttachmentKind::Image => json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": attachment.media_type,
+                    "data": attachment.data_base64,
+                }
+            }),
+            AttachmentKind::Pdf => {
+                let mut block = json!({
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": attachment.media_type,
+                        "data": attachment.data_base64,
+                    }
+                });
+                if let Some(name) = attachment.file_name() {
+                    block["title"] = json!(name);
+                }
+                block
             }
-        }));
+            _ => {
+                let mut block = json!({
+                    "type": "document",
+                    "source": {
+                        "type": "text",
+                        "media_type": "text/plain",
+                        "data": attachment.text().unwrap_or_default(),
+                    }
+                });
+                if let Some(name) = attachment.file_name() {
+                    block["title"] = json!(name);
+                }
+                block
+            }
+        });
     }
     json!({
         "type": "user",

@@ -100,6 +100,63 @@ fn bubble_menu_items(copy_text: Arc<str>, rewind: Option<RewindMenu>) -> MenuExt
     })
 }
 
+/// Whether a message's attachment at `path` shows as a picture; any other is a
+/// file chip.
+pub(crate) fn is_image_path(path: &str) -> bool {
+    tcode_core::attachments::is_image_attachment(&tcode_core::attachments::mime_from_path(
+        std::path::Path::new(path),
+    ))
+}
+
+/// A file a message carried: its name and the folder it was in, the path on
+/// hover and in its menu.
+fn file_chip(entry_id: &str, index: usize, path: &str, cx: &App) -> AnyElement {
+    use crate::sizing::Sizable as _;
+    use crate::widgets::button::ButtonVariants as _;
+    use crate::widgets::menu::ContextMenuExt as _;
+    let menu_path = path.to_owned();
+    let path = std::path::Path::new(path);
+    let name = path.file_name().map_or_else(
+        || path.to_string_lossy().into_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let folder = path
+        .parent()
+        .map(|parent| parent.to_string_lossy().into_owned())
+        .filter(|parent| !parent.is_empty());
+    let mut chip =
+        crate::widgets::Button::new(SharedString::from(format!("user-file-{entry_id}-{index}")))
+            .secondary()
+            .small()
+            .chip()
+            .debug_selector(move || format!("user-file-{index}"))
+            .aria_label(name.clone())
+            .max_w(px(420.))
+            .overflow_hidden()
+            .tooltip(menu_path.clone())
+            .icon(IconName::File)
+            .child(
+                div()
+                    .flex_none()
+                    .max_w(px(220.))
+                    .overflow_hidden()
+                    .text_meta_mono(false, cx)
+                    .child(crate::widgets::fade_text(name)),
+            );
+    if let Some(folder) = folder {
+        chip = chip.child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .text_meta_mono(false, cx)
+                .text_color(cx.theme().muted_foreground)
+                .child(crate::widgets::fade_text(folder)),
+        );
+    }
+    chip.context_menu(move |menu, _, _| menu.path_items(&menu_path, None))
+        .into_any_element()
+}
+
 pub(crate) struct BubbleHandlers {
     pub(crate) copy: ClickHandler,
     pub(crate) images: Vec<ClickHandler>,
@@ -225,10 +282,20 @@ pub(crate) fn user_bubble(
         }
     });
 
-    let thumbnails = (!attachments.is_empty()).then(|| {
+    let (image_paths, file_paths): (Vec<&String>, Vec<&String>) =
+        attachments.iter().partition(|path| is_image_path(path));
+    let files = (!file_paths.is_empty()).then(|| {
         h_flex().gap_2().justify_end().flex_wrap().children(
-            attachments
-                .iter()
+            file_paths
+                .into_iter()
+                .enumerate()
+                .map(|(index, path)| file_chip(entry_id, index, path, cx)),
+        )
+    });
+    let thumbnails = (!image_paths.is_empty()).then(|| {
+        h_flex().gap_2().justify_end().flex_wrap().children(
+            image_paths
+                .into_iter()
                 .zip(images)
                 .enumerate()
                 .map(|(image_index, (path, on_click))| {
@@ -333,6 +400,7 @@ pub(crate) fn user_bubble(
             )
         })
         .children(thumbnails)
+        .children(files)
         .when(!visible.trim().is_empty(), |column| {
             column.child({
                 // The pending border fades as a taken steer travels.

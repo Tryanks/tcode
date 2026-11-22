@@ -110,13 +110,22 @@ fn drop_paths(paths: Vec<PathBuf>, cx: &mut gpui::VisualTestContext) {
 }
 
 fn sent_texts(outgoing: &async_channel::Receiver<String>) -> Vec<String> {
+    sent_turns(outgoing)
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect()
+}
+
+/// The turns the client sent: each one's text and the files it carries whole.
+fn sent_turns(outgoing: &async_channel::Receiver<String>) -> Vec<(String, Vec<PathBuf>)> {
     std::iter::from_fn(|| outgoing.try_recv().ok())
         .filter_map(
             |line| match tcode_protocol::decode_client_line(&line).unwrap().payload {
                 tcode_protocol::ClientPayload::Command(tcode_protocol::Command::SendTurn {
                     text,
+                    attachment_paths,
                     ..
-                }) => Some(text),
+                }) => Some((text, attachment_paths)),
                 _ => None,
             },
         )
@@ -163,29 +172,34 @@ fn remote() -> crate::store::WorkspaceAttachment {
     }
 }
 
-/// A file and a folder on the host's own disk are attached in place: the
-/// message carries their own paths, and nothing is uploaded.
+/// A file and a folder on the host's own disk are attached in place, and
+/// nothing is uploaded: the message carries the file whole, at its own path,
+/// for the harness to take or read, and the folder's path in its text, as it
+/// does a file over [`tcode_core::attachments::MAX_BYTES`].
 #[gpui::test]
-fn a_local_file_or_folder_is_sent_as_its_own_path(cx: &mut TestAppContext) {
+fn a_local_file_goes_whole_and_a_folder_or_large_file_as_its_path(cx: &mut TestAppContext) {
     let (store, incoming, outgoing, status) = attach(cx);
     let root = crate::store::tests::scratch_root("composer-local-file");
     std::fs::create_dir_all(&root).unwrap();
     let notes = root.join("notes.txt");
     std::fs::write(&notes, "notes").unwrap();
+    let large = root.join("large.log");
+    std::fs::File::create(&large)
+        .unwrap()
+        .set_len(tcode_core::attachments::MAX_BYTES + 1)
+        .unwrap();
     let (_composer, cx) = composer_on(&store, &incoming, status, cx);
-    drop_paths(vec![notes.clone(), root.clone()], cx);
-    assert!(cx.debug_bounds("attached-file-0").is_some());
-    assert!(cx.debug_bounds("attached-file-1").is_some());
+    drop_paths(vec![notes.clone(), root.clone(), large.clone()], cx);
+    assert!(cx.debug_bounds("attached-file-2").is_some());
     while outgoing.try_recv().is_ok() {}
     cx.simulate_input("read these");
     cx.simulate_keystrokes("enter");
     draw_settled(cx);
     assert_eq!(
-        sent_texts(&outgoing),
-        [format!(
-            "read these\n\n{}\n{}",
-            notes.display(),
-            root.display()
+        sent_turns(&outgoing),
+        [(
+            format!("read these\n\n{}\n{}", root.display(), large.display()),
+            vec![notes.clone()]
         )]
     );
     assert!(cx.debug_bounds("attached-file-0").is_none());
@@ -194,7 +208,7 @@ fn a_local_file_or_folder_is_sent_as_its_own_path(cx: &mut TestAppContext) {
 
 /// The desktop's "+" opens the system's file picker for any number of
 /// files, and what is chosen attaches as a drop would: here, files on the
-/// host's own disk, sent as their own paths.
+/// host's own disk, sent whole at their own paths.
 #[cfg(feature = "native-dialogs")]
 #[gpui::test]
 fn the_desktop_plus_attaches_picked_files_as_a_drop_would(cx: &mut TestAppContext) {
@@ -222,14 +236,9 @@ fn the_desktop_plus_attaches_picked_files_as_a_drop_would(cx: &mut TestAppContex
     cx.simulate_input("read these");
     cx.simulate_keystrokes("enter");
     draw_settled(cx);
-    let sent = sent_texts(&outgoing);
     assert_eq!(
-        sent,
-        [format!(
-            "read these\n\n{}\n{}",
-            notes.display(),
-            plan.display()
-        )]
+        sent_turns(&outgoing),
+        [("read these".to_owned(), vec![notes.clone(), plan.clone()])]
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -259,7 +268,7 @@ fn a_pasted_file_is_attached_rather_than_refused(cx: &mut TestAppContext) {
 }
 
 /// A remote client uploads the file in chunks and the message carries the
-/// host's path. Until the last chunk lands a send cannot lose the file; a
+/// host's copy. Until the last chunk lands a send cannot lose the file; a
 /// failed chunk holds the message until the retry goes through.
 #[gpui::test]
 fn a_remote_file_uploads_in_chunks_and_a_failure_can_be_retried(cx: &mut TestAppContext) {
@@ -336,8 +345,8 @@ fn a_remote_file_uploads_in_chunks_and_a_failure_can_be_retried(cx: &mut TestApp
     cx.simulate_click(send, gpui::Modifiers::none());
     draw_settled(cx);
     assert_eq!(
-        sent_texts(&outgoing),
-        [format!("read this\n\n{}", host_path.display())]
+        sent_turns(&outgoing),
+        [("read this".to_owned(), vec![host_path.clone()])]
     );
     let _ = std::fs::remove_dir_all(root);
 }
