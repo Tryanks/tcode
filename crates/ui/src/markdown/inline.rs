@@ -7,19 +7,18 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::theme::ActiveTheme as _;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
-    App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId, Entity, GlobalElementId,
-    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, InteractiveText, LayoutId,
-    LongPressEvent, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, SharedString,
-    StyledText, TextLayout, TextRun, TextStyle, TouchPhase, Window, point, px, quad,
+    App, Bounds, CursorStyle, Element, ElementId, Entity, GlobalElementId, HighlightStyle, Hitbox,
+    HitboxBehavior, InspectorElementId, InteractiveText, LayoutId, LongPressEvent, MouseButton,
+    MouseDownEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText, TextLayout, TextRun,
+    TextStyle, TouchPhase, Window, point, px,
 };
 
 use super::{
     nodes::LinkMark,
-    selection::RunOrigin,
-    state::{MarkdownState, PaintedRun, PendingContextTarget, PendingLinkMenu},
+    selection::{PaintedRun, RunOrigin},
+    state::{MarkdownState, PendingContextTarget, PendingLinkMenu},
 };
 
 /// The text a run paints, retained by the parsed IR.
@@ -187,71 +186,6 @@ impl Inline {
             .find(|(range, _)| range.contains(&offset))
             .map(|(range, link)| (range.clone(), link.clone()))
     }
-
-    fn paint_selection(
-        selection: &Range<usize>,
-        text_layout: &TextLayout,
-        bounds: Bounds<Pixels>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let (start, end) = if selection.start <= selection.end {
-            (selection.start, selection.end)
-        } else {
-            (selection.end, selection.start)
-        };
-        let (Some(start_position), Some(end_position)) = (
-            text_layout.position_for_index(start),
-            text_layout.position_for_index(end),
-        ) else {
-            return;
-        };
-        let line_height = text_layout.line_height();
-        let color = cx.theme().selection;
-        let paint = |bounds, window: &mut Window| {
-            window.paint_quad(quad(
-                bounds,
-                px(0.),
-                color,
-                Edges::default(),
-                gpui::transparent_black(),
-                BorderStyle::default(),
-            ));
-        };
-        if start_position.y == end_position.y {
-            paint(
-                Bounds::from_corners(
-                    start_position,
-                    point(end_position.x, end_position.y + line_height),
-                ),
-                window,
-            );
-            return;
-        }
-        paint(
-            Bounds::from_corners(
-                start_position,
-                point(bounds.right(), start_position.y + line_height),
-            ),
-            window,
-        );
-        if end_position.y > start_position.y + line_height {
-            paint(
-                Bounds::from_corners(
-                    point(bounds.left(), start_position.y + line_height),
-                    point(bounds.right(), end_position.y),
-                ),
-                window,
-            );
-        }
-        paint(
-            Bounds::from_corners(
-                point(bounds.left(), end_position.y),
-                point(end_position.x, end_position.y + line_height),
-            ),
-            window,
-        );
-    }
 }
 
 impl Element for Inline {
@@ -396,7 +330,7 @@ impl Element for Inline {
         }
 
         if let Some(selected) = &self.selected {
-            Self::paint_selection(selected, &text_layout, bounds, window, cx);
+            super::selection::paint_selected(selected, &text_layout, bounds, window, cx);
         }
 
         let owner = window.use_keyed_state("tcode-tooltip-trigger", cx, |_, _| {

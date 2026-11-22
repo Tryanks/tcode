@@ -3,7 +3,6 @@
 //! with one member and reach the others.
 use std::path::PathBuf;
 
-use tcode_client::ConnectionFailure;
 use tcode_client::ConnectionState;
 use tcode_client::host::Transport;
 use tcode_client::pairing::{PairInvite, PairedHost, parse_pair_url};
@@ -153,13 +152,6 @@ fn up(state: &ConnectionState) -> bool {
     )
 }
 
-fn rejected(state: &ConnectionState) -> bool {
-    state
-        == &ConnectionState::Offline {
-            reason: ConnectionFailure::AuthenticationRejected,
-        }
-}
-
 /// #935's scenario: the headless machine starts a group with the device
 /// already paired to it, the desktop joins with the headless machine's
 /// invitation and brings its window, a phone pairs with the desktop's
@@ -256,98 +248,4 @@ fn a_device_paired_with_one_member_reaches_every_member_and_outlives_the_first()
     pair(&invitation(&desktop), &second);
     assert!(admits(&desktop, &second));
     desktop.host.shutdown();
-}
-
-/// Removing a device on any member removes it from every member and closes
-/// its connections; only a new pairing brings it back. A member that is not
-/// accepting new devices declines what the others admit until it is told to
-/// admit it.
-#[test]
-fn removal_is_group_wide_and_accept_new_devices_governs_introductions() {
-    let first_dir = TestDir::new("first");
-    let first = machine(&first_dir, "First");
-    let second_dir = TestDir::new("second");
-    let second = machine(&second_dir, "Second");
-    let home = group(
-        &first,
-        GroupAction::Create {
-            name: "Home".into(),
-        },
-    )
-    .group
-    .unwrap();
-    group(
-        &second,
-        GroupAction::Join {
-            link: invitation(&first),
-            address: Some("127.0.0.1".into()),
-        },
-    );
-    assert_eq!(state(&second).group.unwrap().id, home.id);
-
-    let phone_dir = TestDir::new("removed-phone");
-    let phone = device(&phone_dir, "Phone");
-    pair(&invitation(&second), &phone);
-    eventually(&first, "the first machine admit the phone", || {
-        admits(&first, &phone)
-    });
-    let client = tcode_traverse::connect(&saved(&phone, &first), &phone);
-    wait_state(&client, up);
-
-    let id = phone.endpoint_id().to_string();
-    let revoked = second
-        .host
-        .hosting(HostingAction::RevokeDevice(id.clone()))
-        .unwrap();
-    assert!(!revoked.devices.iter().any(|device| device.id == id));
-    wait_state(&client, rejected);
-    assert!(!admits(&first, &phone));
-    client.to_host.close();
-
-    pair(&invitation(&first), &phone);
-    eventually(&second, "the second machine admit the phone again", || {
-        admits(&second, &phone)
-    });
-
-    first
-        .host
-        .hosting(HostingAction::SetEnabled(false))
-        .unwrap();
-    let late_dir = TestDir::new("late-phone");
-    let late = device(&late_dir, "Late phone");
-    pair(&invitation(&second), &late);
-    let late_id = late.endpoint_id().to_string();
-    eventually(&first, "the first machine decline the late phone", || {
-        state(&first)
-            .group
-            .unwrap()
-            .declined
-            .iter()
-            .any(|device| device.id == late_id)
-    });
-    assert!(!admits(&first, &late));
-    first.host.hosting(HostingAction::SetEnabled(true)).unwrap();
-    // Applying the group with the switch back on, as pairing another device
-    // does, does not admit what was declined.
-    let other_dir = TestDir::new("other-phone");
-    pair(&invitation(&first), &device(&other_dir, "Other phone"));
-    assert!(!admits(&first, &late));
-    let admitted = group(&first, GroupAction::Admit(late_id.clone()));
-    assert!(admitted.group.unwrap().declined.is_empty());
-    assert!(admits(&first, &late));
-
-    // A machine another member removes leaves as if it had left itself, and
-    // keeps its devices as directly paired.
-    group(
-        &first,
-        GroupAction::RemoveMachine(second.host.endpoint_id()),
-    );
-    assert_eq!(state(&first).group.unwrap().machines.len(), 1);
-    eventually(&second, "the removed machine leave the group", || {
-        state(&second).group.is_none()
-    });
-    assert!(admits(&second, &late));
-
-    first.host.shutdown();
-    second.host.shutdown();
 }

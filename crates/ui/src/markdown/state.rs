@@ -31,9 +31,9 @@ use web_time::Instant;
 use super::{
     link_target::LinkTarget,
     mermaid,
-    nodes::{BlockNode, TextPosition},
+    nodes::BlockNode,
     render::{self, RootItem},
-    selection::{Membership, RunOrigin, SelectionDocument},
+    selection::{Membership, PaintedRun, PaintedRuns, RunOrigin, SelectionDocument},
     stream_fade::{FadeFrame, Fades, StreamFade},
 };
 
@@ -144,7 +144,7 @@ pub struct MarkdownState {
     /// Clears the view's own selection when the focus leaves the view.
     own_selection_focus_out: Option<gpui::Subscription>,
     /// The runs of text painted last frame, which selection ends hit-test.
-    pub(super) runs: Rc<RefCell<Vec<PaintedRun>>>,
+    pub(super) runs: PaintedRuns,
     /// Whether the document has been drawn in its scene: text appended
     /// before then was never seen arriving, so it does not fade in.
     drawn: bool,
@@ -215,7 +215,7 @@ impl MarkdownState {
             selection: None,
             owns_selection: false,
             own_selection_focus_out: None,
-            runs: Rc::default(),
+            runs: PaintedRuns::default(),
             drawn: false,
             scene: Default::default(),
             stream_fade: StreamFade::default(),
@@ -790,11 +790,7 @@ impl MarkdownState {
         len: usize,
         cx: &gpui::App,
     ) -> Option<Range<usize>> {
-        let membership = self.selection.as_ref()?;
-        membership
-            .document
-            .read(cx)
-            .run_range(membership.entry, origin, len)
+        self.selection.as_ref()?.selected_range(origin, len, cx)
     }
 
     /// The fades the run of `len` bytes at `origin` paints this frame.
@@ -862,7 +858,7 @@ impl MarkdownState {
     /// built again and paints them anew. A view drawn again from last frame
     /// paints nothing, and its runs stand where they were painted.
     fn begin_frame(&self) {
-        self.runs.borrow_mut().clear();
+        self.runs.clear();
     }
 
     /// Tell the selection's document where its ends are, in the runs the view
@@ -871,67 +867,15 @@ impl MarkdownState {
         let Some(membership) = &self.selection else {
             return;
         };
-        let document = membership.document.read(cx);
         for run in self.runs.borrow().iter() {
-            if let Some(selected) = self.selected_range(&run.origin, run.text.len(), cx) {
-                document.register_edge(
-                    membership.entry,
-                    &run.origin,
-                    &selected,
-                    &run.layout,
-                    run.visible,
-                );
+            if let Some(selected) = membership.selected_range(&run.origin, run.text.len(), cx) {
+                membership.register_edge(run, &selected, cx);
             }
         }
     }
 
     pub(super) fn register_run(&self, run: PaintedRun) {
-        self.runs.borrow_mut().push(run);
-    }
-
-    /// The character under `window_point` in the text painted last frame;
-    /// none off the text.
-    pub(super) fn char_at(&self, window_point: Point<Pixels>) -> Option<TextPosition> {
-        let runs = self.runs.borrow();
-        let run = runs.iter().find(|run| run.bounds.contains(&window_point))?;
-        let offset = run.layout.index_for_position(window_point).ok()?;
-        Some(TextPosition {
-            path: run.origin.path.to_vec(),
-            line: run.origin.line,
-            offset: run.origin.base + offset,
-        })
-    }
-
-    /// The position a selection end at `window_point` falls on, from the text
-    /// painted last frame: on the run nearest to it, at the character
-    /// boundary under it, or at the end of a run above it or the start of one
-    /// below.
-    pub(super) fn position_at(&self, window_point: Point<Pixels>) -> Option<TextPosition> {
-        let runs = self.runs.borrow();
-        let distance = |bounds: &Bounds<Pixels>| {
-            let dx = (bounds.left() - window_point.x)
-                .max(window_point.x - bounds.right())
-                .max(px(0.));
-            let dy = (bounds.top() - window_point.y)
-                .max(window_point.y - bounds.bottom())
-                .max(px(0.));
-            dx.as_f32().hypot(dy.as_f32())
-        };
-        let run = runs
-            .iter()
-            .min_by(|a, b| distance(&a.bounds).total_cmp(&distance(&b.bounds)))?;
-        let offset = if window_point.y < run.bounds.top() {
-            0
-        } else if window_point.y >= run.bounds.bottom() {
-            run.text.len()
-        } else {
-            super::selection::nearest_boundary(&run.text, &run.layout, window_point)
-        };
-        Some(TextPosition {
-            path: run.origin.path.to_vec(),
-            line: run.origin.line,
-            offset: run.origin.base + offset,
-        })
+        self.runs.push(run);
     }
 
     /// Record where the document was placed.
@@ -1059,16 +1003,6 @@ impl MarkdownState {
             })
             .into_any_element()
     }
-}
-
-/// A run of text as it was painted, for hit-testing selection ends.
-pub(super) struct PaintedRun {
-    pub(super) origin: RunOrigin,
-    pub(super) text: SharedString,
-    pub(super) layout: gpui::TextLayout,
-    pub(super) bounds: Bounds<Pixels>,
-    /// The clip it was painted under, out of which an end gets no handle.
-    pub(super) visible: Bounds<Pixels>,
 }
 
 #[cfg(test)]

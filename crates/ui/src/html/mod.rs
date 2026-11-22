@@ -18,23 +18,31 @@ pub(crate) mod raster;
 mod render;
 mod style;
 mod svg;
+mod text;
 
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
-    Size, Styled as _, Window, div,
+    App, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _,
+    RenderOnce, Size, Styled as _, Window, canvas, div,
 };
+use gpui_base::input::SelectAll;
 
 use css::{Budget, MediaEnv, PseudoElement, Stylesheet};
 use dom::{Document, NodeId};
 use render::{Frame, Wanted};
 use style::{Cascade, ComputedStyle, DisplayKind, Palette};
 use svg::MediaSlots;
+pub(crate) use text::PageText;
+use text::Selecting;
 
+use crate::markdown::selection::{Membership, PaintedRuns, SelectionDocument};
 use crate::theme::ActiveTheme as _;
+
+/// The key context of a visual whose text is selected, for Select All.
+pub(crate) const CONTEXT: &str = "HtmlView";
 
 /// Cached parsed state and async media slots for one HTML visual.
 ///
@@ -47,6 +55,13 @@ pub struct HtmlState {
     sheet: Stylesheet,
     media: MediaSlots,
     computed: Option<Rc<Computed>>,
+    /// The document the page's text is selected in, and the focus the page
+    /// takes when a selection starts in it.
+    selection: Option<(Membership, FocusHandle)>,
+    /// The runs of text painted last frame, which selection ends hit-test.
+    runs: PaintedRuns,
+    /// The text the page drew last, which its runs are positions in.
+    text: Option<Rc<PageText>>,
 }
 
 impl HtmlState {
@@ -60,7 +75,64 @@ impl HtmlState {
             sheet,
             media: MediaSlots::default(),
             computed: None,
+            selection: None,
+            runs: PaintedRuns::default(),
+            text: None,
         }
+    }
+
+    /// Whether the page's text is entry `entry` of `document`'s selection.
+    pub(crate) fn is_selection_entry(
+        &self,
+        document: &Entity<SelectionDocument>,
+        entry: u64,
+    ) -> bool {
+        self.selection
+            .as_ref()
+            .is_some_and(|(m, _)| m.document == *document && m.entry == entry)
+    }
+
+    /// Make the page's text entry `entry` of `document`'s selection.
+    pub(crate) fn set_selection_entry(
+        &mut self,
+        document: &Entity<SelectionDocument>,
+        entry: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_selection_entry(document, entry) {
+            return;
+        }
+        let membership = Membership {
+            document: document.clone(),
+            entry,
+        };
+        let focus = match self.selection.take() {
+            Some((_, focus)) => focus,
+            None => cx.focus_handle(),
+        };
+        self.selection = Some((membership, focus));
+        cx.notify();
+    }
+
+    fn selecting(&self) -> Option<Selecting> {
+        self.selection.as_ref().map(|(membership, _)| Selecting {
+            membership: membership.clone(),
+            runs: self.runs.clone(),
+        })
+    }
+
+    /// The text the page draws: as it was last drawn, or for a page not
+    /// drawn yet, as it would be at `viewport_width`.
+    pub(crate) fn page_text(&self, viewport_width: f32, cx: &App) -> Rc<PageText> {
+        if let Some(text) = &self.text {
+            return text.clone();
+        }
+        let theme = Palette::of(cx.theme());
+        let env = media_env(&theme, viewport_width);
+        let conditions = self.sheet.conditions(env);
+        let computed = Computed::new(&self.doc, &self.sheet, theme, conditions);
+        let (_, frame) = render::render_document(self, &computed, env.viewport_width, cx);
+        Rc::new(frame.text)
     }
 
     /// Replace the HTML source only when its contents actually changed.
@@ -73,6 +145,7 @@ impl HtmlState {
         self.sheet = Stylesheet::parse_all(&self.doc.stylesheets);
         self.media.clear();
         self.computed = None;
+        self.text = None;
         cx.notify();
     }
 
@@ -122,6 +195,15 @@ impl HtmlState {
                 }
             }
         }
+    }
+}
+
+/// What a page drawn `viewport_width` wide under `theme` answers its media
+/// queries with.
+fn media_env(theme: &Palette, viewport_width: f32) -> MediaEnv {
+    MediaEnv {
+        dark: theme.dark,
+        viewport_width: viewport_width.max(240.0),
     }
 }
 
@@ -327,23 +409,60 @@ impl RenderOnce for HtmlView {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let fallback_width = (f32::from(window.bounds().size.width) - 64.0).clamp(280.0, 760.0);
         let theme = Palette::of(cx.theme());
-        let env = MediaEnv {
-            dark: theme.dark,
-            viewport_width: self.viewport_width.unwrap_or(fallback_width).max(240.0),
-        };
+        let env = media_env(&theme, self.viewport_width.unwrap_or(fallback_width));
         let computed = self.state.update(cx, |state, _| state.computed(theme, env));
         let state = self.state.read(cx);
-        let (element, frame) = render::render_document(state, &computed, env.viewport_width, cx);
-        if !frame.wanted.is_empty() || state.media.len() != frame.used.len() {
+        let (element, mut frame) =
+            render::render_document(state, &computed, env.viewport_width, cx);
+        let text = Rc::new(std::mem::take(&mut frame.text));
+        let settles = !frame.wanted.is_empty() || state.media.len() != frame.used.len();
+        let selection = state.selection.clone();
+        let runs = state.runs.clone();
+        self.state.update(cx, |state, _| state.text = Some(text));
+        if settles {
             let state = self.state.clone();
             window.defer(cx, move |_, cx| {
                 state.update(cx, |state, cx| state.settle(frame, cx));
             });
         }
-        div()
+        let page = div()
             .id(("html", self.state.entity_id()))
+            .relative()
             .w_full()
-            .min_w_0()
+            .min_w_0();
+        let Some((membership, focus)) = selection else {
+            return page.child(element);
+        };
+        let view = self.state.entity_id();
+        // Before the page, whose runs register themselves as they are
+        // placed: the runs of the frame before go, and the document learns
+        // where this entry is drawn.
+        let placed = canvas(
+            {
+                let (membership, focus) = (membership.clone(), focus.clone());
+                move |bounds, _, cx| {
+                    runs.clear();
+                    membership.document.read(cx).register_participant(
+                        membership.entry,
+                        bounds,
+                        view,
+                        &focus,
+                        &runs,
+                    );
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+        page.key_context(CONTEXT)
+            .track_focus(&focus)
+            .on_action(move |_: &SelectAll, _, cx| {
+                membership.document.update(cx, |document, cx| {
+                    document.select_entry(membership.entry, cx)
+                });
+            })
+            .child(placed)
             .child(element)
     }
 }

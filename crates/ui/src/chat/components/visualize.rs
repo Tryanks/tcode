@@ -167,8 +167,10 @@ pub(crate) fn visualization(
             if let Some(width) = viewport_width {
                 view = view.viewport_width(width);
             }
+            let selector = format!("visualize-page-{id}");
             div()
-                .id(SharedString::from(format!("visualize-page-{id}")))
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector)
                 .w_full()
                 .min_w_0()
                 .child(view)
