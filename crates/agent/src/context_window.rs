@@ -118,6 +118,7 @@ mod tests {
                     speed: None,
                     summary: None,
                     approval: None,
+                    apply: None,
                 },
                 crate::SelectOption {
                     value: "872k".into(),
@@ -127,6 +128,7 @@ mod tests {
                     speed: None,
                     summary: None,
                     approval: None,
+                    apply: None,
                 },
             ],
             default_value: Some("272k".into()),

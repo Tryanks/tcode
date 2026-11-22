@@ -83,6 +83,7 @@ pub async fn list_models(
         processes: processes.clone(),
         clock: Default::default(),
         worktrees: Vec::new(),
+        write_journal: None,
     };
     acp_session::query(
         ProviderKind::Grok,
@@ -771,6 +772,7 @@ impl Dialect for Grok {
         Ok(Established {
             resume: ResumeCursor(json!({ "session_id": session_id.0.to_string() })),
             session_id,
+            anew: false,
         })
     }
 
@@ -1566,6 +1568,7 @@ mod tests {
             processes: Default::default(),
             clock: Default::default(),
             worktrees: Vec::new(),
+            write_journal: None,
         };
         let launch = Grok::default().launch(&opts).unwrap();
         assert_eq!(launch.program, PathBuf::from("/opt/grok/bin/grok"));
@@ -1842,6 +1845,7 @@ mod tests {
             processes: Default::default(),
             clock: Default::default(),
             worktrees: Vec::new(),
+            write_journal: None,
         };
         let before = |checkpoint_id: &str| ForkPoint::Before {
             checkpoint_id: checkpoint_id.into(),

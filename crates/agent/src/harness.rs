@@ -25,9 +25,14 @@ pub struct HarnessFacts {
     /// Where the CLI keeps its configuration when that variable is unset.
     pub default_config_dir: Option<&'static str>,
     /// The arguments that sign an account in and out, for a harness whose
-    /// sign-in Tcode runs ([`crate::Caps::account_login`]).
+    /// sign-in Tcode runs ([`crate::Caps::account_login`]). Antigravity has
+    /// none to sign out with: it signs out over ACP
+    /// (`crate::antigravity::sign_out`).
     pub login_args: &'static [&'static str],
     pub logout_args: &'static [&'static str],
+    /// What the sign-in prints when it waits for the code its page shows, for
+    /// a sign-in whose page gives one to paste.
+    pub login_code_prompt: Option<&'static str>,
     /// The CLI's own variables for reaching a model API.
     pub endpoint: Option<Endpoint>,
     /// Native on/off switches Tcode presents for the harness, by id.
@@ -157,6 +162,7 @@ impl ProviderKind {
             default_config_dir: None,
             login_args: &[],
             logout_args: &[],
+            login_code_prompt: None,
             endpoint: None,
             toggles: &[],
             native_mcp: None,
@@ -176,6 +182,7 @@ impl ProviderKind {
                 default_config_dir: Some("~/.claude"),
                 login_args: &["auth", "login"],
                 logout_args: &["auth", "logout"],
+                login_code_prompt: Some("Paste code"),
                 endpoint: Some(CLAUDE_ENDPOINT),
                 toggles: &[],
                 native_mcp: Some(NativeMcpConfig::McpServersJson),
@@ -196,6 +203,7 @@ impl ProviderKind {
                 // instead of opening a local callback server.
                 login_args: &["login", "--device-auth"],
                 logout_args: &["logout"],
+                login_code_prompt: None,
                 endpoint: Some(CODEX_ENDPOINT),
                 toggles: &[],
                 native_mcp: Some(NativeMcpConfig::CodexToml),
@@ -256,8 +264,17 @@ impl ProviderKind {
                     "curl -fsSL https://antigravity.google/cli/install.sh | bash"
                 }),
                 sign_in_command: Some("agy acp --login"),
+                // Prints the sign-in page, then "Then paste the authorization
+                // code, or the full URL of the page you land on, and press
+                // Enter:" (1.5.14).
+                login_args: &["acp", "--login"],
+                login_code_prompt: Some("paste the authorization code"),
                 endpoint: Some(ANTIGRAVITY_ENDPOINT),
                 native_mcp: Some(NativeMcpConfig::McpServersJson),
+                // The release its changelog gives `agy acp` to, with what the
+                // adapter uses of it: a second prompt steering the running
+                // turn, `session/resume`, and the session modes.
+                min_version: Some((1, 5, 0)),
                 ..none
             },
             ProviderKind::Acp => none,

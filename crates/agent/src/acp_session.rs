@@ -10,6 +10,7 @@
 //! services, MCP and option mapping, the standard `session/update` mapping and
 //! cancellation. What an agent family does differently is its [`Dialect`].
 
+use crate::write_journal::WriteJournal;
 use crate::{RewindFailure, RewindFailureReason};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
@@ -53,7 +54,7 @@ const CONFIG_OPTION_PREFIX: &str = "acp:cfg:";
 /// The canonical mode option id for `provider`. Antigravity exposes its live
 /// permission modes under `"mode"` (`crate::permission_control`), while generic
 /// ACP agents and other dialects use [`MODE_OPTION_ID`].
-fn mode_option_id(provider: ProviderKind) -> &'static str {
+pub(crate) fn mode_option_id(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Antigravity => "mode",
         _ => MODE_OPTION_ID,
@@ -264,6 +265,24 @@ pub(crate) trait Dialect: Send + Sync + 'static {
     fn owned_config_options(&self) -> &'static [&'static str] {
         &[]
     }
+
+    /// A launch-flag option override derived from [`Self::launch`] arguments
+    /// that supersedes the wire value reported at startup.
+    fn launch_option_override(&self, _launch: &Launch) -> Option<(String, Value)> {
+        None
+    }
+
+    /// Called after an interrupt notification when the user stops the session,
+    /// so a dialect can close an agent-initiated turn that has no pending
+    /// `session/prompt` response.
+    fn on_interrupt(&self, _state: &mut State) -> Vec<AgentEvent> {
+        Vec::new()
+    }
+
+    /// Called once when the session's command loop ends, before
+    /// [`AgentEvent::SessionClosed`], so a dialect can stop any background
+    /// tasks it started in [`Self::establish`].
+    fn on_close(&self) {}
 }
 
 /// Whether the config option `config_id`, whose option id is `option_id`, is
@@ -287,6 +306,9 @@ pub(crate) struct Launch {
 pub(crate) struct Established {
     pub(crate) session_id: acp::SessionId,
     pub(crate) resume: ResumeCursor,
+    /// The session asked for could not be resumed and this is a new one
+    /// ([`SessionHandle::started_anew`]).
+    pub(crate) anew: bool,
 }
 
 /// The canonical end of one prompt turn.
@@ -310,8 +332,8 @@ pub(crate) struct Setup<'a> {
     pub(crate) init: &'a acp::InitializeResponse,
     name: &'a str,
     accepts_http_mcp: bool,
-    state: &'a Arc<Mutex<State>>,
-    events: &'a Sender<AgentEvent>,
+    pub(crate) state: &'a Arc<Mutex<State>>,
+    pub(crate) events: &'a Sender<AgentEvent>,
 }
 
 impl Setup<'_> {
@@ -523,6 +545,15 @@ impl Setup<'_> {
             ) else {
                 continue;
             };
+            let option_id = config_option_id(provider, &option.id.0, option.category.as_ref());
+            if self
+                .state
+                .lock_recover()
+                .options
+                .value_requires_restart(&option_id, chosen)
+            {
+                continue;
+            }
             let wire_value = match (&option.kind, chosen) {
                 (acp::SessionConfigKind::Select(select), Value::String(value))
                     if select.current_value.0.as_ref() != value.as_str() =>
@@ -797,7 +828,7 @@ pub(crate) async fn start<D: Dialect>(
             AgentError::Spawn(format!("could not start the ACP session thread: {err}"))
         })?;
 
-    ready_rx.recv().await.map_err(|_| {
+    let started_anew = ready_rx.recv().await.map_err(|_| {
         AgentError::Protocol("ACP actor exited before reporting startup status".into())
     })??;
 
@@ -805,6 +836,7 @@ pub(crate) async fn start<D: Dialect>(
         provider,
         commands: commands_tx,
         events: events_rx,
+        started_anew,
     })
 }
 
@@ -934,7 +966,7 @@ async fn run_actor<D: Dialect>(
     opts: SessionOptions,
     commands: Receiver<SessionCommand>,
     events: Sender<AgentEvent>,
-    ready: Sender<Result<(), AgentError>>,
+    ready: Sender<Result<bool, AgentError>>,
 ) {
     let launch = match dialect.launch(&opts) {
         Ok(launch) => launch,
@@ -994,7 +1026,16 @@ async fn run_actor<D: Dialect>(
         .detach();
 
     let mut state = State::new(provider, opts.cwd.clone());
+    if provider.caps().relayed_history {
+        state.journal = opts
+            .write_journal
+            .clone()
+            .map(|dir| Arc::new(Mutex::new(WriteJournal::open(dir))));
+    }
     state.owned_options = dialect.owned_config_options();
+    if let Some((id, value)) = dialect.launch_option_override(&launch) {
+        state.options.set_launch_override(id, value);
+    }
     let state = Arc::new(Mutex::new(state));
     let (turn_tx, turn_done) = smol::channel::unbounded::<TurnOutcome>();
     let client = Client {
@@ -1196,7 +1237,7 @@ async fn connected_actor<D: Dialect>(
     opts: &SessionOptions,
     commands: &Receiver<SessionCommand>,
     events: &Sender<AgentEvent>,
-    ready: &Sender<Result<(), AgentError>>,
+    ready: &Sender<Result<bool, AgentError>>,
     client: &Client,
     stderr_tail: &crate::process::StderrTail,
     io_done: &Receiver<String>,
@@ -1287,6 +1328,7 @@ async fn connected_actor<D: Dialect>(
                             speed: None,
                             summary: None,
                             approval: crate::approval_class(provider, &id, mode),
+                            apply: None,
                         });
                     }
                     state
@@ -1306,7 +1348,7 @@ async fn connected_actor<D: Dialect>(
         })
         .await;
     emit_provider_options(state, events, false).await;
-    if ready.send(Ok(())).await.is_err() {
+    if ready.send(Ok(established.anew)).await.is_err() {
         return Ok(Exit::Closed(None));
     }
     session_started.store(true, Ordering::Release);
@@ -1356,6 +1398,8 @@ async fn connected_actor<D: Dialect>(
             Input::Io(reason) => break Some(reason),
         }
     };
+
+    dialect.on_close();
 
     // Only a live transport can acknowledge a graceful close. A dead stdout
     // has already ended the session and must not leave us awaiting a response.
@@ -1466,11 +1510,25 @@ async fn handle_command<D: Dialect>(
         } => {
             *turn_seq += 1;
             let id = format!("turn-{turn_seq}");
-            let (generation, instructions) = {
+            let (generation, instructions, checkpoint) = {
                 let mut state = state.lock_recover();
                 state.turn = Some(id.clone());
                 state.prompt_generation += 1;
-                (state.prompt_generation, state.instructions.clone())
+                // Tcode's own restore point, where the harness has none.
+                let checkpoint = state
+                    .options
+                    .provider
+                    .caps()
+                    .relayed_history
+                    .then(|| uuid::Uuid::new_v4().to_string());
+                if checkpoint.is_some() {
+                    state.checkpoint = checkpoint.clone();
+                }
+                (
+                    state.prompt_generation,
+                    state.instructions.clone(),
+                    checkpoint,
+                )
             };
 
             let request = acp::PromptRequest::new(
@@ -1486,6 +1544,14 @@ async fn handle_command<D: Dialect>(
                     turn_id: id.clone(),
                 })
                 .await;
+            if let Some(checkpoint_id) = checkpoint {
+                let _ = events
+                    .send(AgentEvent::TurnCheckpoint {
+                        turn_id: id.clone(),
+                        checkpoint_id,
+                    })
+                    .await;
+            }
             let turn_tx = turn_tx.clone();
             executor
                 .spawn(async move {
@@ -1501,8 +1567,15 @@ async fn handle_command<D: Dialect>(
                 .detach();
         }
         // The agent still owes us the `session/prompt` response carrying
-        // `stopReason: cancelled`; the turn completes when it lands.
-        SessionCommand::Interrupt => session.interrupt(session_id).await,
+        // `stopReason: cancelled`; the turn completes when it lands, or in
+        // `on_interrupt` for an agent-initiated turn with no prompt request.
+        SessionCommand::Interrupt => {
+            session.interrupt(session_id).await;
+            let interrupted = dialect.on_interrupt(&mut state.lock_recover());
+            for event in interrupted {
+                let _ = events.send(event).await;
+            }
+        }
         SessionCommand::RespondApproval {
             request_id,
             decision,
@@ -1521,11 +1594,18 @@ async fn handle_command<D: Dialect>(
                 .await;
         }
         SessionCommand::SetOption { id, value } => {
-            let Some(origin) = state.lock_recover().options.origin(&id) else {
+            let (origin, restart) = {
+                let state = state.lock_recover();
+                (
+                    state.options.origin(&id),
+                    state.options.value_requires_restart(&id, &value),
+                )
+            };
+            let Some(origin) = origin else {
                 log::warn!("acp: unknown option id `{id}`");
                 return;
             };
-            if origin == OptionOrigin::Launch {
+            if origin == OptionOrigin::Launch || restart {
                 return;
             }
             match set_option(connection, session_id, &origin, &value).await {
@@ -1655,15 +1735,22 @@ async fn handle_command<D: Dialect>(
                     if selection.id == MODEL_OPTION_ID {
                         continue;
                     }
-                    let (current, origin) = {
+                    let (current, origin, restart) = {
                         let state = state.lock_recover();
                         (
                             state.options.value(&selection.id).cloned(),
                             state.options.origin(&selection.id),
+                            state
+                                .options
+                                .value_requires_restart(&selection.id, &selection.value),
                         )
                     };
                     if current.as_ref() == Some(&selection.value) {
                         continue;
+                    }
+                    if restart {
+                        applied = false;
+                        break;
                     }
                     let Some(origin) = origin.filter(|origin| *origin != OptionOrigin::Launch)
                     else {
@@ -2069,6 +2156,9 @@ enum OptionOrigin {
 struct OptionRegistry {
     provider: ProviderKind,
     records: Vec<OptionRecord>,
+    /// Launch-flag option override (e.g. Antigravity's `--dangerously-skip-permissions`
+    /// pinning `mode` to `full-access` regardless of what wire modes report).
+    launch_override: Option<(String, Value)>,
 }
 
 struct OptionRecord {
@@ -2082,7 +2172,31 @@ impl OptionRegistry {
         Self {
             provider,
             records: Vec::new(),
+            launch_override: None,
         }
+    }
+
+    fn set_launch_override(&mut self, id: String, value: Value) {
+        self.launch_override = Some((id, value));
+    }
+
+    fn value_requires_restart(&self, id: &str, value: &Value) -> bool {
+        self.records
+            .iter()
+            .find(|record| record.selection.id == id)
+            .is_some_and(|record| {
+                record.descriptor.value_requires_restart(Some(value))
+                    || record
+                        .descriptor
+                        .value_requires_restart(Some(&record.selection.value))
+            })
+    }
+
+    fn override_for(&self, id: &str) -> Option<Value> {
+        self.launch_override
+            .as_ref()
+            .filter(|(override_id, _)| override_id == id)
+            .map(|(_, value)| value.clone())
     }
 
     fn ingest(
@@ -2095,36 +2209,55 @@ impl OptionRegistry {
                 OptionDescriptor::Select {
                     id,
                     label,
+                    options,
                     recommended,
                     permissive,
                     ..
-                } => Some((id, label, recommended, permissive)),
+                } => {
+                    let launch_choices: Vec<SelectOption> = options
+                        .into_iter()
+                        .filter(|option| option.apply == Some(crate::ApplyTiming::Restart))
+                        .collect();
+                    Some((id, label, recommended, permissive, launch_choices))
+                }
                 OptionDescriptor::Boolean { .. } => None,
             });
         if let Some(modes) = modes {
             let id = mode_option_id(self.provider).to_string();
-            let (label, recommended, permissive) = permission_meta
+            let (label, recommended, permissive, launch_choices) = permission_meta
                 .as_ref()
                 .filter(|(perm_id, ..)| *perm_id == id)
-                .map(|(_, label, rec, perm)| (label.clone(), rec.clone(), perm.clone()))
-                .unwrap_or_else(|| ("Mode".to_string(), None, None));
+                .map(|(_, label, rec, perm, extra)| {
+                    (label.clone(), rec.clone(), perm.clone(), extra.as_slice())
+                })
+                .unwrap_or_else(|| ("Mode".to_string(), None, None, &[]));
+            let mut options: Vec<SelectOption> = modes
+                .available_modes
+                .iter()
+                .map(|mode| SelectOption {
+                    value: mode.id.0.to_string(),
+                    label: mode.name.clone(),
+                    description: mode.description.clone(),
+                    unavailable: None,
+                    speed: None,
+                    summary: None,
+                    approval: crate::approval_class(self.provider, &id, &mode.id.0),
+                    apply: None,
+                })
+                .collect();
+            for extra in launch_choices {
+                if !options.iter().any(|option| option.value == extra.value) {
+                    options.push(extra.clone());
+                }
+            }
+            let selected = self
+                .override_for(&id)
+                .unwrap_or_else(|| Value::String(modes.current_mode_id.0.to_string()));
             self.upsert(
                 OptionDescriptor::Select {
                     id: id.clone(),
                     label,
-                    options: modes
-                        .available_modes
-                        .iter()
-                        .map(|mode| SelectOption {
-                            value: mode.id.0.to_string(),
-                            label: mode.name.clone(),
-                            description: mode.description.clone(),
-                            unavailable: None,
-                            speed: None,
-                            summary: None,
-                            approval: crate::approval_class(self.provider, &id, &mode.id.0),
-                        })
-                        .collect(),
+                    options,
                     default_value: Some(modes.current_mode_id.0.to_string()),
                     role: config_option_role(
                         self.provider,
@@ -2136,7 +2269,7 @@ impl OptionRegistry {
                     minimum: None,
                 },
                 OptionOrigin::Mode,
-                Value::String(modes.current_mode_id.0.to_string()),
+                selected,
             );
         }
         if let Some(config) = config {
@@ -2153,12 +2286,14 @@ impl OptionRegistry {
             let approval = |value: &str| crate::approval_class(self.provider, &id, value);
             match &option.kind {
                 acp::SessionConfigKind::Select(select) => {
-                    let (label, recommended, permissive) = permission_meta
+                    let (label, recommended, permissive, launch_choices) = permission_meta
                         .as_ref()
                         .filter(|(perm_id, ..)| *perm_id == id)
-                        .map(|(_, label, rec, perm)| (label.clone(), rec.clone(), perm.clone()))
-                        .unwrap_or_else(|| (option.name.clone(), None, None));
-                    let options = match &select.options {
+                        .map(|(_, label, rec, perm, extra)| {
+                            (label.clone(), rec.clone(), perm.clone(), extra.as_slice())
+                        })
+                        .unwrap_or_else(|| (option.name.clone(), None, None, &[]));
+                    let mut options: Vec<SelectOption> = match &select.options {
                         acp::SessionConfigSelectOptions::Ungrouped(flat) => flat
                             .iter()
                             .map(|option| SelectOption {
@@ -2169,6 +2304,7 @@ impl OptionRegistry {
                                 speed: None,
                                 summary: None,
                                 approval: approval(&option.value.0),
+                                apply: None,
                             })
                             .collect(),
                         acp::SessionConfigSelectOptions::Grouped(groups) => groups
@@ -2182,11 +2318,20 @@ impl OptionRegistry {
                                     speed: None,
                                     summary: None,
                                     approval: approval(&option.value.0),
+                                    apply: None,
                                 })
                             })
                             .collect(),
                         _ => Vec::new(),
                     };
+                    for extra in launch_choices {
+                        if !options.iter().any(|option| option.value == extra.value) {
+                            options.push(extra.clone());
+                        }
+                    }
+                    let selected = self
+                        .override_for(&id)
+                        .unwrap_or_else(|| Value::String(select.current_value.0.to_string()));
                     self.upsert(
                         OptionDescriptor::Select {
                             id,
@@ -2200,7 +2345,7 @@ impl OptionRegistry {
                             minimum: None,
                         },
                         OptionOrigin::Config(option.id.clone()),
-                        Value::String(select.current_value.0.to_string()),
+                        selected,
                     );
                 }
                 acp::SessionConfigKind::Boolean(boolean) => self.upsert(
@@ -2242,6 +2387,7 @@ impl OptionRegistry {
     }
 
     fn select(&mut self, id: &str, value: Value) {
+        let value = self.override_for(id).unwrap_or(value);
         if let Some(record) = self
             .records
             .iter_mut()
@@ -2327,6 +2473,9 @@ struct ToolState {
     raw_input: Option<Value>,
     raw_output: Option<Value>,
     announced: bool,
+    /// Whether this call's whole-file `Diff` content has been recorded in
+    /// [`State::journal`] for relayed rewind.
+    journalled: bool,
     /// The turn the agent last spoke of this call in. A call a turn left
     /// unfinished (an interrupt, a rejected permission) keeps its status.
     turn: Option<String>,
@@ -2377,6 +2526,12 @@ pub(crate) struct State {
     modes: Option<acp::SessionModeState>,
     /// [`SessionOptions::instructions`] while the session attached Tcode's MCP servers.
     instructions: Option<String>,
+    /// The thread's record of what its sessions report writing, and the
+    /// restore point of the turn whose writes it takes: the latest sent, which
+    /// what the agent does on its own afterwards still belongs to
+    /// ([`crate::Caps::relayed_history`]).
+    journal: Option<Arc<Mutex<WriteJournal>>>,
+    checkpoint: Option<String>,
 }
 
 impl State {
@@ -2400,6 +2555,8 @@ impl State {
             next_turn: None,
             modes: None,
             instructions: None,
+            journal: None,
+            checkpoint: None,
         }
     }
 
@@ -2413,9 +2570,85 @@ impl State {
         self.turn.as_deref()
     }
 
+    /// Whether a permission or question the agent asked is unanswered.
+    pub(crate) fn awaiting_user(&self) -> bool {
+        !self.approvals.is_empty() || !self.inputs.is_empty()
+    }
+
+    /// Whether a tool call the agent last spoke of in the open turn runs on.
+    pub(crate) fn tool_running(&self) -> bool {
+        self.turn.is_some()
+            && self.tools.values().any(|tool| {
+                tool.turn == self.turn
+                    && matches!(
+                        tool.status,
+                        acp::ToolCallStatus::Pending | acp::ToolCallStatus::InProgress
+                    )
+            })
+    }
+
     /// The latest `usage_update` context figure.
     pub(crate) fn usage(&self) -> Option<TokenUsage> {
         self.usage
+    }
+
+    /// Whether a tool call with `id` has already been seen in this session.
+    pub(crate) fn has_tool(&self, id: &str) -> bool {
+        self.tools.contains_key(id)
+    }
+
+    /// The title last seen for tool call `id`, if any.
+    pub(crate) fn tool_title(&self, id: &str) -> Option<&str> {
+        self.tools.get(id).map(|tool| tool.title.as_str())
+    }
+
+    /// Record every whole-file `Diff` carried by a completed tool call in the
+    /// thread's [`WriteJournal`] when the agent edited files itself rather
+    /// than through `fs/write_text_file`.
+    fn journal_diffs(&mut self, id: &str) {
+        let Some((journal, checkpoint)) = self.journal.clone().zip(self.checkpoint.clone()) else {
+            return;
+        };
+        let Some(tool) = self.tools.get_mut(id) else {
+            return;
+        };
+        if tool.journalled || tool.status != acp::ToolCallStatus::Completed {
+            return;
+        }
+        let entries: Vec<(PathBuf, Option<Vec<u8>>, Vec<u8>)> = tool
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                acp::ToolCallContent::Diff(diff) if !is_hunk_diff(diff.meta.as_ref()) => Some((
+                    self.cwd.join(&diff.path),
+                    diff.old_text.as_ref().map(|text| text.as_bytes().to_vec()),
+                    diff.new_text.as_bytes().to_vec(),
+                )),
+                _ => None,
+            })
+            .collect();
+        if entries.is_empty() {
+            return;
+        }
+        tool.journalled = true;
+        let mut journal = journal.lock_recover();
+        for (path, before, after) in entries {
+            // Confirm `newText` matches the bytes on disk so a partial diff
+            // missing metadata can never replace a whole file on restore.
+            if !std::fs::read(&path).is_ok_and(|disk| disk == after) {
+                log::warn!(
+                    "acp: skipping write journal for {} because its reported newText did not match disk",
+                    path.display()
+                );
+                continue;
+            }
+            if let Err(err) = journal.record_write(&checkpoint, &path, before.as_deref(), &after) {
+                log::warn!(
+                    "acp: could not keep what a write to {} replaces: {err}",
+                    path.display()
+                );
+            }
+        }
     }
 
     /// Open a turn the agent started on its own, which no `session/prompt`
@@ -2571,6 +2804,12 @@ impl State {
             acp::SessionUpdate::ToolCall(call) => {
                 let mut events = self.flush_text();
                 let id = call.tool_call_id.0.to_string();
+                let previous = self.tools.get_mut(&id);
+                let journalled = previous.as_ref().is_some_and(|tool| tool.journalled);
+                let writes = match previous {
+                    Some(previous) => std::mem::take(&mut previous.writes),
+                    None => Vec::new(),
+                };
                 let tool = ToolState {
                     name: tool_name(call.meta.as_ref(), call.raw_input.as_ref()),
                     title: call.title,
@@ -2581,18 +2820,23 @@ impl State {
                     raw_input: call.raw_input,
                     raw_output: call.raw_output,
                     announced: true,
+                    journalled,
                     turn: self.turn.clone(),
-                    writes: match self.tools.get_mut(&id) {
-                        Some(previous) => std::mem::take(&mut previous.writes),
-                        None => Vec::new(),
-                    },
+                    writes,
                 };
+                let terminal = matches!(
+                    tool.status,
+                    acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
+                );
                 let item = self.tool_item(&id, &tool);
                 let existed = self
                     .tools
-                    .insert(id, tool)
+                    .insert(id.clone(), tool)
                     .is_some_and(|previous| previous.announced);
-                events.push(if existed {
+                self.journal_diffs(&id);
+                events.push(if terminal {
+                    AgentEvent::ItemCompleted(item)
+                } else if existed {
                     AgentEvent::ItemUpdated(item)
                 } else {
                     AgentEvent::ItemStarted(item)
@@ -2633,13 +2877,18 @@ impl State {
                 let announced = std::mem::replace(&mut entry.announced, true);
                 let status = entry.status;
                 let tool = entry.clone();
+                self.journal_diffs(&id);
                 let item = self.tool_item(&id, &tool);
-                events.push(match (announced, status) {
-                    (false, _) => AgentEvent::ItemStarted(item),
-                    (true, acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed) => {
-                        AgentEvent::ItemCompleted(item)
-                    }
-                    _ => AgentEvent::ItemUpdated(item),
+                let terminal = matches!(
+                    status,
+                    acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
+                );
+                events.push(if terminal {
+                    AgentEvent::ItemCompleted(item)
+                } else if announced {
+                    AgentEvent::ItemUpdated(item)
+                } else {
+                    AgentEvent::ItemStarted(item)
                 });
                 events
             }
@@ -3026,6 +3275,15 @@ fn file_changes(tool: &ToolState) -> Vec<FileChange> {
             .collect();
     }
     changes
+}
+
+/// Whether `_meta` marks a hunk-sized diff rather than a whole-file ACP diff.
+fn is_hunk_diff(meta: Option<&acp::Meta>) -> bool {
+    meta.is_some_and(|meta| {
+        meta.contains_key("details")
+            || meta.contains_key("old_line")
+            || meta.contains_key("new_line")
+    })
 }
 
 /// Where a diff's texts begin in the old and new file, when the agent says;

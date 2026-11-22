@@ -500,6 +500,7 @@ fn recording_launcher() -> (ProviderLauncher, Launches) {
                 provider,
                 commands,
                 events,
+                started_anew: false,
             })
         })
     }));

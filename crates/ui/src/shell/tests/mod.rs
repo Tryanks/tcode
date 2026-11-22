@@ -931,6 +931,7 @@ fn deliver_thread(
                 speed: None,
                 summary: None,
                 approval: None,
+                apply: None,
             }],
             default_value: None,
             role: agent::OptionRole::Effort,

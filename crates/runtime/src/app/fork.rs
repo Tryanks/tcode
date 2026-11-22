@@ -33,8 +33,10 @@ impl AppState {
             return None;
         }
         // A branch not started yet holds the source's cursor, not its session's.
+        // A thread Tcode rewound or forked itself holds its conversation in
+        // its log alone until the next message.
         let own = active.meta.provider.caps().fork_at
-            && active.meta.resume_cursor.is_some()
+            && (active.meta.resume_cursor.is_some() || active.meta.handoff_due)
             && !matches!(active.meta.pending_fork, Some(ForkPoint::Branch { .. }));
         (own || active.timeline.has_relays()).then(|| ForkStatus {
             blocked: self.rewind_requests.contains_key(&active.meta.id),
@@ -100,9 +102,11 @@ impl AppState {
     }
 
     /// Duplicate a stored transcript and arrange for its next provider start to
-    /// fork the source's native session. The fork stays idle until its first
-    /// user turn, exactly like a cold-opened stored thread. A thread that
-    /// cannot be forked now answers why.
+    /// fork the source's native session, or, for a harness with no fork
+    /// ([`agent::Caps::relayed_history`]), to start a session anew that the
+    /// first message hands the transcript to. The fork stays idle until its
+    /// first user turn, exactly like a cold-opened stored thread. A thread
+    /// that cannot be forked now answers why.
     pub fn fork_thread(&mut self, id: &str, cx: &mut HostCx) -> Result<String, &'static str> {
         let resident = self.resident(id);
         let source = resident
@@ -254,7 +258,16 @@ impl AppState {
             fork.resume_cursor = Some(left.session.resume);
             fork.session_transfer_from = None;
         }
-        fork.pending_fork = Some(plan.point);
+        if fork.provider.caps().relayed_history {
+            // A harness with no fork of its own is asked for none: the copy
+            // of the log is the fork, which its first message hands to a
+            // session started anew.
+            fork.resume_cursor = None;
+            fork.session_transfer_from = None;
+            fork.handoff_due = true;
+        } else {
+            fork.pending_fork = Some(plan.point);
+        }
         let new_session = plan.branch.is_none();
         fork.fork_origin = Some(ForkOrigin {
             thread_id: source.id.clone(),

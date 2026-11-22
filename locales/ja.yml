@@ -9,6 +9,7 @@ chat:
   retry_delivery: "再試行"
   discard_delivery: "破棄"
   relayed: "%{from} から %{to} に引き継ぎました"
+  handed_over: "%{to} は新しいセッションで続行し、これまでの会話を引き継ぎました"
   moved: "%{from} からここに移動しました。%{to} は新しいセッションで続行します"
   session_moved: "%{from} から %{to} に移動しました。同じセッションがそこで続行します"
   worktree_created: "Tcode が %{path} にワークツリー %{name} を作成しました"
@@ -1281,6 +1282,7 @@ permission:
       accept-edits: "ワークスペース内のファイル編集を確認なしで承認します。"
       auto: "編集と安全なコマンドを承認し、元に戻せない操作の前に確認します。"
       plan: "タスクを実行する前に慎重に計画します。"
+      full-access: "確認なしですべてのツール権限リクエストを自動承認します。"
 approval:
   command_requested: "コマンドの承認をリクエストしています"
   file_read_requested: "ファイル読み取りの承認をリクエストしています"

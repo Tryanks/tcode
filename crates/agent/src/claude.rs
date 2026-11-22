@@ -468,6 +468,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         provider: ProviderKind::ClaudeCode,
         commands: cmd_tx,
         events: event_rx,
+        started_anew: false,
     })
 }
 
@@ -2335,6 +2336,7 @@ impl Mapper {
                     speed: None,
                     summary: None,
                     approval: None,
+                    apply: None,
                 });
             }
         }

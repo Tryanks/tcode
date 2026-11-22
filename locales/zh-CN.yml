@@ -9,6 +9,7 @@ chat:
   retry_delivery: "重试"
   discard_delivery: "丢弃"
   relayed: "已从 %{from} 接力至 %{to}"
+  handed_over: "%{to} 以新会话继续，并已接收此前的对话"
   moved: "已从 %{from} 移入此目录，%{to} 以新会话继续"
   session_moved: "已从 %{from} 移至 %{to}，原会话在那里继续"
   worktree_created: "Tcode 已在 %{path} 创建工作树 %{name}"
@@ -1274,6 +1275,7 @@ permission:
       accept-edits: "无需询问即批准工作区内的文件编辑。"
       auto: "自动批准编辑和安全命令；不可逆操作前询问你。"
       plan: "执行任务前先仔细规划。"
+      full-access: "无需询问即自动批准所有工具权限请求。"
 approval:
   command_requested: "请求批准执行命令"
   file_read_requested: "请求批准读取文件"

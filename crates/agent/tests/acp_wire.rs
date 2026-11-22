@@ -149,6 +149,7 @@ fn session_new_sends_http_mcp_servers_by_capability_or_agent_info() {
             processes: processes.clone(),
             clock: Default::default(),
             worktrees: Vec::new(),
+            write_journal: None,
         };
         let handle = smol::block_on(start_session(ProviderKind::Acp, opts))
             .unwrap_or_else(|err| panic!("mode {mode}: {err}"));

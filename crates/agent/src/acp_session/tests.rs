@@ -55,6 +55,7 @@ fn a_start_its_agent_never_answers_ends_when_the_session_stops() {
         processes: processes.clone(),
         clock: Default::default(),
         worktrees: Vec::new(),
+        write_journal: None,
     };
     let start = smol::spawn(crate::start_session(ProviderKind::Acp, opts));
     asked.accept().unwrap();
@@ -299,7 +300,7 @@ fn file_tools_preserve_operation_kind_and_render_available_change_evidence() {
             "content":[{"type":"diff","path":"file.rs","oldText":old,"newText":new}]
         })));
         let [
-            AgentEvent::ItemStarted(ThreadItem {
+            AgentEvent::ItemCompleted(ThreadItem {
                 content:
                     ItemContent::FileChange {
                         changes, status, ..
@@ -332,7 +333,7 @@ fn file_tools_preserve_operation_kind_and_render_available_change_evidence() {
             "kind":kind, "status":"completed", "locations":[{"path":"one.rs"},{"path":"two.rs"}]
         })));
         let [
-            AgentEvent::ItemStarted(ThreadItem {
+            AgentEvent::ItemCompleted(ThreadItem {
                 content: ItemContent::FileChange { changes, .. },
                 ..
             }),
@@ -361,7 +362,7 @@ fn file_tools_preserve_operation_kind_and_render_available_change_evidence() {
         "kind":"edit", "status":"completed", "rawInput":{"path":"file.rs"}, "rawOutput":"done"
     })));
     assert!(
-        matches!(events.as_slice(), [AgentEvent::ItemStarted(ThreadItem {
+        matches!(events.as_slice(), [AgentEvent::ItemCompleted(ThreadItem {
             content:ItemContent::ToolCall {
             image_reads: _, name, input, output:Some(output), status:ItemStatus::Completed,
             .. }, ..
@@ -432,8 +433,8 @@ fn other_tool_kinds_map_to_tool_cards_and_think_to_reasoning() {
             "content": [{ "type": "content", "content": { "type": "text", "text": "body" } }]
         })));
         match events.as_slice() {
-            [AgentEvent::ItemStarted(item)] => assert_eq!(item.content, expected, "{kind}"),
-            other => panic!("{kind}: expected ItemStarted, got {other:?}"),
+            [AgentEvent::ItemCompleted(item)] => assert_eq!(item.content, expected, "{kind}"),
+            other => panic!("{kind}: expected ItemCompleted, got {other:?}"),
         }
     }
 }
@@ -452,7 +453,7 @@ fn a_read_is_the_file_and_line_it_locates() {
         "locations": [{ "path": "/repo/x.rs", "line": 12 }],
         "content": [{ "type": "content", "content": { "type": "text", "text": "body" } }]
     })));
-    let [AgentEvent::ItemStarted(item)] = events.as_slice() else {
+    let [AgentEvent::ItemCompleted(item)] = events.as_slice() else {
         panic!("{events:?}");
     };
     let ItemContent::ToolCall { family, .. } = &item.content else {
@@ -1003,4 +1004,161 @@ fn prompt_carries_text_and_image_blocks() {
     assert_eq!(value[1]["type"], "image");
     assert_eq!(value[1]["mimeType"], "image/png");
     assert_eq!(value[1]["data"], "AAAA");
+}
+
+/// Completed whole-file `Diff` notifications record writes in `WriteJournal`
+/// (whether delivered in a single-shot completed `tool_call` or via
+/// `tool_call_update`), while hunk diffs carrying line metadata are ignored.
+#[test]
+fn completed_whole_file_diffs_journal_writes_for_relayed_rewind() {
+    let dir = std::env::temp_dir().join(format!("tcode-acp-journal-{}", uuid::Uuid::new_v4()));
+    let work = dir.join("work");
+    let journal_dir = dir.join("journal");
+    std::fs::create_dir_all(&work).unwrap();
+
+    let mut state = State::new(ProviderKind::Antigravity, work.clone());
+    state.journal = Some(Arc::new(Mutex::new(WriteJournal::open(
+        journal_dir.clone(),
+    ))));
+    state.checkpoint = Some("cp-1".into());
+
+    // Single-shot completed `tool_call` editing an existing CRLF file.
+    let edited = work.join("note.txt");
+    std::fs::write(&edited, b"after\r\n").unwrap();
+    let events = state.apply_update(update(json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": "edit-1",
+        "title": "Edit note.txt",
+        "kind": "edit",
+        "status": "completed",
+        "content": [{
+            "type": "diff",
+            "path": edited,
+            "oldText": "before\r\n",
+            "newText": "after\r\n"
+        }]
+    })));
+    assert!(matches!(
+        events.as_slice(),
+        [AgentEvent::ItemCompleted(ThreadItem {
+            content: ItemContent::FileChange {
+                status: ItemStatus::Completed,
+                ..
+            },
+            ..
+        })]
+    ));
+
+    // Two-step `tool_call` -> `tool_call_update(completed)` creating a file.
+    let created = work.join("fresh.txt");
+    std::fs::write(&created, b"brand new\n").unwrap();
+    let started = state.apply_update(update(json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": "create-1",
+        "title": "Write fresh.txt",
+        "kind": "edit",
+        "status": "in_progress"
+    })));
+    assert!(matches!(started.as_slice(), [AgentEvent::ItemStarted(_)]));
+    let completed = state.apply_update(update(json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "create-1",
+        "status": "completed",
+        "content": [{
+            "type": "diff",
+            "path": created,
+            "oldText": null,
+            "newText": "brand new\n"
+        }]
+    })));
+    assert!(matches!(
+        completed.as_slice(),
+        [AgentEvent::ItemCompleted(_)]
+    ));
+
+    // Hunk diffs with `_meta.old_line` and diffs whose `newText` does not match
+    // the file on disk are skipped by the journal so restore never truncates a
+    // file to a fragment.
+    let hunk_file = work.join("hunk.txt");
+    std::fs::write(&hunk_file, b"untouched\n").unwrap();
+    let _ = state.apply_update(update(json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": "hunk-1",
+        "title": "Patch hunk.txt",
+        "kind": "edit",
+        "status": "completed",
+        "content": [{
+            "type": "diff",
+            "path": hunk_file,
+            "oldText": "old line\n",
+            "newText": "new line\n",
+            "_meta": { "old_line": 10, "new_line": 10 }
+        }]
+    })));
+    let mismatch_file = work.join("mismatch.txt");
+    std::fs::write(&mismatch_file, b"line 1\nnew fragment\nline 3\n").unwrap();
+    let _ = state.apply_update(update(json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": "mismatch-1",
+        "title": "Fragment diff",
+        "kind": "edit",
+        "status": "completed",
+        "content": [{
+            "type": "diff",
+            "path": mismatch_file,
+            "oldText": "old fragment\n",
+            "newText": "new fragment\n"
+        }]
+    })));
+
+    let preview = WriteJournal::preview(&journal_dir, &["cp-1".into()]);
+    assert_eq!(preview.files.files.len(), 2);
+    assert!(preview.conflicts.is_empty());
+
+    WriteJournal::restore(&journal_dir, &["cp-1".into()]).unwrap();
+    assert_eq!(std::fs::read(&edited).unwrap(), b"before\r\n");
+    assert!(!created.exists());
+    assert_eq!(std::fs::read(&hunk_file).unwrap(), b"untouched\n");
+    assert_eq!(
+        std::fs::read(&mismatch_file).unwrap(),
+        b"line 1\nnew fragment\nline 3\n"
+    );
+
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Antigravity appends its launch-only `full-access` permission choice to the
+/// wire `mode` descriptor, switches wire modes live, and pins `mode` to
+/// `full-access` when launched with `--dangerously-skip-permissions`.
+#[test]
+fn antigravity_mode_appends_full_access_and_honors_launch_override() {
+    let config: Vec<acp::SessionConfigOption> = serde_json::from_value(json!([{
+        "id": "mode",
+        "name": "Mode",
+        "category": "mode",
+        "type": "select",
+        "currentValue": "default",
+        "options": [
+            { "value": "default", "name": "Default" },
+            { "value": "auto", "name": "Auto" },
+            { "value": "plan", "name": "Plan" }
+        ]
+    }]))
+    .unwrap();
+
+    let mut registry = OptionRegistry::new(ProviderKind::Antigravity);
+    registry.ingest(None, Some(&config));
+    assert_eq!(registry.value("mode"), Some(&json!("default")));
+    assert!(!registry.value_requires_restart("mode", &json!("auto")));
+    assert!(registry.value_requires_restart("mode", &json!("full-access")));
+
+    let mut launched = OptionRegistry::new(ProviderKind::Antigravity);
+    launched.set_launch_override("mode".into(), json!(crate::ANTIGRAVITY_FULL_ACCESS_MODE));
+    launched.ingest(None, Some(&config));
+    assert_eq!(launched.value("mode"), Some(&json!("full-access")));
+    assert!(launched.value_requires_restart("mode", &json!("default")));
+
+    // Wire mode updates do not clear the launch-flag override.
+    launched.select("mode", json!("auto"));
+    assert_eq!(launched.value("mode"), Some(&json!("full-access")));
 }

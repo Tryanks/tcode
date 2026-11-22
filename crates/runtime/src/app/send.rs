@@ -516,6 +516,7 @@ impl AppState {
         let active = self.resident_mut(target_id)?;
         let moved_from = active.meta.moved_from.take();
         active.meta.session_transfer_from = None;
+        active.meta.handoff_due = false;
         if let Some(from_dir) = &moved_from {
             transcript.push_str(&format!(
                 "The thread has since moved from `{}` to `{}`, the directory you now run in.\n",
@@ -582,6 +583,7 @@ impl AppState {
             let active = self.resident_mut(target_id).unwrap();
             active.meta.moved_from = None;
             active.meta.session_transfer_from = None;
+            active.meta.handoff_due = false;
             let meta = active.meta.clone();
             self.persist_meta(&meta, cx);
             return true;

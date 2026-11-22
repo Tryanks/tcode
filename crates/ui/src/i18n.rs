@@ -520,6 +520,7 @@ mod tests {
                 reviewer: None,
             }),
             approval: None,
+            apply: None,
         };
         assert_eq!(
             permission_option("permissions", &current),

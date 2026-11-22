@@ -1688,37 +1688,34 @@ impl PermissionControl {
                 )
             })
             .cloned()?;
-        let (id, label, rows, apply) = match descriptor {
+        let (id, label, rows) = match &descriptor {
             OptionDescriptor::Select {
                 id,
                 label,
                 options,
-                apply,
                 recommended,
                 ..
             } => {
                 let rows = options
-                    .into_iter()
+                    .iter()
                     .map(|option| {
                         // A member's space may not allow every value.
                         let refused = option
                             .approval
                             .zip(composer.space_policy.as_ref())
                             .is_some_and(|(class, policy)| !policy.allows_class(class));
-                        let (label, description) = crate::i18n::permission_option(&id, &option);
+                        let (label, description) = crate::i18n::permission_option(id, option);
                         PermissionRow {
                             recommended: recommended.as_deref() == Some(option.value.as_str()),
                             description,
-                            value: serde_json::Value::String(option.value),
+                            value: serde_json::Value::String(option.value.clone()),
                             label,
                             unavailable: option
                                 .unavailable
+                                .as_ref()
                                 .map(|reason| {
-                                    crate::i18n::translate_english(
-                                        "permission.unavailable",
-                                        &reason,
-                                    )
-                                    .into_owned()
+                                    crate::i18n::translate_english("permission.unavailable", reason)
+                                        .into_owned()
                                 })
                                 .or_else(|| {
                                     refused.then(|| {
@@ -1729,16 +1726,23 @@ impl PermissionControl {
                         }
                     })
                     .collect();
-                (id, label, rows, apply)
+                (id.clone(), label.clone(), rows)
             }
             OptionDescriptor::Boolean { .. } => return None,
         };
         let states = OptionStates::of(composer);
+        let current = states.running(&id).cloned();
+        let requested = states.pending(&id).cloned();
+        let apply = if descriptor.requires_restart(current.as_ref(), requested.as_ref()) {
+            agent::ApplyTiming::Restart
+        } else {
+            descriptor.value_apply(requested.as_ref().or(current.as_ref()))
+        };
         Some(Self {
             label: crate::i18n::translate_english(&format!("permission.controls.{id}"), &label)
                 .into_owned(),
-            current: states.running(&id).cloned(),
-            requested: states.pending(&id).cloned(),
+            current,
+            requested,
             note: states.unconfirmed_note(&id).map(Into::into),
             id,
             rows,

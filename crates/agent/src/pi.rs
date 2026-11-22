@@ -180,6 +180,7 @@ fn map_model(
                     speed: None,
                     summary: None,
                     approval: None,
+                    apply: None,
                 })
                 .collect(),
             default_value,

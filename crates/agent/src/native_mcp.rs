@@ -98,6 +98,9 @@ fn path(provider: ProviderKind, launch_env: &LaunchEnv) -> Option<PathBuf> {
 fn parse(config: NativeMcpConfig, text: &str) -> Result<Vec<NativeMcpServer>, String> {
     let (root, key): (Value, _) = match config {
         NativeMcpConfig::OpenCodeResolved => unreachable!("opencode_servers reads the CLI"),
+        // A file with nothing in it holds no server: installing `agy` 1.5.14
+        // leaves its `mcp_config.json` empty.
+        NativeMcpConfig::McpServersJson if text.trim().is_empty() => return Ok(Vec::new()),
         NativeMcpConfig::McpServersJson => (
             serde_json::from_str(text).map_err(|error| error.to_string())?,
             "mcpServers",
@@ -234,6 +237,11 @@ mod tests {
                 ]
             );
         }
+        assert_eq!(parse(NativeMcpConfig::McpServersJson, "").unwrap(), []);
+        assert_eq!(
+            parse(NativeMcpConfig::McpServersJson, "  \n\t ").unwrap(),
+            []
+        );
     }
 
     /// `opencode debug config --standalone` of 2.2.5, on a file in the old

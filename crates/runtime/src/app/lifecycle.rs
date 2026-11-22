@@ -88,6 +88,11 @@ impl AppState {
         let meta = active.meta.clone();
         let settings = self.settings.clone();
         let launch_env = self.prepare_session_env(&meta, cx);
+        let write_journal = meta
+            .provider
+            .caps()
+            .relayed_history
+            .then(|| self.write_journal_dir(&meta.id));
         // The thread switched accounts since its session last ran: that session
         // is copied into this profile's home before the provider resumes it.
         let transfer = meta
@@ -176,6 +181,7 @@ impl AppState {
                 opts.instructions = instructions;
                 opts.processes = processes.clone();
                 opts.clock = clock.clone();
+                opts.write_journal = write_journal;
                 if transfer_failed.is_some() {
                     opts.resume = None;
                     opts.fork = None;
@@ -231,25 +237,44 @@ impl AppState {
                                 state.on_event_stream_ended(&pump_session, &pump_commands, cx);
                             });
                         });
+                        if handle.started_anew
+                            && let Some(resident) = state.resident_mut(&session_id)
+                        {
+                            // The session holds none of the conversation, which
+                            // the next message hands it.
+                            resident.meta.handoff_due = true;
+                            let meta = resident.meta.clone();
+                            state.persist_meta(&meta, cx);
+                        }
                         if let Some(resident) = state.resident_mut(&session_id) {
                             resident.runtime = Runtime::Live(commands.clone());
                             resident._pump = Some(pump);
                             if let Some(descriptor) = resident.permission_descriptor() {
-                                let (id, apply) = match descriptor {
-                                    OptionDescriptor::Select { id, apply, .. }
-                                    | OptionDescriptor::Boolean { id, apply, .. } => (id, apply),
+                                let id = match &descriptor {
+                                    OptionDescriptor::Select { id, .. }
+                                    | OptionDescriptor::Boolean { id, .. } => id.clone(),
                                 };
-                                if apply != ApplyTiming::Restart
-                                    && let Some(selection) = resident
-                                        .meta
-                                        .option_selections
-                                        .iter()
-                                        .find(|selection| selection.id == id)
-                                    && Some(selection)
-                                        != resident
-                                            .live_option_selections
-                                            .iter()
-                                            .find(|selection| selection.id == id)
+                                let default = descriptor.default_value();
+                                let selected = resident
+                                    .meta
+                                    .option_selections
+                                    .iter()
+                                    .find(|selection| selection.id == id);
+                                let live = resident
+                                    .live_option_selections
+                                    .iter()
+                                    .find(|selection| selection.id == id);
+                                let selected_value = selected
+                                    .map(|selection| selection.value.clone())
+                                    .or_else(|| default.clone());
+                                let live_value = live
+                                    .map(|selection| selection.value.clone())
+                                    .or(default);
+                                if !descriptor.requires_restart(
+                                    live_value.as_ref(),
+                                    selected_value.as_ref(),
+                                ) && let Some(selection) = selected
+                                    && Some(selection) != live
                                 {
                                     let _ = commands.try_send(SessionCommand::SetOption {
                                         id: selection.id.clone(),

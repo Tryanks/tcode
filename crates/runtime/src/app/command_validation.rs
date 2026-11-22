@@ -102,6 +102,14 @@ impl AppState {
                     "This provider has no account to sign in to.",
                 ));
             }
+            Command::CreateAccountProfile { provider, .. }
+                if provider.harness().config_dir_env.is_none() =>
+            {
+                return Err(error(
+                    "one_account",
+                    "This provider keeps one account for every profile.",
+                ));
+            }
             Command::TerminalInput { terminal_id, .. }
             | Command::ClearTerminal { terminal_id }
             | Command::ResizeTerminal { terminal_id, .. }

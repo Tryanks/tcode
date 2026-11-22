@@ -461,7 +461,8 @@ pub struct HarnessDescription {
     pub endpoint: Option<EndpointDescription>,
     /// The ids of the harness's native switches.
     pub toggles: Vec<String>,
-    /// Tcode runs the harness's account sign-in, so accounts can be added.
+    /// Tcode runs the harness's account sign-in. Another account can be
+    /// added where `config_dir_env` names a directory to keep it in.
     pub account_login: bool,
     pub launch_args: bool,
     /// What Settings → Plugins does with its plugins.

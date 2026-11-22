@@ -404,14 +404,7 @@ impl ActiveSession {
             }
         });
         permission.as_ref().is_some_and(|descriptor| {
-            let default = match descriptor {
-                OptionDescriptor::Select { default_value, .. } => {
-                    default_value.clone().map(serde_json::Value::String)
-                }
-                OptionDescriptor::Boolean { default_value, .. } => {
-                    Some(serde_json::Value::Bool(*default_value))
-                }
-            };
+            let default = descriptor.default_value();
             let value = |selections: &[OptionSelection]| {
                 selections
                     .iter()
@@ -419,16 +412,10 @@ impl ActiveSession {
                     .map(|selection| selection.value.clone())
                     .or_else(|| default.clone())
             };
-            matches!(
-                descriptor,
-                OptionDescriptor::Select {
-                    apply: ApplyTiming::Restart,
-                    ..
-                } | OptionDescriptor::Boolean {
-                    apply: ApplyTiming::Restart,
-                    ..
-                }
-            ) && value(&self.meta.option_selections) != value(&self.live_option_selections)
+            descriptor.requires_restart(
+                value(&self.live_option_selections).as_ref(),
+                value(&self.meta.option_selections).as_ref(),
+            )
         })
     }
 
@@ -592,10 +579,13 @@ impl ActiveSession {
     }
 
     /// The id and text of the message that opens the fresh provider session of a moved
-    /// thread, or of one whose native session could not be carried to its new account,
-    /// which carries the handoff; `None` until that session is live and a message can go.
+    /// thread, of one whose native session could not be carried to its new account, or of
+    /// one Tcode rewound or forked itself ([`SessionMeta::handoff_due`]), which carries the
+    /// handoff; `None` until that session is live and a message can go.
     pub(super) fn handoff_message(&self, now: SystemTime) -> Option<(u64, String)> {
-        if (self.meta.moved_from.is_none() && !self.session_transfer_failed())
+        if (self.meta.moved_from.is_none()
+            && !self.session_transfer_failed()
+            && !self.meta.handoff_due)
             || self.cwd_changed_while_live()
             || self.profile_changed_while_live()
         {

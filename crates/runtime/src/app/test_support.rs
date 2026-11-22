@@ -901,6 +901,7 @@ impl Providers {
                     provider,
                     commands,
                     events,
+                    started_anew: false,
                 })
             })
         }))

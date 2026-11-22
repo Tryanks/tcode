@@ -691,6 +691,7 @@ fn a_running_harness_options_are_what_it_reported_or_what_was_sent() {
             speed: None,
             summary: None,
             approval: None,
+            apply: None,
         };
         provider.play([AgentEvent::ProviderOptions {
             descriptors: vec![
@@ -777,4 +778,116 @@ fn skill_mentions_use_the_providers_native_invocation() {
     for text in ["$HOME is set", "please $review", "$"] {
         assert_eq!(native_skill_invocation(text.into(), &claude), text);
     }
+}
+
+/// Antigravity switches its four ACP wire modes live, while entering or
+/// leaving launch-only `full-access` (`--dangerously-skip-permissions`) waits
+/// for a session restart without letting wire `ProviderOptions` clobber the
+/// pending choice.
+#[test]
+fn antigravity_full_access_restarts_while_wire_modes_switch_live() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-antigravity-full-access");
+    stored_thread(
+        &store,
+        "ag",
+        ProviderKind::Antigravity,
+        &store.root().join("ag"),
+        |_| {},
+    );
+    let (state, providers) = played_host(cx, &store);
+    let played = first_turn(&state, cx, &providers, "ag", 0);
+    let confirmed = |value: serde_json::Value| AgentEvent::ProviderOptions {
+        descriptors: vec![permission_control(ProviderKind::Antigravity).unwrap()],
+        selections: vec![OptionSelection {
+            id: "mode".into(),
+            value,
+        }],
+    };
+    let value_of = |selections: &[OptionSelection]| {
+        selections
+            .iter()
+            .find(|selection| selection.id == "mode")
+            .map(|selection| selection.value.clone())
+    };
+
+    played.play([confirmed(serde_json::json!("default"))]);
+    played.fence(cx, "ag");
+    while next_command(&played.commands).is_ok() {}
+    assert!(!cx.seen().status("ag").options_pending_restart);
+
+    // Wire mode switch (`default` -> `auto`) goes live via `SetOption`.
+    state
+        .command(
+            cx,
+            Command::SetActiveOption {
+                session_id: "ag".into(),
+                id: "mode".into(),
+                value: Some(serde_json::json!("auto")),
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        played.next_command(cx),
+        SessionCommand::SetOption { id, value } if id == "mode" && value == serde_json::json!("auto")
+    ));
+    played.play([confirmed(serde_json::json!("auto"))]);
+    played.fence(cx, "ag");
+    assert!(!cx.seen().status("ag").options_pending_restart);
+
+    // Entering `full-access` does not send `SetOption` and marks restart pending,
+    // even if another wire `ProviderOptions` arrives before restart.
+    state
+        .command(
+            cx,
+            Command::SetActiveOption {
+                session_id: "ag".into(),
+                id: "mode".into(),
+                value: Some(serde_json::json!("full-access")),
+            },
+        )
+        .unwrap();
+    assert!(next_command(&played.commands).is_err());
+    played.play([confirmed(serde_json::json!("auto"))]);
+    played.fence(cx, "ag");
+    let entering = cx.seen().status("ag").clone();
+    assert_eq!(
+        value_of(&entering.provider_option_selections),
+        Some(serde_json::json!("auto"))
+    );
+    assert_eq!(
+        value_of(&entering.provider_option_requested_selections),
+        Some(serde_json::json!("full-access"))
+    );
+    assert!(entering.options_pending_restart);
+
+    // Once running in `full-access`, leaving it for `auto` also requires a
+    // restart and does not send `SetOption`.
+    played.play([confirmed(serde_json::json!("full-access"))]);
+    played.fence(cx, "ag");
+    assert!(!cx.seen().status("ag").options_pending_restart);
+
+    state
+        .command(
+            cx,
+            Command::SetActiveOption {
+                session_id: "ag".into(),
+                id: "mode".into(),
+                value: Some(serde_json::json!("auto")),
+            },
+        )
+        .unwrap();
+    assert!(next_command(&played.commands).is_err());
+    played.play([confirmed(serde_json::json!("full-access"))]);
+    played.fence(cx, "ag");
+    let leaving = cx.seen().status("ag").clone();
+    assert_eq!(
+        value_of(&leaving.provider_option_selections),
+        Some(serde_json::json!("full-access"))
+    );
+    assert_eq!(
+        value_of(&leaving.provider_option_requested_selections),
+        Some(serde_json::json!("auto"))
+    );
+    assert!(leaving.options_pending_restart);
 }

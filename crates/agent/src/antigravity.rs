@@ -6,19 +6,26 @@
 //! Antigravity's dialect.
 
 pub(crate) mod plugins;
+mod record;
+mod subagents;
+mod watchdog;
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::v1::schema as acp;
 use serde_json::{Map, Value, json};
+use smol::channel::Sender;
 
 use crate::acp_session::{
-    self, Dialect, Established, Launch, Session, Setup, State, TurnEnd, describe, is_auth_required,
-    prompt_status,
+    self, Connection, Dialect, Established, Launch, Session, Setup, State, TurnEnd, describe,
+    is_auth_required, prompt_status,
 };
 use crate::{
-    AgentError, AgentEvent, Attachment, LaunchEnv, ModelSpec, ProviderKind, ResumeCursor,
-    SessionHandle, SessionOptions, SessionProcesses, TokenUsage,
+    AgentError, AgentEvent, Attachment, ItemContent, ItemStatus, LaunchEnv, ModelSpec,
+    ProviderKind, ResumeCursor, SessionHandle, SessionOptions, SessionProcesses, ThreadItem,
+    TokenUsage,
 };
 
 /// The directories the Antigravity CLI launched with `launch_env` keeps its
@@ -46,7 +53,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
             "session fork is not supported for Antigravity".into(),
         ));
     }
-    acp_session::start(ProviderKind::Antigravity, Antigravity, opts).await
+    acp_session::start(ProviderKind::Antigravity, Antigravity::default(), opts).await
 }
 
 /// The models Antigravity's `session/new` advertises for the signed-in account.
@@ -57,10 +64,88 @@ pub async fn list_models(
     launch_env: LaunchEnv,
     processes: &SessionProcesses,
 ) -> Result<Vec<ModelSpec>, AgentError> {
+    outside_a_thread(
+        binary_path,
+        launch_env,
+        processes,
+        async move |connection, init, cwd| {
+            let new = open_session(connection, init, cwd)
+                .await?
+                .ok_or_else(signed_out)?;
+            Ok(acp_session::catalog(
+                ProviderKind::Antigravity,
+                new.modes.as_ref(),
+                new.config_options.as_deref(),
+            )
+            .models)
+        },
+    )
+    .await
+}
+
+/// Whether the agent opens a session for the account it is launched with.
+/// The agent answers at once either way; `agy --print /usage` waits a minute
+/// for a sign-in before it says there is none (1.5.14).
+pub async fn signed_in(
+    binary_path: Option<PathBuf>,
+    launch_env: LaunchEnv,
+) -> Result<bool, AgentError> {
+    outside_a_thread(
+        binary_path,
+        launch_env,
+        &SessionProcesses::default(),
+        async move |connection, init, cwd| Ok(open_session(connection, init, cwd).await?.is_some()),
+    )
+    .await
+}
+
+/// Sign the account out with the agent's own `logout`, which forgets the
+/// sign-in for every `agy` that shares it.
+pub async fn sign_out(
+    binary_path: Option<PathBuf>,
+    launch_env: LaunchEnv,
+) -> Result<(), AgentError> {
+    outside_a_thread(
+        binary_path,
+        launch_env,
+        &SessionProcesses::default(),
+        async move |connection, init, _cwd| {
+            if init.agent_capabilities.auth.logout.is_none() {
+                return Err(AgentError::Provider(
+                    "This Antigravity version does not sign out over ACP. Run `/logout` in `agy`."
+                        .into(),
+                ));
+            }
+            connection
+                .send_request(acp::LogoutRequest::new())
+                .block_task()
+                .await
+                .map(|_| ())
+                .map_err(|err| {
+                    AgentError::Provider(format!(
+                        "Antigravity could not sign out: {}",
+                        describe(&err)
+                    ))
+                })
+        },
+    )
+    .await
+}
+
+/// Run `ask` against an `agy acp` started for no thread, in a directory of
+/// its own that is removed afterwards.
+async fn outside_a_thread<R: Send + 'static>(
+    binary_path: Option<PathBuf>,
+    launch_env: LaunchEnv,
+    processes: &SessionProcesses,
+    ask: impl AsyncFnOnce(&Connection, &acp::InitializeResponse, &Path) -> Result<R, AgentError>
+    + Send
+    + 'static,
+) -> Result<R, AgentError> {
     let cwd = std::env::temp_dir().join(format!("tcode-agy-probe-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&cwd).map_err(|err| {
         AgentError::Spawn(format!(
-            "could not make a directory to ask Antigravity for its models: {err}"
+            "could not make a directory to start Antigravity in: {err}"
         ))
     })?;
     let opts = SessionOptions {
@@ -78,51 +163,61 @@ pub async fn list_models(
         processes: processes.clone(),
         clock: Default::default(),
         worktrees: Vec::new(),
+        write_journal: None,
     };
     let session_cwd = cwd.clone();
-    let listed = acp_session::query(
+    let answer = acp_session::query(
         ProviderKind::Antigravity,
-        Antigravity,
+        Antigravity::default(),
         opts,
-        async move |connection, init| {
-            let new = connection
-                .send_request(acp::NewSessionRequest::new(session_cwd))
-                .block_task()
-                .await
-                .map_err(|err| {
-                    if is_auth_required(&err) {
-                        signed_out()
-                    } else {
-                        AgentError::Protocol(format!(
-                            "Antigravity could not list its models: {}",
-                            describe(&err)
-                        ))
-                    }
-                })?;
-            if init.agent_capabilities.session_capabilities.close.is_some()
-                && let Err(err) = connection
-                    .send_request(acp::CloseSessionRequest::new(new.session_id.clone()))
-                    .block_task()
-                    .await
-            {
-                log::debug!(
-                    "antigravity: session/close after model listing failed: {}",
-                    describe(&err)
-                );
-            }
-            Ok(acp_session::catalog(
-                ProviderKind::Antigravity,
-                new.modes.as_ref(),
-                new.config_options.as_deref(),
-            )
-            .models)
-        },
+        async move |connection, init| ask(connection, init, &session_cwd).await,
     )
     .await;
     if let Err(err) = crate::process::unblock(move || std::fs::remove_dir_all(&cwd)).await {
-        log::warn!("could not remove Antigravity's model-probe directory: {err}");
+        log::warn!("could not remove Antigravity's probe directory: {err}");
     }
-    listed
+    answer
+}
+
+/// Open a session in `cwd` and close it again, for what `session/new` says
+/// of the account. `None` when the agent asks for credentials it has none of.
+async fn open_session(
+    connection: &Connection,
+    init: &acp::InitializeResponse,
+    cwd: &Path,
+) -> Result<Option<acp::NewSessionResponse>, AgentError> {
+    let new_session = async || {
+        connection
+            .send_request(acp::NewSessionRequest::new(cwd.to_path_buf()))
+            .block_task()
+            .await
+    };
+    let mut new = new_session().await;
+    if matches!(&new, Err(err) if is_auth_required(err)) && sign_in_with_api_key(connection).await {
+        new = new_session().await;
+    }
+    let new = match new {
+        Ok(new) => new,
+        Err(err) if is_auth_required(&err) => return Ok(None),
+        Err(err) => {
+            return Err(AgentError::Protocol(format!(
+                "Antigravity could not open a session: {}",
+                describe(&err)
+            )));
+        }
+    };
+    if init.agent_capabilities.session_capabilities.close.is_some()
+        && let Err(err) = connection
+            .send_request(acp::CloseSessionRequest::new(new.session_id.clone()))
+            .block_task()
+            .await
+    {
+        log::debug!(
+            "antigravity: session/close after a probe failed: {}",
+            describe(&err)
+        );
+    }
+    Ok(Some(new))
 }
 
 /// Ask a short-lived `agy --print /usage --output-format json` process for
@@ -146,38 +241,67 @@ pub async fn read_usage(
         .await
         .map_err(|err| AgentError::Spawn(format!("spawning `{binary_display}`: {err}")))?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !output.status.success() {
-        let message = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            output.status.to_string()
-        };
-        return Err(AgentError::Provider(message));
+    // A failed command still prints its envelope, whose `error` says why
+    // (signed out, 1.5.14: `authentication failed or timed out`, exit 1, with
+    // the sign-in page and its prompt on stderr).
+    let envelope = serde_json::from_str(&stdout);
+    if output.status.success() || envelope.is_ok() {
+        return envelope.map_err(|err| {
+            AgentError::Protocol(format!(
+                "Antigravity usage response was not valid JSON: {err}"
+            ))
+        });
     }
-    serde_json::from_str(&stdout).map_err(|err| {
-        AgentError::Protocol(format!(
-            "Antigravity usage response was not valid JSON: {err}"
-        ))
-    })
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(AgentError::Provider(if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        output.status.to_string()
+    }))
+}
+
+/// Answer the agent's "Authentication required" with its API-key sign-in,
+/// which reads `GEMINI_API_KEY` from the agent's own environment and is
+/// refused when there is none. `agy acp` asks for credentials until a client
+/// has chosen a sign-in method once, and keeps the choice afterwards (1.5.14:
+/// with the key set and no Google login, `session/new` is refused before this
+/// request and answered after it, in that process and the next).
+async fn sign_in_with_api_key(connection: &Connection) -> bool {
+    connection
+        .send_request(acp::AuthenticateRequest::new("gemini-api-key"))
+        .block_task()
+        .await
+        .is_ok()
 }
 
 fn signed_out() -> AgentError {
     AgentError::Provider(
-        "Antigravity is not signed in. Run `agy acp --login`, or set GEMINI_API_KEY in Settings → Harnesses → Antigravity, then try again."
+        "Antigravity is not signed in. Sign in, or set GEMINI_API_KEY, in Settings → Harnesses → Antigravity, then try again."
             .into(),
     )
 }
 
 /// Build `agy acp` launch arguments: `--process-per-session` is passed when
-/// HTTP MCP servers are attached (as Antigravity's ACP docs specify) unless
+/// HTTP MCP servers are attached (as Antigravity's ACP docs specify), and
+/// `--dangerously-skip-permissions` when Full access is selected, unless
 /// already supplied in `extra_args`.
-pub(crate) fn launch_args(has_mcp_servers: bool, extra_args: &[String]) -> Vec<String> {
+pub(crate) fn launch_args(
+    has_mcp_servers: bool,
+    full_access: bool,
+    extra_args: &[String],
+) -> Vec<String> {
     let mut args = vec!["acp".to_string()];
     if has_mcp_servers && !extra_args.iter().any(|arg| arg == "--process-per-session") {
         args.push("--process-per-session".to_string());
+    }
+    if full_access
+        && !extra_args
+            .iter()
+            .any(|arg| arg == "--dangerously-skip-permissions")
+    {
+        args.push("--dangerously-skip-permissions".to_string());
     }
     args.extend(extra_args.iter().cloned());
     args
@@ -210,7 +334,121 @@ pub(crate) fn session_meta(
     Some(meta)
 }
 
-struct Antigravity;
+#[derive(Default)]
+struct Antigravity {
+    /// The agent's own record of the session (`conversations/<id>.db`).
+    record: Mutex<Option<SessionRecord>>,
+    /// Tracks the last seen step index and any open autonomous (proactive)
+    /// turn so both `session_update` and the background watcher stay in sync.
+    proactive: Arc<Mutex<subagents::ProactiveTracker>>,
+    /// `invoke_subagent` calls observed on the ACP wire, keyed by `toolCallId`,
+    /// so their immediate spawn-ack `completed` updates do not prematurely
+    /// close the subagent item.
+    spawned_subagents: Mutex<HashMap<String, subagents::SpawnedSubagent>>,
+    /// Control channel for the session's background subagent/proactive watcher.
+    watcher: Mutex<Option<Sender<subagents::WatcherCommand>>>,
+    /// When the agent was last heard from in the open turn ([`watchdog`]),
+    /// on the host's clock the session started with.
+    watchdog: Arc<watchdog::Watchdog>,
+    clock: Mutex<Option<crate::Clock>>,
+}
+
+#[derive(Clone)]
+struct SessionRecord {
+    path: PathBuf,
+}
+
+impl Antigravity {
+    fn send_watcher(&self, command: subagents::WatcherCommand) {
+        if let Some(tx) = self
+            .watcher
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .as_ref()
+        {
+            let _ = tx.try_send(command);
+        }
+    }
+
+    fn session_record(&self) -> Option<SessionRecord> {
+        self.record
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .clone()
+    }
+
+    /// Whether `update` begins autonomous (proactive) work when no turn is
+    /// open. Late `tool_call_update`s for a tool from an earlier turn (such as
+    /// a `schedule` timer completing) stay on that tool and do not open a new
+    /// turn.
+    fn starts_proactive_turn(&self, state: &State, update: &acp::SessionUpdate) -> bool {
+        if state.turn().is_some() {
+            return false;
+        }
+        match update {
+            acp::SessionUpdate::AgentMessageChunk(chunk)
+            | acp::SessionUpdate::AgentThoughtChunk(chunk) => !chunk_is_empty(&chunk.content),
+            acp::SessionUpdate::ToolCall(call) => {
+                !state.has_tool(&call.tool_call_id.0)
+                    && !self
+                        .spawned_subagents
+                        .lock()
+                        .unwrap_or_else(|held| held.into_inner())
+                        .contains_key(call.tool_call_id.0.as_ref())
+            }
+            acp::SessionUpdate::ToolCallUpdate(update) => {
+                !state.has_tool(&update.tool_call_id.0)
+                    && !self
+                        .spawned_subagents
+                        .lock()
+                        .unwrap_or_else(|held| held.into_inner())
+                        .contains_key(update.tool_call_id.0.as_ref())
+            }
+            _ => false,
+        }
+    }
+}
+
+fn chunk_is_empty(block: &acp::ContentBlock) -> bool {
+    match block {
+        acp::ContentBlock::Text(text) => text.text.is_empty(),
+        acp::ContentBlock::Image(_) | acp::ContentBlock::Audio(_) => false,
+        acp::ContentBlock::ResourceLink(link) => link.name.is_empty() && link.uri.is_empty(),
+        acp::ContentBlock::Resource(resource) => match &resource.resource {
+            acp::EmbeddedResourceResource::TextResourceContents(text) => text.text.is_empty(),
+            _ => true,
+        },
+        _ => true,
+    }
+}
+
+fn tool_error_summary(
+    content: Option<&[acp::ToolCallContent]>,
+    raw_output: Option<&Value>,
+) -> Option<String> {
+    if let Some(blocks) = content {
+        let parts: Vec<String> = blocks
+            .iter()
+            .filter_map(|item| match item {
+                acp::ToolCallContent::Content(block) => match &block.content {
+                    acp::ContentBlock::Text(text) if !text.text.trim().is_empty() => {
+                        Some(text.text.trim().to_owned())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        if !parts.is_empty() {
+            return Some(parts.join("\n"));
+        }
+    }
+    raw_output.and_then(|raw| match raw.as_str() {
+        Some(text) if !text.trim().is_empty() => Some(text.trim().to_owned()),
+        None if !raw.is_null() => Some(raw.to_string()),
+        _ => None,
+    })
+}
 
 impl Dialect for Antigravity {
     fn name(&self) -> &str {
@@ -219,13 +457,31 @@ impl Dialect for Antigravity {
 
     fn launch(&self, opts: &SessionOptions) -> Result<Launch, AgentError> {
         let program = crate::resolve_binary(opts.binary_path.as_deref(), "agy")?;
-        let args = launch_args(!opts.mcp_servers.is_empty(), &opts.extra_args);
+        let mode_id = acp_session::mode_option_id(ProviderKind::Antigravity);
+        let full_access = opts.option_selections.iter().any(|selection| {
+            selection.id == mode_id
+                && selection.value.as_str() == Some(crate::ANTIGRAVITY_FULL_ACCESS_MODE)
+        });
+        let args = launch_args(!opts.mcp_servers.is_empty(), full_access, &opts.extra_args);
         Ok(Launch {
             program,
             args,
             env: Vec::new(),
             client_meta: None,
         })
+    }
+
+    fn launch_option_override(&self, launch: &Launch) -> Option<(String, Value)> {
+        launch
+            .args
+            .iter()
+            .any(|arg| arg == "--dangerously-skip-permissions")
+            .then(|| {
+                (
+                    acp_session::mode_option_id(ProviderKind::Antigravity).to_owned(),
+                    json!(crate::ANTIGRAVITY_FULL_ACCESS_MODE),
+                )
+            })
     }
 
     fn accepts_http_mcp(&self, _init: &acp::InitializeResponse) -> bool {
@@ -261,12 +517,21 @@ impl Dialect for Antigravity {
             .map(str::to_string);
 
         let mut established_session = None;
+        let mut anew = false;
+        let resumed = resumed_id.is_some();
         if let Some(session_id) = resumed_id {
             let session_id = acp::SessionId::new(session_id);
-            match setup
+            let mut reattached = setup
                 .reattach(&session_id, &mcp_servers, meta.as_ref())
-                .await
+                .await;
+            if matches!(&reattached, Some(Err(err)) if is_auth_required(err))
+                && sign_in_with_api_key(setup.connection).await
             {
+                reattached = setup
+                    .reattach(&session_id, &mcp_servers, meta.as_ref())
+                    .await;
+            }
+            match reattached {
                 Some(Ok((modes, config_options))) => {
                     established_session = Some((session_id, modes, config_options));
                 }
@@ -281,6 +546,7 @@ impl Dialect for Antigravity {
                                 .into(),
                         )
                         .await;
+                    anew = true;
                 }
                 None => {}
             }
@@ -289,26 +555,30 @@ impl Dialect for Antigravity {
         let (session_id, modes, config_options) = match established_session {
             Some(session) => session,
             None => {
-                let mut request =
-                    acp::NewSessionRequest::new(opts.cwd.clone()).mcp_servers(mcp_servers.clone());
-                if let Some(meta) = meta {
-                    request = request.meta(meta);
+                let new_session = async || {
+                    let mut request = acp::NewSessionRequest::new(opts.cwd.clone())
+                        .mcp_servers(mcp_servers.clone());
+                    if let Some(meta) = &meta {
+                        request = request.meta(meta.clone());
+                    }
+                    setup.connection.send_request(request).block_task().await
+                };
+                let mut new = new_session().await;
+                if matches!(&new, Err(err) if is_auth_required(err))
+                    && sign_in_with_api_key(setup.connection).await
+                {
+                    new = new_session().await;
                 }
-                let new = setup
-                    .connection
-                    .send_request(request)
-                    .block_task()
-                    .await
-                    .map_err(|err| {
-                        if is_auth_required(&err) {
-                            signed_out()
-                        } else {
-                            AgentError::Protocol(format!(
-                                "Antigravity could not start a session: {}",
-                                describe(&err)
-                            ))
-                        }
-                    })?;
+                let new = new.map_err(|err| {
+                    if is_auth_required(&err) {
+                        signed_out()
+                    } else {
+                        AgentError::Protocol(format!(
+                            "Antigravity could not start a session: {}",
+                            describe(&err)
+                        ))
+                    }
+                })?;
                 (new.session_id, new.modes, new.config_options)
             }
         };
@@ -326,11 +596,74 @@ impl Dialect for Antigravity {
             .restore_options(&session_id, modes.as_ref(), &config_options)
             .await;
 
+        if let Some(state_dir) = state_dirs(&opts.launch_env).into_iter().next() {
+            let path = record::path(&state_dir, &session_id.0);
+            // A session that goes on has steps already; a new one has none.
+            let seen = if resumed && !anew {
+                let path = path.clone();
+                crate::process::unblock(move || record::last_step(&path))
+                    .await
+                    .map(|step| step.index)
+            } else {
+                Some(-1)
+            };
+            *self.record.lock().unwrap_or_else(|held| held.into_inner()) =
+                Some(SessionRecord { path });
+            self.proactive
+                .lock()
+                .unwrap_or_else(|held| held.into_inner())
+                .seen = seen;
+
+            let (tx, rx) = smol::channel::unbounded();
+            *self.watcher.lock().unwrap_or_else(|held| held.into_inner()) = Some(tx);
+            let watcher = subagents::run_watcher(
+                state_dir,
+                session_id.0.to_string(),
+                setup.state.clone(),
+                self.proactive.clone(),
+                setup.events.clone(),
+                rx,
+                opts.clock.clone(),
+            );
+            // On the session's connection, the thread its notifications are
+            // handled on ([`subagents::run_watcher`]).
+            if let Err(err) = setup.connection.spawn(async move {
+                watcher.await;
+                Ok(())
+            }) {
+                log::warn!(
+                    "antigravity: could not follow the session's subagents: {}",
+                    describe(&err)
+                );
+            }
+        }
+
+        *self.clock.lock().unwrap_or_else(|held| held.into_inner()) = Some(opts.clock.clone());
+        let watchdog = watchdog::run(
+            self.watchdog.clone(),
+            setup.state.clone(),
+            self.proactive.clone(),
+            setup.events.clone(),
+            opts.processes.clone(),
+            opts.clock.clone(),
+        );
+        // On the session's connection, as the watcher is.
+        if let Err(err) = setup.connection.spawn(async move {
+            watchdog.await;
+            Ok(())
+        }) {
+            log::warn!(
+                "antigravity: could not watch the session for a silent turn: {}",
+                describe(&err)
+            );
+        }
+
         Ok(Established {
             resume: ResumeCursor(json!({
                 "session_id": session_id.0.to_string(),
             })),
             session_id,
+            anew,
         })
     }
 
@@ -342,7 +675,139 @@ impl Dialect for Antigravity {
         if state.loading() {
             return Vec::new();
         }
-        state.apply_update(notification.update)
+        if let Some(clock) = self
+            .clock
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .as_ref()
+        {
+            self.watchdog.hear(clock.now());
+        }
+
+        let mut events = Vec::new();
+        if self.starts_proactive_turn(state, &notification.update) {
+            let turn_id = format!("proactive-{}", uuid::Uuid::new_v4());
+            let mut tracker = self
+                .proactive
+                .lock()
+                .unwrap_or_else(|held| held.into_inner());
+            let since = tracker.seen;
+            tracker.active = Some(subagents::ActiveProactive {
+                turn_id: turn_id.clone(),
+                since,
+                usage_seen: false,
+            });
+            drop(tracker);
+            events.extend(state.begin_agent_turn(&turn_id));
+        }
+
+        match &notification.update {
+            acp::SessionUpdate::ToolCall(call) => {
+                if let Some(spawn) = subagents::parse_spawn(call) {
+                    events.extend(state.flush_text());
+                    if call.status == acp::ToolCallStatus::Failed {
+                        let summary =
+                            tool_error_summary(Some(&call.content), call.raw_output.as_ref());
+                        events.push(AgentEvent::ItemCompleted(ThreadItem {
+                            id: spawn.tool_call_id,
+                            parent_item_id: None,
+                            content: ItemContent::Subagent {
+                                agent_type: spawn.agent_type,
+                                description: spawn.description,
+                                status: ItemStatus::Failed,
+                                summary,
+                                model: spawn.model,
+                                effort: None,
+                            },
+                        }));
+                    } else {
+                        events.extend(subagents::spawn_events(&spawn));
+                        self.spawned_subagents
+                            .lock()
+                            .unwrap_or_else(|held| held.into_inner())
+                            .insert(spawn.tool_call_id.clone(), spawn.clone());
+                        self.send_watcher(subagents::WatcherCommand::Spawned(spawn));
+                    }
+                    return events;
+                }
+                if let Some(active) = self
+                    .proactive
+                    .lock()
+                    .unwrap_or_else(|held| held.into_inner())
+                    .active
+                    .as_mut()
+                {
+                    active.usage_seen = false;
+                }
+                if let Some((recipient, message)) = subagents::parse_send_message(call) {
+                    self.send_watcher(subagents::WatcherCommand::MessageSent {
+                        recipient,
+                        message,
+                    });
+                } else if subagents::is_manage_subagents(call) {
+                    self.send_watcher(subagents::WatcherCommand::Wake);
+                }
+            }
+            acp::SessionUpdate::ToolCallUpdate(update) => {
+                let id = update.tool_call_id.0.as_ref();
+                let spawn = self
+                    .spawned_subagents
+                    .lock()
+                    .unwrap_or_else(|held| held.into_inner())
+                    .get(id)
+                    .cloned();
+                if let Some(spawn) = spawn {
+                    if update.fields.status == Some(acp::ToolCallStatus::Failed) {
+                        self.spawned_subagents
+                            .lock()
+                            .unwrap_or_else(|held| held.into_inner())
+                            .remove(id);
+                        self.send_watcher(subagents::WatcherCommand::SpawnFailed(id.to_owned()));
+                        let summary = tool_error_summary(
+                            update.fields.content.as_deref(),
+                            update.fields.raw_output.as_ref(),
+                        );
+                        events.push(AgentEvent::ItemCompleted(ThreadItem {
+                            id: spawn.tool_call_id,
+                            parent_item_id: None,
+                            content: ItemContent::Subagent {
+                                agent_type: spawn.agent_type,
+                                description: spawn.description,
+                                status: ItemStatus::Failed,
+                                summary,
+                                model: spawn.model,
+                                effort: None,
+                            },
+                        }));
+                    }
+                    // The immediate `completed` update on `invoke_subagent`
+                    // only acknowledges the async spawn; the watcher settles
+                    // the subagent item from its on-disk trajectory.
+                    return events;
+                }
+                if state.tool_title(id) == Some("Run manage_subagents") {
+                    self.send_watcher(subagents::WatcherCommand::Wake);
+                }
+            }
+            _ => {}
+        }
+
+        let is_usage_update = matches!(notification.update, acp::SessionUpdate::UsageUpdate(_));
+        events.extend(state.apply_update(notification.update));
+
+        if is_usage_update {
+            let mut tracker = self
+                .proactive
+                .lock()
+                .unwrap_or_else(|held| held.into_inner());
+            if let Some(active) = tracker.active.as_mut() {
+                active.usage_seen = true;
+                drop(tracker);
+                self.send_watcher(subagents::WatcherCommand::Wake);
+            }
+        }
+
+        events
     }
 
     fn turn_end(
@@ -350,14 +815,33 @@ impl Dialect for Antigravity {
         state: &mut State,
         result: Result<acp::PromptResponse, agent_client_protocol::Error>,
     ) -> TurnEnd {
-        let (status, message) = prompt_status(&result);
+        let (mut status, message) = prompt_status(&result);
+        let rec = self.session_record();
+        let last = rec.as_ref().and_then(|rec| record::last_step(&rec.path));
+        {
+            let mut tracker = self
+                .proactive
+                .lock()
+                .unwrap_or_else(|held| held.into_inner());
+            tracker.active = None;
+            if let Some(last) = last {
+                // The error itself is the message the agent sent with the turn.
+                if status == crate::TurnStatus::Completed
+                    && last.error
+                    && tracker.seen.is_some_and(|seen| last.index > seen)
+                {
+                    status = crate::TurnStatus::Failed;
+                }
+                tracker.seen = Some(last.index);
+            }
+        }
         let context = state.usage();
         let usage = result
             .ok()
             .and_then(|response| response.usage)
             .map(|usage| TokenUsage {
                 freshness: crate::ContextFreshness::Current,
-                total_processed_tokens: Some(usage.total_tokens),
+                turn_processed_tokens: Some(usage.total_tokens),
                 input_tokens: Some(usage.input_tokens),
                 cached_input_tokens: usage.cached_read_tokens,
                 output_tokens: Some(usage.output_tokens),
@@ -374,6 +858,37 @@ impl Dialect for Antigravity {
         }
     }
 
+    fn on_interrupt(&self, state: &mut State) -> Vec<AgentEvent> {
+        let active_turn_id = {
+            let mut tracker = self
+                .proactive
+                .lock()
+                .unwrap_or_else(|held| held.into_inner());
+            let Some(turn_id) = tracker
+                .active
+                .as_ref()
+                .filter(|active| state.turn() == Some(active.turn_id.as_str()))
+                .map(|active| active.turn_id.clone())
+            else {
+                return Vec::new();
+            };
+            tracker.active = None;
+            Some(turn_id)
+        };
+        let Some(turn_id) = active_turn_id else {
+            return Vec::new();
+        };
+        self.send_watcher(subagents::WatcherCommand::SyncSeen);
+        state.end_turn(
+            &turn_id,
+            TurnEnd {
+                status: crate::TurnStatus::Interrupted,
+                message: None,
+                usage: state.usage(),
+            },
+        )
+    }
+
     async fn steer(
         &self,
         session: &Session,
@@ -386,6 +901,10 @@ impl Dialect for Antigravity {
         // on the same session: it immediately answers the superseded prompt with
         // `end_turn` and keeps streaming until the steering prompt completes.
         if session.steer_prompt(session_id, &text, &attachments) {
+            self.proactive
+                .lock()
+                .unwrap_or_else(|held| held.into_inner())
+                .active = None;
             session.emit(AgentEvent::SteerAccepted { request_id }).await;
         } else {
             session.emit(AgentEvent::SteerRejected { request_id }).await;
@@ -395,23 +914,67 @@ impl Dialect for Antigravity {
     fn owned_config_options(&self) -> &'static [&'static str] {
         &[acp_session::MODEL_OPTION_ID]
     }
+
+    fn on_close(&self) {
+        if let Some(tx) = self
+            .watcher
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .take()
+        {
+            let _ = tx.try_send(subagents::WatcherCommand::Close);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn notification(update: Value) -> acp::SessionNotification {
+        serde_json::from_value(json!({
+            "sessionId": "session-1",
+            "update": update,
+        }))
+        .unwrap()
+    }
+
     #[test]
-    fn launch_args_pass_process_per_session_only_when_mcp_servers_are_attached() {
-        assert_eq!(launch_args(false, &[]), vec!["acp"]);
-        assert_eq!(launch_args(true, &[]), vec!["acp", "--process-per-session"]);
+    fn launch_args_pass_process_per_session_and_full_access_without_duplicates() {
+        assert_eq!(launch_args(false, false, &[]), vec!["acp"]);
         assert_eq!(
-            launch_args(true, &["--sandbox".into()]),
-            vec!["acp", "--process-per-session", "--sandbox"]
+            launch_args(true, false, &[]),
+            vec!["acp", "--process-per-session"]
         );
         assert_eq!(
-            launch_args(true, &["--process-per-session".into(), "--sandbox".into()]),
-            vec!["acp", "--process-per-session", "--sandbox"]
+            launch_args(false, true, &[]),
+            vec!["acp", "--dangerously-skip-permissions"]
+        );
+        assert_eq!(
+            launch_args(true, true, &["--sandbox".into()]),
+            vec![
+                "acp",
+                "--process-per-session",
+                "--dangerously-skip-permissions",
+                "--sandbox"
+            ]
+        );
+        assert_eq!(
+            launch_args(
+                true,
+                true,
+                &[
+                    "--process-per-session".into(),
+                    "--dangerously-skip-permissions".into(),
+                    "--sandbox".into()
+                ]
+            ),
+            vec![
+                "acp",
+                "--process-per-session",
+                "--dangerously-skip-permissions",
+                "--sandbox"
+            ]
         );
     }
 
@@ -444,5 +1007,260 @@ mod tests {
         );
         assert!(session_meta(&advertised, Some("   ")).is_none());
         assert!(session_meta(&unadvertised, Some("Use project conventions.")).is_none());
+    }
+
+    /// `session/prompt.usage.totalTokens` is per-turn, not cumulative: leaving
+    /// `total_processed_tokens` empty lets `Timeline` accumulate across turns.
+    /// Interrupted and failed turns also advance `seen` so the next turn does
+    /// not inherit an earlier step window.
+    #[test]
+    fn turn_end_reports_per_turn_processed_tokens_and_advances_seen() {
+        let dir = std::env::temp_dir().join(format!("tcode-agy-turn-end-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("session.db");
+        smol::future::block_on(async {
+            let database = turso::Builder::new_local(&db.to_string_lossy())
+                .build()
+                .await
+                .unwrap();
+            let connection = database.connect().unwrap();
+            connection
+                .execute(
+                    "CREATE TABLE steps (idx integer, step_type integer NOT NULL DEFAULT 0, PRIMARY KEY (idx))",
+                    (),
+                )
+                .await
+                .unwrap();
+            for (idx, kind) in [(0_i64, 14_i64), (1, 15)] {
+                connection
+                    .execute(
+                        "INSERT INTO steps (idx, step_type) VALUES (?, ?)",
+                        (idx, kind),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let dialect = Antigravity::default();
+        *dialect.record.lock().unwrap() = Some(SessionRecord { path: db.clone() });
+        let mut state = State::new(ProviderKind::Antigravity, PathBuf::from("/repo"));
+        let response: acp::PromptResponse = serde_json::from_value(json!({
+            "stopReason": "end_turn",
+            "usage": {
+                "inputTokens": 2236,
+                "cachedReadTokens": 12568,
+                "outputTokens": 32,
+                "totalTokens": 14836
+            }
+        }))
+        .unwrap();
+
+        let end = dialect.turn_end(&mut state, Ok(response));
+        let usage = end.usage.expect("turn usage");
+        assert_eq!(usage.turn_processed_tokens, Some(14836));
+        assert_eq!(usage.total_processed_tokens, None);
+        assert_eq!(dialect.proactive.lock().unwrap().seen, Some(1));
+
+        // Even an interrupted turn advances `seen` so a later proactive turn
+        // will not recount steps before it.
+        smol::future::block_on(async {
+            let database = turso::Builder::new_local(&db.to_string_lossy())
+                .build()
+                .await
+                .unwrap();
+            let connection = database.connect().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO steps (idx, step_type) VALUES (?, ?)",
+                    (2_i64, 15_i64),
+                )
+                .await
+                .unwrap();
+        });
+        let cancelled: acp::PromptResponse = serde_json::from_value(json!({
+            "stopReason": "cancelled"
+        }))
+        .unwrap();
+        let end = dialect.turn_end(&mut state, Ok(cancelled));
+        assert_eq!(end.status, crate::TurnStatus::Interrupted);
+        assert_eq!(dialect.proactive.lock().unwrap().seen, Some(2));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn launch_option_override_matches_full_access_flag() {
+        let dialect = Antigravity::default();
+        let plain = Launch {
+            program: PathBuf::from("agy"),
+            args: vec!["acp".into()],
+            env: Vec::new(),
+            client_meta: None,
+        };
+        assert_eq!(dialect.launch_option_override(&plain), None);
+
+        let full = Launch {
+            program: PathBuf::from("agy"),
+            args: vec!["acp".into(), "--dangerously-skip-permissions".into()],
+            env: Vec::new(),
+            client_meta: None,
+        };
+        assert_eq!(
+            dialect.launch_option_override(&full),
+            Some(("mode".into(), json!(crate::ANTIGRAVITY_FULL_ACCESS_MODE)))
+        );
+    }
+
+    /// Autonomous updates after a prompt returns open a proactive turn and can
+    /// be interrupted on Stop, while late `tool_call_update`s on an earlier
+    /// turn's `schedule` tool do not open a turn of their own.
+    #[test]
+    fn proactive_reply_opens_and_interrupts_cleanly() {
+        let dialect = Antigravity::default();
+        dialect.proactive.lock().unwrap().seen = Some(3);
+
+        let mut state = State::new(ProviderKind::Antigravity, PathBuf::from("/repo"));
+        // Seed a `schedule` tool from turn 1 that stayed in_progress.
+        let _ = state.begin_agent_turn("turn-1");
+        let _ = dialect.session_update(
+            &mut state,
+            notification(json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_sched",
+                "title": "Run schedule",
+                "kind": "other",
+                "status": "in_progress"
+            })),
+        );
+        // Stopping a sent turn does not end it prematurely in `on_interrupt`.
+        assert!(dialect.on_interrupt(&mut state).is_empty());
+        assert_eq!(state.turn(), Some("turn-1"));
+
+        let _ = state.end_turn(
+            "turn-1",
+            TurnEnd {
+                status: crate::TurnStatus::Completed,
+                message: None,
+                usage: None,
+            },
+        );
+        assert_eq!(state.turn(), None);
+
+        // Late `schedule` completion does not open a proactive turn.
+        let sched_done = dialect.session_update(
+            &mut state,
+            notification(json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_sched",
+                "status": "completed"
+            })),
+        );
+        assert!(matches!(
+            sched_done.as_slice(),
+            [AgentEvent::ItemCompleted(_)]
+        ));
+        assert_eq!(state.turn(), None);
+
+        // Autonomous reply text opens a proactive turn.
+        let opened = dialect.session_update(
+            &mut state,
+            notification(json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "Timer fired!" }
+            })),
+        );
+        assert!(matches!(
+            opened.as_slice(),
+            [AgentEvent::TurnStarted { .. }, AgentEvent::Delta { .. }]
+        ));
+        assert!(state.turn().is_some());
+
+        // `usage_update` arms the watcher check without resetting on prose chunks.
+        let _ = dialect.session_update(
+            &mut state,
+            notification(json!({
+                "sessionUpdate": "usage_update",
+                "used": 162,
+                "size": 1048576
+            })),
+        );
+        assert!(
+            dialect
+                .proactive
+                .lock()
+                .unwrap()
+                .active
+                .as_ref()
+                .is_some_and(|active| active.usage_seen)
+        );
+
+        // Interrupting an open proactive turn closes it cleanly as Interrupted.
+        let interrupted = dialect.on_interrupt(&mut state);
+        assert!(interrupted.iter().any(|event| matches!(
+            event,
+            AgentEvent::TurnCompleted {
+                status: crate::TurnStatus::Interrupted,
+                ..
+            }
+        )));
+        assert_eq!(state.turn(), None);
+        assert!(dialect.proactive.lock().unwrap().active.is_none());
+    }
+
+    /// `invoke_subagent` emits a `Subagent` item in progress and ignores the
+    /// immediate `completed` spawn-ack `tool_call_update`.
+    #[test]
+    fn invoke_subagent_maps_to_subagent_item_and_suppresses_spawn_ack() {
+        let dialect = Antigravity::default();
+        let mut state = State::new(ProviderKind::Antigravity, PathBuf::from("/repo"));
+        let _ = state.begin_agent_turn("turn-1");
+
+        let started = dialect.session_update(
+            &mut state,
+            notification(json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_sub",
+                "title": "Run invoke_subagent",
+                "kind": "other",
+                "status": "in_progress",
+                "rawInput": {
+                    "TypeName": "research",
+                    "Role": "Explorer",
+                    "Prompt": "Check README.md"
+                }
+            })),
+        );
+        assert!(matches!(
+            started.as_slice(),
+            [
+                AgentEvent::ItemStarted(ThreadItem {
+                    id,
+                    parent_item_id: None,
+                    content: ItemContent::Subagent {
+                        agent_type,
+                        description,
+                        status: ItemStatus::InProgress,
+                        ..
+                    }
+                }),
+                AgentEvent::ItemCompleted(ThreadItem {
+                    parent_item_id: Some(parent),
+                    content: ItemContent::UserMessage { text, .. },
+                    ..
+                })
+            ] if id == "call_sub" && agent_type == "research" && description == "Explorer"
+                && parent == "call_sub" && text == "Check README.md"
+        ));
+
+        let ack = dialect.session_update(
+            &mut state,
+            notification(json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_sub",
+                "status": "completed"
+            })),
+        );
+        assert!(ack.is_empty());
     }
 }

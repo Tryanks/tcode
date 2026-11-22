@@ -70,7 +70,8 @@ impl HarnessDialog {
         for profile in &profiles {
             rows.push(self.account_row(description, profile, profile.id == builtin, cx));
         }
-        let account_login = description.account_login;
+        // Another account lives in a config directory of its own.
+        let account_login = description.account_login && description.config_dir_env.is_some();
         let endpoints = description.offers_endpoint_profiles();
         let build_actions = |cx: &mut Context<Self>| {
             let mut actions = h_flex().gap_1();

@@ -197,6 +197,7 @@ dependencies = [
  "shell-words",
  "smol",
  "toml 1.2.1+spec-1.1.0",
+ "turso",
  "ureq",
  "uuid",
  "windows 0.62.2",

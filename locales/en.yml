@@ -9,6 +9,7 @@ chat:
   retry_delivery: "Retry"
   discard_delivery: "Discard"
   relayed: "Relayed from %{from} to %{to}"
+  handed_over: "%{to} continues in a new session, handed the conversation so far"
   moved: "Moved here from %{from}; %{to} continues in a new session"
   session_moved: "Moved from %{from} to %{to}; the same session continues there"
   worktree_created: "Tcode created worktree %{name} at %{path}"
@@ -1281,6 +1282,7 @@ permission:
       accept-edits: "Approve file edits in the workspace without asking."
       auto: "Approve edits and safe commands; ask before irreversible actions."
       plan: "Plan carefully before executing a task."
+      full-access: "Auto-approve all tool permission requests without asking."
 approval:
   command_requested: "Command approval requested"
   file_read_requested: "File-read approval requested"

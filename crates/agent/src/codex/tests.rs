@@ -3419,6 +3419,7 @@ fn a_turn_runs_at_the_chosen_then_configured_then_the_models_effort() {
                 processes: Default::default(),
                 clock: Default::default(),
                 worktrees: Vec::new(),
+                write_journal: None,
             };
             let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
                 .await
@@ -3510,6 +3511,7 @@ fn a_thread_says_whether_it_can_be_reverted() {
                 processes: Default::default(),
                 clock: Default::default(),
                 worktrees: Vec::new(),
+                write_journal: None,
             };
             let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
                 .await
