@@ -1583,8 +1583,15 @@ impl TimelineView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut rows = Vec::new();
-        for range in tools::run::windows(activities) {
-            let newer = activities.len() - range.start - 1;
+        let windows = tools::run::windows(activities);
+        let newer = self.successors(
+            activities,
+            &windows,
+            cwd,
+            (live_reasoning_id, auto_expand),
+            cx,
+        );
+        for (range, newer) in windows.into_iter().zip(newer) {
             rows.extend(self.compose_activity_window(
                 &activities[range],
                 newer,
@@ -1612,8 +1619,9 @@ impl TimelineView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let items = tools::run::windows(visible).into_iter().map(|range| {
-            let newer = visible.len() - range.start - 1;
+        let windows = tools::run::windows(visible);
+        let newer = self.successors(visible, &windows, cwd, (live_reasoning_id, auto_expand), cx);
+        let items = windows.into_iter().zip(newer).map(|(range, newer)| {
             let ids: Vec<String> = visible[range]
                 .iter()
                 .map(|entry| entry.id.clone())
@@ -1661,7 +1669,7 @@ impl TimelineView {
 
     /// One window of a Work Log: a computer run, an edit's file windows, the
     /// one window of the files a command changed, or one activity, with
-    /// `newer` windows after it in its list.
+    /// `newer` windows after it in its list that have taken its place.
     fn compose_activity_window(
         &mut self,
         activities: &[&TimelineEntry],
@@ -1783,7 +1791,7 @@ impl TimelineView {
         let mut rows = Vec::new();
         for (file_index, file) in edit.files.iter().enumerate() {
             let key = format!("activity-{}-file-{file_index}", entry.id);
-            let enabled = auto_expand && file.row.counts.is_some();
+            let enabled = file_opens_by_itself(file, auto_expand);
             let expanded =
                 self.auto_activity_expanded((turn, &entry.id), &key, enabled, recency, cx);
             let window_key = format!("{}-file-{file_index}", entry.id);
@@ -1891,12 +1899,7 @@ impl TimelineView {
     ) -> AnyElement {
         let key = format!("activity-{}", entry.id);
         let turn = entry.turn;
-        let is_command = matches!(
-            &entry.content,
-            EntryContent::Item(ItemContent::CommandExecution { .. })
-        );
-        let auto_enabled =
-            row.auto_expand && is_command && self.workspace_store.read(cx).live_command_panel();
+        let auto_enabled = self.command_opens_by_itself(entry, row.auto_expand, cx);
         let expanded =
             self.auto_activity_expanded((turn, &entry.id), &key, auto_enabled, row.recency, cx);
         let activity = tools::activity(entry, row.live_reasoning, cwd);
@@ -2384,6 +2387,75 @@ impl TimelineView {
             });
         })
         .detach();
+    }
+}
+
+fn file_opens_by_itself(file: &tools::diff::EditedFile, auto_expand: bool) -> bool {
+    auto_expand && file.row.counts.is_some()
+}
+
+/// Whether `entry` is still going on: a call that has not returned, a
+/// thought still streaming.
+fn goes_on(entry: &TimelineEntry, live_reasoning_id: Option<&str>) -> bool {
+    match &entry.content {
+        EntryContent::Item(ItemContent::Reasoning { .. }) => {
+            live_reasoning_id == Some(entry.id.as_str())
+        }
+        EntryContent::Item(
+            ItemContent::CommandExecution { status, .. }
+            | ItemContent::FileChange { status, .. }
+            | ItemContent::ToolCall { status, .. }
+            | ItemContent::Subagent { status, .. },
+        ) => *status == agent::ItemStatus::InProgress,
+        _ => false,
+    }
+}
+
+impl TimelineView {
+    fn command_opens_by_itself(&self, entry: &TimelineEntry, auto_expand: bool, cx: &App) -> bool {
+        auto_expand
+            && matches!(
+                &entry.content,
+                EntryContent::Item(ItemContent::CommandExecution { .. })
+            )
+            && self.workspace_store.read(cx).live_command_panel()
+    }
+
+    /// For each of `windows`, how many of the windows after it have taken
+    /// its place: those that ended, and those still going on that already
+    /// show something of their own, as a running command's output or an
+    /// edit's streamed diff. One still going on with nothing to show yet —
+    /// an edit before its diff, a thought, a call not yet returned — leaves
+    /// what is open before it open.
+    fn successors(
+        &self,
+        activities: &[&TimelineEntry],
+        windows: &[std::ops::Range<usize>],
+        cwd: &Path,
+        (live_reasoning_id, auto_expand): (Option<&str>, bool),
+        cx: &App,
+    ) -> Vec<usize> {
+        let mut after = 0;
+        let mut counts = vec![0; windows.len()];
+        for (index, range) in windows.iter().enumerate().rev() {
+            counts[index] = after;
+            let window = &activities[range.clone()];
+            let shows = if tools::run::is_run(activities, range) {
+                false
+            } else if let Some(edit) = tools::diff::edit(window[0], cwd) {
+                !(edit.by_command && edit.files.len() > 1)
+                    && edit
+                        .files
+                        .iter()
+                        .any(|file| file_opens_by_itself(file, auto_expand))
+            } else {
+                self.command_opens_by_itself(window[0], auto_expand, cx)
+            };
+            if shows || !window.iter().any(|entry| goes_on(entry, live_reasoning_id)) {
+                after += 1;
+            }
+        }
+        counts
     }
 }
 
