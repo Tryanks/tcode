@@ -22,7 +22,7 @@ const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 /// Height reserved beneath chat messages for hover-revealed actions.
 pub(crate) const CHAT_ACTION_ROW_HEIGHT: f32 = 24.;
 /// Maximum width of the shared chat/composer content column.
-pub(crate) const CHAT_CONTENT_MAX_WIDTH: f32 = 720.;
+pub(crate) const CHAT_CONTENT_MAX_WIDTH: f32 = 680.;
 /// Minimum horizontal padding around the shared chat/composer content column.
 pub(crate) const CHAT_CONTENT_MIN_PADDING: f32 = 24.;
 /// The narrowest a side panel's content reads at: the right panel's (its
@@ -134,9 +134,21 @@ pub fn radius_button(cx: &App) -> Pixels {
 pub fn radius_chip(cx: &App) -> Pixels {
     cx.theme().tokens.radius.sm
 }
-/// Composer field corners.
-pub fn radius_composer(cx: &App) -> Pixels {
-    cx.theme().tokens.radius.lg
+/// Composer card corners.
+pub fn radius_composer(compact: bool) -> Pixels {
+    px(if compact { 20. } else { 18. })
+}
+/// The user's message bubble.
+pub fn radius_user_bubble() -> Pixels {
+    px(16.)
+}
+/// Padding inside the user's message bubble, as (vertical, horizontal).
+pub(crate) fn user_bubble_padding(compact: bool) -> (Pixels, Pixels) {
+    if compact {
+        (px(8.), px(12.))
+    } else {
+        (px(9.), px(14.))
+    }
 }
 /// The phone's bottom sheet, top corners only.
 pub fn radius_overlay_sheet(cx: &App) -> Pixels {
@@ -1024,10 +1036,9 @@ pub fn brand_wordmark(cx: &App) -> impl IntoElement {
     )
 }
 
-/// The scrim behind modal overlays, at the `overlay` token's values
-/// (`themes/tcode.json`: `#1F232852` light, `#00000080` dark). Passing the ink
-/// `foreground` through in dark mode would *lighten* the page behind the overlay
-/// instead of pushing it back, so the dark scrim is black.
+/// The scrim behind modal overlays. Passing the ink `foreground` through in
+/// dark mode would *lighten* the page behind the overlay instead of pushing it
+/// back, so the dark scrim is black.
 pub fn scrim(progress: f32, cx: &App) -> Hsla {
     cx.theme().by_mode(
         cx.theme().foreground.opacity(0.32 * progress),

@@ -831,10 +831,10 @@ impl TimelineView {
 
 /// Vertical rhythm between turns. Turns are separated by space and typographic
 /// hierarchy alone — there is deliberately no rule/divider under the user bubble.
-pub(super) const TURN_GAP: f32 = 32.;
+pub(super) const TURN_GAP: f32 = 28.;
 
 /// Vertical rhythm between the segments of one turn.
-pub(super) const SEGMENT_GAP: f32 = 10.;
+pub(super) const SEGMENT_GAP: f32 = 14.;
 
 // ListState retains measured row heights, so variable-height turns use the same
 // pixel geometry as scrolling rather than treating a long turn as one short row.

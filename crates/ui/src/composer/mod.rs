@@ -107,7 +107,6 @@ use tcode_core::ui::WorkspaceMode;
 use tcode_protocol::WorkspaceListing;
 
 /// Context-meter colors, shared with provider usage bars.
-use crate::usage::{METER_BLUE, METER_RED};
 /// File mentions are potentially unbounded; command and skill feeds are not
 /// capped and instead use the trigger menu's scrolling viewport.
 const FILE_MENU_ROW_CAP: usize = 50;
@@ -2188,18 +2187,14 @@ impl Composer {
                 }
             })
             .w_full()
-            .px(px(6.))
-            .py(px(6. * frame))
-            .rounded(if self.compact {
-                px(16.)
-            } else {
-                crate::material::radius_composer(cx)
-            })
+            .px(px(10.))
+            .py(px(10. * frame))
+            .rounded(crate::material::radius_composer(self.compact))
             .border_1()
             .border_color(hairline.opacity(frame))
             // The editor needs an opaque fill over the translucent canvas.
             .bg(cx.theme().popover.opacity(frame))
-            .shadow_md()
+            .shadow_sm()
             .map(|mut card| {
                 for shadow in card.style().box_shadow.iter_mut().flatten() {
                     shadow.color.a *= frame;

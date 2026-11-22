@@ -85,7 +85,7 @@ pub(crate) fn appearance(state: PullRequestBadgeState, cx: &App) -> (IconName, H
         ),
         PullRequestBadgeState::Merged => (
             IconName::GitMerge,
-            cx.theme().info,
+            cx.theme().merged,
             "pull_requests.state_merged",
         ),
         PullRequestBadgeState::Closed => (

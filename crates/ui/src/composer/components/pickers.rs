@@ -514,10 +514,10 @@ impl Composer {
         let store_entity = self.workspace_store.clone();
         let pct = usage.and_then(|u| context_meter::used_percentage(&u));
         let overloaded = pct.map(context_meter::is_overloaded).unwrap_or(false);
-        let ring_color: Hsla = if overloaded {
-            rgb(METER_RED).into()
+        let ring_color = if overloaded {
+            cx.theme().danger
         } else {
-            rgb(METER_BLUE).into()
+            cx.theme().primary
         };
         let mut track = cx.theme().muted_foreground;
         track.a = 0.35;
@@ -2486,9 +2486,9 @@ fn render_context_meter_pane(
     let bar_color: Hsla = gpui_base::motion::transition(
         glide("bar-color"),
         if overloaded {
-            rgb(METER_RED).into()
+            cx.theme().danger
         } else {
-            rgb(METER_BLUE).into()
+            cx.theme().primary
         },
         gpui_base::motion::Transition::new(GLIDE),
         window,

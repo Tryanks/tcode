@@ -2159,7 +2159,7 @@ mod tests {
                 ],
                 PathBuf::from("/workspace"),
                 RenderAppearance {
-                    theme: HighlightTheme::default_dark(),
+                    theme: HighlightTheme::dark(gpui::white()),
                     colors: DiffColors {
                         added_word_bg: gpui::hsla(0.3, 0.8, 0.5, 0.3),
                         removed_word_bg: gpui::hsla(0., 0.8, 0.5, 0.28),
@@ -2242,7 +2242,7 @@ mod tests {
                 Vec::new(),
                 PathBuf::from("/workspace"),
                 RenderAppearance {
-                    theme: HighlightTheme::default_dark(),
+                    theme: HighlightTheme::dark(gpui::white()),
                     colors: DiffColors {
                         added_word_bg: gpui::green(),
                         removed_word_bg: gpui::red(),
@@ -2320,7 +2320,7 @@ mod tests {
                     ignore_ws: false,
                     show_invisibles: false,
                 },
-                theme: &HighlightTheme::default_dark(),
+                theme: &HighlightTheme::dark(gpui::white()),
                 colors: &colors,
                 whitespace_style: &HighlightStyle::default(),
             },

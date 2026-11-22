@@ -70,16 +70,14 @@ impl From<ThemeStyle> for HighlightStyle {
 }
 
 impl HighlightTheme {
-    pub fn default_light() -> Arc<Self> {
-        static LIGHT: LazyLock<Arc<HighlightTheme>> =
-            LazyLock::new(|| Arc::new(HighlightTheme::from_styles(LIGHT_STYLES)));
-        LIGHT.clone()
+    /// Tcode's light syntax palette, its plain identifiers in `foreground`.
+    pub fn light(foreground: Hsla) -> Arc<Self> {
+        Arc::new(Self::from_styles(LIGHT_STYLES, foreground))
     }
 
-    pub fn default_dark() -> Arc<Self> {
-        static DARK: LazyLock<Arc<HighlightTheme>> =
-            LazyLock::new(|| Arc::new(HighlightTheme::from_styles(DARK_STYLES)));
-        DARK.clone()
+    /// Tcode's dark syntax palette, its plain identifiers in `foreground`.
+    pub fn dark(foreground: Hsla) -> Arc<Self> {
+        Arc::new(Self::from_styles(DARK_STYLES, foreground))
     }
 
     pub fn style(&self, name: &str) -> Option<HighlightStyle> {
@@ -93,13 +91,18 @@ impl HighlightTheme {
             .map(Into::into)
     }
 
-    fn from_styles(styles: &[(&'static str, StyleValue)]) -> Self {
+    fn from_styles(styles: &[(&'static str, StyleValue)], foreground: Hsla) -> Self {
         Self {
             styles: styles
                 .iter()
                 .map(|&(name, value)| {
                     let style = match value {
                         StyleValue::Color(color) => ThemeStyle::color(color),
+                        StyleValue::Foreground => ThemeStyle {
+                            color: Some(foreground),
+                            font_style: None,
+                            font_weight: None,
+                        },
                         StyleValue::Italic => ThemeStyle::italic(),
                         StyleValue::Weight(weight) => ThemeStyle::bold(weight),
                         StyleValue::ColorWithStyle(color, font_style) => ThemeStyle {
@@ -129,72 +132,76 @@ impl gpui_base::input::HighlightStyleResolver for HighlightTheme {
 #[derive(Clone, Copy)]
 enum StyleValue {
     Color(&'static str),
+    /// The theme's foreground.
+    Foreground,
     Italic,
     Weight(FontWeight),
     ColorWithStyle(&'static str, FontStyle),
     ColorWithWeight(&'static str, FontWeight),
 }
 
-use StyleValue::{Color, ColorWithStyle, ColorWithWeight, Italic, Weight};
+use StyleValue::{Color, ColorWithStyle, ColorWithWeight, Foreground, Italic, Weight};
 
-// Values are the upstream styled layer's Default Light/Dark syntax palettes.
+// One Light and One Dark, the family of the terminal's ANSI palette, so code
+// and terminal read alike.
 const LIGHT_STYLES: &[(&str, StyleValue)] = &[
-    ("attribute", Color("#957931")),
-    ("boolean", Color("#C5060B")),
-    ("comment", Color("#007fff")),
-    ("comment.doc", Color("#007fff")),
-    ("constant", Color("#C5060B")),
-    ("constructor", Color("#0433ff")),
-    ("embedded", Color("#333333")),
+    ("attribute", Color("#986801")),
+    ("boolean", Color("#986801")),
+    ("comment", ColorWithStyle("#A0A1A7", FontStyle::Italic)),
+    ("comment.doc", ColorWithStyle("#A0A1A7", FontStyle::Italic)),
+    ("constant", Color("#986801")),
+    ("constructor", Color("#C18401")),
+    ("embedded", Foreground),
     ("emphasis", Italic),
     ("emphasis.strong", Weight(FontWeight::BOLD)),
-    ("function", Color("#0000A2")),
-    ("keyword", Color("#0433ff")),
-    ("link_text", ColorWithStyle("#0000A2", FontStyle::Normal)),
-    ("link_uri", ColorWithStyle("#6A7293", FontStyle::Italic)),
-    ("number", Color("#0433ff")),
-    ("property", Color("#333333")),
-    ("string", Color("#036A07")),
-    ("string.escape", Color("#036A07")),
-    ("string.regex", Color("#036A07")),
-    ("string.special", Color("#d21f07")),
-    ("string.special.symbol", Color("#d21f07")),
-    ("tag", Color("#0433ff")),
-    ("text.code.span", Color("#6F42C1")),
-    ("text.literal", Color("#6F42C1")),
-    ("title", Color("#0433FF")),
-    ("type", Color("#6f42c1")),
-    ("variable", Color("#333333")),
-    ("variable.special", Color("#C5060B")),
+    ("function", Color("#4078F2")),
+    ("keyword", Color("#A626A4")),
+    ("link_text", Color("#4078F2")),
+    ("link_uri", Color("#0184BC")),
+    ("number", Color("#986801")),
+    ("property", Color("#E45649")),
+    ("string", Color("#50A14F")),
+    ("string.escape", Color("#50A14F")),
+    ("string.regex", Color("#50A14F")),
+    ("string.special", Color("#0184BC")),
+    ("string.special.symbol", Color("#0184BC")),
+    ("tag", Color("#E45649")),
+    ("text.code.span", Color("#A626A4")),
+    ("text.literal", Color("#A626A4")),
+    ("title", ColorWithWeight("#4078F2", FontWeight::SEMIBOLD)),
+    ("type", Color("#C18401")),
+    ("variable", Foreground),
+    ("variable.special", Color("#E45649")),
 ];
 
 const DARK_STYLES: &[(&str, StyleValue)] = &[
-    ("attribute", Color("#e7cb8f")),
-    ("boolean", Color("#E1D797")),
-    ("comment", Color("#9E9E9E")),
-    ("comment.doc", Color("#9E9E9E")),
-    ("constant", Color("#E1D797")),
-    ("constructor", Color("#b5af9a")),
-    ("embedded", Color("#CACCCA")),
+    ("attribute", Color("#D19A66")),
+    ("boolean", Color("#D19A66")),
+    ("comment", ColorWithStyle("#7F848E", FontStyle::Italic)),
+    ("comment.doc", ColorWithStyle("#7F848E", FontStyle::Italic)),
+    ("constant", Color("#D19A66")),
+    ("constructor", Color("#E5C07B")),
+    ("embedded", Foreground),
     ("emphasis", Italic),
     ("emphasis.strong", Weight(FontWeight::BOLD)),
-    ("function", Color("#fdd888")),
-    ("keyword", Color("#c28b12")),
-    ("link_text", ColorWithStyle("#307BF6", FontStyle::Normal)),
-    ("link_uri", ColorWithStyle("#7faef9", FontStyle::Italic)),
-    ("number", Color("#E1D797")),
-    ("property", Color("#CACCCA")),
-    ("string", Color("#62BA46")),
-    ("string.escape", Color("#62BA46")),
-    ("string.regex", Color("#62BA46")),
-    ("string.special", Color("#E1D797")),
-    ("string.special.symbol", Color("#E1D797")),
-    ("tag", Color("#b5af9a")),
-    ("text.code.span", Color("#E1D797")),
-    ("text.literal", Color("#E1D797")),
-    ("title", ColorWithWeight("#fdd888", FontWeight::SEMIBOLD)),
-    ("type", Color("#c75828")),
-    ("variable.special", Color("#E19773")),
+    ("function", Color("#61AFEF")),
+    ("keyword", Color("#C678DD")),
+    ("link_text", Color("#61AFEF")),
+    ("link_uri", Color("#56B6C2")),
+    ("number", Color("#D19A66")),
+    ("property", Color("#E06C75")),
+    ("string", Color("#98C379")),
+    ("string.escape", Color("#98C379")),
+    ("string.regex", Color("#98C379")),
+    ("string.special", Color("#56B6C2")),
+    ("string.special.symbol", Color("#56B6C2")),
+    ("tag", Color("#E06C75")),
+    ("text.code.span", Color("#C678DD")),
+    ("text.literal", Color("#C678DD")),
+    ("title", ColorWithWeight("#61AFEF", FontWeight::SEMIBOLD)),
+    ("type", Color("#E5C07B")),
+    ("variable", Foreground),
+    ("variable.special", Color("#E06C75")),
 ];
 
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(|| {
@@ -648,7 +655,7 @@ mod tests {
     #[test]
     fn a_jsx_arrow_function_is_highlighted() {
         let src = "const f = async (a, b) => a + b;\n";
-        let runs = highlight_source(src, "jsx", &HighlightTheme::default_dark());
+        let runs = highlight_source(src, "jsx", &HighlightTheme::dark(gpui::white()));
         assert!(
             runs.iter()
                 .any(|(range, style)| range.start == 0 && *style != HighlightStyle::default()),
@@ -664,7 +671,7 @@ mod tests {
     fn a_source_highlighted_as_it_grows_ends_as_it_highlights_whole() {
         let line = "    let 名称: Vec<u32> = vec![1, 2, 3]; // a \"comment\"\n";
         let source = format!("fn main() {{\n{}}}\n", line.repeat(150));
-        let theme = HighlightTheme::default_dark();
+        let theme = HighlightTheme::dark(gpui::white());
         // Before streaming: a panic resuming would turn Rust off for good.
         let whole = highlight_source(&source, "rust", &theme);
         let highlight = |end: usize, previous: Option<&HighlightedSource>| {
@@ -695,7 +702,7 @@ mod tests {
     fn source_highlights_cover_utf8_ranges_and_preserve_unknown_language_text() {
         {
             let src = "fn ordinary() { let 名称 = \"中\"; }\n";
-            let theme = HighlightTheme::default_dark();
+            let theme = HighlightTheme::dark(gpui::white());
             let runs = highlight_source(src, "rust", &theme);
             let keyword_style = theme.style("keyword").expect("default theme has keywords");
 
@@ -722,7 +729,11 @@ mod tests {
         {
             let src = "some source";
             assert_eq!(
-                highlight_source(src, "unknown-language", &HighlightTheme::default_dark()),
+                highlight_source(
+                    src,
+                    "unknown-language",
+                    &HighlightTheme::dark(gpui::white())
+                ),
                 vec![(0..src.len(), HighlightStyle::default())]
             );
         }

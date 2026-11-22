@@ -1097,6 +1097,7 @@ impl ChatView {
             .connection_state()
             .is_connected();
         let mut delivery_rows = Vec::new();
+        let (padding_y, padding_x) = crate::material::user_bubble_padding(compact);
         for (key, text, failure, acknowledged) in deliveries {
             let retry_key = key.clone();
             let discard_key = key.clone();
@@ -1193,10 +1194,10 @@ impl ChatView {
                     .child(
                         div()
                             .max_w_3_4()
-                            .px(cx.theme().tokens.spacing.md)
-                            .py(cx.theme().tokens.spacing.xs)
+                            .px(padding_x)
+                            .py(padding_y)
                             .text_token(&cx.theme().tokens.typography.md)
-                            .rounded(crate::material::radius_composer(cx))
+                            .rounded(crate::material::radius_user_bubble())
                             .bg(cx.theme().foreground.opacity(0.08))
                             .text_color(text_color)
                             .child(text),

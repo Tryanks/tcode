@@ -6,17 +6,10 @@
 //! the window's label, the "resets in …" copy, the bar tint — is derived here
 //! so both surfaces stay in sync.
 
-use gpui::{App, Hsla, rgb};
+use gpui::{App, Hsla};
 use tcode_core::usage::{UsageWindow, UsageWindowKind};
 
 use crate::theme::ActiveTheme as _;
-
-/// The context meter's fill colors, shared with the usage bars so a usage row
-/// and the context ring read as the same instrument.
-pub(crate) const METER_BLUE: u32 = 0x3B82F6;
-pub(crate) const METER_RED: u32 = 0xEF4444;
-/// Amber fallback for themes without a `warning` role.
-const METER_AMBER: u32 = 0xF59E0B;
 
 /// The window's display label, suffixed with its scope when the window is a
 /// model-scoped sub-limit (e.g. "Weekly · Fable").
@@ -50,20 +43,15 @@ pub(crate) fn percent_label(pct: f32) -> String {
     format!("{}%", pct.clamp(0.0, 100.0).round() as u32)
 }
 
-/// Bar tint: blue until 75%, amber to 90%, red beyond.
+/// Bar tint: primary until 75%, warning to 90%, danger beyond.
 pub(crate) fn bar_color(pct: f32, cx: &App) -> Hsla {
+    let theme = cx.theme();
     if pct >= 90.0 {
-        rgb(METER_RED).into()
+        theme.danger
     } else if pct >= 75.0 {
-        let warning = cx.theme().warning;
-        // A theme that leaves `warning` fully transparent has no amber role.
-        if warning.a > 0.0 {
-            warning
-        } else {
-            rgb(METER_AMBER).into()
-        }
+        theme.warning
     } else {
-        rgb(METER_BLUE).into()
+        theme.primary
     }
 }
 

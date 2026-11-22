@@ -3,7 +3,8 @@ use std::{collections::HashMap, sync::Arc, sync::LazyLock, time::Duration};
 use gpui::{App, Global, Hsla, Rgba, SharedString, Window, WindowAppearance, px};
 use gpui_base::{
     ColorTokens, RadiusTokens, ScrollbarEntrance, ScrollbarMode, ScrollbarMotion, ScrollbarStyles,
-    ScrollbarTheme, SemanticThemeTokens, ThemeAppearance, TypographyTokens,
+    ScrollbarTheme, SemanticThemeTokens, SpacingTokens, TextStyleToken, ThemeAppearance,
+    TypographyTokens,
 };
 use serde::Deserialize;
 
@@ -62,6 +63,8 @@ pub struct Theme {
     pub link: Hsla,
     pub list_active: Hsla,
     pub list_hover: Hsla,
+    /// A merged pull request.
+    pub merged: Hsla,
     pub mode: ThemeMode,
     /// How far this palette is from the light theme toward the dark one: 0
     /// or 1 at rest, in between while the theme glides from one mode to the
@@ -81,7 +84,6 @@ pub struct Theme {
     pub secondary_active: Hsla,
     pub selection: Hsla,
     pub sidebar: Hsla,
-    pub sidebar_accent: Hsla,
     pub sidebar_foreground: Hsla,
     pub success: Hsla,
     pub success_foreground: Hsla,
@@ -171,9 +173,6 @@ struct ThemeConfig {
     /// Absent, the platform's monospace family gpui-base defaults to.
     #[serde(rename = "mono_font.family", default)]
     mono_font_family: Option<String>,
-    radius: f32,
-    #[serde(rename = "radius.lg")]
-    radius_lg: f32,
     colors: HashMap<String, String>,
 }
 
@@ -259,21 +258,12 @@ impl TryFrom<ThemeConfig> for Theme {
         colors.border = border;
         colors.input = input;
         colors.ring = ring;
-        // The scale gpui-kit derives from the same two theme-file keys.
-        let mut radius = RadiusTokens::default();
-        radius.sm = px(config.radius / 2.);
-        radius.md = px(config.radius);
-        radius.lg = px(config.radius_lg);
-        radius.xl = px(config.radius * 2.);
-        // Sizes and line heights are gpui-base's scale on purpose.
-        let mut typography = TypographyTokens::default();
         let font_family = interface_font(config.font_family);
-        typography.sans = font_family.clone().into();
-        typography.mono = mono.clone();
         let mut tokens = SemanticThemeTokens::default();
         tokens.colors = colors;
-        tokens.radius = radius;
-        tokens.typography = typography;
+        tokens.radius = radius_scale();
+        tokens.spacing = spacing_scale();
+        tokens.typography = type_scale(font_family.clone().into(), mono.clone());
 
         Ok(Self {
             accent,
@@ -285,9 +275,9 @@ impl TryFrom<ThemeConfig> for Theme {
             font_family: font_family.into(),
             foreground,
             highlight_theme: if mode.is_dark() {
-                HighlightTheme::default_dark()
+                HighlightTheme::dark(foreground)
             } else {
-                HighlightTheme::default_light()
+                HighlightTheme::light(foreground)
             },
             info: color("info.background")?,
             info_foreground: color("info.foreground")?,
@@ -295,6 +285,7 @@ impl TryFrom<ThemeConfig> for Theme {
             link: primary,
             list_active: color("list.active.background")?,
             list_hover: color("list.hover.background")?,
+            merged: color("merged")?,
             mode,
             darkness: if mode.is_dark() { 1. } else { 0. },
             mono_font_family: mono,
@@ -311,7 +302,6 @@ impl TryFrom<ThemeConfig> for Theme {
             secondary_active: secondary,
             selection: primary.alpha(0.3),
             sidebar: color("sidebar.background")?,
-            sidebar_accent: color("sidebar.accent.background")?,
             sidebar_foreground: color("sidebar.foreground")?,
             success: color("success.background")?,
             success_foreground: color("success.foreground")?,
@@ -322,6 +312,51 @@ impl TryFrom<ThemeConfig> for Theme {
             warning_foreground: color("warning.foreground")?,
         })
     }
+}
+
+/// Tcode's corner radii: chips, badges and inline code at `sm`; controls,
+/// buttons, inputs and code blocks at `md`; overlays at `lg`; the phone's
+/// sheet at `xl`.
+fn radius_scale() -> RadiusTokens {
+    let mut radius = RadiusTokens::default();
+    radius.none = px(0.);
+    radius.sm = px(6.);
+    radius.md = px(10.);
+    radius.lg = px(14.);
+    radius.xl = px(20.);
+    radius.full = px(9999.);
+    radius
+}
+
+fn spacing_scale() -> SpacingTokens {
+    let mut spacing = SpacingTokens::default();
+    spacing.xxs = px(2.);
+    spacing.xs = px(4.);
+    spacing.sm = px(8.);
+    spacing.md = px(12.);
+    spacing.lg = px(16.);
+    spacing.xl = px(24.);
+    spacing.xxl = px(32.);
+    spacing
+}
+
+fn type_scale(sans: SharedString, mono: SharedString) -> TypographyTokens {
+    let text = |size: f32, line_height: f32| {
+        let mut token = TextStyleToken::default();
+        token.size = px(size);
+        token.line_height = px(line_height);
+        token
+    };
+    let mut typography = TypographyTokens::default();
+    typography.sans = sans;
+    typography.mono = mono;
+    typography.xs = text(12., 16.);
+    typography.sm = text(14., 20.);
+    typography.md = text(16., 24.);
+    typography.lg = text(18., 28.);
+    typography.xl = text(20., 28.);
+    typography.mono_md = text(13., 20.);
+    typography
 }
 
 /// Initialize gpui-base behavior and tcode's application-owned theme.
