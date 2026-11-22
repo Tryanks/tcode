@@ -10,6 +10,7 @@
 //! services, MCP and option mapping, the standard `session/update` mapping and
 //! cancellation. What an agent family does differently is its [`Dialect`].
 
+use crate::write_journal::WriteJournal;
 use crate::{RewindFailure, RewindFailureReason};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
@@ -287,6 +288,9 @@ pub(crate) struct Launch {
 pub(crate) struct Established {
     pub(crate) session_id: acp::SessionId,
     pub(crate) resume: ResumeCursor,
+    /// The session asked for could not be resumed and this is a new one
+    /// ([`SessionHandle::started_anew`]).
+    pub(crate) anew: bool,
 }
 
 /// The canonical end of one prompt turn.
@@ -797,7 +801,7 @@ pub(crate) async fn start<D: Dialect>(
             AgentError::Spawn(format!("could not start the ACP session thread: {err}"))
         })?;
 
-    ready_rx.recv().await.map_err(|_| {
+    let started_anew = ready_rx.recv().await.map_err(|_| {
         AgentError::Protocol("ACP actor exited before reporting startup status".into())
     })??;
 
@@ -805,6 +809,7 @@ pub(crate) async fn start<D: Dialect>(
         provider,
         commands: commands_tx,
         events: events_rx,
+        started_anew,
     })
 }
 
@@ -934,7 +939,7 @@ async fn run_actor<D: Dialect>(
     opts: SessionOptions,
     commands: Receiver<SessionCommand>,
     events: Sender<AgentEvent>,
-    ready: Sender<Result<(), AgentError>>,
+    ready: Sender<Result<bool, AgentError>>,
 ) {
     let launch = match dialect.launch(&opts) {
         Ok(launch) => launch,
@@ -994,6 +999,12 @@ async fn run_actor<D: Dialect>(
         .detach();
 
     let mut state = State::new(provider, opts.cwd.clone());
+    if provider.caps().relayed_history {
+        state.journal = opts
+            .write_journal
+            .clone()
+            .map(|dir| Arc::new(Mutex::new(WriteJournal::open(dir))));
+    }
     state.owned_options = dialect.owned_config_options();
     let state = Arc::new(Mutex::new(state));
     let (turn_tx, turn_done) = smol::channel::unbounded::<TurnOutcome>();
@@ -1196,7 +1207,7 @@ async fn connected_actor<D: Dialect>(
     opts: &SessionOptions,
     commands: &Receiver<SessionCommand>,
     events: &Sender<AgentEvent>,
-    ready: &Sender<Result<(), AgentError>>,
+    ready: &Sender<Result<bool, AgentError>>,
     client: &Client,
     stderr_tail: &crate::process::StderrTail,
     io_done: &Receiver<String>,
@@ -1306,7 +1317,7 @@ async fn connected_actor<D: Dialect>(
         })
         .await;
     emit_provider_options(state, events, false).await;
-    if ready.send(Ok(())).await.is_err() {
+    if ready.send(Ok(established.anew)).await.is_err() {
         return Ok(Exit::Closed(None));
     }
     session_started.store(true, Ordering::Release);
@@ -1466,11 +1477,25 @@ async fn handle_command<D: Dialect>(
         } => {
             *turn_seq += 1;
             let id = format!("turn-{turn_seq}");
-            let (generation, instructions) = {
+            let (generation, instructions, checkpoint) = {
                 let mut state = state.lock_recover();
                 state.turn = Some(id.clone());
                 state.prompt_generation += 1;
-                (state.prompt_generation, state.instructions.clone())
+                // Tcode's own restore point, where the harness has none.
+                let checkpoint = state
+                    .options
+                    .provider
+                    .caps()
+                    .relayed_history
+                    .then(|| uuid::Uuid::new_v4().to_string());
+                if checkpoint.is_some() {
+                    state.checkpoint = checkpoint.clone();
+                }
+                (
+                    state.prompt_generation,
+                    state.instructions.clone(),
+                    checkpoint,
+                )
             };
 
             let request = acp::PromptRequest::new(
@@ -1486,6 +1511,14 @@ async fn handle_command<D: Dialect>(
                     turn_id: id.clone(),
                 })
                 .await;
+            if let Some(checkpoint_id) = checkpoint {
+                let _ = events
+                    .send(AgentEvent::TurnCheckpoint {
+                        turn_id: id.clone(),
+                        checkpoint_id,
+                    })
+                    .await;
+            }
             let turn_tx = turn_tx.clone();
             executor
                 .spawn(async move {
@@ -2377,6 +2410,12 @@ pub(crate) struct State {
     modes: Option<acp::SessionModeState>,
     /// [`SessionOptions::instructions`] while the session attached Tcode's MCP servers.
     instructions: Option<String>,
+    /// The thread's record of what its sessions write through Tcode, and the
+    /// restore point of the turn whose writes it takes: the latest sent, which
+    /// what the agent does on its own afterwards still belongs to
+    /// ([`crate::Caps::relayed_history`]).
+    journal: Option<Arc<Mutex<WriteJournal>>>,
+    checkpoint: Option<String>,
 }
 
 impl State {
@@ -2400,6 +2439,8 @@ impl State {
             next_turn: None,
             modes: None,
             instructions: None,
+            journal: None,
+            checkpoint: None,
         }
     }
 
@@ -3353,6 +3394,27 @@ impl Client {
                     format!("could not create {}: {err}", parent.display()),
                 )
             })?;
+        }
+        let kept = {
+            let state = self.state.lock_recover();
+            state.journal.clone().zip(state.checkpoint.clone())
+        };
+        if let Some((journal, checkpoint)) = kept {
+            let (path, content) = (path.clone(), args.content.clone());
+            let kept = crate::process::unblock(move || {
+                journal
+                    .lock_recover()
+                    .before_write(&checkpoint, &path, content.as_bytes())
+            })
+            .await;
+            // The write is the agent's to make either way; one the journal
+            // could not take is one a rewind leaves as it is.
+            if let Err(err) = kept {
+                log::warn!(
+                    "acp: could not keep what a write to {} replaces: {err}",
+                    self.state.lock_recover().cwd.join(&args.path).display()
+                );
+            }
         }
         // What the file held decides whether the write created or modified
         // it. One that cannot be read as text is left to the call's own

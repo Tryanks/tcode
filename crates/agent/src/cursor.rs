@@ -102,6 +102,7 @@ pub async fn list_models(
         processes: processes.clone(),
         clock: Default::default(),
         worktrees: Vec::new(),
+        write_journal: None,
     };
     let cursor = Cursor::new(&opts);
     acp_session::query(
@@ -316,6 +317,7 @@ impl Dialect for Cursor {
         Ok(Established {
             resume: ResumeCursor(json!({ "session_id": session_id.0.to_string() })),
             session_id,
+            anew: false,
         })
     }
 

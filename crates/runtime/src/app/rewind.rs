@@ -268,8 +268,131 @@ impl AppState {
         };
         match returns {
             Some(to) => self.begin_return(target_id, request, to, cx),
+            None if active.meta.provider.caps().relayed_history => {
+                self.begin_own_rewind(target_id, request, at.turn, cx)
+            }
             None => self.begin_rewind_request(target_id, request, cx),
         }
+    }
+
+    /// Where the thread's record of what its sessions wrote through Tcode is
+    /// kept ([`agent::write_journal`]): in Tcode's data, never the workspace.
+    pub(super) fn write_journal_dir(&self, session_id: &str) -> PathBuf {
+        self.store.root().join("write-journals").join(session_id)
+    }
+
+    /// The restore points of turn `turn` and every turn after it, whose
+    /// writes a restore to before `turn` takes back.
+    fn restore_points_from(active: &ActiveSession, turn: usize) -> Vec<String> {
+        active
+            .timeline
+            .turns
+            .iter()
+            .skip(turn)
+            .filter_map(|turn| turn.provider_checkpoint_id.clone())
+            .collect()
+    }
+
+    /// Make a rewind for a harness that has none
+    /// ([`agent::Caps::relayed_history`]), which is asked for nothing: the
+    /// files its sessions wrote through Tcode from the turn on are put back,
+    /// and for the conversation the thread leaves its session, the log being
+    /// cut as a harness's own rewind cuts it. The next message starts a
+    /// session anew and hands it what the cut left.
+    fn begin_own_rewind(
+        &mut self,
+        target_id: &str,
+        mut request: RewindRequest,
+        turn: usize,
+        cx: &mut HostCx,
+    ) -> Option<smol::channel::Receiver<AgentEvent>> {
+        let active = self.resident_mut(target_id)?;
+        let session_id = active.meta.id.clone();
+        let (waiter, answer) = smol::channel::bounded(1);
+        request.waiters.push(waiter);
+        let (checkpoint_id, mode) = (request.checkpoint_id.clone(), request.mode);
+        // A running turn goes on writing files and is the user's to stop.
+        let running = active.turn_in_flight || active.timeline.turn_running;
+        if !running && !active.queue.is_empty() {
+            active.queue_held = true;
+        }
+        active.idle_since = None;
+        let checkpoints = Self::restore_points_from(active, turn);
+        self.rewind_requests.insert(session_id.clone(), request);
+        if running {
+            let refused = AgentEvent::RewindFailed {
+                checkpoint_id,
+                mode,
+                failure: RewindFailure::new(RewindFailureReason::TurnRunning, None),
+            };
+            self.on_rewind_outcome(&session_id, refused, cx);
+            return Some(answer);
+        }
+        let dir = self.write_journal_dir(&session_id);
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let files = if mode.includes_files() {
+                let restored = host_cx
+                    .unblock(move || {
+                        agent::write_journal::WriteJournal::restore(&dir, &checkpoints)
+                    })
+                    .await;
+                Some(restored.map_err(|error| error.to_string()))
+            } else {
+                None
+            };
+            host_cx.enqueue(move |state, cx| {
+                state.finish_own_rewind(&session_id, checkpoint_id, mode, files, cx)
+            });
+        });
+        Some(answer)
+    }
+
+    fn finish_own_rewind(
+        &mut self,
+        session_id: &str,
+        checkpoint_id: String,
+        mode: RewindMode,
+        files: Option<Result<agent::RewindFiles, String>>,
+        cx: &mut HostCx,
+    ) {
+        // The thread was closed, or its provider shut down, meanwhile.
+        if !self.rewind_requests.contains_key(session_id) {
+            return;
+        }
+        let files = match files.transpose() {
+            Ok(files) => files,
+            Err(error) => {
+                let failed = AgentEvent::RewindFailed {
+                    checkpoint_id,
+                    mode,
+                    failure: RewindFailure::new(RewindFailureReason::Other, error),
+                };
+                self.on_rewind_outcome(session_id, failed, cx);
+                return;
+            }
+        };
+        if mode.includes_conversation()
+            && let Some(active) = self.resident_mut(session_id)
+        {
+            // The session holds the turns the cut takes out, and no harness
+            // of this kind takes them out of it.
+            active.shutdown_to_idle();
+            active.meta.resume_cursor = None;
+            active.meta.pending_fork = None;
+            active.meta.handoff_due = true;
+        }
+        let made = AgentEvent::RewindCompleted {
+            checkpoint_id,
+            mode,
+            prefill: None,
+            prefill_attachments: Vec::new(),
+            later_history: agent::LaterHistory::Truncated,
+            files,
+            incomplete: None,
+            undo_token: None,
+        };
+        self.on_rewind_outcome(session_id, made, cx);
     }
 
     /// Rewind to a message of a session a handoff left: the thread goes back
@@ -428,6 +551,25 @@ impl AppState {
             return answer;
         };
         let session_id = active.meta.id.clone();
+        if active.meta.provider.caps().relayed_history {
+            // Tcode's own rewind: the journal answers, and no harness is asked.
+            let checkpoints = if mode.includes_files() {
+                Self::restore_points_from(active, at.turn)
+            } else {
+                Vec::new()
+            };
+            let dir = self.write_journal_dir(&session_id);
+            let host_cx = cx.clone();
+            HostCx::spawn_detached(cx, async move {
+                let preview = host_cx
+                    .unblock(move || {
+                        agent::write_journal::WriteJournal::preview(&dir, &checkpoints)
+                    })
+                    .await;
+                let _ = reply.try_send(RewindPreviewResult::Ready(preview));
+            });
+            return answer;
+        }
         let live = match &active.runtime {
             Runtime::Live(commands) => Some(commands.clone()),
             Runtime::Idle | Runtime::Starting { .. } => None,

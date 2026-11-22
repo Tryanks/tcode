@@ -167,6 +167,7 @@ pub fn scripted_provider(provider: ProviderKind) -> ScriptedProvider {
                 provider,
                 commands,
                 events,
+                started_anew: false,
             })
         })
     }));

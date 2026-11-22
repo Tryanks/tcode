@@ -7,6 +7,7 @@ chat:
   retry_delivery: "再試行"
   discard_delivery: "破棄"
   relayed: "%{from} から %{to} に引き継ぎました"
+  handed_over: "%{to} は新しいセッションで続行し、これまでの会話を引き継ぎました"
   moved: "%{from} からここに移動しました。%{to} は新しいセッションで続行します"
   session_moved: "%{from} から %{to} に移動しました。同じセッションがそこで続行します"
   worktree_created: "Tcode が %{path} にワークツリー %{name} を作成しました"

@@ -444,6 +444,7 @@ async fn run_probe(
         processes: Default::default(),
         clock: Default::default(),
         worktrees: Vec::new(),
+        write_journal: None,
     };
     let handle = match start_session(provider, opts).await {
         Ok(handle) => handle,

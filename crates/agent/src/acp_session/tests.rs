@@ -55,6 +55,7 @@ fn a_start_its_agent_never_answers_ends_when_the_session_stops() {
         processes: processes.clone(),
         clock: Default::default(),
         worktrees: Vec::new(),
+        write_journal: None,
     };
     let start = smol::spawn(crate::start_session(ProviderKind::Acp, opts));
     asked.accept().unwrap();

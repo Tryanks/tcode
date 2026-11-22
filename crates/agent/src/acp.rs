@@ -70,6 +70,7 @@ pub async fn probe_catalog(
         processes: processes.clone(),
         clock: Default::default(),
         worktrees: Vec::new(),
+        write_journal: None,
     };
     let session_cwd = cwd.clone();
     let probed = acp_session::query(
@@ -211,6 +212,7 @@ impl Dialect for Registry {
                 "acp_agent_id": agent.id,
             })),
             session_id,
+            anew: false,
         })
     }
 

@@ -60,6 +60,8 @@ pub use process::{SessionProcesses, command, stop_every_tree, tree_output};
 #[cfg(feature = "process")]
 mod subagent_tail;
 mod tool_name;
+#[cfg(feature = "process")]
+pub mod write_journal;
 pub use tool_name::ToolName;
 mod tool_output;
 pub use tool_output::ToolOutput;
@@ -193,7 +195,32 @@ pub struct Caps {
     /// there ([`SessionOptions::cwd`]), or sent there while it runs
     /// ([`SessionCommand::MoveTo`]).
     pub session_move: bool,
+    /// The harness is maintained natively and has only what standard ACP
+    /// carries, which can neither cut nor copy a conversation, so Tcode makes
+    /// its rewinds and forks itself (CONTRIBUTING, Principle 1): Antigravity,
+    /// and no agent that merely connects over ACP. The harness is asked for
+    /// neither: a rewind takes back the files its sessions wrote through
+    /// Tcode ([`write_journal`]) and leaves the session for a new one, a fork
+    /// is a new session, and each is handed the conversation so far with the
+    /// next message ([`AgentEvent::ProviderRelay`]).
+    pub relayed_history: bool,
 }
+
+/// What Tcode's own rewind does ([`Caps::relayed_history`]). The files are
+/// those the sessions wrote through Tcode, each put back as its turn's first
+/// write found it; one changed outside the sessions since is listed first.
+const RELAYED_REWIND: RewindControl = RewindControl {
+    modes: &[
+        RewindMode::FilesAndConversation,
+        RewindMode::Conversation,
+        RewindMode::Files,
+    ],
+    first_turn_conversation: true,
+    steer_targets: false,
+    later_history: LaterHistory::Truncated,
+    preview: RewindPreviewKind::Conflicts,
+    restores_command_edits: false,
+};
 
 /// Where a session started from [`SessionOptions::resume`] goes on instead of
 /// where that session stands. A value the provider's [`Caps`] do not declare
@@ -212,8 +239,9 @@ pub enum ForkPoint {
     Branch { token: String },
 }
 
-/// What a harness's own rewind does. Tcode offers exactly this and never
-/// emulates a missing part with Git or transcript edits.
+/// What a rewind does in a thread of the harness: the harness's own, of which
+/// Tcode offers exactly this and emulates no missing part, or Tcode's for a
+/// harness that has none ([`Caps::relayed_history`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RewindControl {
     /// The scopes it restores, in the order the panel offers them.
@@ -412,6 +440,7 @@ impl ProviderKind {
                 account_login: true,
                 session_transfer: true,
                 session_move: false,
+                relayed_history: false,
             },
             ProviderKind::Codex => Caps {
                 supports_steering: true,
@@ -478,6 +507,7 @@ impl ProviderKind {
                 // `thread/resume {cwd}`, and `turn/start {cwd}` for the turn
                 // after a move and those after it (0.167.0).
                 session_move: true,
+                relayed_history: false,
             },
             ProviderKind::Acp => Caps {
                 supports_steering: false,
@@ -506,6 +536,7 @@ impl ProviderKind {
                 account_login: false,
                 session_transfer: false,
                 session_move: false,
+                relayed_history: false,
             },
             ProviderKind::Pi => Caps {
                 supports_steering: true,
@@ -554,6 +585,7 @@ impl ProviderKind {
                 account_login: false,
                 session_transfer: false,
                 session_move: false,
+                relayed_history: false,
             },
             ProviderKind::OpenCode => Caps {
                 supports_steering: true,
@@ -611,6 +643,7 @@ impl ProviderKind {
                 // `POST /session/{id}/move` (2.2.6), which the model's own
                 // `session_move` tool also calls.
                 session_move: true,
+                relayed_history: false,
             },
             ProviderKind::Cursor => Caps {
                 supports_steering: false,
@@ -643,6 +676,7 @@ impl ProviderKind {
                 account_login: false,
                 session_transfer: false,
                 session_move: false,
+                relayed_history: false,
             },
             ProviderKind::Grok => Caps {
                 supports_steering: true,
@@ -699,14 +733,15 @@ impl ProviderKind {
                 account_login: false,
                 session_transfer: false,
                 session_move: false,
+                relayed_history: false,
             },
             ProviderKind::Antigravity => Caps {
                 // `agy acp` steers a running turn when a second `session/prompt`
                 // arrives on the same session.
                 supports_steering: true,
-                supports_fork: false,
-                fork_at: false,
-                rewind: None,
+                supports_fork: true,
+                fork_at: true,
+                rewind: Some(RELAYED_REWIND),
                 manual_compaction: false,
                 goals: None,
                 per_turn_effort: false,
@@ -734,9 +769,13 @@ impl ProviderKind {
                     unmanaged: None,
                 },
                 instruction_channel: InstructionChannel::SessionAppend,
-                account_login: false,
+                // `agy acp --login` and ACP `logout`. Every `agy` shares the
+                // one sign-in: it has no config directory to keep another
+                // account in.
+                account_login: true,
                 session_transfer: false,
                 session_move: false,
+                relayed_history: true,
             },
         }
     }
@@ -1334,6 +1373,9 @@ pub struct SessionOptions {
     /// The worktrees Tcode made for the thread, which a resumed session may
     /// report it works in.
     pub worktrees: Vec<PathBuf>,
+    /// The directory of the thread's [`write_journal::WriteJournal`], for a
+    /// harness whose rewind Tcode makes ([`Caps::relayed_history`]).
+    pub write_journal: Option<PathBuf>,
     /// The host's time, which the session's waits on its harness read.
     #[cfg(feature = "process")]
     pub clock: Clock,
@@ -2546,6 +2588,10 @@ pub struct SessionHandle {
     pub provider: ProviderKind,
     pub commands: Sender<SessionCommand>,
     pub events: Receiver<AgentEvent>,
+    /// The harness could not go on in the session it was asked to resume and
+    /// started one anew, which holds none of the thread's conversation: the
+    /// next message hands it over ([`AgentEvent::ProviderRelay`]).
+    pub started_anew: bool,
 }
 
 #[cfg(feature = "process")]
@@ -2583,6 +2629,7 @@ where
         provider,
         commands,
         events,
+        started_anew: false,
     })
 }
 

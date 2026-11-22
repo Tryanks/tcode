@@ -468,6 +468,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         provider: ProviderKind::ClaudeCode,
         commands: cmd_tx,
         events: event_rx,
+        started_anew: false,
     })
 }
 

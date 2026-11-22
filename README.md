@@ -42,8 +42,13 @@ off.
 
 **Provider-native rewind.** Claude Code sessions expose Claude's own checkpoint
 options for restoring code, conversation, or both. Tcode forwards those native
-operations and records the confirmed result; it does not snapshot your Git
-working tree or synthesize rollback for providers that lack the capability.
+operations and records the confirmed result. Antigravity, which Tcode
+integrates natively though it speaks only standard ACP, has no rewind or fork,
+so Tcode makes them itself: it puts back the files the agent wrote through
+Tcode, exactly as each turn found them, and hands the conversation that is
+left to a new session, in the open. It never snapshots your Git working tree:
+what it keeps is what the agent overwrote, in Tcode's own data. Other ACP
+agents get what they offer and nothing made up for them.
 
 **Diffs, not scrollback.** Syntax-highlighted per-turn diffs in a resizable
 split, with a changed-files card on each turn.

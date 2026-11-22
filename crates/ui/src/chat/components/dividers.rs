@@ -103,6 +103,9 @@ pub(crate) fn relay_divider(
             from = dir.to_string_lossy(),
             to = to.display_name()
         ),
+        // The same harness in a session started anew: another account of
+        // it, or a rewind or fork Tcode made for a harness with neither.
+        None if from == to => crate::tr!("chat.handed_over", to = to.display_name()),
         None => crate::tr!(
             "chat.relayed",
             from = from.display_name(),

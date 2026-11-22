@@ -263,6 +263,7 @@ fn spawn_session(
         processes: processes.clone(),
         clock: Default::default(),
         worktrees: Vec::new(),
+        write_journal: None,
     };
     let start = smol::spawn(start_session(ProviderKind::Acp, opts));
     let (stream, _) = listener.accept().unwrap();

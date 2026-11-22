@@ -233,6 +233,8 @@ pub(super) struct PreparedExecution {
 pub(super) struct ProviderHandle {
     pub(super) commands: ProviderCommands,
     pub(super) events: smol::channel::Receiver<AgentEvent>,
+    /// [`agent::SessionHandle::started_anew`].
+    pub(super) started_anew: bool,
 }
 
 impl PreparedExecution {
@@ -256,6 +258,7 @@ impl PreparedExecution {
         Ok(ProviderHandle {
             commands: self.connect(handle.commands),
             events: handle.events,
+            started_anew: handle.started_anew,
         })
     }
 

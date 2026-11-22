@@ -41,6 +41,7 @@ fn options() -> SessionOptions {
         processes: Default::default(),
         clock: Default::default(),
         worktrees: Vec::new(),
+        write_journal: None,
     }
 }
 

@@ -179,7 +179,7 @@ pub async fn probe_provider(
             .await
             .as_deref()
             .and_then(parse_grok_models_auth),
-        ProviderKind::Antigravity => probe_antigravity_auth(&program, &env).await,
+        ProviderKind::Antigravity => probe_antigravity_auth(binary, launch_env, &env).await,
         // Authentication over ACP is surfaced by the session protocol.
         ProviderKind::Acp => None,
     };
@@ -266,7 +266,11 @@ fn env_configured(env: &[(String, String)], key: &str) -> Option<String> {
     }
 }
 
-async fn probe_antigravity_auth(program: &str, env: &[(String, String)]) -> Option<ProviderAuth> {
+async fn probe_antigravity_auth(
+    binary: PathBuf,
+    launch_env: LaunchEnv,
+    env: &[(String, String)],
+) -> Option<ProviderAuth> {
     if env_configured(env, "GEMINI_API_KEY").is_some() {
         return Some(ProviderAuth {
             status: AuthStatus::Authenticated,
@@ -283,51 +287,18 @@ async fn probe_antigravity_auth(program: &str, env: &[(String, String)]) -> Opti
             email: None,
         });
     }
-    let output = provider_command(program, env)
-        .args(["--print", "/usage", "--output-format", "json"])
-        .output()
+    let signed_in = agent::antigravity::signed_in(Some(binary), launch_env)
         .await
         .ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    parse_antigravity_usage_auth(output.status.success(), &stdout, &stderr)
-}
-
-fn parse_antigravity_usage_auth(success: bool, stdout: &str, stderr: &str) -> Option<ProviderAuth> {
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
-        if json.get("status").and_then(serde_json::Value::as_str) == Some("SUCCESS") {
-            return Some(ProviderAuth {
-                status: AuthStatus::Authenticated,
-                label: None,
-                email: None,
-            });
-        }
-        if let Some(error) = json.get("error").and_then(serde_json::Value::as_str)
-            && mentions_unauthenticated(error)
-        {
-            return Some(ProviderAuth {
-                status: AuthStatus::Unauthenticated,
-                label: None,
-                email: None,
-            });
-        }
-    }
-    if !success && (mentions_unauthenticated(stderr) || mentions_unauthenticated(stdout)) {
-        return Some(ProviderAuth {
-            status: AuthStatus::Unauthenticated,
-            label: None,
-            email: None,
-        });
-    }
-    None
-}
-
-fn mentions_unauthenticated(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.contains("authentication required")
-        || lower.contains("not authenticated")
-        || lower.contains("not signed in")
-        || lower.contains("unauthenticated")
+    Some(ProviderAuth {
+        status: if signed_in {
+            AuthStatus::Authenticated
+        } else {
+            AuthStatus::Unauthenticated
+        },
+        label: None,
+        email: None,
+    })
 }
 
 fn finalize_probe(

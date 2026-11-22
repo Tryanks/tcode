@@ -88,6 +88,11 @@ impl AppState {
         let meta = active.meta.clone();
         let settings = self.settings.clone();
         let launch_env = self.prepare_session_env(&meta, cx);
+        let write_journal = meta
+            .provider
+            .caps()
+            .relayed_history
+            .then(|| self.write_journal_dir(&meta.id));
         // The thread switched accounts since its session last ran: that session
         // is copied into this profile's home before the provider resumes it.
         let transfer = meta
@@ -176,6 +181,7 @@ impl AppState {
                 opts.instructions = instructions;
                 opts.processes = processes.clone();
                 opts.clock = clock.clone();
+                opts.write_journal = write_journal;
                 if transfer_failed.is_some() {
                     opts.resume = None;
                     opts.fork = None;
@@ -231,6 +237,15 @@ impl AppState {
                                 state.on_event_stream_ended(&pump_session, &pump_commands, cx);
                             });
                         });
+                        if handle.started_anew
+                            && let Some(resident) = state.resident_mut(&session_id)
+                        {
+                            // The session holds none of the conversation, which
+                            // the next message hands it.
+                            resident.meta.handoff_due = true;
+                            let meta = resident.meta.clone();
+                            state.persist_meta(&meta, cx);
+                        }
                         if let Some(resident) = state.resident_mut(&session_id) {
                             resident.runtime = Runtime::Live(commands.clone());
                             resident._pump = Some(pump);

@@ -592,10 +592,13 @@ impl ActiveSession {
     }
 
     /// The id and text of the message that opens the fresh provider session of a moved
-    /// thread, or of one whose native session could not be carried to its new account,
-    /// which carries the handoff; `None` until that session is live and a message can go.
+    /// thread, of one whose native session could not be carried to its new account, or of
+    /// one Tcode rewound or forked itself ([`SessionMeta::handoff_due`]), which carries the
+    /// handoff; `None` until that session is live and a message can go.
     pub(super) fn handoff_message(&self, now: SystemTime) -> Option<(u64, String)> {
-        if (self.meta.moved_from.is_none() && !self.session_transfer_failed())
+        if (self.meta.moved_from.is_none()
+            && !self.session_transfer_failed()
+            && !self.meta.handoff_due)
             || self.cwd_changed_while_live()
             || self.profile_changed_while_live()
         {

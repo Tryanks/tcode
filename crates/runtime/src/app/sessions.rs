@@ -1627,7 +1627,7 @@ impl AppState {
     ) -> ForkAvailability {
         if !meta.provider.caps().supports_fork {
             ForkAvailability::Unsupported
-        } else if meta.resume_cursor.is_none() {
+        } else if meta.resume_cursor.is_none() && !meta.handoff_due {
             ForkAvailability::Empty
         } else if resident.is_some_and(|session| session.turn_in_flight) {
             ForkAvailability::Running
@@ -1765,6 +1765,24 @@ impl AppState {
         // Persist the pruned last-visited map (ignore save errors — cosmetic).
         self.persist_settings(cx);
         let uploads = self.remove_thread_uploads(ids.to_vec(), cx);
+        let journals: Vec<PathBuf> = ids.iter().map(|id| self.write_journal_dir(id)).collect();
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            host_cx
+                .unblock(move || {
+                    for journal in journals {
+                        match std::fs::remove_dir_all(&journal) {
+                            Ok(()) => {}
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(error) => log::warn!(
+                                "could not remove a deleted thread's write journal {}: {error}",
+                                journal.display()
+                            ),
+                        }
+                    }
+                })
+                .await;
+        });
         for (deleted_id, root, cwd) in worktree_removals {
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {

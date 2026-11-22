@@ -80,7 +80,10 @@ pub fn start_login(
         child,
         codes,
         cancelled: false,
-        output: LoginOutput::default(),
+        output: LoginOutput {
+            code_prompt: provider.harness().login_code_prompt,
+            ..LoginOutput::default()
+        },
         errors: Vec::new(),
         pending: Default::default(),
         finished: false,
@@ -196,8 +199,9 @@ impl LoginRun {
     }
 
     fn failure(&self, status: &str) -> String {
-        last_line(&self.errors)
-            .or_else(|| last_line(&self.output.text))
+        let prompt = self.output.code_prompt;
+        last_line(&self.errors, prompt)
+            .or_else(|| last_line(&self.output.text, prompt))
             .unwrap_or_else(|| status.to_string())
     }
 }
@@ -214,13 +218,13 @@ async fn read_chunk(stream: &mut Option<impl futures_lite::AsyncRead + Unpin>) -
     }
 }
 
-/// The prompt has no trailing newline, so it is matched in the accumulated
-/// output rather than per line.
-const CODE_PROMPT: &str = "Paste code";
-
 /// The sign-in's stdout, read as it arrives.
 #[derive(Default)]
 struct LoginOutput {
+    /// [`agent::HarnessFacts::login_code_prompt`]. It may have no trailing
+    /// newline, so it is matched in the accumulated output rather than per
+    /// line.
+    code_prompt: Option<&'static str>,
     text: Vec<u8>,
     url_seen: bool,
     code_seen: bool,
@@ -253,7 +257,9 @@ impl LoginOutput {
             self.code_seen = true;
             events.push(LoginEvent::DeviceCode(code.to_string()));
         }
-        let prompts = text.matches(CODE_PROMPT).count();
+        let prompts = self
+            .code_prompt
+            .map_or(0, |prompt| text.matches(prompt).count());
         if prompts > self.prompts {
             self.prompts = prompts;
             events.push(LoginEvent::AwaitingCode);
@@ -277,13 +283,15 @@ fn is_device_code(line: &str) -> bool {
 
 /// The last non-empty line, without the code prompt that precedes it on the
 /// same line.
-fn last_line(output: &[u8]) -> Option<String> {
+fn last_line(output: &[u8], code_prompt: Option<&str>) -> Option<String> {
     let text = agent::strip_ansi(&String::from_utf8_lossy(output));
     text.lines()
-        .map(|line| match line.find(CODE_PROMPT) {
-            Some(start) => line[start..].split_once('>').map_or("", |(_, rest)| rest),
-            None => line,
-        })
+        .map(
+            |line| match code_prompt.and_then(|prompt| line.find(prompt)) {
+                Some(start) => line[start..].split_once('>').map_or("", |(_, rest)| rest),
+                None => line,
+            },
+        )
         .map(str::trim)
         .rfind(|line| !line.is_empty())
         .map(str::to_string)
@@ -295,6 +303,11 @@ pub async fn logout(
     binary: &Path,
     launch_env: &LaunchEnv,
 ) -> Result<(), String> {
+    if provider == ProviderKind::Antigravity {
+        return agent::antigravity::sign_out(Some(binary.to_path_buf()), launch_env.clone())
+            .await
+            .map_err(|error| error.to_string());
+    }
     let env = launch_env.pairs(provider);
     let output = provider_command(&binary.to_string_lossy(), &env)
         .args(provider.harness().logout_args)
@@ -304,7 +317,7 @@ pub async fn logout(
     if output.status.success() {
         return Ok(());
     }
-    Err(last_line(&output.stderr)
-        .or_else(|| last_line(&output.stdout))
+    Err(last_line(&output.stderr, None)
+        .or_else(|| last_line(&output.stdout, None))
         .unwrap_or_else(|| output.status.to_string()))
 }

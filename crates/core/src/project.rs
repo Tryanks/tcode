@@ -208,6 +208,12 @@ pub struct SessionMeta {
     /// hands the conversation to a fresh provider session in `cwd`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moved_from: Option<PathBuf>,
+    /// The thread's conversation is in no session of its harness: Tcode rewound or forked
+    /// it for a harness that does neither ([`agent::Caps::relayed_history`]), or its session
+    /// could not be gone on in. The next message starts a session anew and hands it the
+    /// conversation so far.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub handoff_due: bool,
     /// The provider profile (a built-in one by its id) whose home holds this thread's native
     /// session, after the thread switched to another account of the same provider and until
     /// the session starts there: the next start copies it into the current profile's home
@@ -464,6 +470,7 @@ impl SessionMeta {
             pending_fork: None,
             fork_origin: None,
             moved_from: None,
+            handoff_due: false,
             session_transfer_from: None,
             imported_from: None,
             option_selections: Vec::new(),

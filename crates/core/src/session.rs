@@ -651,6 +651,21 @@ pub struct Rewound {
     cut_steers: Option<(usize, Vec<(String, String)>)>,
 }
 
+/// Whether a handoff left a native session behind, which holds the turns
+/// before it and which the thread's harness cannot reach. One Tcode made
+/// inside a harness whose history it relays left none: there the thread's log
+/// is the conversation, rewound and forked whatever session ran a turn
+/// ([`agent::Caps::relayed_history`]). A move to another directory still
+/// leaves the files of the turns before it behind.
+fn relay_left_session(
+    from: agent::ProviderKind,
+    to: agent::ProviderKind,
+    moved_from: &Option<std::path::PathBuf>,
+    left: &Option<agent::LeftSession>,
+) -> bool {
+    left.is_some() || moved_from.is_some() || from != to || !from.caps().relayed_history
+}
+
 /// Where a fork through a finished turn stops ([`Timeline::fork_edge`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ForkEdge {
@@ -974,7 +989,16 @@ impl Timeline {
         self.relays = self
             .entries
             .iter()
-            .filter(|entry| matches!(entry.content, EntryContent::ProviderRelay { .. }))
+            .filter(|entry| match &entry.content {
+                EntryContent::ProviderRelay {
+                    from_provider,
+                    to_provider,
+                    moved_from,
+                    left,
+                    ..
+                } => relay_left_session(*from_provider, *to_provider, moved_from, left),
+                _ => false,
+            })
             .count();
     }
 
@@ -1115,14 +1139,20 @@ impl Timeline {
             EntryContent::ProviderRelay {
                 from_provider,
                 from_model,
+                to_provider,
+                moved_from,
                 left,
                 ..
-            } if found(entry.turn) => Some(LeftTurn {
-                relay_turn: entry.turn,
-                provider: *from_provider,
-                model: from_model.as_deref(),
-                session: left.as_ref(),
-            }),
+            } if found(entry.turn)
+                && relay_left_session(*from_provider, *to_provider, moved_from, left) =>
+            {
+                Some(LeftTurn {
+                    relay_turn: entry.turn,
+                    provider: *from_provider,
+                    model: from_model.as_deref(),
+                    session: left.as_ref(),
+                })
+            }
             _ => None,
         })
     }
@@ -1284,7 +1314,9 @@ impl Timeline {
             } => {
                 let turn = self.begin_user_turn();
                 let id = self.synthetic_id("relay", ts);
-                self.relays += 1;
+                if relay_left_session(*from_provider, *to_provider, moved_from, left) {
+                    self.relays += 1;
+                }
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
                     content: EntryContent::ProviderRelay {

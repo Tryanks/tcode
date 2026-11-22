@@ -2108,6 +2108,7 @@ pub(super) fn session_options(
             .into_iter()
             .chain(meta.other_worktrees.iter().map(|owned| owned.path.clone()))
             .collect(),
+        write_journal: None,
         processes: Default::default(),
         clock: Default::default(),
     })
