@@ -392,12 +392,13 @@ pub use wire::{
 // FavoriteModel::Row and ToggleFavoriteModel gain acp_agent_id so ACP models
 // can be starred per agent.
 // ProviderKind gains Antigravity (wire name `antigravity`), which an older peer
-// cannot decode because ProviderKind has no unknown fallback; SelectOption gains
-// optional per-choice apply timing.
+// cannot decode because ProviderKind has no unknown fallback.
 // Settings gains visualize, with the visualize_enabled patch.
 // A command output frame holds the output's last rows and no history, and
 // its lines_evicted counts every row before them.
-pub const PROTOCOL_VERSION: u32 = 31;
+//
+// Version 32 (v0.4.7): SelectOption gains optional per-choice apply timing.
+pub const PROTOCOL_VERSION: u32 = 32;
 
 #[cfg(test)]
 mod tests;
