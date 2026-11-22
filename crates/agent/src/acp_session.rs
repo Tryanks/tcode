@@ -2570,6 +2570,23 @@ impl State {
         self.turn.as_deref()
     }
 
+    /// Whether a permission or question the agent asked is unanswered.
+    pub(crate) fn awaiting_user(&self) -> bool {
+        !self.approvals.is_empty() || !self.inputs.is_empty()
+    }
+
+    /// Whether a tool call the agent last spoke of in the open turn runs on.
+    pub(crate) fn tool_running(&self) -> bool {
+        self.turn.is_some()
+            && self.tools.values().any(|tool| {
+                tool.turn == self.turn
+                    && matches!(
+                        tool.status,
+                        acp::ToolCallStatus::Pending | acp::ToolCallStatus::InProgress
+                    )
+            })
+    }
+
     /// The latest `usage_update` context figure.
     pub(crate) fn usage(&self) -> Option<TokenUsage> {
         self.usage

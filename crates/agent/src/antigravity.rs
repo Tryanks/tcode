@@ -8,6 +8,7 @@
 pub(crate) mod plugins;
 mod record;
 mod subagents;
+mod watchdog;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -346,6 +347,10 @@ struct Antigravity {
     spawned_subagents: Mutex<HashMap<String, subagents::SpawnedSubagent>>,
     /// Control channel for the session's background subagent/proactive watcher.
     watcher: Mutex<Option<Sender<subagents::WatcherCommand>>>,
+    /// When the agent was last heard from in the open turn ([`watchdog`]),
+    /// on the host's clock the session started with.
+    watchdog: Arc<watchdog::Watchdog>,
+    clock: Mutex<Option<crate::Clock>>,
 }
 
 #[derive(Clone)]
@@ -633,6 +638,26 @@ impl Dialect for Antigravity {
             }
         }
 
+        *self.clock.lock().unwrap_or_else(|held| held.into_inner()) = Some(opts.clock.clone());
+        let watchdog = watchdog::run(
+            self.watchdog.clone(),
+            setup.state.clone(),
+            self.proactive.clone(),
+            setup.events.clone(),
+            opts.processes.clone(),
+            opts.clock.clone(),
+        );
+        // On the session's connection, as the watcher is.
+        if let Err(err) = setup.connection.spawn(async move {
+            watchdog.await;
+            Ok(())
+        }) {
+            log::warn!(
+                "antigravity: could not watch the session for a silent turn: {}",
+                describe(&err)
+            );
+        }
+
         Ok(Established {
             resume: ResumeCursor(json!({
                 "session_id": session_id.0.to_string(),
@@ -649,6 +674,14 @@ impl Dialect for Antigravity {
     ) -> Vec<AgentEvent> {
         if state.loading() {
             return Vec::new();
+        }
+        if let Some(clock) = self
+            .clock
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .as_ref()
+        {
+            self.watchdog.hear(clock.now());
         }
 
         let mut events = Vec::new();

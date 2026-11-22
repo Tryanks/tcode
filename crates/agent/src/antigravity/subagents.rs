@@ -74,6 +74,9 @@ pub(super) enum WatcherCommand {
 pub(super) struct ProactiveTracker {
     pub(super) active: Option<ActiveProactive>,
     pub(super) seen: Option<i64>,
+    /// Whether a subagent of the session runs, as the watcher last found;
+    /// the parent says nothing while one works ([`super::watchdog`]).
+    pub(super) subagents_running: bool,
 }
 
 pub(super) struct ActiveProactive {
@@ -825,6 +828,7 @@ pub(super) async fn run_watcher(
         {
             let mut state = acp_state.lock().unwrap_or_else(|held| held.into_inner());
             let mut tracker = proactive.lock().unwrap_or_else(|held| held.into_inner());
+            tracker.subagents_running = watcher.has_active_subagents();
             if let Some(step) = synced_step
                 && tracker.seen.is_none_or(|seen| step > seen)
             {
