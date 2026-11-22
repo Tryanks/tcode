@@ -1509,7 +1509,7 @@ impl AppShell {
         let host = store.read(cx).host_key();
         self.reconcile_panes(store, cx);
         if let Some(link) = self.links.iter_mut().find(|link| link.key() == host)
-            && link.attention.update(store.read(cx), cx)
+            && link.attention.update(store, cx)
         {
             crate::attention::request(window);
         }

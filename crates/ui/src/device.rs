@@ -232,6 +232,14 @@ impl DevicePreferences {
         Self::update(cx, |saved| saved.remote_attachment_limit_mib = limit);
     }
 
+    pub(crate) fn system_notifications(cx: &App) -> bool {
+        Self::saved(cx).is_some_and(|saved| saved.system_notifications)
+    }
+
+    pub(crate) fn set_system_notifications(enabled: bool, cx: &mut App) {
+        Self::update(cx, |saved| saved.system_notifications = enabled);
+    }
+
     /// The width the user dragged a right panel to, in points.
     pub(crate) fn right_panel_width(cx: &App) -> Option<u32> {
         Self::saved(cx)?.right_panel_width
@@ -335,8 +343,8 @@ impl DevicePreferences {
         });
     }
 
-    /// Restore this device's theme, language, name, attachment limit and
-    /// panel width to their defaults; its sidebar, workspace and window are
+    /// Restore this device's theme, language, name, attachment limit,
+    /// notifications and panel width to their defaults; its sidebar, workspace and window are
     /// kept.
     pub(crate) fn restore_defaults(window: &mut Window, cx: &mut App) {
         Self::update(cx, |saved| {

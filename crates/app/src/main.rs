@@ -797,6 +797,9 @@ fn main() {
     // or a launch of the running app from Finder.
     application.on_reopen(MainWindow::show);
     application.with_assets(assets::Assets).run(move |cx| {
+        // The bundle identifier: Windows posts system notifications under
+        // it as the AppUserModelID, and Linux names the sender by the name.
+        cx.set_app_identity("com.tryanks.tcode", "Tcode");
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let application_fonts: Vec<Cow<'static, [u8]>> = vec![
             Cow::Borrowed(assets::DM_SANS),

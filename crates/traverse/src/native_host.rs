@@ -275,6 +275,7 @@ impl ClientHost for NativeClientHost {
             prefs["sidebar_layout"] = serde_json::json!(preferences.sidebar_layout);
             prefs["window_size"] = serde_json::json!(preferences.window_size);
             prefs["window_maximized"] = serde_json::json!(preferences.window_maximized);
+            prefs["system_notifications"] = serde_json::json!(preferences.system_notifications);
             prefs["workspace"] = serde_json::json!(preferences.workspace);
         })
     }
@@ -897,6 +898,7 @@ mod tests {
             sidebar_layout: Some(SidebarLayout::Grouped),
             window_size: Some((1280, 900)),
             window_maximized: true,
+            system_notifications: true,
             workspace: Some(tcode_client::host::WorkspacePreference {
                 scope: Some(tcode_client::host::WorkspaceScope::Group {
                     group_id: "home".into(),
@@ -943,6 +945,8 @@ mod tests {
         );
         assert_eq!(saved["window_maximized"], true);
         assert!(host.load_preferences().unwrap().window_maximized);
+        assert_eq!(saved["system_notifications"], true);
+        assert!(host.load_preferences().unwrap().system_notifications);
         assert_eq!(saved["sidebar_collapsed"], true);
         assert_eq!(saved["sidebar_layout"], "grouped");
         assert_eq!(

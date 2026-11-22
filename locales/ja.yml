@@ -1,6 +1,8 @@
 app:
   name: "Tcode"
   window_menu: "ウィンドウ"
+attention:
+  waiting: "%{harness} があなたの判断を待っています。"
 chat:
   sending: "送信中…"
   waiting_connection: "接続を待っています…"
@@ -581,6 +583,9 @@ settings:
   remote_attachment_limit:
     title: "インターネット経由の添付ファイルの上限（MB）"
     description: "これより大きい画像は、インターネット経由で直接送信する前に確認し、リレー経由では送信しません。ローカルネットワークでの接続には上限はありません。"
+  system_notifications:
+    title: "システム通知"
+    description: "Tcode のウィンドウがアクティブでないときにスレッドが承認待ちになると、システム通知も表示します。通知をクリックするとそのスレッドが開きます。"
   word_wrap:
     title: "差分の折り返し"
     description: "差分パネルの折り返し切り替えのデフォルト値です。"
