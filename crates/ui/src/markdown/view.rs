@@ -360,10 +360,13 @@ impl Element for MarkdownView {
         request_layout.0.read(cx).register_edges(cx);
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         if let Some(membership) = &request_layout.0.read(cx).selection {
+            let state = request_layout.0.read(cx);
             membership.document.read(cx).register_participant(
                 membership.entry,
                 bounds,
-                request_layout.0.downgrade(),
+                request_layout.0.entity_id(),
+                &state.focus_handle,
+                &state.runs,
             );
         }
         MarkdownViewPrepaintState { hitbox }
@@ -476,7 +479,7 @@ mod tests {
                     views
                         .iter()
                         .enumerate()
-                        .map(|(entry, view)| (entry as u64, view.read(cx).parsed_root()))
+                        .map(|(entry, view)| (entry as u64, view.read(cx).parsed_root() as _))
                         .filter(|(entry, _)| range.contains(entry))
                         .collect()
                 }))

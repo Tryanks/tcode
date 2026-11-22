@@ -32,7 +32,7 @@ mod mermaid;
 pub(crate) mod nodes;
 pub(crate) mod parse;
 mod render;
-mod selection;
+pub(crate) mod selection;
 mod state;
 mod stream_fade;
 mod utils;
@@ -48,7 +48,8 @@ pub use view::{MarkdownView, MenuExtension};
 
 pub(super) const CONTEXT: &str = "MarkdownView";
 
-/// Register Markdown select-all bindings. Copying is the selection area's.
+/// Register the select-all bindings of what a document selects in. Copying
+/// is the selection area's.
 pub fn init(cx: &mut App) {
     cx.text_system()
         .add_fonts(vec![std::borrow::Cow::Borrowed(
@@ -60,5 +61,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-a", SelectAll, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-a", SelectAll, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-a", SelectAll, Some(crate::html::CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-a", SelectAll, Some(crate::html::CONTEXT)),
     ]);
 }

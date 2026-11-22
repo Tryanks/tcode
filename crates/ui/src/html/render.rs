@@ -7,8 +7,8 @@ use std::ops::Range;
 use gpui::{
     AnyElement, App, DefiniteLength, HighlightStyle, Hsla, InteractiveElement as _,
     IntoElement as _, Length, ObjectFit, Overflow, ParentElement as _,
-    StatefulInteractiveElement as _, StrikethroughStyle, Styled as _, StyledImage as _, StyledText,
-    TextAlign, UnderlineStyle, div, img, px, relative,
+    StatefulInteractiveElement as _, StrikethroughStyle, Styled as _, StyledImage as _, TextAlign,
+    UnderlineStyle, div, img, px, relative,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -18,6 +18,7 @@ use super::style::{
     WhiteSpaceMode,
 };
 use super::svg::{MediaSlots, RasterKey, RasterState};
+use super::text::{PageText, TextSink};
 use super::{Computed, HtmlState, PictureOf};
 use crate::scroll::ScrollableElement as _;
 use crate::theme::{ActiveTheme as _, Theme};
@@ -48,6 +49,8 @@ pub(crate) struct Frame {
     pub(crate) wanted: Vec<Wanted>,
     /// Every drawing the frame shows or waits for.
     pub(crate) used: HashSet<RasterKey>,
+    /// The text the frame draws.
+    pub(crate) text: PageText,
 }
 
 struct RenderCtx<'a> {
@@ -57,6 +60,7 @@ struct RenderCtx<'a> {
     theme: &'a Theme,
     viewport_width: f32,
     frame: Frame,
+    text: TextSink,
 }
 
 pub(crate) fn render_document(
@@ -74,6 +78,7 @@ pub(crate) fn render_document(
         theme: cx.theme(),
         viewport_width,
         frame: Frame::default(),
+        text: TextSink::selecting(state.selecting()),
     };
 
     let children = render_children(&doc.roots, root_style, None, &mut ctx, cx);
@@ -86,6 +91,7 @@ pub(crate) fn render_document(
         .children(children)
         .children(left_out_notes(state, computed, cx));
 
+    ctx.frame.text = ctx.text.text;
     (root.into_any_element(), ctx.frame)
 }
 
@@ -154,7 +160,11 @@ fn render_children(
                     if !normalized.trim().is_empty() {
                         let transformed =
                             apply_text_transform(&normalized, parent_style.text_transform);
-                        out.push(text_box(&transformed).child(transformed).into_any_element());
+                        out.push(
+                            text_box(&transformed)
+                                .child(ctx.text.run(transformed, Vec::new()))
+                                .into_any_element(),
+                        );
                     }
                 } else {
                     inline_run.push(cid);
@@ -407,7 +417,9 @@ fn render_link_element(
     cx: &App,
 ) -> AnyElement {
     let href = el.attr("href").and_then(safe_href);
+    let outer = ctx.text.enter_link();
     let children = render_children(&ctx.doc.nodes[node_id].children, style, None, ctx, cx);
+    ctx.text.leave(outer);
     let mut node = h_flex().items_center().flex_wrap();
     style.apply_to(node.style(), ctx.viewport_width);
     if matches!(style.display, DisplayKind::Inline) {
@@ -419,10 +431,22 @@ fn render_link_element(
         return node.into_any_element();
     };
     let shown = url.clone();
+    let document = ctx
+        .text
+        .selecting
+        .as_ref()
+        .map(|selecting| selecting.membership.document.clone());
     node.id(("html-link", node_id))
         .relative()
         .cursor_pointer()
         .on_click(move |_, _, cx| {
+            // A drag that selected the link's text ends on it too.
+            if document
+                .as_ref()
+                .is_some_and(|document| document.read(cx).has_selection())
+            {
+                return;
+            }
             cx.stop_propagation();
             cx.open_url(&url);
         })
@@ -737,6 +761,7 @@ fn render_table(
 
     let row_count = rows.len();
     for (row_idx, (rid, row_style, is_head)) in rows.into_iter().enumerate() {
+        let outer_row = ctx.text.enter_row();
         let mut row_div = h_flex().w_full().min_w_0().items_stretch();
         row_style.apply_to(row_div.style(), ctx.viewport_width);
         row_div.style().display = Some(gpui::Display::Flex);
@@ -771,11 +796,14 @@ fn render_table(
                 } else {
                     cell_div.style().flex_shrink = Some(0.0);
                 }
+                let outer_cell = ctx.text.enter_cell();
                 let children =
                     render_children(&ctx.doc.nodes[cell_id].children, cell_style, None, ctx, cx);
+                ctx.text.leave(outer_cell);
                 row_div = row_div.child(cell_div.children(children));
             }
         }
+        ctx.text.leave(outer_row);
         table = table.child(row_div);
     }
 
@@ -838,12 +866,11 @@ fn render_inline_run(
             return None;
         }
         let styled = text_box(&text).w_full().min_w_0();
-        let styled = if highlights.is_empty() {
-            styled.child(text)
-        } else {
-            styled.child(StyledText::new(text).with_highlights(highlights))
-        };
-        return Some(styled.into_any_element());
+        return Some(
+            styled
+                .child(ctx.text.run(text, highlights))
+                .into_any_element(),
+        );
     }
 
     // Rich inline flow (contains badges, inline-blocks, links, inline SVGs, etc.)
@@ -854,19 +881,26 @@ fn render_inline_run(
         _ => {}
     }
     let mut any_visible = false;
+    let outer = ctx.text.enter_flow();
     for &nid in nodes {
         match &ctx.doc.nodes[nid].kind {
             NodeKind::Text(t) => {
                 let norm = normalize_text(t, parent_style.white_space);
-                if !norm.trim().is_empty() {
+                if norm.trim().is_empty() {
+                    if !norm.is_empty() {
+                        ctx.text.space();
+                    }
+                } else {
                     let transformed = apply_text_transform(&norm, parent_style.text_transform);
-                    row = row.child(text_box(&transformed).child(transformed));
+                    row = row
+                        .child(text_box(&transformed).child(ctx.text.run(transformed, Vec::new())));
                     any_visible = true;
                 }
             }
             NodeKind::Element(el) => {
                 if el.tag == "br" {
                     row = row.child(div().w(relative(1.0)).h(px(0.0)));
+                    ctx.text.line_break();
                     any_visible = true;
                     continue;
                 }
@@ -880,6 +914,7 @@ fn render_inline_run(
             }
         }
     }
+    ctx.text.leave(outer);
     any_visible.then(|| row.into_any_element())
 }
 

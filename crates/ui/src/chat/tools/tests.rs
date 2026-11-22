@@ -1056,6 +1056,59 @@ fn a_shortened_commands_copy_output_copies_whole(cx: &mut TestAppContext) {
     thread.shutdown(cx);
 }
 
+/// A selection runs from a reply's text into the page of the visualization
+/// under it, and Copy takes the page as it reads: a line's boxes spaced as
+/// the page spaces them, a table's cells apart by tabs.
+#[gpui::test]
+fn a_selection_runs_from_a_reply_through_a_visualization(cx: &mut TestAppContext) {
+    let html = "<p>Build <a href=\"https://example.com\">status</a> <b>green</b></p>\
+                <table><tr><th>Step</th><th>Took</th></tr>\
+                <tr><td>Compile</td><td>41 s</td></tr></table>";
+    let item = |id: &str, content: serde_json::Value| {
+        serde_json::json!({ "ts": 2_000,
+            "event": { "type": "item_completed", "id": id, "content": content } })
+    };
+    let log = [
+        serde_json::json!({ "ts": 1_000, "event": { "type": "turn_started", "turn_id": "t" } }),
+        item(
+            "user",
+            serde_json::json!({ "kind": "user_message", "text": "How did it go?" }),
+        ),
+        item(
+            "reply",
+            serde_json::json!({ "kind": "assistant_message", "text": "The run:" }),
+        ),
+        item(
+            "page",
+            serde_json::json!({ "kind": "tool_call", "name": "mcp__tcode_visualize__visualize",
+                "input": { "title": "Run", "html": html },
+                "output": "{\"rendered\":true}", "status": "completed" }),
+        ),
+        serde_json::json!({ "ts": 3_000, "event": { "type": "turn_completed", "turn_id": "t",
+            "status": "completed", "usage": null } }),
+    ]
+    .map(|line| line.to_string())
+    .join("\n");
+    let (thread, cx) = StoredThread::open(cx, &log, 1_024.);
+    let reply = cx.debug_bounds("markdown-block-0").expect("the reply");
+    let page = cx.debug_bounds("visualize-page-page").expect("the page");
+    let from = reply.origin + gpui::point(px(1.), px(1.));
+    let to = page.bottom_right() - gpui::point(px(1.), px(1.));
+    cx.simulate_mouse_down(from, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(to, Some(gpui::MouseButton::Left), Modifiers::default());
+    cx.simulate_mouse_up(to, gpui::MouseButton::Left, Modifiers::default());
+    draw_settled(cx);
+    cx.dispatch_action(gpui_base::input::Copy);
+    let copied = cx
+        .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+        .unwrap_or_default();
+    assert_eq!(
+        copied,
+        "The run:\nBuild status green\nStep\tTook\nCompile\t41 s"
+    );
+    thread.shutdown(cx);
+}
+
 fn titled(title: &str, error: Option<&str>) -> Read {
     Read {
         verb: None,

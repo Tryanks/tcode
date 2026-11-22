@@ -342,24 +342,29 @@ impl TimelineView {
         cx.notify();
     }
 
-    /// Make each resident message the selection entry at its index in the
-    /// timeline.
+    /// Make each resident message, and each resident visualization's page,
+    /// the selection entry at its index in the timeline.
     fn place_messages_in_selection(&self, cx: &mut Context<Self>) {
-        let places = self
+        let (places, pages) = self
             .workspace_store
             .read(cx)
             .with_timeline_for(
                 self.session_id.as_deref(),
                 |timeline| {
-                    timeline
-                        .entries
-                        .iter()
-                        .enumerate()
+                    let entries = || timeline.entries.iter().enumerate();
+                    let places = entries()
                         .filter_map(|(index, entry)| {
                             let md = self.md_states.get(&entry.id)?;
                             Some((md.state.clone(), index as u64))
                         })
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    let pages = entries()
+                        .filter_map(|(index, entry)| {
+                            let visual = self.visuals.get(&entry.id)?;
+                            Some((visual.state.clone(), index as u64))
+                        })
+                        .collect::<Vec<_>>();
+                    (places, pages)
                 },
                 cx,
             )
@@ -368,6 +373,13 @@ impl TimelineView {
         // it, which builds it again: only a message moved in the
         // selection's order is.
         for (state, entry) in places {
+            if !state.read(cx).is_selection_entry(&self.selection, entry) {
+                state.update(cx, |state, cx| {
+                    state.set_selection_entry(&self.selection, entry, cx)
+                });
+            }
+        }
+        for (state, entry) in pages {
             if !state.read(cx).is_selection_entry(&self.selection, entry) {
                 state.update(cx, |state, cx| {
                     state.set_selection_entry(&self.selection, entry, cx)
@@ -551,6 +563,25 @@ fn entry_markdown(entry: &TimelineEntry) -> Option<String> {
 /// The transcript's selection document: its entries are the messages at
 /// their timeline indices, read from their resident Markdown when they have
 /// one and parsed from the timeline when they are not resident.
+impl TimelineView {
+    /// The text of the page the visualization `entry` draws, resident or
+    /// not: a page read from a file is held only while it is resident.
+    fn page_text(&self, entry: &TimelineEntry, cx: &App) -> Option<Rc<crate::html::PageText>> {
+        let width = self
+            .visual_width()
+            .unwrap_or(crate::material::CHAT_CONTENT_MAX_WIDTH);
+        if let Some(visual) = self.visuals.get(&entry.id) {
+            return Some(visual.state.read(cx).page_text(width, cx));
+        }
+        match tools::visualize::card(entry)?.page {
+            tools::visualize::Page::Inline(html) => {
+                Some(crate::html::HtmlState::new(html).page_text(width, cx))
+            }
+            tools::visualize::Page::File(_) => None,
+        }
+    }
+}
+
 pub(in crate::chat) fn transcript_selection(
     timeline: gpui::WeakEntity<TimelineView>,
     cx: &mut App,
@@ -574,16 +605,20 @@ pub(in crate::chat) fn transcript_selection(
                             .skip(start)
                             .take(end.saturating_sub(start) + 1)
                             .filter_map(|(index, entry)| {
-                                let root = match chat.md_states.get(&entry.id) {
-                                    Some(md) => md.state.read(cx).parsed_root(),
-                                    None => Rc::new(
-                                        crate::markdown::parse::parse_document(&entry_markdown(
-                                            entry,
-                                        )?)
-                                        .root,
-                                    ),
-                                };
-                                Some((index as u64, root))
+                                let text: Rc<dyn crate::markdown::selection::EntryText> =
+                                    if let Some(md) = chat.md_states.get(&entry.id) {
+                                        md.state.read(cx).parsed_root()
+                                    } else if let Some(page) = chat.page_text(entry, cx) {
+                                        page
+                                    } else {
+                                        Rc::new(
+                                            crate::markdown::parse::parse_document(
+                                                &entry_markdown(entry)?,
+                                            )
+                                            .root,
+                                        )
+                                    };
+                                Some((index as u64, text))
                             })
                             .collect()
                     },

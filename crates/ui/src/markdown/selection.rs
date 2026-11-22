@@ -1,5 +1,7 @@
 //! Text selection across one document: a chat transcript, or a standalone
-//! Markdown view such as a pull request comment.
+//! Markdown view such as a pull request comment. What a document selects in
+//! is the text its views paint: a reply's Markdown, and a visualization's
+//! page.
 //!
 //! gpui-base's window text selection serves the whole window, and that reach
 //! is what a transcript cannot live with: every left press anywhere in the
@@ -15,11 +17,12 @@
 use std::{cell::RefCell, ops::RangeInclusive, rc::Rc};
 
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, ClipboardItem, Context, Entity, EntityId, Half as _,
-    Hitbox, HitboxBehavior, InteractiveElement as _, IntoElement, LongPressEvent, Modifiers,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels,
-    PlatformInput, Point, RenderOnce, ScrollDelta, ScrollEvent, Styled as _, TextLayout,
-    TouchPhase, WeakEntity, Window, canvas, div, point, px,
+    AnyElement, App, AppContext as _, BorderStyle, Bounds, ClipboardItem, Context, Edges, Entity,
+    EntityId, FocusHandle, Half as _, Hitbox, HitboxBehavior, InteractiveElement as _, IntoElement,
+    LongPressEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement as _, Pixels, PlatformInput, Point, RenderOnce, ScrollDelta, ScrollEvent,
+    SharedString, Styled as _, TextLayout, TouchPhase, WeakEntity, Window, canvas, div, point, px,
+    quad,
 };
 use gpui_base::{GlobalState, SelectionEdge};
 
@@ -27,6 +30,7 @@ use super::{
     nodes::{BlockNode, TextPosition},
     state::MarkdownState,
 };
+use crate::theme::ActiveTheme as _;
 use crate::touch_selection::{EditMenuItem, TouchSelectionLayout, TouchSelectionOverlay};
 
 /// A position in one entry of a document. Entries are numbered in the order
@@ -84,9 +88,97 @@ pub(crate) fn render_path(path: &str) -> Rc<[u32]> {
         .collect()
 }
 
-/// The parsed text of the entries a document holds in `range`, in order,
-/// for copying text that is not on screen.
-pub(crate) type EntryNodes = Rc<dyn Fn(RangeInclusive<u64>, &App) -> Vec<(u64, Rc<BlockNode>)>>;
+/// The text of one entry of a document, by the positions its runs are
+/// painted at.
+pub(crate) trait EntryText {
+    /// The text from `start` to `end` as a reader would paste it.
+    fn text_between(&self, start: &TextPosition, end: &TextPosition) -> String;
+    /// The positions before the entry's first character and after its last.
+    fn extent(&self) -> Option<(TextPosition, TextPosition)>;
+    /// The whole text of the segment at `path` and `line`.
+    fn segment_text(&self, path: &[u32], line: u32) -> Option<String>;
+}
+
+impl EntryText for BlockNode {
+    fn text_between(&self, start: &TextPosition, end: &TextPosition) -> String {
+        BlockNode::text_between(self, start, end)
+    }
+
+    fn extent(&self) -> Option<(TextPosition, TextPosition)> {
+        BlockNode::extent(self)
+    }
+
+    fn segment_text(&self, path: &[u32], line: u32) -> Option<String> {
+        BlockNode::segment_text(self, path, line)
+    }
+}
+
+/// The text of the entries a document holds in `range`, in order, for
+/// copying text that is not on screen.
+pub(crate) type EntryNodes = Rc<dyn Fn(RangeInclusive<u64>, &App) -> Vec<(u64, Rc<dyn EntryText>)>>;
+
+/// A run of text as it was painted, for hit-testing selection ends.
+pub(crate) struct PaintedRun {
+    pub(crate) origin: RunOrigin,
+    pub(crate) text: SharedString,
+    pub(crate) layout: TextLayout,
+    pub(crate) bounds: Bounds<Pixels>,
+    /// The clip it was painted under, out of which an end gets no handle.
+    pub(crate) visible: Bounds<Pixels>,
+}
+
+/// The runs of text a view painted last frame.
+#[derive(Clone, Default)]
+pub(crate) struct PaintedRuns(Rc<RefCell<Vec<PaintedRun>>>);
+
+impl PaintedRuns {
+    pub(crate) fn clear(&self) {
+        self.0.borrow_mut().clear();
+    }
+
+    pub(crate) fn push(&self, run: PaintedRun) {
+        self.0.borrow_mut().push(run);
+    }
+
+    pub(crate) fn borrow(&self) -> std::cell::Ref<'_, Vec<PaintedRun>> {
+        self.0.borrow()
+    }
+
+    /// The character under `window_point`; none off the text.
+    fn char_at(&self, window_point: Point<Pixels>) -> Option<TextPosition> {
+        let runs = self.0.borrow();
+        let run = runs.iter().find(|run| run.bounds.contains(&window_point))?;
+        let offset = run.layout.index_for_position(window_point).ok()?;
+        Some(run.origin.position(offset))
+    }
+
+    /// The position a selection end at `window_point` falls on: on the run
+    /// nearest to it, at the character boundary under it, or at the end of
+    /// a run above it or the start of one below.
+    fn position_at(&self, window_point: Point<Pixels>) -> Option<TextPosition> {
+        let runs = self.0.borrow();
+        let distance = |bounds: &Bounds<Pixels>| {
+            let dx = (bounds.left() - window_point.x)
+                .max(window_point.x - bounds.right())
+                .max(px(0.));
+            let dy = (bounds.top() - window_point.y)
+                .max(window_point.y - bounds.bottom())
+                .max(px(0.));
+            dx.as_f32().hypot(dy.as_f32())
+        };
+        let run = runs
+            .iter()
+            .min_by(|a, b| distance(&a.bounds).total_cmp(&distance(&b.bounds)))?;
+        let offset = if window_point.y < run.bounds.top() {
+            0
+        } else if window_point.y >= run.bounds.bottom() {
+            run.text.len()
+        } else {
+            nearest_boundary(&run.text, &run.layout, window_point)
+        };
+        Some(run.origin.position(offset))
+    }
+}
 
 /// What a double or triple click selects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,10 +230,14 @@ struct Frame {
     edges: (Option<Bounds<Pixels>>, Option<Bounds<Pixels>>),
 }
 
+/// A view that painted an entry's text this frame.
 struct Participant {
     entry: u64,
     bounds: Bounds<Pixels>,
-    state: WeakEntity<MarkdownState>,
+    view: EntityId,
+    /// Takes the focus when the selection starts in this view.
+    focus: FocusHandle,
+    runs: PaintedRuns,
 }
 
 impl gpui::EventEmitter<SelectionGesture> for SelectionDocument {}
@@ -313,7 +409,7 @@ impl SelectionDocument {
             .borrow()
             .participants
             .iter()
-            .map(|participant| participant.state.entity_id())
+            .map(|participant| participant.view)
             .collect();
         let app: &mut App = cx;
         for view in views {
@@ -334,7 +430,7 @@ impl SelectionDocument {
     /// The document position a selection end at `window_point` falls on:
     /// in the entry under it, or past the end of the entry above it when it
     /// is between entries.
-    fn point_at(&self, window_point: Point<Pixels>, cx: &App) -> Option<DocPoint> {
+    fn point_at(&self, window_point: Point<Pixels>) -> Option<DocPoint> {
         let frame = self.frame.borrow();
         let y = window_point.y;
         let on = frame
@@ -342,8 +438,7 @@ impl SelectionDocument {
             .iter()
             .find(|p| p.bounds.top() <= y && y < p.bounds.bottom());
         if let Some(participant) = on
-            && let Some(state) = participant.state.upgrade()
-            && let Some(position) = state.read(cx).position_at(window_point)
+            && let Some(position) = participant.runs.position_at(window_point)
         {
             return Some(DocPoint {
                 entry: participant.entry,
@@ -373,11 +468,10 @@ impl SelectionDocument {
 
     /// The character under `window_point`, in the entry it lies on; none
     /// off the text.
-    fn char_at(&self, window_point: Point<Pixels>, cx: &App) -> Option<DocPoint> {
+    fn char_at(&self, window_point: Point<Pixels>) -> Option<DocPoint> {
         let frame = self.frame.borrow();
         frame.participants.iter().find_map(|participant| {
-            let state = participant.state.upgrade()?;
-            let position = state.read(cx).char_at(window_point)?;
+            let position = participant.runs.char_at(window_point)?;
             Some(DocPoint {
                 entry: participant.entry,
                 position,
@@ -503,16 +597,16 @@ impl SelectionDocument {
         }
     }
 
-    /// The view the selection starts in, which takes the focus so the
+    /// The focus of the view the selection starts in, which takes it so the
     /// keyboard's Copy and Select All reach this document.
-    fn selection_view(&self) -> Option<Entity<MarkdownState>> {
+    fn selection_focus(&self) -> Option<FocusHandle> {
         let (start, _) = self.span()?;
         self.frame
             .borrow()
             .participants
             .iter()
             .find(|p| p.entry == start.entry)
-            .and_then(|p| p.state.upgrade())
+            .map(|p| p.focus.clone())
     }
 
     /// The touch handles and menu to draw, when a long press made this
@@ -569,20 +663,23 @@ impl SelectionDocument {
         }
     }
 
+    /// `view` painted entry `entry` in `bounds` this frame, in `runs`.
     pub(crate) fn register_participant(
         &self,
         entry: u64,
         bounds: Bounds<Pixels>,
-        state: WeakEntity<MarkdownState>,
+        view: EntityId,
+        focus: &FocusHandle,
+        runs: &PaintedRuns,
     ) {
         let mut frame = self.frame.borrow_mut();
-        frame
-            .participants
-            .retain(|p| p.state.entity_id() != state.entity_id());
+        frame.participants.retain(|p| p.view != view);
         frame.participants.push(Participant {
             entry,
             bounds,
-            state,
+            view,
+            focus: focus.clone(),
+            runs: runs.clone(),
         });
     }
 
@@ -615,7 +712,7 @@ impl SelectionDocument {
                 let Some((_, offset)) = self.touch.dragging else {
                     return;
                 };
-                let Some(point) = self.point_at(position + offset, cx) else {
+                let Some(point) = self.point_at(position + offset) else {
                     return;
                 };
                 let Some((start, end)) = self.span().map(|(s, e)| (s.clone(), e.clone())) else {
@@ -866,7 +963,7 @@ fn listen(document: &Entity<SelectionDocument>, hitbox: Hitbox, window: &mut Win
                 } else {
                     Unit::Line
                 };
-                if let Some(point) = document.read(cx).char_at(event.position, cx) {
+                if let Some(point) = document.read(cx).char_at(event.position) {
                     document.update(cx, |document, cx| {
                         if document.select_unit(unit, &point, cx) {
                             document.hold_unit(cx);
@@ -876,7 +973,7 @@ fn listen(document: &Entity<SelectionDocument>, hitbox: Hitbox, window: &mut Win
                 }
                 return;
             }
-            let Some(point) = document.read(cx).point_at(event.position, cx) else {
+            let Some(point) = document.read(cx).point_at(event.position) else {
                 document.update(cx, |document, cx| document.clear(cx));
                 return;
             };
@@ -928,7 +1025,7 @@ fn listen(document: &Entity<SelectionDocument>, hitbox: Hitbox, window: &mut Win
                 if window.default_prevented() || !hitbox.is_hovered(window) {
                     return;
                 }
-                let Some(point) = document.read(cx).char_at(event.start_position, cx) else {
+                let Some(point) = document.read(cx).char_at(event.start_position) else {
                     return;
                 };
                 // The finger then moves the far end, from the word's start.
@@ -954,7 +1051,7 @@ fn listen(document: &Entity<SelectionDocument>, hitbox: Hitbox, window: &mut Win
             }
             match event.phase {
                 TouchPhase::Moved => {
-                    if let Some(point) = document.read(cx).point_at(event.position, cx) {
+                    if let Some(point) = document.read(cx).point_at(event.position) {
                         document.update(cx, |document, cx| document.drag(point, cx));
                     }
                 }
@@ -972,8 +1069,7 @@ fn listen(document: &Entity<SelectionDocument>, hitbox: Hitbox, window: &mut Win
 }
 
 fn focus_selection(document: &Entity<SelectionDocument>, window: &mut Window, cx: &mut App) {
-    if let Some(view) = document.read(cx).selection_view() {
-        let focus = view.read(cx).focus_handle.clone();
+    if let Some(focus) = document.read(cx).selection_focus() {
         focus.focus(window, cx);
     }
 }
@@ -986,7 +1082,7 @@ fn follow(
     window: &mut Window,
     cx: &mut App,
 ) {
-    if let Some(point) = document.read(cx).point_at(position, cx) {
+    if let Some(point) = document.read(cx).point_at(position) {
         document.update(cx, |document, cx| document.drag(point, cx));
     }
     let handle = window.window_handle();
@@ -1018,7 +1114,7 @@ fn follow(
                             cx,
                         );
                         if let Some(document) = document.upgrade()
-                            && let Some(point) = document.read(cx).point_at(pointer, cx)
+                            && let Some(point) = document.read(cx).point_at(pointer)
                         {
                             document.update(cx, |document, cx| document.drag(point, cx));
                         }
@@ -1088,7 +1184,7 @@ pub(crate) fn own_document(
             }
             state
                 .upgrade()
-                .map(|state| vec![(0, state.read(cx).parsed_root())])
+                .map(|state| vec![(0, state.read(cx).parsed_root() as Rc<dyn EntryText>)])
                 .unwrap_or_default()
         }))
     })
@@ -1099,6 +1195,97 @@ pub(crate) fn own_document(
 pub(crate) struct Membership {
     pub(crate) document: Entity<SelectionDocument>,
     pub(crate) entry: u64,
+}
+
+impl Membership {
+    /// The part of the run at `origin`, `len` bytes long, that is selected.
+    pub(crate) fn selected_range(
+        &self,
+        origin: &RunOrigin,
+        len: usize,
+        cx: &App,
+    ) -> Option<std::ops::Range<usize>> {
+        self.document.read(cx).run_range(self.entry, origin, len)
+    }
+
+    /// Tell the document where its selection's ends are in `run`, which
+    /// holds `selected` of it.
+    pub(crate) fn register_edge(
+        &self,
+        run: &PaintedRun,
+        selected: &std::ops::Range<usize>,
+        cx: &App,
+    ) {
+        self.document.read(cx).register_edge(
+            self.entry,
+            &run.origin,
+            selected,
+            &run.layout,
+            run.visible,
+        );
+    }
+}
+
+/// Paint the selection over `selected` of a run laid out as `text_layout`
+/// in `bounds`.
+pub(crate) fn paint_selected(
+    selected: &std::ops::Range<usize>,
+    text_layout: &TextLayout,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let (Some(start_position), Some(end_position)) = (
+        text_layout.position_for_index(selected.start),
+        text_layout.position_for_index(selected.end),
+    ) else {
+        return;
+    };
+    let line_height = text_layout.line_height();
+    let color = cx.theme().selection;
+    let paint = |bounds, window: &mut Window| {
+        window.paint_quad(quad(
+            bounds,
+            px(0.),
+            color,
+            Edges::default(),
+            gpui::transparent_black(),
+            BorderStyle::default(),
+        ));
+    };
+    if start_position.y == end_position.y {
+        paint(
+            Bounds::from_corners(
+                start_position,
+                point(end_position.x, end_position.y + line_height),
+            ),
+            window,
+        );
+        return;
+    }
+    paint(
+        Bounds::from_corners(
+            start_position,
+            point(bounds.right(), start_position.y + line_height),
+        ),
+        window,
+    );
+    if end_position.y > start_position.y + line_height {
+        paint(
+            Bounds::from_corners(
+                point(bounds.left(), start_position.y + line_height),
+                point(bounds.right(), end_position.y),
+            ),
+            window,
+        );
+    }
+    paint(
+        Bounds::from_corners(
+            point(bounds.left(), end_position.y),
+            point(end_position.x, end_position.y + line_height),
+        ),
+        window,
+    );
 }
 
 #[cfg(test)]

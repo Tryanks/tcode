@@ -1208,14 +1208,17 @@ impl TimelineView {
                 Some(FileRead::Failed(why)) => Shown::Unreadable(why.message(path)),
             },
         };
-        // The page is as wide as a reply's text: the body within its
-        // margins, up to the column's width.
+        components::visualize::visualization(&entry.id, shown, self.visual_width(), cx)
+    }
+
+    /// How wide a visualization's page is drawn: as a reply's text is, the
+    /// body within its margins, up to the column's width.
+    pub(super) fn visual_width(&self) -> Option<f32> {
         let body = f32::from(self.layout.width);
-        let viewport_width = (body > 0.0).then(|| {
+        (body > 0.0).then(|| {
             (body - 2. * crate::material::CHAT_CONTENT_MIN_PADDING)
                 .min(crate::material::CHAT_CONTENT_MAX_WIDTH)
-        });
-        components::visualize::visualization(&entry.id, shown, viewport_width, cx)
+        })
     }
 
     /// A proposed plan's block, carrying the decision its agent waits on.
