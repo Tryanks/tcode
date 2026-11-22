@@ -14,6 +14,8 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, Toolbar, h_flex, v_flex};
 
+pub(crate) mod event_card;
+
 /// How long a value drawn here takes to glide to a new one.
 const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 

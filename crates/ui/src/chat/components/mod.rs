@@ -1,5 +1,6 @@
 pub(crate) mod assistant;
 pub(crate) mod bubble;
+pub(crate) mod callback_card;
 pub(crate) mod changed_files;
 pub(crate) mod disclosure;
 pub(crate) mod dividers;
@@ -7,6 +8,7 @@ pub(crate) mod error_card;
 pub(crate) mod images;
 pub(crate) mod indicator;
 pub(crate) mod plan;
+pub(crate) mod pull_request;
 pub(crate) mod rewind;
 pub(crate) mod visualize;
 pub(crate) mod work_log;

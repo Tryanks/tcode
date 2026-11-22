@@ -1,5 +1,7 @@
 use super::super::*;
+use crate::material::event_card::{self, CardTone};
 use crate::scroll::ScrollableElement as _;
+use gpui_base::StyledExt as _;
 use tcode_core::session::PendingUserInput;
 
 /// How long a value drawn here takes to glide to a new one.
@@ -130,7 +132,6 @@ impl Composer {
             return div().into_any_element();
         };
         let muted = cx.theme().muted_foreground;
-        let primary = cx.theme().primary;
         let expanded = self.ui_expanded;
         let multi = question.multi_select;
 
@@ -168,23 +169,21 @@ impl Composer {
             crate::tr!("userinput.async_header").into_owned()
         };
         let mut strip = crate::material::accessible_clickable(
-            h_flex(),
+            event_card::header(true, cx),
             "ui-strip",
             Role::Button,
             title.clone(),
             cx,
         )
-        .w_full()
-        .gap_2()
-        .items_center()
         .cursor_pointer()
-        .child(Icon::new(IconName::Info).text_color(primary))
+        .child(event_card::icon_tile(IconName::CircleQuestionMark, cx))
         .child(
             div()
                 .flex_none()
                 .max_w_1_2()
                 .overflow_hidden()
-                .text_title(cx)
+                .text_token(&cx.theme().tokens.typography.sm)
+                .font_medium()
                 .child(crate::widgets::fade_text(title)),
         )
         .when(question.optional, |strip| {
@@ -284,9 +283,8 @@ impl Composer {
             cx.notify();
         }));
 
-        let card = crate::material::card_raised(cx)
-            .w_full()
-            .gap_0()
+        let card = event_card::raised_event_card(CardTone::Waiting, cx)
+            .debug_selector(|| "ui-card".into())
             .child(strip);
         let body = self.motion.cross_fade(
             self.motion_key(format_args!("ui-question-{request_id}")),
@@ -418,21 +416,19 @@ impl Composer {
         } else {
             None
         };
-        let footer = h_flex()
-            .w_full()
-            .items_center()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_secondary(self.compact, cx)
-                    .children(hint),
-            )
-            .children(confirm);
+        // A question with neither a hint nor a confirming button has no foot.
+        let footer = (hint.is_some() || confirm.is_some()).then(|| {
+            event_card::footer(cx)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_secondary(self.compact, cx)
+                        .children(hint),
+                )
+                .children(confirm)
+        });
 
-        // The card's gap is carried above each part of the answer area, so
-        // it folds with it.
-        let gap = cx.theme().tokens.spacing.sm;
         card.child(
             crate::widgets::Collapsible::new(
                 self.motion_id(format_args!("ui-answer-{request_id}")),
@@ -443,11 +439,8 @@ impl Composer {
             .content(
                 v_flex()
                     .w_full()
-                    .gap(gap)
-                    .pt(gap)
-                    .child(body)
-                    .child(custom_answer)
-                    .child(footer),
+                    .child(event_card::section(cx).child(body).child(custom_answer))
+                    .children(footer),
             ),
         )
         .into_any_element()

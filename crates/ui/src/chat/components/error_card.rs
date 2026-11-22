@@ -1,17 +1,15 @@
+use crate::material::event_card::{self, CardTone};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::clock::Clock;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
-use crate::{
-    icon::{Icon, IconName},
-    sizing::Sizable as _,
-};
+use crate::{icon::IconName, sizing::Sizable as _};
 use gpui::{
-    AnyElement, App, ClickEvent, IntoElement as _, ParentElement as _, SharedString, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    SharedString, Styled as _, Window, div, prelude::FluentBuilder as _,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::h_flex;
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
@@ -40,8 +38,9 @@ pub(crate) enum LimitResume {
     },
 }
 
-/// A provider/app error as a first-class timeline block: a danger-tinted card
-/// carrying the full message, wrapped across as many lines as it needs.
+/// A provider/app error as a first-class timeline block: a danger card
+/// carrying the full message, wrapped across as many lines as it needs, with
+/// the way to resume, when there is one, along its foot.
 pub(crate) fn error_card(
     id: &str,
     message: &str,
@@ -51,7 +50,6 @@ pub(crate) fn error_card(
     motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
-    let danger = cx.theme().danger;
     let copy = Button::new(SharedString::from(format!("copy-error:{id}")))
         .motion(motion)
         .ghost()
@@ -122,6 +120,7 @@ pub(crate) fn error_card(
             resets_at,
             on_cancel,
         } => h_flex()
+            .w_full()
             .gap_2()
             .items_center()
             .child(
@@ -153,43 +152,36 @@ pub(crate) fn error_card(
             )
             .into_any_element(),
     });
-    let content = v_flex()
-        .flex_1()
-        .min_w_0()
-        .gap_2()
+    let theme = cx.theme();
+    let header = event_card::header(true, cx)
+        .child(event_card::tinted_tile(
+            IconName::TriangleAlert,
+            theme.danger_foreground,
+            cx,
+        ))
+        .child(event_card::header_text(
+            crate::tr!("chat.error_label").into_owned(),
+            None,
+            cx,
+        ))
+        .child(copy);
+    let id_selector = id.to_owned();
+    event_card::event_card(CardTone::Danger, cx)
+        .debug_selector(move || format!("error-card-{id_selector}"))
+        .child(header)
         .child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .text_token(&cx.theme().tokens.typography.xs)
-                .child(Icon::new(IconName::TriangleAlert).text_color(cx.theme().danger_foreground))
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .font_medium()
-                        .text_color(cx.theme().danger_foreground)
-                        .child(crate::material::tracked_uppercase(
-                            crate::tr!("chat.error_label").as_ref(),
-                        )),
-                )
-                .child(div().flex_1())
-                .child(copy),
+            event_card::section(cx).child(
+                div()
+                    .w_full()
+                    .text_body(false, cx)
+                    .text_color(theme.danger_foreground)
+                    .whitespace_normal()
+                    .child(message.to_string()),
+            ),
         )
-        .child(
-            div()
-                .w_full()
-                .text_body(false, cx)
-                .text_color(cx.theme().danger_foreground)
-                .whitespace_normal()
-                .child(message.to_string()),
-        )
-        .when_some(resume_row, |content, row| content.child(row));
-    crate::material::notice(danger, cx)
-        .items_stretch()
-        .overflow_hidden()
-        // The danger rail is a hairline accent, not a spacing step.
-        .child(div().flex_none().w(px(2.)).rounded_full().bg(danger))
-        .child(content)
+        .when_some(resume_row, |card, row| {
+            card.child(event_card::footer(cx).child(row))
+        })
         .context_menu({
             let message = message.to_string();
             move |menu, _, _| {

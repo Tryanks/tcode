@@ -1,49 +1,53 @@
-//! A subagent's window: the agent a call started and the task it was given,
-//! and how it stands. The agent's work is its own thread's — the host routes
-//! its calls there and the lead's timeline leaves them out — so a press on
-//! the window opens that thread rather than unfolding anything here.
+//! What a call started that works on its own: a subagent of the harness, or
+//! a thread Tcode started for a `tcode_control` call. Each stands as a card
+//! of its own in the flow rather than a window among the turn's work, and
+//! the card opens where that work is: a subagent's calls go to the thread
+//! the host keeps for it, which the lead's timeline leaves out.
 
 use agent::{ItemContent, ItemStatus};
 use gpui::App;
 use tcode_core::session::{EntryContent, TimelineEntry};
 
-use super::Activity;
-use super::window::{Argument, Chip, Header, Verb};
+use super::threads;
 use crate::chat::timeline::TimelineView;
-use crate::icon::IconName;
 
-/// The window a subagent item shows as: the agent's type in
-/// the verb's weight, its task, the model and effort it ran with as one
-/// chip, which gives way as one in a narrow row. A failed agent's report is
-/// its error, told by its first line.
-pub(in crate::chat) fn activity(
-    agent_type: &str,
-    description: &str,
-    status: ItemStatus,
-    summary: Option<&str>,
-    model: Option<&str>,
-    effort: Option<&str>,
-) -> Activity {
-    let summary = summary.filter(|summary| !summary.trim().is_empty());
-    let ran_with: Vec<&str> = [model, effort].into_iter().flatten().collect();
-    let mut header = Header::new(IconName::Bot, Verb("agent"))
-        .argument(Argument::plain(crate::chat::model::one_line(description)))
-        .chip((!ran_with.is_empty()).then(|| Chip::Tag(ran_with.join(" · "))));
-    if !agent_type.is_empty() {
-        header = header.subject(agent_type.to_owned());
-    }
-    let mut copy = Vec::new();
-    super::copy(&mut copy, "tools.copy_task", description);
-    if let Some(summary) = summary {
-        super::copy(&mut copy, "tools.copy_summary", summary);
-    }
-    Activity {
-        failure: super::window::failure_line(&header, status, summary),
-        header,
-        status,
-        copy,
-        expandable: false,
-        path: None,
+/// What `entry` started, as its card tells it.
+pub(in crate::chat) enum Started<'a> {
+    /// A subagent of the harness's own.
+    Native {
+        agent_type: &'a str,
+        description: &'a str,
+        status: ItemStatus,
+        summary: Option<&'a str>,
+        model: Option<&'a str>,
+        effort: Option<&'a str>,
+    },
+    /// A thread Tcode starts for the call.
+    Thread(threads::Start<'a>),
+}
+
+/// What `entry` started, when it stands as a card.
+pub(in crate::chat) fn card(entry: &TimelineEntry) -> Option<Started<'_>> {
+    match &entry.content {
+        EntryContent::Item(ItemContent::Subagent {
+            agent_type,
+            description,
+            status,
+            summary,
+            model,
+            effort,
+        }) => Some(Started::Native {
+            agent_type,
+            description,
+            status: *status,
+            summary: summary.as_deref().filter(|text| !text.trim().is_empty()),
+            model: model.as_deref(),
+            effort: effort.as_deref(),
+        }),
+        EntryContent::Item(ItemContent::ToolCall { .. }) => {
+            threads::start(entry).map(Started::Thread)
+        }
+        _ => None,
     }
 }
 

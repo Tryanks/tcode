@@ -1,7 +1,8 @@
 use super::*;
 use tcode_core::notice::{
-    CHILD_REPORT_REMINDER, ORCHESTRATE_APPROVAL_PHRASE, ORCHESTRATE_FALLBACK_LABEL,
-    ORCHESTRATE_QUESTION_PHRASE, ORCHESTRATE_REPORT_LABEL, callback_header,
+    CHILD_REPORT_REMINDER, ORCHESTRATE_APPROVAL_ID_PHRASE, ORCHESTRATE_APPROVAL_PHRASE,
+    ORCHESTRATE_FALLBACK_LABEL, ORCHESTRATE_QUESTION_PHRASE, ORCHESTRATE_QUESTIONS_PHRASE,
+    ORCHESTRATE_REPORT_LABEL, callback_header,
 };
 use tcode_core::project::ChildExpectation;
 use tcode_core::settlement::{AgentDelivery, AgentReport};
@@ -789,7 +790,7 @@ impl AppState {
             "You are the approver: answer with tcode_control respond_approval, passing this thread_id and approval_id with option: <exact id> or cancel: true; reject anything outside the brief's scope."
         };
         let text = format!(
-            "{} {ORCHESTRATE_APPROVAL_PHRASE}{} (approval_id: {}). Native options: {}. {}",
+            "{} {ORCHESTRATE_APPROVAL_PHRASE}{}{ORCHESTRATE_APPROVAL_ID_PHRASE}{}). Native options: {}. {}",
             callback_header(child_id, &child.title),
             approval_request_summary(&request),
             request.id,
@@ -844,7 +845,7 @@ impl AppState {
             "You are the decider: answer with tcode_control respond_input, passing this thread_id and question_id with answers keyed by question id, a string (an option label or free text) for a single-choice question and an array of strings for a multi_select one, deciding from the brief and the user's instructions."
         };
         let text = format!(
-            "{} {ORCHESTRATE_QUESTION_PHRASE}question_id: {}; {delivery}). Questions: {}. {instruction}",
+            "{} {ORCHESTRATE_QUESTION_PHRASE}question_id: {}; {delivery}{ORCHESTRATE_QUESTIONS_PHRASE}{}. {instruction}",
             callback_header(child_id, &child.title),
             pending.request_id,
             serde_json::to_string(&pending.questions).expect("questions serialize"),

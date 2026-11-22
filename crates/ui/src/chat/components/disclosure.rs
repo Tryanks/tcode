@@ -8,8 +8,8 @@ use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use gpui::{
     AnyElement, App, ClickEvent, Div, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div, prelude::FluentBuilder as _, px,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -49,88 +49,13 @@ fn callback_label(callback: &OrchestrateCallback) -> String {
     )
 }
 
-/// What became of the callback's child, which its row keeps in view however
-/// long the child's title is.
-pub(crate) fn callback_event_label(callback: &OrchestrateCallback) -> Cow<'static, str> {
+/// What became of the callback's child, worded to follow its title.
+fn callback_event_label(callback: &OrchestrateCallback) -> Cow<'static, str> {
     match &callback.event {
         CallbackEvent::Ended(state) => localized_callback_state(state),
         CallbackEvent::Approval => crate::tr!("chat.orchestrate_state_approval"),
         CallbackEvent::Question => crate::tr!("chat.orchestrate_state_question"),
     }
-}
-
-/// `on_open` opens the child the callback reports on, while it still exists.
-/// `event` follows the child's title and does not fade with it. The link to
-/// the child underlines under the pointer as `hover`, the timeline's,
-/// follows it.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn callback_row(
-    key: &str,
-    event: SharedString,
-    callback: &OrchestrateCallback,
-    expanded: bool,
-    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    on_open: Option<super::changed_files::ClickHandler>,
-    hover: crate::motion::ListHover,
-    motion: &crate::motion::owned::Owned,
-    cx: &App,
-) -> AnyElement {
-    let body = if callback.body.trim().is_empty() {
-        crate::tr!("chat.orchestrate_callback_empty").into_owned()
-    } else {
-        callback.body.clone()
-    };
-    let title = one_line(&callback.title).into();
-    disclosure_with(
-        key,
-        title,
-        Some(event),
-        body,
-        expanded,
-        on_toggle,
-        Some((on_open, hover)),
-        false,
-        motion,
-        cx,
-    )
-}
-
-/// The link to a callback's child, its underline fading in at the list's
-/// hover `reveal`. Once the child has gone the link is leaving, and takes no
-/// activation. Not gpui-base's `Link`: it keeps its focus handle to itself,
-/// so its keyboard focus ring could only switch at once; the clickable's
-/// fades.
-fn open_child_link(
-    key: &str,
-    on_open: Option<super::changed_files::ClickHandler>,
-    hover: &crate::motion::ListHover,
-    reveal: f32,
-    cx: &App,
-) -> AnyElement {
-    let id = SharedString::from(format!("callback-open-{key}"));
-    let primary = cx.theme().primary;
-    crate::material::accessible_clickable(
-        div(),
-        id.clone(),
-        Role::Link,
-        SharedString::from(crate::tr!("agents.open").into_owned()),
-        cx,
-    )
-    .relative()
-    .child(hover.hitbox(id))
-    .when(reveal > 0., |link| {
-        link.underline()
-            .text_decoration_color(primary.opacity(reveal))
-    })
-    .when_some(on_open, |link, on_open| {
-        link.cursor_pointer()
-            .on_click(move |event, window, cx| on_open(event, window, cx))
-    })
-    .flex_none()
-    .text_token(&cx.theme().tokens.typography.xs)
-    .text_color(primary)
-    .child(crate::widgets::fade_text(crate::tr!("agents.open_child")))
-    .into_any_element()
 }
 
 /// A centered disclosure notification with a height-capped verbatim body: the
@@ -149,11 +74,9 @@ pub(crate) fn disclosure(
     disclosure_with(
         key,
         label,
-        None,
         full_text.to_string(),
         expanded,
         on_toggle,
-        None,
         false,
         motion,
         cx,
@@ -174,32 +97,23 @@ pub(crate) fn warning_disclosure(
     disclosure_with(
         key,
         label,
-        None,
         full_text.to_string(),
         expanded,
         on_toggle,
-        None,
         true,
         motion,
         cx,
     )
 }
 
-/// `open` is a callback's link to its child, `None` in it once the child
-/// has gone, and the hover it follows. `alert` gives the label the warning
-/// tint and mark.
+/// `alert` gives the label the warning tint and mark.
 #[allow(clippy::too_many_arguments)]
 fn disclosure_with(
     key: &str,
     label: SharedString,
-    suffix: Option<SharedString>,
     full_text: String,
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    open: Option<(
-        Option<super::changed_files::ClickHandler>,
-        crate::motion::ListHover,
-    )>,
     alert: bool,
     motion: &crate::motion::owned::Owned,
     cx: &App,
@@ -215,10 +129,7 @@ fn disclosure_with(
             .motion(&motion)
             .ghost()
             .small()
-            .aria_label(match &suffix {
-                Some(suffix) => format!("{label} {suffix}").into(),
-                None => label.clone(),
-            })
+            .aria_label(label.clone())
             .aria_expanded(expanded)
             // A long notice (a `[control]` message is one) truncates inside the row instead of
             // spilling past both edges of the centered divider.
@@ -246,26 +157,13 @@ fn disclosure_with(
                             .min_w_0()
                             .overflow_hidden()
                             .child(crate::widgets::fade_text(label)),
-                    )
-                    .children(suffix.map(|suffix| div().flex_none().child(suffix))),
+                    ),
             )
             .on_click(on_toggle)
             .debug_selector({
                 let selector = format!("disclosure-{key}");
                 move || selector
             });
-        let open = open.and_then(|(on_open, hover)| {
-            let shown = motion.shown(
-                format!("callback-open-shown-{key}"),
-                on_open.is_some().then_some(()),
-                SHOW,
-                window,
-                cx,
-            )?;
-            let reveal = hover.reveal(&format!("callback-open-{key}"), window, cx);
-            Some(shown.fade(open_child_link(&key, on_open, &hover, reveal, cx)))
-        });
-
         let row = h_flex()
             .w_full()
             .items_center()
@@ -273,7 +171,6 @@ fn disclosure_with(
             .gap_2()
             .child(super::dividers::divider_stub(cx))
             .child(toggle)
-            .children(open)
             .child(super::dividers::divider_stub(cx));
 
         let body = motion

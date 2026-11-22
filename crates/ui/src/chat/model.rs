@@ -44,6 +44,10 @@ pub(crate) enum Segment<'a> {
     Assistant(&'a TimelineEntry),
     Plan(&'a TimelineEntry),
     Visualize(&'a TimelineEntry),
+    /// A call that linked a pull request to the thread, as its record.
+    PullRequest(&'a TimelineEntry),
+    /// A subagent, or a thread a call started.
+    ThreadCard(&'a TimelineEntry),
     Error(&'a TimelineEntry),
     RequestRetry(&'a TimelineEntry),
     /// Consecutive warnings of the harness.
@@ -199,6 +203,19 @@ pub(crate) fn segment_entries<'a>(
             {
                 single(&mut segments, &mut ranges, Segment::Visualize(entry));
             }
+            EntryContent::Item(ItemContent::ToolCall { .. })
+                if super::tools::pull_request::card(entry).is_some() =>
+            {
+                single(&mut segments, &mut ranges, Segment::PullRequest(entry));
+            }
+            EntryContent::Item(ItemContent::Subagent { .. }) => {
+                single(&mut segments, &mut ranges, Segment::ThreadCard(entry));
+            }
+            EntryContent::Item(ItemContent::ToolCall { .. })
+                if super::tools::subagent::card(entry).is_some() =>
+            {
+                single(&mut segments, &mut ranges, Segment::ThreadCard(entry));
+            }
             EntryContent::Item(item)
                 if matches!(item, ItemContent::ImageRead { .. })
                     || matches!(item, ItemContent::ToolCall { image_reads, status: ItemStatus::Completed, .. } if !image_reads.is_empty())
@@ -223,7 +240,6 @@ pub(crate) fn segment_entries<'a>(
             EntryContent::Item(ItemContent::ImageRead { .. })
             | EntryContent::Item(ItemContent::CommandExecution { .. })
             | EntryContent::Item(ItemContent::ToolCall { .. })
-            | EntryContent::Item(ItemContent::Subagent { .. })
             | EntryContent::Item(ItemContent::WebSearch { .. })
             | EntryContent::Item(ItemContent::Other { .. })
             | EntryContent::Item(ItemContent::FileChange { .. }) => {
@@ -276,6 +292,25 @@ pub(crate) fn segment_entries<'a>(
             EntryContent::Worktree { .. } => {
                 single(&mut segments, &mut ranges, Segment::Worktree(entry));
             }
+            // In no segment's range, so no row re-segments it without the
+            // card that tells it.
+            EntryContent::ControlAction(action)
+                if super::tools::pull_request::told_by_card(action, entries) =>
+            {
+                flush_activities(
+                    &mut segments,
+                    &mut ranges,
+                    &mut activities,
+                    &mut run_start,
+                    index,
+                );
+            }
+            // The card of the call that started a thread tells it. The record
+            // the starting thread keeps names the started one in its detail;
+            // the started thread's own has no detail, and stays.
+            EntryContent::ControlAction(action)
+                if action.action == tcode_core::control::action::START_THREAD
+                    && action.detail.is_some() => {}
             EntryContent::ControlAction(_) => {
                 single(&mut segments, &mut ranges, Segment::ControlAction(entry));
             }
@@ -363,7 +398,6 @@ pub(crate) struct WorkLogCounts {
     pub(crate) searches: usize,
     pub(crate) computer: usize,
     pub(crate) tools: usize,
-    pub(crate) subagents: usize,
 }
 
 /// What a run of activities did, each counted by the window it shows as.
@@ -379,7 +413,6 @@ pub(crate) fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
             Some(Family::Search) => counts.searches += 1,
             Some(Family::Computer) => counts.computer += 1,
             Some(Family::Tool) => counts.tools += 1,
-            Some(Family::Agent) => counts.subagents += 1,
             None => {}
         }
     }
@@ -993,6 +1026,99 @@ pub(in crate::chat) mod tests {
         )
     }
 
+    /// A subagent, and a thread a call started, stand as cards between the
+    /// runs; a call that started nothing stays in its run. The starting
+    /// thread's record of the start, which names the started thread, is
+    /// left out for the card that tells it; the started thread's own record
+    /// stays, as do the records of other actions.
+    #[test]
+    fn started_agents_and_threads_stand_as_cards_told_once() {
+        let start = |id: &str, status, output: Option<&str>| {
+            entry(
+                id,
+                EntryContent::Item(ItemContent::ToolCall {
+                    name: "mcp__tcode_control__start_thread".into(),
+                    input: serde_json::json!({
+                        "provider": "codex",
+                        "title": "Migrate the keys",
+                        "message": "Migrate the keys.",
+                        "request_id": id,
+                    }),
+                    output: output.map(str::to_owned),
+                    status,
+                    image_reads: vec![],
+                    family: None,
+                }),
+            )
+        };
+        let record = |id: &str, action: &str, detail: Option<&str>| {
+            entry(
+                id,
+                EntryContent::ControlAction(agent::ControlAction {
+                    actor_thread_id: "lead".into(),
+                    actor_title: "Lead".into(),
+                    action: action.into(),
+                    detail: detail.map(str::to_owned),
+                }),
+            )
+        };
+        let entries = [
+            command("cmd-1"),
+            entry(
+                "agent",
+                EntryContent::Item(ItemContent::Subagent {
+                    agent_type: "explore".into(),
+                    description: "Survey the store".into(),
+                    status: ItemStatus::InProgress,
+                    summary: None,
+                    model: None,
+                    effort: None,
+                }),
+            ),
+            start(
+                "started",
+                ItemStatus::Completed,
+                Some(
+                    r#"{"thread_id":"child","created":true,"title":"Migrate the keys","cwd":"/tmp"}"#,
+                ),
+            ),
+            start("starting", ItemStatus::InProgress, None),
+            start(
+                "refused",
+                ItemStatus::Failed,
+                Some("unknown provider: gemini"),
+            ),
+            record("in-lead", "start_thread", Some("Migrate the keys")),
+            command("cmd-2"),
+            record("in-child", "start_thread", None),
+            record("renamed", "rename", Some("Child — Keys")),
+        ];
+        let segmented = segment_entries(&entries, false);
+        assert!(matches!(
+            segmented.flow.as_slice(),
+            [
+                Segment::ActivityRun(first),
+                Segment::ThreadCard(agent),
+                Segment::ThreadCard(started),
+                Segment::ThreadCard(starting),
+                Segment::ActivityRun(second),
+                Segment::ControlAction(in_child),
+                Segment::ControlAction(renamed),
+            ] if first.len() == 1
+                && agent.id == "agent"
+                && started.id == "started"
+                && starting.id == "starting"
+                && second.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
+                    == ["refused", "cmd-2"]
+                && in_child.id == "in-child"
+                && renamed.id == "renamed"
+        ));
+        assert_eq!(
+            segmented.ranges,
+            vec![0..1, 1..2, 2..3, 3..4, 4..7, 7..8, 8..9]
+        );
+    }
+
     #[test]
     fn segmentation_preserves_message_order_and_groups_adjacent_activities() {
         let entries = [
@@ -1308,7 +1434,6 @@ pub(in crate::chat) mod tests {
             searches: 2,
             computer: 4,
             tools: 1,
-            subagents: 2,
         };
         let tools = WorkLogCounts {
             tools: 2,

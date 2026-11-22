@@ -41,7 +41,9 @@ fn a_pending_steer_shows_as_its_bubble(cx: &mut TestAppContext) {
 }
 
 /// The host steers its notices into a running turn: steered or still
-/// pending, a notice is a disclosure row per notice, never the user's bubble.
+/// pending, a notice is never the user's bubble. Each child callback is a
+/// card of its own, one still pending says so, and one waiting on the user
+/// carries the action that opens the child and its request whole on demand.
 #[gpui::test]
 fn steered_notices_render_as_disclosures_not_bubbles(cx: &mut TestAppContext) {
     use gpui::{VisualTestContext, px, size};
@@ -74,6 +76,13 @@ fn steered_notices_render_as_disclosures_not_bubbles(cx: &mut TestAppContext) {
                     SteeringStatus::Pending,
                 ),
             ),
+            entry(
+                "request",
+                steer(
+                    "[orchestrate] thread c (\"Third\") is waiting for approval: command `rm -rf build` (approval_id: r1). Native options: []. The user answers in the child thread.".into(),
+                    SteeringStatus::Accepted,
+                ),
+            ),
         ]);
 
     let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
@@ -85,16 +94,51 @@ fn steered_notices_render_as_disclosures_not_bubbles(cx: &mut TestAppContext) {
     cx.simulate_resize(size(px(1_024.), px(700.)));
     draw_settled(cx);
 
-    for row in [
-        "disclosure-pull-request-update-wake",
-        "disclosure-orchestrate-callback-results-0",
-        "disclosure-orchestrate-callback-results-1",
+    assert!(
+        cx.debug_bounds("pull-request-update-wake").is_some(),
+        "the watch's wake is not its card"
+    );
+    for card in [
+        "callback-card-orchestrate-callback-results-0",
+        "callback-card-orchestrate-callback-results-1",
+        "callback-card-orchestrate-callback-request-0",
     ] {
-        assert!(cx.debug_bounds(row).is_some(), "{row} is not a disclosure");
+        assert!(cx.debug_bounds(card).is_some(), "{card} is not a card");
     }
-    for bubble in ["steering-wake", "steering-results"] {
+    for pending in [
+        "callback-card-steering-orchestrate-callback-results-0",
+        "callback-card-steering-orchestrate-callback-results-1",
+    ] {
+        assert!(
+            cx.debug_bounds(pending).is_some(),
+            "{pending} is not marked"
+        );
+    }
+    assert!(
+        cx.debug_bounds("callback-card-steering-orchestrate-callback-request-0")
+            .is_none()
+    );
+    assert!(
+        cx.debug_bounds("callback-card-open-orchestrate-callback-request-0")
+            .is_some(),
+        "a waiting card has no action"
+    );
+    for bubble in ["steering-wake", "steering-results", "steering-request"] {
         assert!(cx.debug_bounds(bubble).is_none(), "{bubble} is a bubble");
     }
+
+    // The request the parent's model was sent is shown whole on demand.
+    let body = "callback-card-body-orchestrate-callback-request-0";
+    assert!(cx.debug_bounds(body).is_none());
+    let toggle = cx
+        .debug_bounds("callback-card-toggle-orchestrate-callback-request-0")
+        .expect("a request offers its whole text");
+    cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+    draw_settled(cx);
+    assert!(
+        cx.debug_bounds(body).is_some(),
+        "the request is not shown whole"
+    );
 }
 
 /// A running command's panel watches the host's screen at the panel's

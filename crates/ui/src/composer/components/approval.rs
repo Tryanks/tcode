@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::material::event_card::{self, CardTone};
 use crate::scroll::ScrollableElement as _;
 
 /// How long what is drawn here only some of the time takes to come in or go.
@@ -76,18 +77,21 @@ impl Composer {
             }
             ApprovalKind::Plan { .. } => crate::tr!("approval.plan_requested"),
         };
+        let icon = match &request.kind {
+            ApprovalKind::ExecCommand { .. } => IconName::SquareTerminal,
+            ApprovalKind::FileRead { .. } => IconName::FileText,
+            ApprovalKind::FileChange { .. } => IconName::Pencil,
+            ApprovalKind::ToolUse { .. } => IconName::Puzzle,
+            ApprovalKind::Plan { .. } => IconName::Map,
+        };
         let muted = cx.theme().muted_foreground;
 
-        let detail_bg = cx.theme().muted;
         let detail_area = |content: AnyElement| {
             div()
                 .id("approval-detail-scroll")
                 .w_full()
                 .max_h(px(DETAIL_MAX_HEIGHT))
                 .overflow_y_scroll_area()
-                .p_2()
-                .rounded(crate::material::radius_card(cx))
-                .bg(detail_bg)
                 .child(content)
                 .into_any_element()
         };
@@ -118,8 +122,6 @@ impl Composer {
                 div()
                     .debug_selector(|| "approval-detail".into())
                     .w_full()
-                    .rounded(crate::material::radius_card(cx))
-                    .bg(detail_bg)
                     .child(
                         crate::scroll::VirtualList::measured(
                             "approval-detail-scroll",
@@ -138,8 +140,7 @@ impl Composer {
                             },
                         )
                         .w_full()
-                        .max_h(px(DETAIL_MAX_HEIGHT))
-                        .p_2(),
+                        .max_h(px(DETAIL_MAX_HEIGHT)),
                     )
                     .into_any_element()
             }
@@ -181,7 +182,7 @@ impl Composer {
         let cancel_id = request.id.clone();
 
         // The delivery line and the offline notice fold in and away; the
-        // card's own gap is carried under each, so it folds with them.
+        // gap under each is carried inside it, so it folds with them.
         let gap = cx.theme().tokens.spacing.sm;
         let connected = self
             .workspace_store
@@ -214,7 +215,13 @@ impl Composer {
                             .into_any_element()
                     },
                 );
-                shown.fold(div().pb(gap).text_secondary(self.compact, cx).child(line))
+                shown.fold(
+                    div()
+                        .px(px(crate::material::CARD_INSET))
+                        .pb(gap)
+                        .text_secondary(self.compact, cx)
+                        .child(line),
+                )
             });
         let offline = self
             .motion
@@ -228,6 +235,7 @@ impl Composer {
             .map(|shown| {
                 shown.fold(
                     div()
+                        .px(px(crate::material::CARD_INSET))
                         .pb(gap)
                         .text_body(self.compact, cx)
                         .text_color(muted)
@@ -241,10 +249,8 @@ impl Composer {
         .motion(&self.motion)
         .w_full()
         .content(
-            v_flex()
-                .w_full()
+            event_card::section(cx)
                 .gap_1()
-                .pb(gap)
                 .child(detail)
                 .when_some(request.reason.clone(), |this, reason| {
                     this.child(
@@ -263,14 +269,11 @@ impl Composer {
                 }),
         );
 
-        crate::material::card_raised(cx)
-            .w_full()
-            .gap_0()
-            .children(delivery)
-            .children(offline)
+        event_card::raised_event_card(CardTone::Waiting, cx)
+            .debug_selector(|| "approval-card".into())
             .child(
                 crate::material::accessible_clickable(
-                    h_flex(),
+                    event_card::header(true, cx),
                     "approval-header",
                     Role::Button,
                     summary.clone(),
@@ -279,27 +282,28 @@ impl Composer {
                 .when(self.compact, |header| {
                     header.min_h(px(crate::material::TOUCH_TARGET))
                 })
-                .w_full()
-                .gap_2()
-                .items_center()
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.approval_expanded = !this.approval_expanded;
                     cx.notify();
                 }))
-                .child(
-                    div()
-                        .text_caption(cx)
-                        .child(crate::widgets::fade_text(if self.compact {
-                            crate::tr!("mobile.approval")
-                        } else {
-                            crate::tr!("approval.pending")
-                        })),
-                )
-                .child(div().flex_1().text_title(cx).child(summary))
+                .child(event_card::icon_tile(icon, cx))
+                .child(event_card::header_text(summary, None, cx))
+                .child(event_card::status(
+                    None,
+                    if self.compact {
+                        crate::tr!("mobile.approval")
+                    } else {
+                        crate::tr!("approval.pending")
+                    }
+                    .into_owned(),
+                    cx.theme().primary,
+                    cx,
+                ))
                 .when(count > 1, |this| {
                     this.child(
                         div()
+                            .flex_none()
                             .text_secondary(self.compact, cx)
                             .child(format!("1/{count}")),
                     )
@@ -313,11 +317,12 @@ impl Composer {
                     .text_color(muted),
                 ),
             )
-            .child(div().h(gap))
+            .children(delivery)
+            .children(offline)
             .child(detail)
             .when(!answerable, |card| {
                 card.child(
-                    div()
+                    event_card::section(cx)
                         .text_secondary(self.compact, cx)
                         .child(crate::tr!("approval.space_reviewed_only")),
                 )
@@ -354,23 +359,18 @@ impl Composer {
                             }));
                         options = options.child(button);
                     }
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .items_start()
-                        .child(options)
-                        .child(
-                            Button::new("approval-cancel")
-                                .motion(&self.button_motion())
-                                .ghost()
-                                .chip()
-                                .touch(self.compact)
-                                .disabled(!self.interactive(cx) || pending)
-                                .label(crate::tr!("approval.cancel_turn"))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.respond(cancel_id.clone(), ApprovalDecision::Cancel, cx);
-                                })),
-                        )
+                    event_card::footer(cx).items_start().child(options).child(
+                        Button::new("approval-cancel")
+                            .motion(&self.button_motion())
+                            .ghost()
+                            .chip()
+                            .touch(self.compact)
+                            .disabled(!self.interactive(cx) || pending)
+                            .label(crate::tr!("approval.cancel_turn"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.respond(cancel_id.clone(), ApprovalDecision::Cancel, cx);
+                            })),
+                    )
                 })
             })
             .into_any_element()

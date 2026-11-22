@@ -296,6 +296,12 @@ impl TimelineView {
                 Segment::Visualize(entry) => {
                     column = column.child(self.compose_visualize(entry, cx));
                 }
+                Segment::PullRequest(entry) => {
+                    column = column.child(self.compose_pull_request_record(entry, cx));
+                }
+                Segment::ThreadCard(entry) => {
+                    column = column.child(self.compose_thread_card(entry, window, cx));
+                }
                 Segment::Withheld(entry) => {
                     let EntryContent::Withheld { bytes, row } = entry.content else {
                         unreachable!();
@@ -1361,15 +1367,24 @@ impl TimelineView {
         match &notice {
             HostNotice::Orchestrate(callbacks) => {
                 for callback in callbacks {
-                    let event =
-                        label(components::disclosure::callback_event_label(callback).into_owned());
-                    column =
-                        column.child(self.compose_callback_row(turn, key(), event, callback, cx));
+                    column = column.child(self.compose_callback_card(
+                        turn,
+                        key(),
+                        pending,
+                        callback,
+                        cx,
+                    ));
                 }
             }
-            HostNotice::PullRequest { .. }
-            | HostNotice::ReportReminder
-            | HostNotice::Control(_) => {
+            HostNotice::PullRequest { number, notice } => {
+                column = column.child(self.compose_pull_request_update(
+                    (turn, key(), pending),
+                    (*number, notice),
+                    text,
+                    cx,
+                ));
+            }
+            HostNotice::ReportReminder | HostNotice::Control(_) => {
                 column = column.child(self.compose_disclosure(
                     turn,
                     key(),
@@ -1382,27 +1397,47 @@ impl TimelineView {
         column.into_any_element()
     }
 
-    fn compose_callback_row(
+    fn compose_callback_card(
         &self,
         turn: usize,
         key: String,
-        event: SharedString,
+        steering: bool,
         callback: &OrchestrateCallback,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let expanded = self.expanded.contains(&key);
         let child_id = callback.child_id.clone();
-        let exists = {
+        let (glyph, detail) = {
             let store = self.workspace_store.read(cx);
-            store.thread_meta(&child_id).is_some()
-                || store
+            let meta = store.thread_meta(&child_id).or_else(|| {
+                store
                     .archived_sessions()
                     .iter()
-                    .any(|meta| meta.id == child_id)
+                    .find(|meta| meta.id == child_id)
+            });
+            let glyph = meta.map(|meta| {
+                crate::provider_card::profile_glyph(
+                    store,
+                    meta.provider,
+                    meta.profile_id.as_deref(),
+                )
+            });
+            let detail = meta.map(|meta| {
+                std::iter::once(meta.provider.display_name().to_owned())
+                    .chain(meta.model.as_deref().map(|model| {
+                        store
+                            .thread_model_name(&child_id, model)
+                            .unwrap_or_else(|| model.to_owned())
+                    }))
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            });
+            (glyph, detail)
         };
+        let exists = glyph.is_some();
         let store = self.workspace_store.clone();
         let host = self.agent_host(cx);
-        // The row that opens the agent is what its card grows out of.
+        // The agent opens out of the card that opens it.
         let origin = SharedString::from(format!("callback-{key}"));
         let on_open = exists.then(|| {
             let origin = origin.clone();
@@ -1418,25 +1453,28 @@ impl TimelineView {
             }) as components::changed_files::ClickHandler
         });
         let toggle_key = key.clone();
-        let row = components::disclosure::callback_row(
+        let card = components::callback_card::callback_card(
             &key,
-            event,
             callback,
+            components::callback_card::CallbackChild {
+                glyph,
+                detail,
+                on_open,
+            },
+            steering,
             expanded,
             cx.listener(move |this, _, _, cx| {
                 this.toggle_expanded(turn, &toggle_key, cx);
             }),
-            on_open,
             self.hover.clone(),
             &self.motion,
-            cx,
         );
         if exists {
             self.side_origins
-                .mark(origin, crate::material::radius_card(cx), row)
+                .mark(origin, px(crate::material::event_card::RADIUS), card)
                 .into_any_element()
         } else {
-            row
+            card
         }
     }
 
@@ -1914,20 +1952,13 @@ impl TimelineView {
             path,
             ..
         } = activity;
-        let thread = self
-            .workspace_store
-            .read(cx)
-            .session_status_for(self.session_id.as_deref(), cx);
-        // A running command or agent the harness can move into the
-        // background, as its own Ctrl+B does.
-        let movable = thread.is_some_and(|status| {
-            status
-                .background_control
-                .is_some_and(|control| control.move_running)
-        }) && matches!(
-            &entry.content,
-            EntryContent::Item(ItemContent::CommandExecution { .. } | ItemContent::Subagent { .. })
-        );
+        // A running command the harness can move into the background, as
+        // its own Ctrl+B does.
+        let movable = self.moves_to_background(cx)
+            && matches!(
+                &entry.content,
+                EntryContent::Item(ItemContent::CommandExecution { .. })
+            );
         if self.runs_in_background(entry, status, cx) {
             status = agent::ItemStatus::InProgress;
             header.background = true;
@@ -1958,10 +1989,7 @@ impl TimelineView {
                 },
             )
         });
-        let child = tools::subagent::child_thread(self, entry, cx);
-        let detail = if child.is_some() {
-            tools::window::Detail::Elsewhere(crate::tr!("tools.open_thread").into_owned().into())
-        } else if !expandable {
+        let detail = if !expandable {
             tools::window::Detail::None
         } else {
             match tools::window::fold(&self.motion, &entry.id, expanded, window, cx) {
@@ -1973,34 +2001,11 @@ impl TimelineView {
                 None => tools::window::Detail::Shut,
             }
         };
-        // A window that opens an agent is what the agent's card grows out of.
-        let origin = child
-            .as_ref()
-            .map(|_| SharedString::from(format!("activity-window-{}", entry.id)));
-        let on_click: tools::window::ClickHandler = match child {
-            Some(child) => {
-                let store = self.workspace_store.clone();
-                let host = self.agent_host(cx);
-                let origin = origin.clone();
-                Box::new(move |_, window, cx| {
-                    crate::agents_panel::open_agent(
-                        &store,
-                        child.clone(),
-                        host.clone(),
-                        origin.clone(),
-                        window,
-                        cx,
-                    );
-                })
-            }
-            None => {
-                let click_key = key;
-                let entry_id = entry.id.clone();
-                Box::new(cx.listener(move |this, _, _, cx| {
-                    this.toggle_activity_expanded((turn, &entry_id), &click_key, expanded, cx);
-                }))
-            }
-        };
+        let click_key = key;
+        let entry_id = entry.id.clone();
+        let on_click = cx.listener(move |this, _, _, cx| {
+            this.toggle_activity_expanded((turn, &entry_id), &click_key, expanded, cx);
+        });
         let tool = tools::window::tool_window(
             tools::window::WindowSpec {
                 key: entry.id.clone(),
@@ -2019,41 +2024,64 @@ impl TimelineView {
             on_click,
             cx,
         );
-        // Pointed out from a row of the background work, the window is ringed
-        // a while.
+        self.ringed_when_located(
+            &entry.id,
+            crate::material::radius_chip(cx),
+            tool,
+            window,
+            cx,
+        )
+    }
+
+    /// `element`, the call `item_id`'s, ringed a while once a row of the
+    /// background work that names it is pressed.
+    fn ringed_when_located(
+        &self,
+        item_id: &str,
+        radius: gpui::Pixels,
+        element: AnyElement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let located = self
             .motion
             .shown(
-                format!("located-{}", entry.id),
-                (self.located.as_deref() == Some(entry.id.as_str())).then_some(()),
+                format!("located-{item_id}"),
+                (self.located.as_deref() == Some(item_id)).then_some(()),
                 CHANGE,
                 window,
                 cx,
             )
             .map(|shown| shown.progress());
-        let tool = match located {
+        match located {
             Some(progress) => div()
                 .relative()
                 .w_full()
-                .child(tool)
+                .child(element)
                 .child(
                     div()
                         .absolute()
                         .inset_0()
-                        .rounded(crate::material::radius_chip(cx))
+                        .rounded(radius)
                         .border_2()
                         .border_color(cx.theme().primary.opacity(progress)),
                 )
                 .into_any_element(),
-            None => tool,
-        };
-        match origin {
-            Some(origin) => self
-                .side_origins
-                .mark(origin, crate::material::radius_card(cx), tool)
-                .into_any_element(),
-            None => tool,
+            None => element,
         }
+    }
+
+    /// Whether the thread's harness can move a running call into the
+    /// background.
+    fn moves_to_background(&self, cx: &App) -> bool {
+        self.workspace_store
+            .read(cx)
+            .session_status_for(self.session_id.as_deref(), cx)
+            .is_some_and(|status| {
+                status
+                    .background_control
+                    .is_some_and(|control| control.move_running)
+            })
     }
 
     /// The way from a call's window to its row among the background work.
@@ -2405,8 +2433,7 @@ fn goes_on(entry: &TimelineEntry, live_reasoning_id: Option<&str>) -> bool {
         EntryContent::Item(
             ItemContent::CommandExecution { status, .. }
             | ItemContent::FileChange { status, .. }
-            | ItemContent::ToolCall { status, .. }
-            | ItemContent::Subagent { status, .. },
+            | ItemContent::ToolCall { status, .. },
         ) => *status == agent::ItemStatus::InProgress,
         _ => false,
     }
@@ -2459,6 +2486,8 @@ impl TimelineView {
         counts
     }
 }
+
+pub(in crate::chat) mod thread_card;
 
 #[cfg(test)]
 mod tests;

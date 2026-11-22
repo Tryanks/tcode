@@ -15,6 +15,10 @@ pub const ORCHESTRATE_CALLBACK_PREFIX: &str = "[orchestrate] thread ";
 pub const ORCHESTRATE_APPROVAL_PHRASE: &str = "is waiting for approval: ";
 /// Follows the callback header of a child asking its lead a question.
 pub const ORCHESTRATE_QUESTION_PHRASE: &str = "is asking (";
+/// Ends the summary of what an approval callback's child asks to do.
+pub const ORCHESTRATE_APPROVAL_ID_PHRASE: &str = " (approval_id: ";
+/// Opens the JSON of a question callback's questions.
+pub const ORCHESTRATE_QUESTIONS_PHRASE: &str = "). Questions: ";
 
 /// Opens a callback body carrying the report the child chose with
 /// `report_result`.
@@ -111,6 +115,39 @@ impl OrchestrateCallback {
                 .strip_prefix(ORCHESTRATE_FALLBACK_LABEL)
                 .unwrap_or(&self.body),
         )
+    }
+
+    /// One line saying what a request asks: what the child wants approved,
+    /// or the questions it asks. `None` for an ending, or a body this host
+    /// did not write.
+    pub fn request_summary(&self) -> Option<String> {
+        match self.event {
+            CallbackEvent::Ended(_) => None,
+            CallbackEvent::Approval => {
+                let rest = self.body.strip_prefix(ORCHESTRATE_APPROVAL_PHRASE)?;
+                let end = rest.find(ORCHESTRATE_APPROVAL_ID_PHRASE)?;
+                Some(rest[..end].to_owned())
+            }
+            CallbackEvent::Question => {
+                let (_, rest) = self.body.split_once(ORCHESTRATE_QUESTIONS_PHRASE)?;
+                let questions = serde_json::Deserializer::from_str(rest)
+                    .into_iter::<Vec<agent::UserInputQuestion>>()
+                    .next()?
+                    .ok()?;
+                let asked = questions
+                    .iter()
+                    .map(|question| {
+                        if question.question.trim().is_empty() {
+                            question.header.trim()
+                        } else {
+                            question.question.trim()
+                        }
+                    })
+                    .filter(|asked| !asked.is_empty())
+                    .collect::<Vec<_>>();
+                (!asked.is_empty()).then(|| asked.join(" · "))
+            }
+        }
     }
 }
 
@@ -243,13 +280,21 @@ mod tests {
         assert_eq!(approval.event, CallbackEvent::Approval);
         assert!(approval.body.starts_with("is waiting for approval: Bash"));
         assert_eq!(approval.report(), None);
+        assert_eq!(
+            approval.request_summary().as_deref(),
+            Some("Bash: rm -rf build")
+        );
 
         let [question] = &callbacks(
-            "[orchestrate] thread kid (\"Fix\") is asking (question_id: q1; the child is blocked until it is answered). Questions: [{\"id\":\"a\"}]. The user answers in the child thread.",
+            "[orchestrate] thread kid (\"Fix\") is asking (question_id: q1; the child is blocked until it is answered). Questions: [{\"id\":\"a\",\"header\":\"Scope\",\"question\":\"Touch the tests too?\",\"options\":[],\"multi_select\":false},{\"id\":\"b\",\"header\":\"Branch\",\"question\":\"\",\"options\":[],\"multi_select\":false}]. The user answers in the child thread.",
         )[..] else {
             panic!("one callback");
         };
         assert_eq!(question.event, CallbackEvent::Question);
         assert_eq!(question.report(), None);
+        assert_eq!(
+            question.request_summary().as_deref(),
+            Some("Touch the tests too? · Branch")
+        );
     }
 }

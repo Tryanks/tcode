@@ -137,6 +137,17 @@ chat:
   from_orchestrator: "委任元スレッド"
   report_reminder: "報告するよう促しました"
   orchestrate_callback_empty: "（出力なし）"
+  callback_card:
+    reported: "報告済み"
+    updated: "報告を更新"
+    unreported: "報告せずに終了"
+    failed: "失敗"
+    completed: "完了"
+    approval: "承認待ち"
+    question: "質問中"
+    show_all: "すべて表示"
+    show_less: "折りたたむ"
+    open_thread: "子スレッドを開く"
   error_label: "エラー"
 fork:
   action: "ここからフォーク"
@@ -2217,6 +2228,10 @@ pull_requests:
   kind_closed: "クローズ"
   kind_merged: "マージ済み"
   kind_unreadable: "読み取り不可"
+  update_title: "PR #%{number}"
+  record_opened: "PR を作成しました"
+  record_already_linked: "PR はリンク済み"
+  record_open: "PR パネルで最新の状態を見る"
   watch_update: "#%{number}：%{kinds}"
   watch_closed: "#%{number} のウォッチを停止しました：クローズされました。"
   watch_merged: "#%{number} のウォッチを停止しました：マージされました。"
@@ -3149,10 +3164,6 @@ tools:
       running: "ウェブ検索中"
       done: "ウェブ検索済み"
       asked: "ウェブ検索"
-    agent:
-      running: "サブエージェントに委任中"
-      done: "サブエージェントに委任済み"
-      asked: "サブエージェントに委任"
     script:
       running: "コンピューター操作スクリプトを実行中"
       done: "コンピューター操作スクリプトを実行済み"
@@ -3320,6 +3331,8 @@ tools:
   status:
     interrupted: "中断"
     declined: "拒否"
+    starting: "起動中"
+    started: "開始済み"
     background: "バックグラウンドで実行中"
   exit_code: "終了コード %{code}"
   input: "入力"

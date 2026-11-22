@@ -2151,10 +2151,12 @@ fn draw_until(
 /// An agent's thread with every right-panel tab, ten running agents of its
 /// own, a two-digit count on Pull requests, the longest git label, all five
 /// header toggles and a link back to a parent whose title is longer than
-/// the link shows.
+/// the link shows. Its agents' cards spin for as long as they run, so motion
+/// is reduced, under which a spinner rests.
 fn mount_crowded_thread(
     cx: &mut TestAppContext,
 ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
     mount_thread_with(cx, ten_agents(agent::ItemStatus::InProgress))
 }
 

@@ -137,6 +137,17 @@ chat:
   from_orchestrator: "委派它的线程"
   report_reminder: "已提醒汇报"
   orchestrate_callback_empty: "（无输出）"
+  callback_card:
+    reported: "已汇报"
+    updated: "更新了汇报"
+    unreported: "未汇报就结束"
+    failed: "失败"
+    completed: "已完成"
+    approval: "等待审批"
+    question: "在提问"
+    show_all: "展开全文"
+    show_less: "收起"
+    open_thread: "打开子线程"
   error_label: "错误"
 fork:
   action: "从这里派生"
@@ -2210,6 +2221,10 @@ pull_requests:
   kind_closed: "已关闭"
   kind_merged: "已合并"
   kind_unreadable: "无法读取"
+  update_title: "PR #%{number}"
+  record_opened: "开启了 PR"
+  record_already_linked: "PR 已关联"
+  record_open: "在 PR 面板查看最新状态"
   watch_update: "#%{number}：%{kinds}"
   watch_closed: "已停止关注 #%{number}：它已关闭。"
   watch_merged: "已停止关注 #%{number}：它已合并。"
@@ -3142,10 +3157,6 @@ tools:
       running: "网络搜索中"
       done: "已网络搜索"
       asked: "网络搜索"
-    agent:
-      running: "委派中"
-      done: "已委派"
-      asked: "委派"
     script:
       running: "运行电脑操作脚本中"
       done: "已运行电脑操作脚本"
@@ -3313,6 +3324,8 @@ tools:
   status:
     interrupted: "已中断"
     declined: "已拒绝"
+    starting: "启动中"
+    started: "已开启"
     background: "后台运行中"
   exit_code: "退出码 %{code}"
   input: "输入"

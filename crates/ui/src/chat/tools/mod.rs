@@ -15,6 +15,7 @@ pub(in crate::chat) mod harness;
 pub(in crate::chat) mod other;
 pub(in crate::chat) mod outline;
 pub(in crate::chat) mod preview;
+pub(in crate::chat) mod pull_request;
 pub(in crate::chat) mod question;
 pub(in crate::chat) mod read;
 pub(in crate::chat) mod run;
@@ -171,7 +172,6 @@ pub(in crate::chat) enum Family {
     /// An action on a computer: a desktop app or the preview browser.
     Computer,
     Tool,
-    Agent,
 }
 
 /// Which family's window `entry` shows as: its item kind, then for a tool
@@ -206,8 +206,9 @@ pub(in crate::chat) fn family(entry: &TimelineEntry) -> Option<Family> {
         }
         ItemContent::ImageRead { .. } => Family::Read,
         ItemContent::WebSearch { .. } | ItemContent::Other { .. } => Family::Tool,
-        ItemContent::Subagent { .. } => Family::Agent,
-        ItemContent::UserMessage { .. }
+        // It stands as a card of its own, outside the run.
+        ItemContent::Subagent { .. }
+        | ItemContent::UserMessage { .. }
         | ItemContent::AssistantMessage { .. }
         | ItemContent::Reasoning { .. }
         | ItemContent::Plan { .. } => return None,
@@ -319,21 +320,6 @@ fn kind_activity(entry: &TimelineEntry, live_reasoning: bool, cwd: &Path) -> Act
             copy(&mut items, "chat.copy_text", summary);
             settled(generic::other_header(provider_kind, summary), items)
         }
-        ItemContent::Subagent {
-            agent_type,
-            description,
-            status,
-            summary,
-            model,
-            effort,
-        } => subagent::activity(
-            agent_type,
-            description,
-            *status,
-            summary.as_deref(),
-            model.as_deref(),
-            effort.as_deref(),
-        ),
         _ => settled(Header::bare(crate::icon::IconName::Info), Vec::new()),
     }
 }

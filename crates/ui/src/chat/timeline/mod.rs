@@ -5,6 +5,7 @@ use gpui::WeakEntity;
 mod expansion;
 mod glide;
 mod list;
+mod pull_request;
 mod render;
 mod residency;
 mod rewind;
@@ -15,6 +16,8 @@ use crate::motion::list_rows::{Arrival, Glide, RowGlide};
 pub(super) use expansion::{
     AutoActivityExpansions, AutoActivityRecency, auto_activity_snapshot_keys,
 };
+#[cfg(test)]
+pub(in crate::chat) use render::thread_card;
 pub(super) use render::{ActivityRow, FullOutput, WithheldLoad};
 pub(super) use residency::{
     PendingMarkdownBuild, tail_row_window, transcript_selection, viewport_row_window,
@@ -1322,7 +1325,14 @@ impl TimelineView {
                 .read(cx)
                 .with_timeline_for(
                     self.session_id.as_deref(),
-                    |timeline| timeline.entries.get(start).map(|entry| entry.id.clone()),
+                    |timeline| {
+                        timeline
+                            .entries
+                            .get(start)
+                            // A card stands outside the work log.
+                            .filter(|entry| crate::chat::tools::subagent::card(entry).is_none())
+                            .map(|entry| entry.id.clone())
+                    },
                     cx,
                 )
                 .flatten()

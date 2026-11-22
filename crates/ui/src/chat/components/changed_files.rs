@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::icon::IconName;
+use crate::material::event_card::{self, CardTone};
 use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -9,7 +11,7 @@ use agent::{ChangeCompleteness, FileChange};
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, InteractiveElement as _, IntoElement as _,
     ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div, prelude::FluentBuilder as _, px,
+    div, px,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -45,45 +47,38 @@ pub(crate) fn changed_files(
     } = handlers;
 
     let totals = ChangeTotals::of(changes);
-
-    let header = h_flex()
-        .w_full()
-        .px_1()
-        .gap_2()
+    let theme = cx.theme();
+    let mut title = crate::tr!("chat.changed_files", count = changes.len()).into_owned();
+    if completeness == ChangeCompleteness::Partial {
+        title = format!("{title} {}", crate::tr!("chat.changed_files_partial"));
+    }
+    let counts = h_flex()
+        .flex_none()
         .items_center()
+        .gap_1()
+        .whitespace_nowrap()
+        .text_token(&theme.tokens.typography.xs)
+        .font_family(theme.mono_font_family.clone())
         .child(
-            h_flex()
-                .flex_1()
-                .min_w_0()
-                .gap_1p5()
-                .items_center()
-                .text_caption(cx)
-                .child(crate::widgets::fade_text(crate::tr!(
-                    "chat.changed_files",
-                    count = changes.len()
-                )))
-                .when(completeness == ChangeCompleteness::Partial, |header| {
-                    header.child(crate::widgets::fade_text(crate::tr!(
-                        "chat.changed_files_partial"
-                    )))
-                })
-                .child("·")
-                .child(
-                    div()
-                        .text_color(cx.theme().success)
-                        .child(format!("+{}", totals.added)),
-                )
-                .child(
-                    div()
-                        .text_color(cx.theme().danger)
-                        .child(format!("-{}", totals.deleted)),
-                )
-                .children(
-                    totals
-                        .uncounted_label()
-                        .map(|label| crate::widgets::fade_text(format!("· {label}"))),
-                ),
+            div()
+                .text_color(theme.success)
+                .child(format!("+{}", totals.added)),
         )
+        .child(
+            div()
+                .text_color(theme.danger)
+                .child(format!("\u{2212}{}", totals.deleted)),
+        )
+        .children(totals.uncounted_label().map(|label| {
+            div()
+                .text_color(theme.muted_foreground)
+                .child(format!("· {label}"))
+        }));
+
+    let header = event_card::header(true, cx)
+        .child(event_card::icon_tile(IconName::Files, cx))
+        .child(event_card::header_text(title, None, cx))
+        .child(counts)
         .child(
             quiet_control(
                 ("view-diff", index),
@@ -96,7 +91,9 @@ pub(crate) fn changed_files(
             .tooltip(crate::tr!("chat.view_diff_tooltip").into_owned()),
         );
 
-    let mut content = v_flex().w_full().gap_1p5().pt(px(2.)).child(header);
+    let content = event_card::event_card(CardTone::Neutral, cx)
+        .debug_selector(move || format!("changed-files-card-{index}"))
+        .child(header);
 
     let visible = if show_all {
         changes.len()
@@ -167,14 +164,14 @@ pub(crate) fn changed_files(
                 chip_element(index, &cwd, key, chip, on_click, &motion, cx)
             },
         )
-        .render(h_flex().w_full().px_1().gap_1p5().flex_wrap());
+        .render(h_flex().w_full().gap_1p5().flex_wrap());
         crate::motion::SizeGlide::new(&glide, row)
             .on_change(count)
             .into_any_element()
     });
-    content = content.child(body);
-
-    content.into_any_element()
+    content
+        .child(event_card::section(cx).child(body))
+        .into_any_element()
 }
 
 /// How many files [`changed_file_rows`] lists before it offers the rest.
