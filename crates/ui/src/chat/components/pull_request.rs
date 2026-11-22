@@ -1,5 +1,5 @@
-//! The cards a pull request takes in the flow: the record of a call that
-//! linked one to the thread, and a watch's wake.
+//! What a pull request takes in the flow: the record of a call that linked
+//! one to the thread, and a watch's wake, which is a card.
 
 use crate::icon::{Icon, IconName};
 use crate::material::event_card::{self, CardTone};
@@ -8,8 +8,10 @@ use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use gpui::{
     AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 use tcode_core::pull_request::PullRequestBadgeState;
 use tcode_core::pull_request_watch::{WatchChangeKind, WatchNotice};
 
@@ -20,57 +22,118 @@ const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 
 const BODY_MAX_HEIGHT: f32 = 320.;
 
+/// The record's event line and link, a half step over the caption size.
+const RECORD_LINE: f32 = 12.5;
+/// The time at the event line's end, a step under the line it ends.
+const RECORD_TIME: f32 = 11.5;
+const RECORD_GLYPH: f32 = 15.;
+/// The text's inset from the rule down the record's left edge.
+const RECORD_INSET: f32 = 12.;
+
 /// What a linked pull request's record shows.
 pub(crate) struct PullRequestRecord {
+    /// What the call did.
+    pub(crate) said: SharedString,
+    /// When, in the reader's local time.
+    pub(crate) at: Option<SharedString>,
     /// Its title, or `repository#number` while the thread has read none.
     pub(crate) title: SharedString,
-    pub(crate) subtitle: SharedString,
-    /// What the call did and when.
-    pub(crate) said: SharedString,
+    /// `repository #number`, or its host while the thread has read none.
+    pub(crate) place: SharedString,
+    /// Its head and base branches, once the thread has read them.
+    pub(crate) branches: Option<(SharedString, SharedString)>,
     /// Opens it in the thread's Pull requests panel, `None` once the thread
     /// no longer shows it.
     pub(crate) on_open: Option<ClickHandler>,
 }
 
 /// The record of a call that linked a pull request, as it stood then: no
-/// state, checks or review, which only the panel it opens keeps current.
-pub(crate) fn record_card(
-    id: &str,
-    record: PullRequestRecord,
-    motion: &crate::motion::owned::Owned,
-    cx: &App,
-) -> AnyElement {
-    let header = event_card::header(false, cx)
-        .child(event_card::icon_tile(IconName::GitPullRequest, cx))
-        .child(event_card::header_text(
-            record.title,
-            Some(record.subtitle),
-            cx,
-        ))
-        .child(event_card::status(
-            None,
-            record.said,
-            cx.theme().muted_foreground,
-            cx,
-        ));
-    let footer = record.on_open.map(|on_open| {
-        let selector = format!("pull-request-record-open-{id}");
-        event_card::footer(cx).child(
-            super::changed_files::quiet_control(
-                SharedString::from(selector.clone()),
-                crate::tr!("pull_requests.record_open").into_owned().into(),
-                on_open,
-                cx,
-            )
-            .motion(motion)
-            .debug_selector(move || selector),
+/// surface and no state, checks or review, which only the panel it opens
+/// keeps current. A rule down its left edge sets it off from the flow.
+pub(crate) fn record_card(id: &str, record: PullRequestRecord, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let typography = &theme.tokens.typography;
+    let event = h_flex()
+        .w_full()
+        .min_w_0()
+        .items_center()
+        .gap(px(7.))
+        .child(
+            Icon::new(IconName::GitPullRequest)
+                .size(px(RECORD_GLYPH))
+                .text_color(theme.muted_foreground),
         )
+        .child(
+            div()
+                .min_w_0()
+                .child(crate::widgets::fade_text(record.said)),
+        )
+        .children(record.at.map(|at| {
+            div()
+                .flex_none()
+                .ml_auto()
+                .font_family(typography.mono.clone())
+                .text_size(px(RECORD_TIME))
+                .child(at)
+        }));
+    let title = div()
+        .w_full()
+        .min_w_0()
+        .mt(px(4.))
+        .mb(px(1.))
+        .text_token(&typography.sm)
+        .font_medium()
+        .text_color(theme.foreground)
+        .child(record.title);
+    let meta = h_flex()
+        .w_full()
+        .min_w_0()
+        .flex_wrap()
+        .items_center()
+        .gap(px(4.))
+        .text_token(&typography.xs)
+        .child(record.place)
+        .when_some(record.branches, |meta, (head, base)| {
+            meta.child("·").child(
+                div()
+                    .min_w_0()
+                    .font_family(typography.mono.clone())
+                    .child(SharedString::from(format!("{head} → {base}"))),
+            )
+        });
+    let link = record.on_open.map(|on_open| {
+        let selector = format!("pull-request-record-open-{id}");
+        let label = SharedString::from(crate::tr!("pull_requests.record_open").into_owned());
+        crate::material::accessible_clickable(
+            div(),
+            SharedString::from(selector.clone()),
+            Role::Link,
+            label.clone(),
+            cx,
+        )
+        .mt(px(7.))
+        .cursor_pointer()
+        .text_color(theme.primary)
+        .on_click(move |event, window, cx| on_open(event, window, cx))
+        .debug_selector(move || selector)
+        .child(SharedString::from(format!("{label} ›")))
     });
     let selector = format!("pull-request-record-{id}");
-    event_card::event_card(CardTone::Neutral, cx)
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .py(px(2.))
+        .pl(px(RECORD_INSET))
+        .border_l_2()
+        .border_color(theme.border)
+        .text_token(&typography.xs)
+        .text_size(px(RECORD_LINE))
+        .text_color(theme.muted_foreground)
         .debug_selector(move || selector)
-        .child(header)
-        .children(footer)
+        .child(event)
+        .child(title)
+        .child(meta)
+        .children(link)
         .into_any_element()
 }
 

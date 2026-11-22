@@ -26,22 +26,24 @@ impl TimelineView {
             || format!("{}#{}", key.repository, key.number),
             |snapshot| snapshot.title.clone(),
         );
-        let subtitle = match snapshot {
-            Some(snapshot) => format!(
-                "{} #{} · {} → {}",
-                key.repository, key.number, snapshot.head_branch, snapshot.base_branch
+        let (place, branches) = match snapshot {
+            Some(snapshot) => (
+                format!("{} #{}", key.repository, key.number),
+                Some((
+                    snapshot.head_branch.clone().into(),
+                    snapshot.base_branch.clone().into(),
+                )),
             ),
-            None => key.host.clone(),
+            None => (key.host.clone(), None),
         };
-        let did = if linked.already {
+        let said = if linked.already {
             crate::tr!("pull_requests.record_already_linked")
         } else {
             crate::tr!("pull_requests.record_opened")
         };
-        let said = match entry.ts {
-            Some(at) => format!("{did} · {}", crate::chat::model::format_local_time(at)),
-            None => did.into_owned(),
-        };
+        let at = entry
+            .ts
+            .map(|at| crate::chat::model::format_local_time(at).into());
         let shown = tcode_core::pull_request::shown(links, &key);
         let on_open = self.session_id.clone().filter(|_| shown).map(|session_id| {
             let store = self.workspace_store.clone();
@@ -66,12 +68,13 @@ impl TimelineView {
         components::pull_request::record_card(
             &entry.id,
             components::pull_request::PullRequestRecord {
+                said: said.into_owned().into(),
+                at,
                 title: title.into(),
-                subtitle: subtitle.into(),
-                said: said.into(),
+                place: place.into(),
+                branches,
                 on_open,
             },
-            &self.motion,
             cx,
         )
     }
