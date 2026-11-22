@@ -1,6 +1,8 @@
 app:
   name: "Tcode"
   window_menu: "Window"
+attention:
+  waiting: "%{harness} is waiting for your decision."
 chat:
   sending: "Sending…"
   waiting_connection: "Waiting for connection…"
@@ -581,6 +583,9 @@ settings:
   remote_attachment_limit:
     title: "Attachment limit over the internet (MB)"
     description: "Images larger than this ask before going over a direct internet path and are never sent through a relay. Local network connections are not limited."
+  system_notifications:
+    title: "System notifications"
+    description: "When no Tcode window is active and a thread starts waiting for your approval, also post a system notification. Clicking it opens the thread."
   word_wrap:
     title: "Word wrap in diffs"
     description: "The default for the diff panel's wrap toggle."

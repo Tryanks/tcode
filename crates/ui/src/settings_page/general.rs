@@ -14,10 +14,17 @@ impl SettingsPage {
         if self.settings_hosts(cx).len() <= 1 {
             appearance.push(self.provider_marks_row(cx));
         }
-        let device = vec![
+        let mut device = vec![
             self.device_name_row(device_name_overridden, cx),
             self.remote_attachment_limit_row(attachment_limit_overridden, cx),
         ];
+        if cfg!(not(any(
+            target_family = "wasm",
+            target_os = "ios",
+            target_os = "android"
+        ))) {
+            device.push(self.system_notifications_row(cx));
+        }
         v_flex()
             .gap(crate::material::section_gap(cx))
             .child(crate::settings_rows::settings_group(
@@ -231,6 +238,29 @@ impl SettingsPage {
             )
             .debug_selector(|| "settings-device-name-row".into());
         row.render(layout)
+    }
+
+    /// Whether this device also posts a system notification when a thread
+    /// starts waiting on an approval while Tcode is away. GPUI has no
+    /// notification center on phones or in a browser, so only a desktop
+    /// shows the row.
+    pub(super) fn system_notifications_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let enabled = DevicePreferences::system_notifications(cx);
+        let compact = self.window_state.read(cx).compact;
+        ToggleRow::new(
+            "system-notifications",
+            crate::tr!("settings.system_notifications.title"),
+            enabled,
+            compact,
+            |enabled: &bool, _, cx| DevicePreferences::set_system_notifications(*enabled, cx),
+        )
+        .description(crate::tr!("settings.system_notifications.description"))
+        .reset(crate::settings_rows::reset_action(
+            "reset-system-notifications",
+            enabled,
+            |_, _, cx| DevicePreferences::set_system_notifications(false, cx),
+        ))
+        .into_any_element()
     }
 
     pub(super) fn remote_attachment_limit_row(

@@ -184,6 +184,10 @@ pub struct ClientPreferences {
     /// Whether the desktop window last closed maximized.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub window_maximized: bool,
+    /// Whether a thread that starts waiting on an approval while no Tcode
+    /// window is active also posts a system notification.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub system_notifications: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_layout: Option<tcode_core::settings::SidebarLayout>,
     /// `None` until this device first arranges its workspace.

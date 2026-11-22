@@ -1,6 +1,8 @@
 app:
   name: "Tcode"
   window_menu: "窗口"
+attention:
+  waiting: "%{harness} 正在等待你的决定。"
 chat:
   sending: "正在发送…"
   waiting_connection: "等待连接…"
@@ -581,6 +583,9 @@ settings:
   remote_attachment_limit:
     title: "互联网传输附件上限 (MB)"
     description: "超过此大小的图片在互联网直连时会先询问，经中继时不会发送。局域网连接不受限制。"
+  system_notifications:
+    title: "系统通知"
+    description: "当没有 Tcode 窗口处于活动状态、且有线程开始等待你的批准时，同时发送一条系统通知。点击通知会打开该线程。"
   word_wrap:
     title: "Diff 自动换行"
     description: "Diff 面板中换行开关的默认状态。"
