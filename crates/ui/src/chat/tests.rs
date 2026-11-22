@@ -39,6 +39,7 @@ fn a_compact_composer_shows_effort_approval_and_context(cx: &mut TestAppContext)
                     speed: None,
                     summary: None,
                     approval: None,
+                    apply: None,
                 }],
                 default_value: Some("xhigh".into()),
                 role: agent::OptionRole::Effort,

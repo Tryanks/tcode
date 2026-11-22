@@ -250,21 +250,31 @@ impl AppState {
                             resident.runtime = Runtime::Live(commands.clone());
                             resident._pump = Some(pump);
                             if let Some(descriptor) = resident.permission_descriptor() {
-                                let (id, apply) = match descriptor {
-                                    OptionDescriptor::Select { id, apply, .. }
-                                    | OptionDescriptor::Boolean { id, apply, .. } => (id, apply),
+                                let id = match &descriptor {
+                                    OptionDescriptor::Select { id, .. }
+                                    | OptionDescriptor::Boolean { id, .. } => id.clone(),
                                 };
-                                if apply != ApplyTiming::Restart
-                                    && let Some(selection) = resident
-                                        .meta
-                                        .option_selections
-                                        .iter()
-                                        .find(|selection| selection.id == id)
-                                    && Some(selection)
-                                        != resident
-                                            .live_option_selections
-                                            .iter()
-                                            .find(|selection| selection.id == id)
+                                let default = descriptor.default_value();
+                                let selected = resident
+                                    .meta
+                                    .option_selections
+                                    .iter()
+                                    .find(|selection| selection.id == id);
+                                let live = resident
+                                    .live_option_selections
+                                    .iter()
+                                    .find(|selection| selection.id == id);
+                                let selected_value = selected
+                                    .map(|selection| selection.value.clone())
+                                    .or_else(|| default.clone());
+                                let live_value = live
+                                    .map(|selection| selection.value.clone())
+                                    .or(default);
+                                if !descriptor.requires_restart(
+                                    live_value.as_ref(),
+                                    selected_value.as_ref(),
+                                ) && let Some(selection) = selected
+                                    && Some(selection) != live
                                 {
                                     let _ = commands.try_send(SessionCommand::SetOption {
                                         id: selection.id.clone(),

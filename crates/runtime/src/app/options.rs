@@ -213,34 +213,30 @@ impl AppState {
                 value,
             });
         }
-        let permission_push = permission
+        let is_permission = permission
             .as_ref()
             .is_some_and(|descriptor| match descriptor {
-                OptionDescriptor::Select {
-                    id: option_id,
-                    apply,
-                    ..
-                }
-                | OptionDescriptor::Boolean {
-                    id: option_id,
-                    apply,
-                    ..
-                } => option_id == id && *apply != ApplyTiming::Restart,
+                OptionDescriptor::Select { id: option_id, .. }
+                | OptionDescriptor::Boolean { id: option_id, .. } => option_id == id,
             });
-        let permission_restart = permission
-            .as_ref()
-            .is_some_and(|descriptor| match descriptor {
-                OptionDescriptor::Select {
-                    id: option_id,
-                    apply,
-                    ..
-                }
-                | OptionDescriptor::Boolean {
-                    id: option_id,
-                    apply,
-                    ..
-                } => option_id == id && *apply == ApplyTiming::Restart,
-            });
+        let permission_restart = permission.as_ref().is_some_and(|descriptor| {
+            if !is_permission {
+                return false;
+            }
+            let default = descriptor.default_value();
+            let pick = |selections: &[OptionSelection]| {
+                selections
+                    .iter()
+                    .find(|selection| selection.id == id)
+                    .map(|selection| selection.value.clone())
+                    .or_else(|| default.clone())
+            };
+            descriptor.value_apply(pick(&active.meta.option_selections).as_ref())
+                == ApplyTiming::Restart
+                || descriptor.value_apply(pick(&active.live_option_selections).as_ref())
+                    == ApplyTiming::Restart
+        });
+        let permission_push = is_permission && !permission_restart;
         if (permission_push
             || (!permission_restart && active.meta.provider.caps().live_option_push.supports(id)))
             && let Runtime::Live(commands) = &active.runtime

@@ -1270,6 +1270,7 @@ permission:
       accept-edits: "无需询问即批准工作区内的文件编辑。"
       auto: "自动批准编辑和安全命令；不可逆操作前询问你。"
       plan: "执行任务前先仔细规划。"
+      full-access: "无需询问即自动批准所有工具权限请求。"
 approval:
   command_requested: "请求批准执行命令"
   file_read_requested: "请求批准读取文件"

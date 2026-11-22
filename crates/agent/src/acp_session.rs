@@ -265,6 +265,11 @@ pub(crate) trait Dialect: Send + Sync + 'static {
     fn owned_config_options(&self) -> &'static [&'static str] {
         &[]
     }
+
+    /// Called once when the session's command loop ends, before
+    /// [`AgentEvent::SessionClosed`], so a dialect can stop any background
+    /// tasks it started in [`Self::establish`].
+    fn on_close(&self) {}
 }
 
 /// Whether the config option `config_id`, whose option id is `option_id`, is
@@ -314,8 +319,8 @@ pub(crate) struct Setup<'a> {
     pub(crate) init: &'a acp::InitializeResponse,
     name: &'a str,
     accepts_http_mcp: bool,
-    state: &'a Arc<Mutex<State>>,
-    events: &'a Sender<AgentEvent>,
+    pub(crate) state: &'a Arc<Mutex<State>>,
+    pub(crate) events: &'a Sender<AgentEvent>,
 }
 
 impl Setup<'_> {
@@ -527,6 +532,15 @@ impl Setup<'_> {
             ) else {
                 continue;
             };
+            let option_id = config_option_id(provider, &option.id.0, option.category.as_ref());
+            if self
+                .state
+                .lock_recover()
+                .options
+                .value_requires_restart(&option_id, chosen)
+            {
+                continue;
+            }
             let wire_value = match (&option.kind, chosen) {
                 (acp::SessionConfigKind::Select(select), Value::String(value))
                     if select.current_value.0.as_ref() != value.as_str() =>
@@ -1006,6 +1020,17 @@ async fn run_actor<D: Dialect>(
             .map(|dir| Arc::new(Mutex::new(WriteJournal::open(dir))));
     }
     state.owned_options = dialect.owned_config_options();
+    if provider == ProviderKind::Antigravity
+        && launch
+            .args
+            .iter()
+            .any(|arg| arg == "--dangerously-skip-permissions")
+    {
+        state.options.set_launch_override(
+            "mode".to_owned(),
+            Value::String(crate::antigravity::FULL_ACCESS_MODE.to_owned()),
+        );
+    }
     let state = Arc::new(Mutex::new(state));
     let (turn_tx, turn_done) = smol::channel::unbounded::<TurnOutcome>();
     let client = Client {
@@ -1298,6 +1323,7 @@ async fn connected_actor<D: Dialect>(
                             speed: None,
                             summary: None,
                             approval: crate::approval_class(provider, &id, mode),
+                            apply: None,
                         });
                     }
                     state
@@ -1367,6 +1393,8 @@ async fn connected_actor<D: Dialect>(
             Input::Io(reason) => break Some(reason),
         }
     };
+
+    dialect.on_close();
 
     // Only a live transport can acknowledge a graceful close. A dead stdout
     // has already ended the session and must not leave us awaiting a response.
@@ -1554,11 +1582,18 @@ async fn handle_command<D: Dialect>(
                 .await;
         }
         SessionCommand::SetOption { id, value } => {
-            let Some(origin) = state.lock_recover().options.origin(&id) else {
+            let (origin, restart) = {
+                let state = state.lock_recover();
+                (
+                    state.options.origin(&id),
+                    state.options.value_requires_restart(&id, &value),
+                )
+            };
+            let Some(origin) = origin else {
                 log::warn!("acp: unknown option id `{id}`");
                 return;
             };
-            if origin == OptionOrigin::Launch {
+            if origin == OptionOrigin::Launch || restart {
                 return;
             }
             match set_option(connection, session_id, &origin, &value).await {
@@ -1688,15 +1723,22 @@ async fn handle_command<D: Dialect>(
                     if selection.id == MODEL_OPTION_ID {
                         continue;
                     }
-                    let (current, origin) = {
+                    let (current, origin, restart) = {
                         let state = state.lock_recover();
                         (
                             state.options.value(&selection.id).cloned(),
                             state.options.origin(&selection.id),
+                            state
+                                .options
+                                .value_requires_restart(&selection.id, &selection.value),
                         )
                     };
                     if current.as_ref() == Some(&selection.value) {
                         continue;
+                    }
+                    if restart {
+                        applied = false;
+                        break;
                     }
                     let Some(origin) = origin.filter(|origin| *origin != OptionOrigin::Launch)
                     else {
@@ -2102,6 +2144,9 @@ enum OptionOrigin {
 struct OptionRegistry {
     provider: ProviderKind,
     records: Vec<OptionRecord>,
+    /// Launch-flag option override (e.g. Antigravity's `--dangerously-skip-permissions`
+    /// pinning `mode` to `full-access` regardless of what wire modes report).
+    launch_override: Option<(String, Value)>,
 }
 
 struct OptionRecord {
@@ -2115,7 +2160,30 @@ impl OptionRegistry {
         Self {
             provider,
             records: Vec::new(),
+            launch_override: None,
         }
+    }
+
+    fn set_launch_override(&mut self, id: String, value: Value) {
+        self.launch_override = Some((id, value));
+    }
+
+    fn value_requires_restart(&self, id: &str, value: &Value) -> bool {
+        self.records
+            .iter()
+            .find(|record| record.selection.id == id)
+            .is_some_and(|record| {
+                record.descriptor.value_apply(Some(value)) == crate::ApplyTiming::Restart
+                    || record.descriptor.value_apply(Some(&record.selection.value))
+                        == crate::ApplyTiming::Restart
+            })
+    }
+
+    fn override_for(&self, id: &str) -> Option<Value> {
+        self.launch_override
+            .as_ref()
+            .filter(|(override_id, _)| override_id == id)
+            .map(|(_, value)| value.clone())
     }
 
     fn ingest(
@@ -2128,36 +2196,55 @@ impl OptionRegistry {
                 OptionDescriptor::Select {
                     id,
                     label,
+                    options,
                     recommended,
                     permissive,
                     ..
-                } => Some((id, label, recommended, permissive)),
+                } => {
+                    let launch_choices: Vec<SelectOption> = options
+                        .into_iter()
+                        .filter(|option| option.apply == Some(crate::ApplyTiming::Restart))
+                        .collect();
+                    Some((id, label, recommended, permissive, launch_choices))
+                }
                 OptionDescriptor::Boolean { .. } => None,
             });
         if let Some(modes) = modes {
             let id = mode_option_id(self.provider).to_string();
-            let (label, recommended, permissive) = permission_meta
+            let (label, recommended, permissive, launch_choices) = permission_meta
                 .as_ref()
                 .filter(|(perm_id, ..)| *perm_id == id)
-                .map(|(_, label, rec, perm)| (label.clone(), rec.clone(), perm.clone()))
-                .unwrap_or_else(|| ("Mode".to_string(), None, None));
+                .map(|(_, label, rec, perm, extra)| {
+                    (label.clone(), rec.clone(), perm.clone(), extra.as_slice())
+                })
+                .unwrap_or_else(|| ("Mode".to_string(), None, None, &[]));
+            let mut options: Vec<SelectOption> = modes
+                .available_modes
+                .iter()
+                .map(|mode| SelectOption {
+                    value: mode.id.0.to_string(),
+                    label: mode.name.clone(),
+                    description: mode.description.clone(),
+                    unavailable: None,
+                    speed: None,
+                    summary: None,
+                    approval: crate::approval_class(self.provider, &id, &mode.id.0),
+                    apply: None,
+                })
+                .collect();
+            for extra in launch_choices {
+                if !options.iter().any(|option| option.value == extra.value) {
+                    options.push(extra.clone());
+                }
+            }
+            let selected = self
+                .override_for(&id)
+                .unwrap_or_else(|| Value::String(modes.current_mode_id.0.to_string()));
             self.upsert(
                 OptionDescriptor::Select {
                     id: id.clone(),
                     label,
-                    options: modes
-                        .available_modes
-                        .iter()
-                        .map(|mode| SelectOption {
-                            value: mode.id.0.to_string(),
-                            label: mode.name.clone(),
-                            description: mode.description.clone(),
-                            unavailable: None,
-                            speed: None,
-                            summary: None,
-                            approval: crate::approval_class(self.provider, &id, &mode.id.0),
-                        })
-                        .collect(),
+                    options,
                     default_value: Some(modes.current_mode_id.0.to_string()),
                     role: config_option_role(
                         self.provider,
@@ -2169,7 +2256,7 @@ impl OptionRegistry {
                     minimum: None,
                 },
                 OptionOrigin::Mode,
-                Value::String(modes.current_mode_id.0.to_string()),
+                selected,
             );
         }
         if let Some(config) = config {
@@ -2186,12 +2273,14 @@ impl OptionRegistry {
             let approval = |value: &str| crate::approval_class(self.provider, &id, value);
             match &option.kind {
                 acp::SessionConfigKind::Select(select) => {
-                    let (label, recommended, permissive) = permission_meta
+                    let (label, recommended, permissive, launch_choices) = permission_meta
                         .as_ref()
                         .filter(|(perm_id, ..)| *perm_id == id)
-                        .map(|(_, label, rec, perm)| (label.clone(), rec.clone(), perm.clone()))
-                        .unwrap_or_else(|| (option.name.clone(), None, None));
-                    let options = match &select.options {
+                        .map(|(_, label, rec, perm, extra)| {
+                            (label.clone(), rec.clone(), perm.clone(), extra.as_slice())
+                        })
+                        .unwrap_or_else(|| (option.name.clone(), None, None, &[]));
+                    let mut options: Vec<SelectOption> = match &select.options {
                         acp::SessionConfigSelectOptions::Ungrouped(flat) => flat
                             .iter()
                             .map(|option| SelectOption {
@@ -2202,6 +2291,7 @@ impl OptionRegistry {
                                 speed: None,
                                 summary: None,
                                 approval: approval(&option.value.0),
+                                apply: None,
                             })
                             .collect(),
                         acp::SessionConfigSelectOptions::Grouped(groups) => groups
@@ -2215,11 +2305,20 @@ impl OptionRegistry {
                                     speed: None,
                                     summary: None,
                                     approval: approval(&option.value.0),
+                                    apply: None,
                                 })
                             })
                             .collect(),
                         _ => Vec::new(),
                     };
+                    for extra in launch_choices {
+                        if !options.iter().any(|option| option.value == extra.value) {
+                            options.push(extra.clone());
+                        }
+                    }
+                    let selected = self
+                        .override_for(&id)
+                        .unwrap_or_else(|| Value::String(select.current_value.0.to_string()));
                     self.upsert(
                         OptionDescriptor::Select {
                             id,
@@ -2233,7 +2332,7 @@ impl OptionRegistry {
                             minimum: None,
                         },
                         OptionOrigin::Config(option.id.clone()),
-                        Value::String(select.current_value.0.to_string()),
+                        selected,
                     );
                 }
                 acp::SessionConfigKind::Boolean(boolean) => self.upsert(
@@ -2275,6 +2374,7 @@ impl OptionRegistry {
     }
 
     fn select(&mut self, id: &str, value: Value) {
+        let value = self.override_for(id).unwrap_or(value);
         if let Some(record) = self
             .records
             .iter_mut()
@@ -2360,6 +2460,9 @@ struct ToolState {
     raw_input: Option<Value>,
     raw_output: Option<Value>,
     announced: bool,
+    /// Whether this call's whole-file `Diff` content has been recorded in
+    /// [`State::journal`] for relayed rewind.
+    journalled: bool,
     /// The turn the agent last spoke of this call in. A call a turn left
     /// unfinished (an interrupt, a rejected permission) keeps its status.
     turn: Option<String>,
@@ -2457,6 +2560,56 @@ impl State {
     /// The latest `usage_update` context figure.
     pub(crate) fn usage(&self) -> Option<TokenUsage> {
         self.usage
+    }
+
+    /// Whether a tool call with `id` has already been seen in this session.
+    pub(crate) fn has_tool(&self, id: &str) -> bool {
+        self.tools.contains_key(id)
+    }
+
+    /// The title last seen for tool call `id`, if any.
+    pub(crate) fn tool_title(&self, id: &str) -> Option<&str> {
+        self.tools.get(id).map(|tool| tool.title.as_str())
+    }
+
+    /// Record every whole-file `Diff` carried by a completed tool call in the
+    /// thread's [`WriteJournal`] when the agent edited files itself rather
+    /// than through `fs/write_text_file`.
+    fn journal_diffs(&mut self, id: &str) {
+        let Some((journal, checkpoint)) = self.journal.clone().zip(self.checkpoint.clone()) else {
+            return;
+        };
+        let Some(tool) = self.tools.get_mut(id) else {
+            return;
+        };
+        if tool.journalled || tool.status != acp::ToolCallStatus::Completed {
+            return;
+        }
+        let entries: Vec<(PathBuf, Option<Vec<u8>>, Vec<u8>)> = tool
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                acp::ToolCallContent::Diff(diff) if !is_hunk_diff(diff.meta.as_ref()) => Some((
+                    self.cwd.join(&diff.path),
+                    diff.old_text.as_ref().map(|text| text.as_bytes().to_vec()),
+                    diff.new_text.as_bytes().to_vec(),
+                )),
+                _ => None,
+            })
+            .collect();
+        if entries.is_empty() {
+            return;
+        }
+        tool.journalled = true;
+        let mut journal = journal.lock_recover();
+        for (path, before, after) in entries {
+            if let Err(err) = journal.record_write(&checkpoint, &path, before.as_deref(), &after) {
+                log::warn!(
+                    "acp: could not keep what a write to {} replaces: {err}",
+                    path.display()
+                );
+            }
+        }
     }
 
     /// Open a turn the agent started on its own, which no `session/prompt`
@@ -2612,6 +2765,12 @@ impl State {
             acp::SessionUpdate::ToolCall(call) => {
                 let mut events = self.flush_text();
                 let id = call.tool_call_id.0.to_string();
+                let previous = self.tools.get_mut(&id);
+                let journalled = previous.as_ref().is_some_and(|tool| tool.journalled);
+                let writes = match previous {
+                    Some(previous) => std::mem::take(&mut previous.writes),
+                    None => Vec::new(),
+                };
                 let tool = ToolState {
                     name: tool_name(call.meta.as_ref(), call.raw_input.as_ref()),
                     title: call.title,
@@ -2622,18 +2781,23 @@ impl State {
                     raw_input: call.raw_input,
                     raw_output: call.raw_output,
                     announced: true,
+                    journalled,
                     turn: self.turn.clone(),
-                    writes: match self.tools.get_mut(&id) {
-                        Some(previous) => std::mem::take(&mut previous.writes),
-                        None => Vec::new(),
-                    },
+                    writes,
                 };
+                let terminal = matches!(
+                    tool.status,
+                    acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
+                );
                 let item = self.tool_item(&id, &tool);
                 let existed = self
                     .tools
-                    .insert(id, tool)
+                    .insert(id.clone(), tool)
                     .is_some_and(|previous| previous.announced);
-                events.push(if existed {
+                self.journal_diffs(&id);
+                events.push(if terminal {
+                    AgentEvent::ItemCompleted(item)
+                } else if existed {
                     AgentEvent::ItemUpdated(item)
                 } else {
                     AgentEvent::ItemStarted(item)
@@ -2674,13 +2838,18 @@ impl State {
                 let announced = std::mem::replace(&mut entry.announced, true);
                 let status = entry.status;
                 let tool = entry.clone();
+                self.journal_diffs(&id);
                 let item = self.tool_item(&id, &tool);
-                events.push(match (announced, status) {
-                    (false, _) => AgentEvent::ItemStarted(item),
-                    (true, acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed) => {
-                        AgentEvent::ItemCompleted(item)
-                    }
-                    _ => AgentEvent::ItemUpdated(item),
+                let terminal = matches!(
+                    status,
+                    acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
+                );
+                events.push(if terminal {
+                    AgentEvent::ItemCompleted(item)
+                } else if announced {
+                    AgentEvent::ItemUpdated(item)
+                } else {
+                    AgentEvent::ItemStarted(item)
                 });
                 events
             }
@@ -3067,6 +3236,15 @@ fn file_changes(tool: &ToolState) -> Vec<FileChange> {
             .collect();
     }
     changes
+}
+
+/// Whether `_meta` marks a hunk-sized diff rather than a whole-file ACP diff.
+fn is_hunk_diff(meta: Option<&acp::Meta>) -> bool {
+    meta.is_some_and(|meta| {
+        meta.contains_key("details")
+            || meta.contains_key("old_line")
+            || meta.contains_key("new_line")
+    })
 }
 
 /// Where a diff's texts begin in the old and new file, when the agent says;

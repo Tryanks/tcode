@@ -83,21 +83,57 @@ impl WriteJournal {
         path: &Path,
         content: &[u8],
     ) -> io::Result<()> {
+        self.append(
+            checkpoint,
+            path,
+            |journal| match std::fs::read(path) {
+                Ok(bytes) => Ok(Before::Blob(journal.keep_blob(&bytes)?)),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Before::Absent),
+                Err(err) => Err(err),
+            },
+            content,
+        )
+    }
+
+    /// Record a write an agent already performed itself and reported as a
+    /// whole-file before/after pair: `before` is `None` when the write created
+    /// `path`, or the file's exact bytes before the write.
+    pub fn record_write(
+        &mut self,
+        checkpoint: &str,
+        path: &Path,
+        before: Option<&[u8]>,
+        after: &[u8],
+    ) -> io::Result<()> {
+        self.append(
+            checkpoint,
+            path,
+            |journal| match before {
+                Some(bytes) => Ok(Before::Blob(journal.keep_blob(bytes)?)),
+                None => Ok(Before::Absent),
+            },
+            after,
+        )
+    }
+
+    fn append(
+        &mut self,
+        checkpoint: &str,
+        path: &Path,
+        before: impl FnOnce(&Self) -> io::Result<Before>,
+        after: &[u8],
+    ) -> io::Result<()> {
         let key = (checkpoint.to_owned(), path.to_path_buf());
         let before = if self.kept.contains(&key) {
             None
         } else {
-            Some(match std::fs::read(path) {
-                Ok(bytes) => Before::Blob(self.keep_blob(&bytes)?),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => Before::Absent,
-                Err(err) => return Err(err),
-            })
+            Some(before(self)?)
         };
         let line = Line {
             checkpoint: key.0.clone(),
             path: key.1.clone(),
             before,
-            after: digest(content),
+            after: digest(after),
         };
         std::fs::create_dir_all(&self.dir)?;
         let mut index = std::fs::OpenOptions::new()
@@ -438,5 +474,49 @@ mod tests {
         WriteJournal::restore(&scratch.journal(), &turns(&["t1", "t2"])).unwrap();
         assert_eq!(scratch.read("a.txt").unwrap(), b"start\n");
         assert_eq!(scratch.read("b.txt"), None);
+    }
+
+    /// Writes recorded from whole-file before/after diffs (when an agent edits
+    /// files directly instead of calling `fs/write_text_file`) restore exact
+    /// original bytes, remove newly created files, and preserve empty files.
+    #[test]
+    fn record_write_restores_diff_reported_edits_and_creations() {
+        let scratch = Scratch::new();
+        let edited = scratch.file("edited.txt");
+        let created = scratch.file("created.txt");
+        let empty = scratch.file("empty.txt");
+        let mut journal = WriteJournal::open(scratch.journal());
+
+        // Agent edited existing CRLF file twice in turn 1.
+        std::fs::write(&edited, b"v2\r\n").unwrap();
+        journal
+            .record_write("t1", &edited, Some(b"v0\r\n"), b"v1\r\n")
+            .unwrap();
+        journal
+            .record_write("t1", &edited, Some(b"v1\r\n"), b"v2\r\n")
+            .unwrap();
+
+        // Agent created a new file and overwrote a previously empty file.
+        std::fs::write(&created, b"fresh\n").unwrap();
+        journal
+            .record_write("t1", &created, None, b"fresh\n")
+            .unwrap();
+        std::fs::write(&empty, b"filled\n").unwrap();
+        journal
+            .record_write("t1", &empty, Some(b""), b"filled\n")
+            .unwrap();
+
+        let preview = WriteJournal::preview(&scratch.journal(), &turns(&["t1"]));
+        assert_eq!(
+            paths(&preview.files),
+            ["created.txt", "edited.txt", "empty.txt"]
+        );
+        assert_eq!(preview.conflicts, []);
+
+        let restored = WriteJournal::restore(&scratch.journal(), &turns(&["t1"])).unwrap();
+        assert_eq!(paths(&restored), ["created.txt", "edited.txt", "empty.txt"]);
+        assert_eq!(scratch.read("edited.txt").unwrap(), b"v0\r\n");
+        assert_eq!(scratch.read("created.txt"), None);
+        assert_eq!(scratch.read("empty.txt").unwrap(), b"");
     }
 }

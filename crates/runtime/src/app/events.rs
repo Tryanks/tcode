@@ -270,21 +270,29 @@ impl AppState {
                     // A permission chosen at launch is the thread's until a
                     // restart applies it, whatever the running process says.
                     let launch_permission_id =
-                        active
-                            .permission_descriptor()
-                            .and_then(|descriptor| match descriptor {
-                                OptionDescriptor::Select {
-                                    id,
-                                    apply: ApplyTiming::Restart,
-                                    ..
-                                }
-                                | OptionDescriptor::Boolean {
-                                    id,
-                                    apply: ApplyTiming::Restart,
-                                    ..
-                                } => Some(id),
-                                _ => None,
-                            });
+                        active.permission_descriptor().and_then(|descriptor| {
+                            let id = match &descriptor {
+                                OptionDescriptor::Select { id, .. }
+                                | OptionDescriptor::Boolean { id, .. } => id.clone(),
+                            };
+                            let default = descriptor.default_value();
+                            let selected = active
+                                .meta
+                                .option_selections
+                                .iter()
+                                .find(|selection| selection.id == id)
+                                .map(|selection| selection.value.clone())
+                                .or_else(|| default.clone());
+                            let incoming = selections
+                                .iter()
+                                .find(|selection| selection.id == id)
+                                .map(|selection| selection.value.clone())
+                                .or(default);
+                            (descriptor.value_apply(selected.as_ref()) == ApplyTiming::Restart
+                                || descriptor.value_apply(incoming.as_ref())
+                                    == ApplyTiming::Restart)
+                                .then_some(id)
+                        });
                     // An agent's own option is set by the agent, and the thread
                     // follows it. A catalog option is the user's choice, which
                     // Tcode sends; what the harness reports does not replace it.

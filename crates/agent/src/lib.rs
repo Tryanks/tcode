@@ -1652,6 +1652,50 @@ pub struct SelectOption {
     /// its permission control; `None` for a value of any other option.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalClass>,
+    /// When this choice's timing differs from the option's [`ApplyTiming`],
+    /// such as a permission value carried only as a launch flag alongside
+    /// modes that switch live. `None` inherits the option's own timing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apply: Option<ApplyTiming>,
+}
+
+impl OptionDescriptor {
+    /// The option's default value as JSON, when it defines one.
+    pub fn default_value(&self) -> Option<serde_json::Value> {
+        match self {
+            OptionDescriptor::Select { default_value, .. } => {
+                default_value.clone().map(serde_json::Value::String)
+            }
+            OptionDescriptor::Boolean { default_value, .. } => {
+                Some(serde_json::Value::Bool(*default_value))
+            }
+        }
+    }
+
+    /// When a change involving `value` takes effect: a choice's own
+    /// [`SelectOption::apply`] override if set, else the option's timing.
+    pub fn value_apply(&self, value: Option<&serde_json::Value>) -> ApplyTiming {
+        match self {
+            OptionDescriptor::Select { options, apply, .. } => value
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| options.iter().find(|option| option.value == value))
+                .and_then(|option| option.apply)
+                .unwrap_or(*apply),
+            OptionDescriptor::Boolean { apply, .. } => *apply,
+        }
+    }
+
+    /// Whether switching this option between `live` and `selected` requires
+    /// restarting the provider process rather than applying live.
+    pub fn requires_restart(
+        &self,
+        live: Option<&serde_json::Value>,
+        selected: Option<&serde_json::Value>,
+    ) -> bool {
+        live != selected
+            && (self.value_apply(live) == ApplyTiming::Restart
+                || self.value_apply(selected) == ApplyTiming::Restart)
+    }
 }
 
 type PermissionTable = (
@@ -1819,7 +1863,7 @@ fn permission_table(provider: ProviderKind) -> Option<PermissionTable> {
             ApplyTiming::Live,
             "default",
             "auto",
-            "auto",
+            "full-access",
             &[
                 (
                     "default",
@@ -1845,6 +1889,12 @@ fn permission_table(provider: ProviderKind) -> Option<PermissionTable> {
                     "Plan carefully before executing a task.",
                     ApprovalClass::Manual,
                 ),
+                (
+                    "full-access",
+                    "Full access",
+                    "Auto-approve all tool permission requests without asking.",
+                    ApprovalClass::Unrestricted,
+                ),
             ] as &[(&str, &str, &str, ApprovalClass)],
         ),
         ProviderKind::Pi | ProviderKind::Acp => return None,
@@ -1867,6 +1917,9 @@ pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
                 speed: None,
                 summary: None,
                 approval: Some(*class),
+                apply: (provider == ProviderKind::Antigravity
+                    && *value == antigravity::FULL_ACCESS_MODE)
+                    .then_some(ApplyTiming::Restart),
             })
             .collect(),
         default_value: Some(default.into()),
@@ -2015,7 +2068,7 @@ mod permission_tests {
                 ApplyTiming::Live,
                 "default",
                 "auto",
-                "auto",
+                "full-access",
             ),
         ] {
             let OptionDescriptor::Select {

@@ -39,6 +39,7 @@ fn select(
                 speed: None,
                 summary: None,
                 approval: agent::approval_class(ProviderKind::Acp, id, value),
+                apply: None,
             })
             .collect(),
         default_value: Some(default.into()),

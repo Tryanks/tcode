@@ -167,6 +167,7 @@ fn current_permission_option(effective: &str, settings: &Value) -> SelectOption 
             reviewer,
         }),
         approval: approval_class(ProviderKind::Codex, PERMISSIONS_OPTION_ID, effective),
+        apply: None,
     }
 }
 
@@ -212,6 +213,7 @@ fn permission_descriptor(
             speed: None,
             summary: None,
             approval: approval_class(ProviderKind::Codex, PERMISSIONS_OPTION_ID, &value),
+            apply: None,
             value,
         });
     }
@@ -439,6 +441,7 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
                     speed: None,
                     summary: None,
                     approval: None,
+                    apply: None,
                 })
             })
             .collect();
@@ -478,6 +481,7 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
             speed: None,
             summary: None,
             approval: None,
+            apply: None,
         });
         select_options.extend(tiers);
         options.push(OptionDescriptor::Select {
@@ -516,6 +520,7 @@ fn context_window_descriptor(windows: Option<&model_windows::ModelWindows>) -> O
             speed: None,
             summary: None,
             approval: None,
+            apply: None,
         }
     };
     let (options, default_value) = match windows {
@@ -568,6 +573,7 @@ fn service_tiers(model: &Value) -> Vec<SelectOption> {
                     description,
                     summary: None,
                     approval: None,
+                    apply: None,
                 })
             })
             .collect();

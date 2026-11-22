@@ -404,14 +404,7 @@ impl ActiveSession {
             }
         });
         permission.as_ref().is_some_and(|descriptor| {
-            let default = match descriptor {
-                OptionDescriptor::Select { default_value, .. } => {
-                    default_value.clone().map(serde_json::Value::String)
-                }
-                OptionDescriptor::Boolean { default_value, .. } => {
-                    Some(serde_json::Value::Bool(*default_value))
-                }
-            };
+            let default = descriptor.default_value();
             let value = |selections: &[OptionSelection]| {
                 selections
                     .iter()
@@ -419,16 +412,10 @@ impl ActiveSession {
                     .map(|selection| selection.value.clone())
                     .or_else(|| default.clone())
             };
-            matches!(
-                descriptor,
-                OptionDescriptor::Select {
-                    apply: ApplyTiming::Restart,
-                    ..
-                } | OptionDescriptor::Boolean {
-                    apply: ApplyTiming::Restart,
-                    ..
-                }
-            ) && value(&self.meta.option_selections) != value(&self.live_option_selections)
+            descriptor.requires_restart(
+                value(&self.live_option_selections).as_ref(),
+                value(&self.meta.option_selections).as_ref(),
+            )
         })
     }
 

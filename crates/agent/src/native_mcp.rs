@@ -237,6 +237,11 @@ mod tests {
                 ]
             );
         }
+        assert_eq!(parse(NativeMcpConfig::McpServersJson, "").unwrap(), []);
+        assert_eq!(
+            parse(NativeMcpConfig::McpServersJson, "  \n\t ").unwrap(),
+            []
+        );
     }
 
     /// `opencode debug config --standalone` of 2.2.5, on a file in the old
