@@ -28,6 +28,8 @@ struct Inner {
     next_connection: AtomicU64,
     originals: Option<Arc<dyn tcode_client::original::OriginalBackend>>,
     original_slots: std::sync::Mutex<HashMap<String, usize>>,
+    /// Woken whenever an original gives its slot back.
+    original_released: tokio::sync::Notify,
 }
 
 struct Attachment {
@@ -56,6 +58,7 @@ impl HostMux {
                 next_connection: AtomicU64::new(1),
                 originals: None,
                 original_slots: Default::default(),
+                original_released: tokio::sync::Notify::new(),
             }),
         }
     }
@@ -80,22 +83,27 @@ impl HostMux {
                 "attachment has no bulk stream",
             ));
         }
-        let permit = {
-            let mut slots = self.inner.original_slots.lock().unwrap();
-            if policy.transfers.is_some_and(|limits| {
-                slots.values().sum::<usize>() >= limits.total
-                    || slots.get(&device).copied().unwrap_or(0) >= limits.per_device
-            }) {
-                return Err(tcode_protocol::ProtocolError {
-                    code: "busy".into(),
-                    message: "too many original reads".into(),
-                });
+        // The limits bound how many originals stream at once, not how many
+        // are asked for: a read past them waits for a slot. Dropping the
+        // waiting future gives up its place without taking one.
+        let permit = loop {
+            let released = self.inner.original_released.notified();
+            let mut released = std::pin::pin!(released);
+            released.as_mut().enable();
+            {
+                let mut slots = self.inner.original_slots.lock().unwrap();
+                if !policy.transfers.is_some_and(|limits| {
+                    slots.values().sum::<usize>() >= limits.total
+                        || slots.get(&device).copied().unwrap_or(0) >= limits.per_device
+                }) {
+                    *slots.entry(device.clone()).or_default() += 1;
+                    break OriginalPermit {
+                        inner: self.inner.clone(),
+                        device,
+                    };
+                }
             }
-            *slots.entry(device.clone()).or_default() += 1;
-            OriginalPermit {
-                inner: self.inner.clone(),
-                device,
-            }
+            released.await;
         };
         let backend = self
             .inner
@@ -181,6 +189,8 @@ impl Drop for OriginalPermit {
                 slots.remove(&self.device);
             }
         }
+        drop(slots);
+        self.inner.original_released.notify_waiters();
     }
 }
 
