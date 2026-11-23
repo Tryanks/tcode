@@ -231,7 +231,8 @@ fn a_phone_row_says_whether_its_thread_works_runs_background_work_or_waits(
 
 /// A dispatched agent that waits on the user is named on its lead's row,
 /// after the verb: the verb keeps its whole width however long the agent's
-/// title, and the row keeps its height beside one that says nothing.
+/// title, the model stays named after them, and the row keeps its height
+/// beside one that says nothing.
 #[gpui::test]
 fn a_lead_row_names_its_waiting_agent_after_a_whole_verb(cx: &mut TestAppContext) {
     let long = "Implement CSV export for every report ".repeat(12);
@@ -287,7 +288,18 @@ fn a_lead_row_names_its_waiting_agent_after_a_whole_verb(cx: &mut TestAppContext
             short.size.width, long_verb.size.width,
             "a long name takes none of the verb's width"
         );
-        assert!(long_verb.right() < bounds(format!("{row}-lead-long"), cx).right());
+        for lead in ["lead-short", "lead-long"] {
+            let verb = bounds(format!("row-status-verb-{lead}"), cx);
+            let model = bounds(format!("row-model-{lead}"), cx);
+            let row = bounds(format!("{row}-{lead}"), cx);
+            assert!(bounds(format!("row-lamp-{lead}"), cx).right() <= verb.left());
+            assert!(
+                verb.right() <= model.left()
+                    && model.right() <= row.right()
+                    && model.size.width > px(0.),
+                "{lead}'s row names its model after what it does"
+            );
+        }
     }
     sidebar.read_with(cx, |sidebar, _| {
         for (lead, agent) in [("lead-short", "Explore"), ("lead-long", long.as_str())] {
