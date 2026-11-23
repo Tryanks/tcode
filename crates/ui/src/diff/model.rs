@@ -752,7 +752,7 @@ mod tests {
             },
             "example.rs".into(),
             "rust",
-            &HighlightTheme::default_dark(),
+            &HighlightTheme::dark(gpui::white()),
             &colors(),
             &HighlightStyle::default(),
         )
@@ -878,7 +878,7 @@ mod tests {
                 },
                 "new.rs".into(),
                 "rust",
-                &HighlightTheme::default_dark(),
+                &HighlightTheme::dark(gpui::white()),
                 &colors(),
                 &HighlightStyle::default(),
             );
@@ -903,7 +903,7 @@ mod tests {
             },
             "example.rs".into(),
             "rust",
-            &HighlightTheme::default_dark(),
+            &HighlightTheme::dark(gpui::white()),
             &colors(),
             &HighlightStyle::default(),
         );
@@ -947,7 +947,7 @@ mod tests {
             },
             "example.rs".into(),
             "rust",
-            &HighlightTheme::default_dark(),
+            &HighlightTheme::dark(gpui::white()),
             &colors(),
             &HighlightStyle::default(),
         );

@@ -52,13 +52,13 @@ fn a_thread_dropped_on_a_panes_middle_replaces_its_thread(cx: &mut TestAppContex
     });
 }
 
-/// A press on a subagent's window in its lead's timeline opens the
+/// A press on a subagent's card in its lead's timeline opens the
 /// agent's thread beside the lead, in the lead's own pane, with the
 /// keyboard; Escape from it closes it and gives the keyboard back to the
 /// lead's composer; once shown, the same press leaves the one agent
 /// shown rather than opening it twice.
 #[gpui::test]
-fn a_subagent_window_opens_its_thread_beside_its_lead(cx: &mut TestAppContext) {
+fn a_subagent_card_opens_its_thread_beside_its_lead(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx) = mount_panes(cx);
     cx.update(|_, cx| cx.set_reduce_motion(true));
@@ -132,17 +132,10 @@ fn a_subagent_window_opens_its_thread_beside_its_lead(cx: &mut TestAppContext) {
     });
     crate::test_frames::draw_settled(cx);
     assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
-    let log = cx
-        .debug_bounds("worklog-header-0-spawn-1")
-        .expect("the turn's work log");
-    cx.simulate_mouse_move(log.center(), None, gpui::Modifiers::default());
-    draw(cx);
-    cx.simulate_click(log.center(), gpui::Modifiers::default());
-    crate::test_frames::draw_settled(cx);
-    let window = cx
-        .debug_bounds("activity-row-spawn-1")
-        .expect("the subagent's window");
-    cx.simulate_click(window.center(), gpui::Modifiers::default());
+    let card = cx
+        .debug_bounds("thread-card-spawn-1")
+        .expect("the subagent's card");
+    cx.simulate_click(card.center(), gpui::Modifiers::default());
     draw(cx);
     serve_thread(&host, "mirror");
     // The host makes a native subagent's thread read-only.
@@ -193,10 +186,10 @@ fn a_subagent_window_opens_its_thread_beside_its_lead(cx: &mut TestAppContext) {
     store.read_with(cx, |store, _| assert!(!store.is_thread_open("mirror")));
 
     for press in 0..2 {
-        let window = cx
-            .debug_bounds("activity-row-spawn-1")
-            .expect("the subagent's window");
-        cx.simulate_click(window.center(), gpui::Modifiers::default());
+        let card = cx
+            .debug_bounds("thread-card-spawn-1")
+            .expect("the subagent's card");
+        cx.simulate_click(card.center(), gpui::Modifiers::default());
         crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx),

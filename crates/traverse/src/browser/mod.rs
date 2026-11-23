@@ -282,7 +282,7 @@ where
 
 async fn dispatch<S>(stream: &mut S, request: Request, shared: &Arc<Shared>) -> io::Result<()>
 where
-    S: AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin,
 {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/original") => original::serve(stream, request, shared).await,

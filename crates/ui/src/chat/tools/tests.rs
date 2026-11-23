@@ -20,6 +20,7 @@ use crate::window_state::WindowState;
 /// A chat open on a thread whose stored log is `log`.
 pub(in crate::chat) struct StoredThread {
     pub(in crate::chat) store: Entity<WorkspaceStore>,
+    chat: Entity<ChatView>,
     pub(in crate::chat) driver: crate::store::tests::LocalHostDriver,
     host: tcode_runtime::pipe::SpawnedHost,
     scripts: tcode_runtime::app::Scripts,
@@ -84,7 +85,7 @@ impl StoredThread {
             })
         });
         let window_state = cx.new(|_| WindowState::default());
-        let (_, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
+        let (chat, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
                 window_state,
@@ -98,6 +99,7 @@ impl StoredThread {
         (
             Self {
                 store,
+                chat,
                 driver,
                 host,
                 scripts,
@@ -139,6 +141,21 @@ impl StoredThread {
             false,
             std::path::Path::new("/home/user/project"),
         ))
+    }
+
+    /// The card `id` stands as in the flow, as it reads.
+    pub(in crate::chat) fn card(
+        &self,
+        id: &str,
+        cx: &mut VisualTestContext,
+    ) -> crate::chat::timeline::thread_card::ThreadCard {
+        let entry = self.entry(id, cx);
+        self.chat.read_with(cx, |chat, cx| {
+            chat.timeline
+                .read(cx)
+                .thread_card(&entry, cx)
+                .unwrap_or_else(|| panic!("{id} stands as no card"))
+        })
     }
 
     /// Opens the turn's folded Work Log, as a reader does.
@@ -723,69 +740,65 @@ fn a_web_call_reads_as_its_url_or_query(cx: &mut TestAppContext) {
     thread.shutdown(cx);
 }
 
-/// A subagent is a window in the shared grammar: the agent's type and its
-/// task, the model and effort it ran with as a chip, interrupted said in
-/// words.
+/// A subagent stands as a card in the flow, outside the turn's folded work:
+/// its task over its agent's type and the model and effort it ran with,
+/// and how it stands, interrupted said in words. A completed agent's
+/// summary is its report, which reaches the lead as a message of its own,
+/// so the card does not repeat it.
 #[gpui::test]
-fn a_subagent_reads_as_its_agent_and_task(cx: &mut TestAppContext) {
+fn a_subagent_stands_as_a_card_of_its_task_and_agent(cx: &mut TestAppContext) {
+    use crate::chat::timeline::thread_card::Standing;
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/subagent.jsonl"), 1_024.);
     let claude = "toolu_010000000000000000000036";
     let codex = "call_000000000000000000000037";
     let interrupted = "call_000000000000000000000038";
+    let reads = |id: &str, cx: &mut VisualTestContext| {
+        let card = thread.card(id, cx);
+        (card.title, card.subtitle, card.standing, card.failure)
+    };
     assert_eq!(
-        thread.header(claude, cx),
-        read(
-            "Ran subagent",
-            Some("Explore"),
-            Some("Classify the parser tests"),
+        reads(claude, cx),
+        (
+            "Classify the parser tests".to_owned(),
+            "Explore".to_owned(),
+            Standing::Finished,
             None
         )
     );
     assert_eq!(
-        thread.header(codex, cx),
-        Read {
-            chips: vec![Chip::Tag("gpt-6-astra · low".to_owned())],
-            ..read(
-                "Ran subagent",
-                Some("api_client"),
-                Some("/root/api_client"),
-                None
-            )
-        }
-    );
-    assert_eq!(
-        thread.header(interrupted, cx),
-        read(
-            "Ran subagent",
-            Some("cache_limits"),
-            Some("/root/perf_review/cache_limits"),
+        reads(codex, cx),
+        (
+            "/root/api_client".to_owned(),
+            "api_client · gpt-6-astra · low".to_owned(),
+            Standing::Finished,
             None
         )
     );
-    thread.open_work_log(claude, cx);
+    assert_eq!(
+        reads(interrupted, cx),
+        (
+            "/root/perf_review/cache_limits".to_owned(),
+            "cache_limits".to_owned(),
+            Standing::Interrupted,
+            None
+        )
+    );
     for id in [claude, codex, interrupted] {
-        assert!(shows(cx, &format!("tool-argument-{id}")), "{id}");
-    }
-    assert!(shows(cx, &format!("tool-chip-{codex}")));
-    assert!(shows(cx, &format!("tool-status-chip-{interrupted}")));
-    for settled in [claude, codex] {
-        assert!(
-            !shows(cx, &format!("tool-status-chip-{settled}")),
-            "{settled}"
-        );
+        assert!(shows(cx, &format!("thread-card-{id}")), "{id}");
+        assert!(!shows(cx, &format!("thread-card-failure-{id}")), "{id}");
     }
     thread.shutdown(cx);
 }
 
-/// A running agent says so; a failed one tells its error by the first line
-/// of what it reported, under its header. The running
-/// row is the recorded Codex update; no failed agent is recorded, so that
-/// one takes the shape the adapters give a failure: the error as the
-/// summary.
+/// A running agent says so; a failed one stands as a card of the stopped
+/// kind, told by the first line of what it reported. The running row is
+/// the recorded Codex update; no failed agent is recorded, so that one
+/// takes the shape the adapters give a failure: the error as the summary.
 #[gpui::test]
-fn a_subagent_window_tells_a_running_and_a_failed_agent(cx: &mut TestAppContext) {
+fn a_subagent_card_tells_a_running_and_a_failed_agent(cx: &mut TestAppContext) {
+    use crate::chat::timeline::thread_card::Standing;
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let running = "call_000000000000000000000037";
@@ -806,30 +819,25 @@ fn a_subagent_window_tells_a_running_and_a_failed_agent(cx: &mut TestAppContext)
     .map(|line| line.to_string())
     .join("\n");
     let (thread, cx) = StoredThread::open(cx, &log, 1_024.);
+    assert_eq!(thread.card(running, cx).standing, Standing::Working);
+    let card = thread.card(failed, cx);
+    assert_eq!(card.standing, Standing::Failed);
     assert_eq!(
-        thread.header(running, cx).verb.as_deref(),
-        Some("Running subagent")
+        card.failure.as_deref(),
+        Some("ProviderModelNotFoundError: model not found")
     );
-    assert_eq!(
-        thread.header(failed, cx),
-        read(
-            "Ran subagent",
-            Some("general"),
-            Some("Survey the store"),
-            Some("ProviderModelNotFoundError: model not found")
-        )
-    );
-    thread.open_work_log(running, cx);
-    assert!(shows(cx, &format!("tool-error-{failed}")));
+    assert!(shows(cx, &format!("thread-card-failure-{failed}")));
     thread.shutdown(cx);
 }
 
 /// A call the turn waits on keeps its spinner; one that returned while the
 /// work it started goes on — an agent or a command launched in the
-/// background, as Claude Code reports them — says so in the verb's place
-/// until that work ends, when it reads as done.
+/// background, as Claude Code reports them — says so until that work ends,
+/// when it reads as done: a command in its verb's place, an agent on its
+/// card.
 #[gpui::test]
 fn a_call_whose_work_goes_on_in_the_background_says_so_until_it_ends(cx: &mut TestAppContext) {
+    use crate::chat::timeline::thread_card::Standing;
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let waited = "toolu_waited";
@@ -877,16 +885,14 @@ fn a_call_whose_work_goes_on_in_the_background_says_so_until_it_ends(cx: &mut Te
     .collect();
     let (mut thread, cx) = StoredThread::open(cx, &log, 1_024.);
     thread.provider("Start them.", live, "said", cx);
-    let verb = |id: &str, cx: &mut VisualTestContext| thread.header(id, cx).verb;
-    assert_eq!(verb(waited, cx).as_deref(), Some("Running subagent"));
-    for id in [agent, command] {
-        assert_eq!(
-            verb(id, cx).as_deref(),
-            Some("Running in background"),
-            "{id}"
-        );
-    }
-    assert_eq!(verb(ended, cx).as_deref(), Some("Ran subagent"));
+    let standing = |id: &str, cx: &mut VisualTestContext| thread.card(id, cx).standing;
+    assert_eq!(standing(waited, cx), Standing::Working);
+    assert_eq!(standing(agent, cx), Standing::Background);
+    assert_eq!(standing(ended, cx), Standing::Finished);
+    assert_eq!(
+        thread.header(command, cx).verb.as_deref(),
+        Some("Running in background")
+    );
     thread.shutdown(cx);
 }
 
@@ -1421,6 +1427,7 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
     let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/threads.jsonl"), 1_024.);
     let outline = "toolu_010000000000000000000079:toolu_010000000000000000000080";
     let notify = "toolu_010000000000000000000100";
+    let refused = "toolu_010000000000000000000097";
     let with = |read: Read, detail: Option<&str>, chips: Vec<Chip>| Read {
         detail: detail.map(str::to_owned),
         chips,
@@ -1469,15 +1476,17 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
             ),
         ),
         (
-            "toolu_010000000000000000000095",
+            refused,
             with(
                 read(
                     "Started a thread",
                     None,
-                    Some("示例工作 8：示例页与导出"),
-                    None,
+                    Some("示例工作 10：示例文档"),
+                    Some(
+                        "unknown provider: gemini; start_thread starts any provider list_providers lists",
+                    ),
                 ),
-                Some("claude · claude-fable-5-1"),
+                Some("gemini"),
                 Vec::new(),
             ),
         ),
@@ -1494,11 +1503,64 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
     }
 
     thread.open_work_log(outline, cx);
+    // The threads it started stand as cards between the runs.
+    thread.open_work_log(refused, cx);
     click(cx, &format!("activity-row-{notify}"));
     for link in 0..2 {
         assert!(shows(cx, &format!("tool-thread-{notify}-{link}")), "{link}");
     }
     assert!(!shows(cx, &format!("tool-thread-{notify}-2")));
+    thread.shutdown(cx);
+}
+
+/// A thread a call started stands as a card in the flow: the task, the
+/// harness and model it runs on, and a press opens it. One of its own says
+/// it started and what it was asked; a subagent carries the bot on its
+/// harness's glyph, names the branch of its worktree, and opens beside its
+/// lead as an agent does. A call that started nothing stays a row (above).
+#[gpui::test]
+fn a_started_thread_stands_as_a_card(cx: &mut TestAppContext) {
+    use crate::chat::timeline::thread_card::{Mark, Opens, Standing};
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/threads.jsonl"), 1_024.);
+    let own = "toolu_010000000000000000000095";
+    let subagent = "toolu_010000000000000000000096";
+    let card = thread.card(own, cx);
+    assert_eq!(card.mark, Mark::Provider(agent::ProviderKind::ClaudeCode));
+    assert!(!card.badge);
+    assert_eq!(card.title, "示例工作 8：示例页与导出");
+    assert_eq!(card.subtitle, "Claude Code · claude-fable-5-1");
+    assert_eq!(card.standing, Standing::Started);
+    assert_eq!(
+        card.message.as_deref(),
+        Some("Neutral text standing in for the user's prose.")
+    );
+    assert_eq!(
+        card.opens,
+        Some(Opens::Thread(
+            "00000061-0000-0000-0000-000000000061".to_owned()
+        ))
+    );
+    let card = thread.card(subagent, cx);
+    assert_eq!(card.mark, Mark::Provider(agent::ProviderKind::Codex));
+    assert!(card.badge);
+    assert_eq!(
+        card.subtitle,
+        "Codex · gpt-6-astra · tcode/00000062-0000-0000-0000-000000000062"
+    );
+    assert_eq!(card.message, None);
+    assert_eq!(
+        card.opens,
+        Some(Opens::Agent(
+            "00000062-0000-0000-0000-000000000062".to_owned()
+        ))
+    );
+    for id in [own, subagent] {
+        assert!(shows(cx, &format!("thread-card-{id}")), "{id}");
+    }
+    assert!(shows(cx, &format!("thread-card-message-{own}")));
+    assert!(!shows(cx, &format!("thread-card-message-{subagent}")));
     thread.shutdown(cx);
 }
 

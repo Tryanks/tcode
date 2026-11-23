@@ -1,5 +1,7 @@
 use super::super::*;
+use crate::material::event_card::{self, CardTone};
 use crate::scroll::ScrollableElement as _;
+use gpui_base::StyledExt as _;
 use tcode_core::session::PendingUserInput;
 
 /// How long a value drawn here takes to glide to a new one.
@@ -61,6 +63,7 @@ impl Composer {
     pub(in super::super) fn render_user_input_panel(
         &self,
         pending: &PendingUserInput,
+        asker: Option<tcode_protocol::SubagentAsking>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -83,7 +86,7 @@ impl Composer {
                 if *hidden {
                     self.render_user_input_pill(cx)
                 } else {
-                    self.render_user_input_card(pending, window, cx)
+                    self.render_user_input_card(pending, asker.as_ref(), window, cx)
                 }
             },
         )
@@ -118,6 +121,7 @@ impl Composer {
     fn render_user_input_card(
         &self,
         pending: &PendingUserInput,
+        asker: Option<&tcode_protocol::SubagentAsking>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -130,7 +134,6 @@ impl Composer {
             return div().into_any_element();
         };
         let muted = cx.theme().muted_foreground;
-        let primary = cx.theme().primary;
         let expanded = self.ui_expanded;
         let multi = question.multi_select;
 
@@ -168,23 +171,21 @@ impl Composer {
             crate::tr!("userinput.async_header").into_owned()
         };
         let mut strip = crate::material::accessible_clickable(
-            h_flex(),
+            event_card::header(true, cx),
             "ui-strip",
             Role::Button,
             title.clone(),
             cx,
         )
-        .w_full()
-        .gap_2()
-        .items_center()
         .cursor_pointer()
-        .child(Icon::new(IconName::Info).text_color(primary))
+        .child(event_card::icon_tile(IconName::CircleQuestionMark, cx))
         .child(
             div()
                 .flex_none()
                 .max_w_1_2()
                 .overflow_hidden()
-                .text_title(cx)
+                .text_token(&cx.theme().tokens.typography.sm)
+                .font_medium()
                 .child(crate::widgets::fade_text(title)),
         )
         .when(question.optional, |strip| {
@@ -284,10 +285,12 @@ impl Composer {
             cx.notify();
         }));
 
-        let card = crate::material::card_raised(cx)
-            .w_full()
-            .gap_0()
-            .child(strip);
+        let card = event_card::raised_event_card(CardTone::Waiting, cx)
+            .debug_selector(|| "ui-card".into())
+            .child(strip)
+            .when_some(asker, |card, asker| {
+                card.child(self.render_asker(asker, cx))
+            });
         let body = self.motion.cross_fade(
             self.motion_key(format_args!("ui-question-{request_id}")),
             index,
@@ -418,21 +421,19 @@ impl Composer {
         } else {
             None
         };
-        let footer = h_flex()
-            .w_full()
-            .items_center()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_secondary(self.compact, cx)
-                    .children(hint),
-            )
-            .children(confirm);
+        // A question with neither a hint nor a confirming button has no foot.
+        let footer = (hint.is_some() || confirm.is_some()).then(|| {
+            event_card::footer(cx)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_secondary(self.compact, cx)
+                        .children(hint),
+                )
+                .children(confirm)
+        });
 
-        // The card's gap is carried above each part of the answer area, so
-        // it folds with it.
-        let gap = cx.theme().tokens.spacing.sm;
         card.child(
             crate::widgets::Collapsible::new(
                 self.motion_id(format_args!("ui-answer-{request_id}")),
@@ -443,11 +444,8 @@ impl Composer {
             .content(
                 v_flex()
                     .w_full()
-                    .gap(gap)
-                    .pt(gap)
-                    .child(body)
-                    .child(custom_answer)
-                    .child(footer),
+                    .child(event_card::section(cx).child(body).child(custom_answer))
+                    .children(footer),
             ),
         )
         .into_any_element()
@@ -635,6 +633,7 @@ impl Composer {
             request_id,
             questions,
             delivery,
+            ..
         }) = self.pending_user_input(cx)
         else {
             return false;
@@ -670,16 +669,7 @@ impl Composer {
         label: String,
         cx: &mut Context<Self>,
     ) {
-        let entry = self.ui_selections.entry(question.id.clone()).or_default();
-        if question.multi_select {
-            if let Some(pos) = entry.iter().position(|l| l == &label) {
-                entry.remove(pos);
-            } else {
-                entry.push(label);
-            }
-        } else {
-            *entry = vec![label];
-        }
+        toggle_user_input_option(&mut self.ui_selections, question, label);
         cx.notify();
     }
 
@@ -697,17 +687,14 @@ impl Composer {
         else {
             return;
         };
-        let text = input.read(cx).value().trim().to_string();
-        if text.is_empty() {
-            let index = self
-                .ui_question_index
-                .min(questions.len().saturating_sub(1));
-            let Some(question) = questions.get(index).filter(|question| question.optional) else {
-                return;
-            };
-            self.ui_selections.insert(question.id.clone(), Vec::new());
-        } else {
-            self.record_custom_answer(&questions, text);
+        let index = self
+            .ui_question_index
+            .min(questions.len().saturating_sub(1));
+        let text = input.read(cx).value().to_string();
+        if !questions.get(index).is_some_and(|question| {
+            submit_typed_user_input(&mut self.ui_selections, question, &text)
+        }) {
+            return;
         }
         input.update(cx, |state, cx| state.set_value("", window, cx));
         self.ui_advance_or_submit(&questions, request_id, window, cx);
@@ -722,12 +709,7 @@ impl Composer {
             .ui_question_index
             .min(questions.len().saturating_sub(1));
         if let Some(question) = questions.get(index) {
-            let entry = self.ui_selections.entry(question.id.clone()).or_default();
-            if question.multi_select {
-                entry.push(text);
-            } else {
-                *entry = vec![text];
-            }
+            record_typed_user_input(&mut self.ui_selections, question, text);
         }
     }
 
@@ -797,25 +779,24 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if user_input_all_answered(questions, &self.ui_selections) {
-            self.ui_submit(questions, request_id, window, cx);
-        } else if let Some(next) =
-            next_unanswered_question(questions, &self.ui_selections, self.ui_question_index)
-        {
-            self.ui_question_index = next;
-            self.seed_user_input_prefill(questions, window, cx);
-            cx.notify();
+        match user_input_step(questions, &self.ui_selections, self.ui_question_index) {
+            Some(UserInputStep::Send(answers)) => self.ui_submit(answers, request_id, window, cx),
+            Some(UserInputStep::Question(next)) => {
+                self.ui_question_index = next;
+                self.seed_user_input_prefill(questions, window, cx);
+                cx.notify();
+            }
+            None => {}
         }
     }
 
-    pub(in super::super) fn ui_submit(
+    fn ui_submit(
         &mut self,
-        questions: &[UserInputQuestion],
+        answers: serde_json::Map<String, serde_json::Value>,
         request_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let answers = assemble_user_input_answers(questions, &self.ui_selections);
         self.user_input_custom
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.ui_selections.clear();
@@ -872,6 +853,7 @@ mod tests {
                 },
                 agent::AgentEvent::UserInputRequested {
                     request_id: "ask".into(),
+                    parent_item_id: None,
                     questions,
                     delivery,
                 },

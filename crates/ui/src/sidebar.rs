@@ -55,6 +55,7 @@ mod headers;
 mod layout;
 mod lists;
 mod presence;
+mod row;
 mod settled;
 mod swipe;
 mod thread_row;
@@ -74,10 +75,6 @@ const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
 /// How long a part drawn here takes to cross-fade to another of its states.
 const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// The provider mark behind a thread row: its provider's glyph at this alpha,
-/// sized to the row height minus this vertical inset so it sits inside the row.
-const PROVIDER_MARK_ALPHA: f32 = 0.32;
-const PROVIDER_MARK_INSET: f32 = 8.;
 /// A project's threads indent beneath its header's chevron and artwork;
 /// `selectable_row` has no indent.
 const THREAD_INDENT: f32 = 30.;
@@ -189,8 +186,8 @@ const SHOWN_FILL: f32 = 0.5;
 const GLYPH_WIDTH: f32 = 14.;
 const GLYPH_HEIGHT: f32 = 12.;
 
-/// Each flat slot: the desktop two-line row and the 2pt gap reserved below it.
-const FLAT_ROW_HEIGHT: f32 = crate::material::selectable_row_two_line_height(false) + 2.;
+/// Each flat slot: the desktop three-line row and the gap below it.
+const FLAT_ROW_HEIGHT: f32 = row::DESKTOP_ROW_HEIGHT + row::DESKTOP_ROW_GAP;
 
 /// A status shown beside other row content: it fades in and out in place,
 /// and a change from one value to another cross-fades.
@@ -439,13 +436,25 @@ struct ThreadFlags {
     failed: bool,
     /// Pieces of background work and agents still running.
     background: (u32, u32),
-    /// Dispatched agents finished and await the thread's settle.
-    unsettled: bool,
     /// What wakes the thread later though nothing of it runs.
     wakes: tcode_protocol::ThreadWakes,
     /// The host can fork the thread's conversation, now or once it can.
     forks: bool,
     standing: Standing,
+    /// A dispatched agent of the thread's, at any depth, that waits on the
+    /// user.
+    waiting_agent: Option<WaitingAgent>,
+    /// The harness's own subagent that asks the user through the thread.
+    native_asking: Option<(row::StatusKind, SharedString)>,
+}
+
+/// An agent of a thread's that waits on the user, as the thread's row
+/// names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WaitingAgent {
+    /// For an approval, else for an answer.
+    approval: bool,
+    title: SharedString,
 }
 
 #[derive(Clone)]
@@ -460,8 +469,9 @@ struct ThreadRowState {
     settle_blocked: bool,
     /// Pieces of background work and agents still running.
     background: (u32, u32),
-    unsettled: bool,
     wakes: tcode_protocol::ThreadWakes,
+    waiting_agent: Option<WaitingAgent>,
+    native_asking: Option<(row::StatusKind, SharedString)>,
     failed: bool,
     auto_settle_enabled: bool,
     is_worktree: bool,
@@ -820,9 +830,7 @@ struct CompactThreadRow {
     meta: SessionMeta,
     state: ThreadRowState,
     working: bool,
-    title: SharedString,
     row_id: SharedString,
-    label: SharedString,
     project_name: Option<SharedString>,
     /// Its host's name, in a list of several hosts' threads by time.
     host_name: Option<SharedString>,
@@ -1114,6 +1122,28 @@ struct ThreadRows<'a> {
 }
 
 fn session_flags(sessions: &[SessionMeta], store: &WorkspaceStore) -> HashMap<String, ThreadFlags> {
+    // Each listed row's agent that waits on the user, one asking for an
+    // approval over one asking a question.
+    let mut waiting_agents: HashMap<String, WaitingAgent> = HashMap::new();
+    for meta in sessions.iter().filter(|meta| meta.is_dispatched()) {
+        let approval = store.pending_approval_for(&meta.id);
+        if !approval && !store.pending_user_input_for(&meta.id) {
+            continue;
+        }
+        let row = store.roster_row(&meta.id);
+        if waiting_agents
+            .get(&row)
+            .is_none_or(|waiting| approval && !waiting.approval)
+        {
+            waiting_agents.insert(
+                row,
+                WaitingAgent {
+                    approval,
+                    title: meta.title.clone().into(),
+                },
+            );
+        }
+    }
     sessions
         .iter()
         .map(|meta| {
@@ -1129,9 +1159,6 @@ fn session_flags(sessions: &[SessionMeta], store: &WorkspaceStore) -> HashMap<St
                     background: store.activity(&meta.id).map_or((0, 0), |activity| {
                         (activity.background.tasks, activity.background.agents)
                     }),
-                    unsettled: store
-                        .activity(&meta.id)
-                        .is_some_and(|activity| activity.unsettled > 0),
                     wakes: store
                         .activity(&meta.id)
                         .map(|activity| activity.wakes.clone())
@@ -1140,6 +1167,8 @@ fn session_flags(sessions: &[SessionMeta], store: &WorkspaceStore) -> HashMap<St
                         activity.fork != tcode_protocol::ForkAvailability::Unsupported
                     }),
                     standing: store.standing(meta),
+                    waiting_agent: waiting_agents.remove(&meta.id),
+                    native_asking: row::native_subagent_asking(store, &meta.id),
                 },
             )
         })
@@ -1449,15 +1478,8 @@ pub(crate) fn proceed_delete(
     });
 }
 
-/// A compact thread row as [`SessionsSidebar::render_compact_thread`] lays it
-/// out — a title and a second line inside `list_row`'s vertical inset, at
-/// least `list_row`'s height — and the hairline below it.
-fn compact_thread_row_height(cx: &App) -> f32 {
-    let theme = cx.theme();
-    let (typography, spacing) = (&theme.tokens.typography, &theme.tokens.spacing);
-    let lines = typography.md.line_height + spacing.xxs + typography.sm.line_height;
-    f32::from(lines + spacing.sm * 2.).max(crate::material::LIST_ROW_MIN_HEIGHT) + 1.
-}
+/// A phone thread row and the hairline below it.
+const COMPACT_THREAD_ROW_HEIGHT: f32 = row::PHONE_ROW_HEIGHT + 1.;
 
 fn thread_list_scrollbar(
     id: &'static str,

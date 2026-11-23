@@ -14,6 +14,7 @@ use gpui::{
 use gpui_base::{Radio, RadioGroup, h_flex, v_flex};
 use tcode_core::session::{EntryContent, Rewound, TimelineEntry};
 
+use crate::icon::{Icon, IconName};
 use crate::overlay::{Dialog, DialogActions};
 use crate::scroll::ScrollableElement as _;
 use crate::sizing::Sizable as _;
@@ -545,6 +546,9 @@ pub(crate) enum DividerUndo {
     Available(Handler),
     InProgress,
     OpenBranch(Handler),
+    /// The last undo failed, as this says, until a message is sent; the
+    /// undo, where it can be tried again.
+    Failed(String, Option<Handler>),
 }
 
 /// The divider a rewind leaves: what it did, the turns it removed to read
@@ -612,30 +616,38 @@ pub(crate) fn rewound_divider(
                 .child(label.clone())
                 .into_any_element()
         };
-        let undo = undo.as_ref().map(|undo| match undo {
-            DividerUndo::Available(on_undo) => {
-                Button::new(SharedString::from(format!("rewound-undo-{key}")))
-                    .text()
-                    .xsmall()
-                    .label(if branch {
-                        crate::tr!("rewind.return_to_branch").into_owned()
+        let undo_button = |on_undo: &Handler| {
+            Button::new(SharedString::from(format!("rewound-undo-{key}")))
+                .text()
+                .xsmall()
+                .label(if branch {
+                    crate::tr!("rewind.return_to_branch").into_owned()
+                } else {
+                    crate::tr!("rewind.undo").into_owned()
+                })
+                .on_click({
+                    let on_undo = on_undo.clone();
+                    move |_, window, cx| on_undo(window, cx)
+                })
+                .debug_selector({
+                    let selector = if branch {
+                        format!("rewound-return-{key}")
                     } else {
-                        crate::tr!("rewind.undo").into_owned()
-                    })
-                    .on_click({
-                        let on_undo = on_undo.clone();
-                        move |_, window, cx| on_undo(window, cx)
-                    })
-                    .debug_selector({
-                        let selector = if branch {
-                            format!("rewound-return-{key}")
-                        } else {
-                            format!("rewound-undo-{key}")
-                        };
-                        move || selector
-                    })
-                    .into_any_element()
-            }
+                        format!("rewound-undo-{key}")
+                    };
+                    move || selector
+                })
+                .into_any_element()
+        };
+        let undo = undo.as_ref().map(|undo| match undo {
+            DividerUndo::Available(on_undo) => undo_button(on_undo),
+            DividerUndo::Failed(failure, on_undo) => h_flex()
+                .min_w_0()
+                .gap_2()
+                .items_center()
+                .child(super::notices::rewind_failure(&key, failure.clone(), cx))
+                .children(on_undo.as_ref().map(undo_button))
+                .into_any_element(),
             DividerUndo::OpenBranch(on_open) => {
                 Button::new(SharedString::from(format!("rewound-open-branch-{key}")))
                     .text()
@@ -666,8 +678,14 @@ pub(crate) fn rewound_divider(
             .w_full()
             .items_center()
             .justify_center()
-            .gap_2()
-            .child(super::dividers::divider_stub(cx))
+            .gap_1p5()
+            .child(
+                div()
+                    .flex_none()
+                    .text_token(&cx.theme().tokens.typography.xs)
+                    .text_color(tint)
+                    .child(Icon::new(IconName::Undo2)),
+            )
             .child(label_element)
             .when_some(undo, |row, undo| {
                 row.child(
@@ -677,8 +695,7 @@ pub(crate) fn rewound_divider(
                         .child("·"),
                 )
                 .child(undo)
-            })
-            .child(super::dividers::divider_stub(cx));
+            });
         let body = motion
             .shown(
                 format!("rewound-fold-{key}"),

@@ -515,6 +515,7 @@ fn manual_settlement_is_thread_local_and_waits_for_the_queue_and_the_user() {
         (
             AgentEvent::UserInputRequested {
                 request_id: "blocking".into(),
+                parent_item_id: None,
                 questions: vec![],
                 delivery: agent::UserInputDelivery::Blocking,
             },
@@ -552,6 +553,7 @@ fn manual_settlement_is_thread_local_and_waits_for_the_queue_and_the_user() {
         .unwrap();
     parent.play([AgentEvent::UserInputRequested {
         request_id: "asynchronous".into(),
+        parent_item_id: None,
         questions: vec![],
         delivery: agent::UserInputDelivery::Async,
     }]);

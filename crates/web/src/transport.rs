@@ -213,7 +213,6 @@ impl tcode_client::original::OriginalOpener for BrowserOriginal {
                         401 | 403 => "out_of_scope",
                         404 => "not_found",
                         409 => "changed",
-                        429 => "busy",
                         _ => "io",
                     }
                     .into(),

@@ -2074,6 +2074,7 @@ fn with_running_turn(
 fn question() -> tcode_core::session::PendingUserInput {
     tcode_core::session::PendingUserInput {
         request_id: "ask".into(),
+        parent_item_id: None,
         questions: vec![agent::UserInputQuestion {
             id: "which".into(),
             header: "Next".into(),
@@ -2179,6 +2180,7 @@ fn the_status_settles_the_running_turn_whichever_topic_arrives_first(cx: &mut Te
                 3_000,
                 AgentEvent::UserInputRequested {
                     request_id: "ask".into(),
+                    parent_item_id: None,
                     questions: question().questions,
                     delivery: agent::UserInputDelivery::Blocking,
                 },
@@ -4249,6 +4251,7 @@ fn active_threads_lead_with_those_that_want_the_user(cx: &mut TestAppContext) {
                     wakes: Default::default(),
                     waiting_for_approval: false,
                     waiting_for_input: waiting,
+                    asking: Vec::new(),
                     settle_blocked: working,
                     failed: false,
                     unread,

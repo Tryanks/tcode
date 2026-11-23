@@ -70,8 +70,7 @@ impl MarkdownView {
         }
     }
 
-    /// Render headings at chat scale (h1 17px / h2 15px / h3+ 13.5px) instead
-    /// of document scale.
+    /// Render headings at chat scale instead of document scale.
     pub fn compact_headings(mut self, compact: bool) -> Self {
         self.compact_headings = Some(compact);
         self

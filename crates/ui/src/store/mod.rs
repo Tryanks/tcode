@@ -1142,6 +1142,14 @@ impl WorkspaceStore {
         })
     }
 
+    pub(crate) fn user_input_delivery_pending_for(&self, session: &str, request: &str) -> bool {
+        self.host.pending_commands().iter().any(|(_, command)| {
+            matches!(command,
+            Command::RespondUserInput { request_id, session_id, .. }
+            if request_id == request && session_id == session)
+        })
+    }
+
     pub(crate) fn retry_delivery(&self, key: &str, cx: &mut Context<Self>) {
         if let Err(error) = self.host.retry_failed(key) {
             cx.emit(RuntimeEvent::Error(tcode_protocol::RuntimeError::External(
@@ -1876,13 +1884,11 @@ impl WorkspaceStore {
         self.settings_replica.shorten_long_commands
     }
 
-    /// The `0xRRGGBB` color of `meta`'s sidebar provider mark, `None` while
-    /// the Provider marks setting is off.
-    pub fn provider_color(&self, meta: &SessionMeta) -> Option<u32> {
-        self.settings_replica.sidebar_provider_marks.then(|| {
-            self.settings_replica
-                .provider_color(&meta.provider_color_key())
-        })
+    /// The `0xRRGGBB` color `meta`'s harness glyph is drawn in on its
+    /// sidebar row.
+    pub fn provider_color(&self, meta: &SessionMeta) -> u32 {
+        self.settings_replica
+            .provider_color(&meta.provider_color_key())
     }
 
     pub fn archived_groups(&self) -> Vec<ProjectGroup> {
@@ -2048,6 +2054,16 @@ impl WorkspaceStore {
             .activity
             .get(session_id)
             .is_some_and(|activity| activity.unread)
+    }
+
+    /// The harness's own subagents waiting on the user through
+    /// `session_id`, as its index activity says.
+    pub fn asking(&self, session_id: &str) -> &[tcode_protocol::SubagentAsking] {
+        self.index_summary
+            .activity
+            .get(session_id)
+            .map(|activity| activity.asking.as_slice())
+            .unwrap_or_default()
     }
 
     pub fn pending_approval_for(&self, session_id: &str) -> bool {

@@ -13,9 +13,9 @@ use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Display, Element, ElementId, Entity, EntityId,
     FlexDirection, FontStyle, FontWeight, Global, GlobalElementId, HighlightStyle,
     InspectorElementId, InteractiveElement as _, IntoElement, LayoutId, ListState, MouseButton,
-    ObjectFit, ParentElement as _, Pixels, Rems, Role, SharedString,
-    StatefulInteractiveElement as _, Style, Styled as _, StyledImage as _, StyledText, TextLayout,
-    Window, div, img, prelude::FluentBuilder as _, px, relative, rems, size,
+    ObjectFit, ParentElement as _, Pixels, Role, SharedString, StatefulInteractiveElement as _,
+    Style, Styled as _, StyledImage as _, StyledText, TextLayout, Window, div, img,
+    prelude::FluentBuilder as _, px, relative, rems, size,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -39,6 +39,11 @@ const BLOCK_OVERDRAW: Pixels = px(300.);
 const CODE_LINES_PER_ITEM: usize = 32;
 const LIST_ITEMS_PER_ITEM: usize = 8;
 const TABLE_BORDER_PX: f32 = 1.;
+/// The space under a block that another follows.
+pub(super) const BLOCK_GAP: Pixels = px(14.);
+/// A fenced block's corners and the inset its lines keep from its edges.
+pub(super) const CODE_BLOCK_RADIUS: f32 = 12.;
+pub(super) const CODE_BLOCK_PADDING: f32 = 14.;
 type HighlightRuns = Vec<(Range<usize>, HighlightStyle)>;
 type SharedHighlightRuns = Arc<highlight::HighlightedSource>;
 type LinkRuns = Vec<(Range<usize>, super::nodes::LinkMark)>;
@@ -109,11 +114,11 @@ impl RenderOptions {
         }
     }
 
-    fn gap(&self) -> Rems {
+    fn gap(&self) -> Pixels {
         if self.in_list || self.is_last {
-            rems(0.)
+            px(0.)
         } else {
-            rems(1.)
+            BLOCK_GAP
         }
     }
 }
@@ -1594,7 +1599,7 @@ fn render_code_block(
     }
     let (first, last) = (span.start == 0, span.end == prepared.lines.len());
     let lines = code_lines(code, span.clone(), options, view, cx);
-    let radius = crate::material::radius_card(cx);
+    let radius = px(CODE_BLOCK_RADIUS);
     // The whole fence, not the painted span: a long block is split across
     // list items and the menu copies the code a reader sees as one block,
     // with the line endings it was written with, less the fence's last.
@@ -1640,7 +1645,7 @@ fn render_code_block(
     });
     let content = div()
         .id(span_id(&options.path, &span))
-        .when(last && !options.is_last, |block| block.pb(rems(1.)))
+        .when(last && !options.is_last, |block| block.pb(BLOCK_GAP))
         // A formula's source view takes the formula's menu from its block.
         .when(!is_math, |block| {
             block.on_mouse_down(MouseButton::Right, move |_, _, cx| {
@@ -1654,9 +1659,13 @@ fn render_code_block(
         })
         .child(
             div()
-                .px_3()
-                .when(first, |block| block.pt_3().rounded_t(radius))
-                .when(last, |block| block.pb_3().rounded_b(radius))
+                .px(px(CODE_BLOCK_PADDING))
+                .when(first, |block| {
+                    block.pt(px(CODE_BLOCK_PADDING)).rounded_t(radius)
+                })
+                .when(last, |block| {
+                    block.pb(px(CODE_BLOCK_PADDING)).rounded_b(radius)
+                })
                 .bg(cx.theme().tokens.colors.muted)
                 .relative()
                 .child(lines)
@@ -1830,7 +1839,7 @@ fn render_scroll_table(
     div()
         .id(options.path.clone())
         .w_full()
-        .pb(if options.is_last { rems(0.) } else { rems(1.) })
+        .pb(if options.is_last { px(0.) } else { BLOCK_GAP })
         .child(
             div()
                 .id(SharedString::from(format!("{}-viewport", options.path)))

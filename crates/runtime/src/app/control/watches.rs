@@ -2,7 +2,7 @@ use super::*;
 use crate::app::orchestrate::approval_request_summary;
 use control_mcp::{BatchResult, CancelNotifyParams, NotifyWhenParams, Outcome};
 use tcode_core::control::{ControlWatch, WatchEvent, action};
-use tcode_core::notice::CONTROL_CALLBACK_PREFIX;
+use tcode_core::notice::{CONTROL_CALLBACK_PREFIX, control_header};
 
 #[derive(Serialize)]
 struct WatchAnswer<'a> {
@@ -215,8 +215,8 @@ impl AppState {
             return;
         };
         let text = format!(
-            "{CONTROL_CALLBACK_PREFIX}thread {target_id} ({}) {}{}",
-            quoted(&target.title),
+            "{CONTROL_CALLBACK_PREFIX}{} {}{}",
+            control_header(target_id, &target.title),
             wire_name(event),
             self.watch_event_detail(&target, event)
         );

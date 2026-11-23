@@ -15,7 +15,6 @@ use gpui_base::{StyledExt as _, h_flex, v_flex};
 use crate::icon::{Icon, IconName, IconNamed};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
-use crate::widgets::TooltipTrigger as _;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::widgets::{BreathingDot, Spinner};
 
@@ -92,9 +91,6 @@ pub(in crate::chat) enum Chip {
     /// An outcome the call itself reports short of success, in its words: a
     /// wait that timed out, an action that did not work.
     Warning(String),
-    /// What the call ran with, verbatim: the model an agent ran on, its
-    /// effort.
-    Tag(String),
 }
 
 /// The header of one window.
@@ -255,9 +251,6 @@ pub(in crate::chat) enum Detail {
     /// Open, or folding shut, as the fold samples it; the key names what
     /// the body shows, and the body's height glides when it changes.
     Fold(crate::motion::Shown<()>, AnyElement, u64),
-    /// Nothing to open in place: a press goes where this says, which the
-    /// pointer is told as the window's tooltip.
-    Elsewhere(SharedString),
 }
 
 /// The fold of a window's body: `Some` while it is open or still folding
@@ -329,8 +322,8 @@ pub(in crate::chat) fn elapsed(
     header.elapsed_ms.or_else(|| elapsed_of(entry))
 }
 
-/// A whole window: the header, a click on which toggles the body — or, for
-/// [`Detail::Elsewhere`], goes there — then the body in a rail when open.
+/// A whole window: the header, a click on which toggles the body, then the
+/// body in a rail when open.
 /// The context menu offers the window's copies.
 pub(in crate::chat) fn tool_window(
     spec: WindowSpec,
@@ -351,24 +344,18 @@ pub(in crate::chat) fn tool_window(
         hover,
         motion,
     } = spec;
-    let pressable = !matches!(detail, Detail::None);
-    let folds = !matches!(detail, Detail::None | Detail::Elsewhere(_));
+    let folds = !matches!(detail, Detail::None);
     let open = match &detail {
         Detail::Fold(shown, ..) => !shown.leaving(),
-        Detail::None | Detail::Shut | Detail::Elsewhere(_) => false,
-    };
-    let goes = match &detail {
-        Detail::Elsewhere(goes) => Some(goes.clone()),
-        _ => None,
+        Detail::None | Detail::Shut => false,
     };
     let label = header.label(status);
     let radius = crate::material::radius_chip(cx);
-    let fill =
-        pressable.then(|| hover.layer(format!("activity-row-{key}"), cx.theme().accent, radius));
+    let fill = folds.then(|| hover.layer(format!("activity-row-{key}"), cx.theme().accent, radius));
     let row = header_row(
         &motion, &key, header, status, elapsed_ms, compact, folds, open, fill, cx,
     );
-    let row: AnyElement = if pressable {
+    let row: AnyElement = if folds {
         crate::material::accessible_clickable(
             row,
             SharedString::from(format!("activity-row-{key}")),
@@ -380,10 +367,7 @@ pub(in crate::chat) fn tool_window(
             let key = key.clone();
             move || format!("activity-row-{key}")
         })
-        .when(folds, |row| row.aria_expanded(open))
-        .when_some(goes, |row, goes| {
-            row.with_tooltip(move |_, _| crate::widgets::tooltip::Tooltip::new(goes.clone()))
-        })
+        .aria_expanded(open)
         .rounded(radius)
         .cursor_pointer()
         .on_click(on_toggle)
@@ -421,7 +405,7 @@ pub(in crate::chat) fn tool_window(
                 body(content),
             ))))
         }
-        Detail::None | Detail::Shut | Detail::Elsewhere(_) => None,
+        Detail::None | Detail::Shut => None,
     };
     v_flex()
         .id(SharedString::from(format!("tool-window-{key}")))
@@ -657,33 +641,6 @@ fn chip_element(key: &str, chip: Chip, cx: &App) -> AnyElement {
         Chip::Warning(text) => {
             crate::material::semantic_chip(text, theme.warning.opacity(0.12), theme.warning, cx)
                 .into_any_element()
-        }
-        // What the call ran with matters less than what it acted on: in a
-        // narrow row it gives way beside the argument instead of pushing
-        // the argument out.
-        Chip::Tag(text) => {
-            return h_flex()
-                .min_w_0()
-                .flex_shrink(1.)
-                .debug_selector(move || format!("tool-chip-{key}"))
-                .child(
-                    crate::material::chip_surface(
-                        theme.muted.opacity(0.4),
-                        theme.muted_foreground,
-                        cx,
-                    )
-                    .flex_shrink(1.)
-                    .min_w_0()
-                    .overflow_hidden()
-                    .font_family(mono)
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .child(crate::widgets::fade_text(text)),
-                    ),
-                )
-                .into_any_element();
         }
     };
     div()

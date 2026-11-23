@@ -39,7 +39,7 @@ use gpui::{
     InspectorElementId, InteractiveElement as _, IntoElement, LayoutId, MouseButton, ObjectFit,
     ParentElement as _, Pixels, RenderImage, Role, SharedString, StatefulInteractiveElement as _,
     Style, Styled, StyledImage as _, SvgRenderer, Task, Window, div, img,
-    prelude::FluentBuilder as _, relative, rems, size,
+    prelude::FluentBuilder as _, px, relative, size,
 };
 use gpui_base::h_flex;
 use mermaid_rs_renderer::{
@@ -633,8 +633,7 @@ pub(super) fn block(
         });
         let code = div()
             .w_full()
-            .px_3()
-            .py_3()
+            .p(px(super::render::CODE_BLOCK_PADDING))
             .child(lines(cx))
             .children(failure);
         // Until its picture is drawn, the code holds the height the diagram
@@ -795,7 +794,7 @@ pub(super) fn block(
     let card = div()
         .w_full()
         .relative()
-        .rounded(crate::material::radius_card(cx))
+        .rounded(px(super::render::CODE_BLOCK_RADIUS))
         .bg(cx.theme().tokens.colors.muted)
         .child(SizeGlide::new(&glide, faces).gliding(swap.and_then(|swap| swap.from), progress))
         .child(actions);
@@ -804,7 +803,7 @@ pub(super) fn block(
         .id(SharedString::from(path.to_string()))
         .on_hover(hover.on_hover(hover_key))
         .w_full()
-        .when(!is_last, |block| block.pb(rems(1.)))
+        .when(!is_last, |block| block.pb(super::render::BLOCK_GAP))
         .on_mouse_down(MouseButton::Right, move |_, _, cx| {
             context_view.update(cx, |state, cx| {
                 state.set_pending_context(

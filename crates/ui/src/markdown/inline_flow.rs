@@ -28,7 +28,7 @@ use super::{
 const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
 
 const ELEMENT_LEN: usize = 1;
-const INLINE_CODE_PADDING_X: Pixels = px(3.);
+const INLINE_CODE_PADDING_X: Pixels = px(4.);
 const INLINE_CODE_PADDING_Y: Pixels = px(1.);
 
 #[derive(Clone)]

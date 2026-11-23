@@ -23,7 +23,6 @@
 //! waiting for the host and a finger put on it in flight still undoes the
 //! swipe. The list takes it back if the host refuses.
 
-use crate::sidebar::compact::busy_status;
 use std::collections::{HashSet, VecDeque};
 use std::f32::consts::TAU;
 use std::time::Duration;
@@ -476,12 +475,15 @@ impl Uncovered {
                 let state = &row.state;
                 let scheduled_only = state.wakes.scheduled_at.is_some()
                     && !(state.waiting() || row.working || state.background != (0, 0));
-                let (label, color) = if scheduled_only {
-                    (crate::tr!("sidebar.waiting"), cx.theme().muted_foreground)
+                let status = if scheduled_only {
+                    row::RowStatus {
+                        kind: row::StatusKind::Waiting,
+                        name: None,
+                    }
                 } else {
-                    busy_status(state, cx)
+                    row::RowStatus::busy(state)
                 };
-                Self::Busy(label.into(), color)
+                Self::Busy(status.verb().into(), status.color(cx))
             },
             Self::Action,
         )

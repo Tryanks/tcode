@@ -630,7 +630,7 @@ fn type_into(pane: &Entity<ThreadPanel>, cx: &mut VisualTestContext) {
     let bounds = pane.read_with(cx, |pane, _| pane.bounds());
     let card = cx.debug_bounds("composer-card").expect("a composer");
     cx.simulate_click(
-        gpui::point(bounds.center().x, card.center().y),
+        gpui::point(bounds.center().x, card.top() + px(24.)),
         gpui::Modifiers::default(),
     );
     draw(cx);
@@ -1970,6 +1970,7 @@ fn session_status(session: &str, cwd: &std::path::Path) -> tcode_protocol::Sessi
             wakes: Default::default(),
             waiting_for_approval: false,
             waiting_for_input: false,
+            asking: Vec::new(),
             settle_blocked: false,
             failed: false,
             unread: false,
@@ -1999,6 +2000,7 @@ fn session_status(session: &str, cwd: &std::path::Path) -> tcode_protocol::Sessi
         running_turn: None,
         pending_approvals: Vec::new(),
         pending_user_input: None,
+        child_requests: Vec::new(),
         steering_supported: false,
         // As the host describes every thread of a harness with one.
         provider_option_descriptors: agent::permission_control(agent::ProviderKind::ClaudeCode)
@@ -2151,10 +2153,12 @@ fn draw_until(
 /// An agent's thread with every right-panel tab, ten running agents of its
 /// own, a two-digit count on Pull requests, the longest git label, all five
 /// header toggles and a link back to a parent whose title is longer than
-/// the link shows.
+/// the link shows. Its agents' cards spin for as long as they run, so motion
+/// is reduced, under which a spinner rests.
 fn mount_crowded_thread(
     cx: &mut TestAppContext,
 ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
     mount_thread_with(cx, ten_agents(agent::ItemStatus::InProgress))
 }
 

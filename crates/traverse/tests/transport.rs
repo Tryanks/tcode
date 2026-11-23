@@ -1345,7 +1345,9 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
 const ORIGINAL_BYTES: usize = 4 * 1024 * 1024;
 
 /// Contract: a large original and a recorded image leave control responsive;
-/// cancellation releases admission even when both device slots are occupied.
+/// with both device slots occupied a further read waits instead of failing,
+/// a read dropped while waiting takes no slot, and cancellation releases
+/// admission to the waiting read.
 #[test]
 fn originals_preserve_control_progress_bytes_and_cancelled_admission() {
     use tcode_client::HostLink;
@@ -1392,20 +1394,27 @@ fn originals_preserve_control_progress_bytes_and_cancelled_admission() {
         }
         assert_eq!(received, bytes);
         drop(item);
-        let mut first = admitted_original(&link, &target).await;
+        let mut first = link.read_original(target.clone());
         first.read().await.unwrap().unwrap();
-        let mut second = admitted_original(&link, &target).await;
+        let mut second = link.read_original(target.clone());
         second.read().await.unwrap().unwrap();
-        let mut refused = link.read_original(target.clone());
-        assert_eq!(refused.metadata().await.unwrap_err().code, "busy");
-        first.cancel();
-        assert!(first.read().await.is_err());
-        assert_eq!(link.query(Query::Ping).await.unwrap(), QueryResponse::Pong);
-        let mut replacement = admitted_original(&link, &target).await;
-        let mut received = Vec::new();
-        while let Some(block) = replacement.read().await.unwrap() {
-            received.extend(block);
-        }
+        let waiting = async {
+            let mut waiting = link.read_original(target.clone());
+            let mut received = Vec::new();
+            while let Some(block) = waiting.read().await.unwrap() {
+                received.extend(block);
+            }
+            received
+        };
+        let release = async {
+            let mut abandoned = link.read_original(target.clone());
+            let _ = futures_lite::future::poll_once(abandoned.metadata()).await;
+            drop(abandoned);
+            assert_eq!(link.query(Query::Ping).await.unwrap(), QueryResponse::Pong);
+            first.cancel();
+            assert!(first.read().await.is_err());
+        };
+        let (received, ()) = futures_lite::future::zip(waiting, release).await;
         assert_eq!(received, bytes);
         drop(second);
         link.close();
@@ -1413,24 +1422,6 @@ fn originals_preserve_control_progress_bytes_and_cancelled_admission() {
     });
     host.shutdown();
     real_host::stop(runtime, &mux);
-}
-
-/// Opens `target` once the host admits it. A read gives its slot back when the
-/// host sees the client stop the stream or acknowledge its end, which no
-/// stream orders before the next request: until then the host answers that
-/// request busy, and the device asks again.
-async fn admitted_original(
-    link: &tcode_client::HostLink,
-    target: &tcode_protocol::OriginalTarget,
-) -> tcode_client::OriginalTransfer {
-    loop {
-        let mut next = link.read_original(target.clone());
-        match next.metadata().await {
-            Ok(_) => break next,
-            Err(error) if error.code == "busy" => {}
-            Err(error) => panic!("original: {error:?}"),
-        }
-    }
 }
 
 /// Contract: revoking a project grant prevents a blocked original from completing.

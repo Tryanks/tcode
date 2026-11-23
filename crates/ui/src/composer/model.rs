@@ -417,7 +417,7 @@ pub(super) fn traits_chip_label(spec: &ModelSpec, states: &OptionStates) -> Opti
 /// A question counts as answered once it carries at least one selection (or a
 /// recorded custom-text answer, which is stored the same way). An optional
 /// one counts once the user has passed it, even left empty.
-pub(super) fn user_input_answered(
+pub(crate) fn user_input_answered(
     question: &UserInputQuestion,
     selections: &std::collections::HashMap<String, Vec<String>>,
 ) -> bool {
@@ -426,7 +426,7 @@ pub(super) fn user_input_answered(
         .is_some_and(|selected| question.optional || !selected.is_empty())
 }
 
-pub(super) fn user_input_all_answered(
+pub(crate) fn user_input_all_answered(
     questions: &[UserInputQuestion],
     selections: &std::collections::HashMap<String, Vec<String>>,
 ) -> bool {
@@ -437,7 +437,7 @@ pub(super) fn user_input_all_answered(
 
 /// The next unanswered question after `from`, wrapping around to earlier ones
 /// (and back to `from` itself) so a skipped question is always revisited.
-pub(super) fn next_unanswered_question(
+pub(crate) fn next_unanswered_question(
     questions: &[UserInputQuestion],
     selections: &std::collections::HashMap<String, Vec<String>>,
     from: usize,
@@ -453,7 +453,7 @@ pub(super) fn next_unanswered_question(
 
 /// Build the answers map for a user-input request: keyed by question id, with a
 /// string (single-select / free-text) or string-array (multi-select) value.
-pub(super) fn assemble_user_input_answers(
+pub(crate) fn assemble_user_input_answers(
     questions: &[UserInputQuestion],
     selections: &std::collections::HashMap<String, Vec<String>>,
 ) -> serde_json::Map<String, serde_json::Value> {
@@ -473,6 +473,84 @@ pub(super) fn assemble_user_input_answers(
         map.insert(question.id.clone(), value);
     }
     map
+}
+
+/// Choosing `label` for `question`: it replaces a single-select answer and
+/// toggles in a multi-select one.
+pub(crate) fn toggle_user_input_option(
+    selections: &mut std::collections::HashMap<String, Vec<String>>,
+    question: &UserInputQuestion,
+    label: String,
+) {
+    let entry = selections.entry(question.id.clone()).or_default();
+    if question.multi_select {
+        if let Some(pos) = entry.iter().position(|l| l == &label) {
+            entry.remove(pos);
+        } else {
+            entry.push(label);
+        }
+    } else {
+        *entry = vec![label];
+    }
+}
+
+/// Typed `text` as an answer to `question`, as a click records an option:
+/// one more answer to a multi-select question, the answer to a single-select
+/// one.
+pub(crate) fn record_typed_user_input(
+    selections: &mut std::collections::HashMap<String, Vec<String>>,
+    question: &UserInputQuestion,
+    text: String,
+) {
+    let entry = selections.entry(question.id.clone()).or_default();
+    if question.multi_select {
+        entry.push(text);
+    } else {
+        *entry = vec![text];
+    }
+}
+
+/// The typed answer sent for `question`: `text` as its answer, or with none
+/// typed an optional question passed over. False when nothing was typed and
+/// the question needs an answer.
+pub(crate) fn submit_typed_user_input(
+    selections: &mut std::collections::HashMap<String, Vec<String>>,
+    question: &UserInputQuestion,
+    text: &str,
+) -> bool {
+    let text = text.trim();
+    if !text.is_empty() {
+        record_typed_user_input(selections, question, text.to_owned());
+    } else if question.optional {
+        selections.insert(question.id.clone(), Vec::new());
+    } else {
+        return false;
+    }
+    true
+}
+
+/// Where leaving a question goes.
+pub(crate) enum UserInputStep {
+    /// Every question is answered: these answers go.
+    Send(serde_json::Map<String, serde_json::Value>),
+    /// The next question still unanswered.
+    Question(usize),
+}
+
+/// Leaving question `at`: the answer set once it is complete, or the next
+/// question still unanswered.
+pub(crate) fn user_input_step(
+    questions: &[UserInputQuestion],
+    selections: &std::collections::HashMap<String, Vec<String>>,
+    at: usize,
+) -> Option<UserInputStep> {
+    if user_input_all_answered(questions, selections) {
+        Some(UserInputStep::Send(assemble_user_input_answers(
+            questions, selections,
+        )))
+    } else {
+        next_unanswered_question(questions, selections, at).map(UserInputStep::Question)
+    }
 }
 
 pub(super) fn current_model_name(catalog: &[ModelSpec], model: Option<&str>) -> String {

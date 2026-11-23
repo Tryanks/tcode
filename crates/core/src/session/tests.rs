@@ -416,6 +416,7 @@ fn repeated_compacting_status_announces_one_compaction() {
 fn structured_user_input_blocks_until_resolution() {
     let request = AgentEvent::UserInputRequested {
         request_id: "que_1".into(),
+        parent_item_id: None,
         questions: vec![UserInputQuestion {
             id: "que_1:0".into(),
             header: "Scope".into(),
@@ -1327,40 +1328,6 @@ fn a_warning_before_any_turn_is_an_entry_of_the_thread() {
         &warning.content,
         EntryContent::Warning { message } if message == "config is deprecated"
     ));
-}
-
-/// Attempts at one request are one entry, which says the latest; a request
-/// retried later in the turn is its own.
-#[test]
-fn attempts_at_a_request_share_one_entry() {
-    let mut timeline = Timeline::default();
-    let retry = |message: &str| AgentEvent::RequestRetry {
-        message: message.into(),
-    };
-    timeline.apply_at(Some(1), &retry("Reconnecting... 1/5"));
-    timeline.apply_at(Some(2), &retry("Reconnecting... 2/5"));
-    timeline.apply_at(
-        Some(3),
-        &AgentEvent::Warning {
-            message: "fell back".into(),
-        },
-    );
-    timeline.apply_at(Some(4), &retry("Reconnecting... 1/5"));
-
-    let shown: Vec<_> = timeline
-        .entries
-        .iter()
-        .map(|entry| match &entry.content {
-            EntryContent::RequestRetry { message } => message.as_str(),
-            EntryContent::Warning { .. } => "warning",
-            other => panic!("{other:?}"),
-        })
-        .collect();
-    assert_eq!(
-        shown,
-        ["Reconnecting... 2/5", "warning", "Reconnecting... 1/5"]
-    );
-    assert_ne!(timeline.entries[0].id, timeline.entries[2].id);
 }
 
 #[test]

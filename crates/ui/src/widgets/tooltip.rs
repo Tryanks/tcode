@@ -6,6 +6,7 @@ use gpui::{
     AnyElement, App, Bounds, Element, ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior,
     InspectorElementId, IntoElement, LayoutId, MouseExitEvent, MouseMoveEvent, ParentElement,
     Pixels, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window, canvas, div,
+    px,
 };
 use gpui_base::StyledExt as _;
 
@@ -59,9 +60,9 @@ impl Tooltip {
             .border_1()
             .border_color(cx.theme().border)
             .shadow_md()
-            .rounded(crate::material::radius_chip(cx))
-            .py_0p5()
-            .px_2()
+            .rounded(px(8.))
+            .py(px(5.))
+            .px(px(8.))
             .text_token(&cx.theme().tokens.typography.sm)
             .refine_style(&self.style)
             .child(div().child(match &self.content {

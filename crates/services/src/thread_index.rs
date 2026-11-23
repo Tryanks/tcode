@@ -1338,7 +1338,7 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
                     .unwrap_or_default()
             ),
         ),
-        EntryContent::RewindFailed { mode, failure } => (
+        EntryContent::RewindFailed { mode, failure, .. } => (
             "rewind_failed",
             format!(
                 "{} failed: {:?}{}",

@@ -193,6 +193,7 @@ mod tests {
                             wakes: Default::default(),
                             waiting_for_approval: waiting,
                             waiting_for_input: false,
+                            asking: Vec::new(),
                             settle_blocked: false,
                             failed: false,
                             unread: false,

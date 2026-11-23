@@ -119,7 +119,9 @@ impl AppState {
         };
         let decision =
             resolve_approval_decision(params.option.as_deref(), params.cancel, &request)?;
+        let answer = self.approval_answer(&target, &request.id, &decision);
         self.respond_session_approval(&target, request.id.clone(), decision)?;
+        self.record_child_request_settled(&target, &request.id, answer, cx);
         self.audit(
             caller,
             &target,

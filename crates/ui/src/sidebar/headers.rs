@@ -964,11 +964,12 @@ impl SessionsSidebar {
             waiting_for_input: own_flags.waiting_for_input,
             settle_blocked: own_flags.settle_blocked,
             background: own_flags.background,
-            unsettled: own_flags.unsettled,
             // A run that failed with a message scheduled after it is waiting for that
             // message: a turn that hits its usage limit ends failed and queues its own resume.
             failed: own_flags.failed && own_flags.wakes.scheduled_at.is_none(),
             wakes: own_flags.wakes,
+            waiting_agent: own_flags.waiting_agent,
+            native_asking: own_flags.native_asking,
             auto_settle_enabled: meta.auto_settle_disabled_at.is_none(),
             is_worktree: meta.worktree.is_some(),
             show_unread: own_flags.unread && !own_flags.working,
@@ -980,42 +981,5 @@ impl SessionsSidebar {
                 .as_ref()
                 .is_some_and(|text| !text.is_empty()),
         }
-    }
-
-    /// The decorative provider mark painted under a thread row's content:
-    /// `meta`'s protocol glyph in its provider color, fitted to the row height
-    /// minus [`PROVIDER_MARK_INSET`], vertically centred and right-aligned
-    /// inside the row's `right_padding`. `None` while Provider marks is off.
-    /// It has no handlers, so the row's own hover, click and menu are unaffected.
-    pub(super) fn provider_mark(
-        store: &WorkspaceStore,
-        meta: &SessionMeta,
-        name: &str,
-        row_height: f32,
-        right_padding: f32,
-    ) -> Option<gpui::Div> {
-        let color: gpui::Hsla = gpui::rgb(store.provider_color(meta)?).into();
-        let glyph = crate::provider_card::provider_glyph(meta.provider);
-        let size = px(row_height - PROVIDER_MARK_INSET);
-        let id = name.to_owned();
-        Some(
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .right(px(right_padding))
-                .flex()
-                .items_center()
-                .child(
-                    div()
-                        .size(size)
-                        .debug_selector(move || format!("sidebar-provider-mark-{id}"))
-                        .child(
-                            glyph
-                                .size(size)
-                                .text_color(color.opacity(PROVIDER_MARK_ALPHA)),
-                        ),
-                ),
-        )
     }
 }

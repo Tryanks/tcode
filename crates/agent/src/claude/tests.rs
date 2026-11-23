@@ -2812,6 +2812,7 @@ fn an_mcp_form_is_asked_as_questions_with_its_defaults_and_answered_in_its_types
     let [
         AgentEvent::UserInputRequested {
             request_id,
+            parent_item_id: None,
             questions,
             delivery: UserInputDelivery::Blocking,
         },

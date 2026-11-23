@@ -80,6 +80,14 @@ pub trait TextRole: Styled + Sized {
 
 impl<T: Styled> TextRole for T {}
 
+/// The chat's reading text, an assistant's markdown and a message bubble:
+/// `md`'s size on a looser line than the scale's.
+pub(crate) fn chat_prose(cx: &App) -> TextStyleToken {
+    let mut prose = cx.theme().tokens.typography.md;
+    prose.line_height = gpui::px(26.);
+    prose
+}
+
 /// How far below the centre of its line box a line of `text`, in `family` at
 /// `size`, paints its baseline: (ascent - descent) / 2 of the metrics shaping
 /// finds, which take the largest over the fonts the line is drawn in. So it

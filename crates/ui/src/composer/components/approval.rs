@@ -1,5 +1,7 @@
 use super::super::*;
+use crate::material::event_card::{self, CardTone};
 use crate::scroll::ScrollableElement as _;
+use gpui_base::StyledExt as _;
 
 /// How long what is drawn here only some of the time takes to come in or go.
 const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
@@ -18,16 +20,19 @@ impl Composer {
         &self,
         request: &ApprovalRequest,
         count: usize,
+        asker: Option<tcode_protocol::SubagentAsking>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.motion.cross_fade(
             self.motion_key("approval-request"),
-            request.clone(),
+            (request.clone(), asker),
             CHANGE,
             window,
             cx,
-            |request, window, cx| self.render_approval(request, count, window, cx),
+            |(request, asker), window, cx| {
+                self.render_approval(request, count, asker.as_ref(), window, cx)
+            },
         )
     }
 
@@ -35,16 +40,11 @@ impl Composer {
         &self,
         request: &ApprovalRequest,
         count: usize,
+        asker: Option<&tcode_protocol::SubagentAsking>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // In a space that leaves approvals to the agent's harness, a member
-        // answers none: theirs are declined at once, and the owner's are the
-        // owner's.
-        let answerable = matches!(request.kind, ApprovalKind::Plan { .. })
-            || self.workspace_store.read(cx).space_allows(|policy| {
-                policy.approval != tcode_protocol::SpaceApproval::ReviewedOnly
-            });
+        let answerable = approval_answerable(request, self.workspace_store.read(cx));
         let summary = match &request.kind {
             ApprovalKind::ExecCommand { .. } => {
                 if self.compact {
@@ -76,18 +76,21 @@ impl Composer {
             }
             ApprovalKind::Plan { .. } => crate::tr!("approval.plan_requested"),
         };
+        let icon = match &request.kind {
+            ApprovalKind::ExecCommand { .. } => IconName::SquareTerminal,
+            ApprovalKind::FileRead { .. } => IconName::FileText,
+            ApprovalKind::FileChange { .. } => IconName::Pencil,
+            ApprovalKind::ToolUse { .. } => IconName::Puzzle,
+            ApprovalKind::Plan { .. } => IconName::Map,
+        };
         let muted = cx.theme().muted_foreground;
 
-        let detail_bg = cx.theme().muted;
         let detail_area = |content: AnyElement| {
             div()
                 .id("approval-detail-scroll")
                 .w_full()
                 .max_h(px(DETAIL_MAX_HEIGHT))
                 .overflow_y_scroll_area()
-                .p_2()
-                .rounded(crate::material::radius_card(cx))
-                .bg(detail_bg)
                 .child(content)
                 .into_any_element()
         };
@@ -118,8 +121,6 @@ impl Composer {
                 div()
                     .debug_selector(|| "approval-detail".into())
                     .w_full()
-                    .rounded(crate::material::radius_card(cx))
-                    .bg(detail_bg)
                     .child(
                         crate::scroll::VirtualList::measured(
                             "approval-detail-scroll",
@@ -138,8 +139,7 @@ impl Composer {
                             },
                         )
                         .w_full()
-                        .max_h(px(DETAIL_MAX_HEIGHT))
-                        .p_2(),
+                        .max_h(px(DETAIL_MAX_HEIGHT)),
                     )
                     .into_any_element()
             }
@@ -178,10 +178,9 @@ impl Composer {
             .read(cx)
             .approval_delivery_pending_for(self.session_id.as_deref(), &request.id);
         let expanded = self.approval_expanded;
-        let cancel_id = request.id.clone();
 
         // The delivery line and the offline notice fold in and away; the
-        // card's own gap is carried under each, so it folds with them.
+        // gap under each is carried inside it, so it folds with them.
         let gap = cx.theme().tokens.spacing.sm;
         let connected = self
             .workspace_store
@@ -214,7 +213,13 @@ impl Composer {
                             .into_any_element()
                     },
                 );
-                shown.fold(div().pb(gap).text_secondary(self.compact, cx).child(line))
+                shown.fold(
+                    div()
+                        .px(px(crate::material::CARD_INSET))
+                        .pb(gap)
+                        .text_secondary(self.compact, cx)
+                        .child(line),
+                )
             });
         let offline = self
             .motion
@@ -228,6 +233,7 @@ impl Composer {
             .map(|shown| {
                 shown.fold(
                     div()
+                        .px(px(crate::material::CARD_INSET))
                         .pb(gap)
                         .text_body(self.compact, cx)
                         .text_color(muted)
@@ -241,10 +247,8 @@ impl Composer {
         .motion(&self.motion)
         .w_full()
         .content(
-            v_flex()
-                .w_full()
+            event_card::section(cx)
                 .gap_1()
-                .pb(gap)
                 .child(detail)
                 .when_some(request.reason.clone(), |this, reason| {
                     this.child(
@@ -263,14 +267,11 @@ impl Composer {
                 }),
         );
 
-        crate::material::card_raised(cx)
-            .w_full()
-            .gap_0()
-            .children(delivery)
-            .children(offline)
+        event_card::raised_event_card(CardTone::Waiting, cx)
+            .debug_selector(|| "approval-card".into())
             .child(
                 crate::material::accessible_clickable(
-                    h_flex(),
+                    event_card::header(true, cx),
                     "approval-header",
                     Role::Button,
                     summary.clone(),
@@ -279,27 +280,28 @@ impl Composer {
                 .when(self.compact, |header| {
                     header.min_h(px(crate::material::TOUCH_TARGET))
                 })
-                .w_full()
-                .gap_2()
-                .items_center()
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.approval_expanded = !this.approval_expanded;
                     cx.notify();
                 }))
-                .child(
-                    div()
-                        .text_caption(cx)
-                        .child(crate::widgets::fade_text(if self.compact {
-                            crate::tr!("mobile.approval")
-                        } else {
-                            crate::tr!("approval.pending")
-                        })),
-                )
-                .child(div().flex_1().text_title(cx).child(summary))
+                .child(event_card::icon_tile(icon, cx))
+                .child(event_card::header_text(summary, None, cx))
+                .child(event_card::status(
+                    None,
+                    if self.compact {
+                        crate::tr!("mobile.approval")
+                    } else {
+                        crate::tr!("approval.pending")
+                    }
+                    .into_owned(),
+                    cx.theme().primary,
+                    cx,
+                ))
                 .when(count > 1, |this| {
                     this.child(
                         div()
+                            .flex_none()
                             .text_secondary(self.compact, cx)
                             .child(format!("1/{count}")),
                     )
@@ -313,65 +315,90 @@ impl Composer {
                     .text_color(muted),
                 ),
             )
-            .child(div().h(gap))
+            .when_some(asker, |card, asker| {
+                card.child(self.render_asker(asker, cx))
+            })
+            .children(delivery)
+            .children(offline)
             .child(detail)
             .when(!answerable, |card| {
                 card.child(
-                    div()
+                    event_card::section(cx)
                         .text_secondary(self.compact, cx)
                         .child(crate::tr!("approval.space_reviewed_only")),
                 )
             })
             .when(answerable, |card| {
-                card.child({
-                    let mut options = h_flex()
+                let respond = cx.entity().downgrade();
+                card.child(
+                    event_card::footer(cx)
+                        .items_start()
+                        .child(approval_decisions(
+                            "approval",
+                            request,
+                            self.interactive(cx) && !pending,
+                            self.compact,
+                            &self.button_motion(),
+                            Rc::new(move |request_id, decision, _, cx| {
+                                respond
+                                    .update(cx, |this, cx| this.respond(request_id, decision, cx))
+                                    .ok();
+                            }),
+                        )),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The line naming the harness's own subagent a request on the approval
+    /// or question card comes from: it is answered in its lead's composer,
+    /// where it would otherwise pass for the lead's own.
+    pub(in super::super) fn render_asker(
+        &self,
+        asker: &tcode_protocol::SubagentAsking,
+        cx: &App,
+    ) -> AnyElement {
+        let description = asker
+            .description
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        h_flex()
+            .debug_selector(|| "request-asker".into())
+            .w_full()
+            .px(px(crate::material::CARD_INSET))
+            .pb(cx.theme().tokens.spacing.sm)
+            .min_w_0()
+            .gap_1p5()
+            .items_center()
+            .text_secondary(self.compact, cx)
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap_1()
+                    .px_1p5()
+                    .items_center()
+                    .rounded(crate::material::radius_chip(cx))
+                    .bg(cx.theme().muted)
+                    .text_caption(cx)
+                    .child(Icon::new(IconName::Bot).xsmall())
+                    .child(crate::tr!("composer.subagent")),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .font_medium()
+                    .text_color(cx.theme().foreground)
+                    .child(asker.agent_type.clone()),
+            )
+            .when(!description.is_empty(), |line| {
+                line.child(
+                    div()
                         .flex_1()
                         .min_w_0()
-                        .gap_2()
-                        .items_center()
-                        .flex_wrap();
-                    for option in &request.options {
-                        let request_id = request.id.clone();
-                        let option_id = option.id.clone();
-                        let rejects = matches!(
-                            option.kind,
-                            ApprovalOptionKind::RejectOnce | ApprovalOptionKind::RejectAlways
-                        );
-                        let id = gpui::SharedString::from(format!("approval-option-{}", option.id));
-                        let button = Button::new(id)
-                            .motion(&self.button_motion())
-                            .chip()
-                            .touch(self.compact)
-                            .disabled(!self.interactive(cx) || pending)
-                            .label(option.label.clone())
-                            .when(rejects, |button| button.danger().outline())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.respond(
-                                    request_id.clone(),
-                                    ApprovalDecision::Option(option_id.clone()),
-                                    cx,
-                                );
-                            }));
-                        options = options.child(button);
-                    }
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .items_start()
-                        .child(options)
-                        .child(
-                            Button::new("approval-cancel")
-                                .motion(&self.button_motion())
-                                .ghost()
-                                .chip()
-                                .touch(self.compact)
-                                .disabled(!self.interactive(cx) || pending)
-                                .label(crate::tr!("approval.cancel_turn"))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.respond(cancel_id.clone(), ApprovalDecision::Cancel, cx);
-                                })),
-                        )
-                })
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(format!("· {description}"))),
+                )
             })
             .into_any_element()
     }
@@ -390,6 +417,85 @@ impl Composer {
             )
         });
     }
+}
+
+/// Whether this client's user may answer `request`. In a space that leaves
+/// approvals to the agent's harness, a member answers none but a plan: theirs
+/// are declined at once, and the owner's are the owner's.
+pub(crate) fn approval_answerable(request: &ApprovalRequest, store: &WorkspaceStore) -> bool {
+    matches!(request.kind, ApprovalKind::Plan { .. })
+        || store
+            .space_allows(|policy| policy.approval != tcode_protocol::SpaceApproval::ReviewedOnly)
+}
+
+/// Sends a decision on the approval with the given id.
+pub(crate) type Decide = Rc<dyn Fn(String, ApprovalDecision, &mut Window, &mut App)>;
+
+/// What a pending approval offers whoever answers it: the harness's own
+/// options in its order and words, a rejecting one marked as such, then
+/// cancelling the turn.
+/// `id` prefixes the ids and debug selectors of its buttons.
+pub(crate) fn approval_decisions(
+    id: &str,
+    request: &ApprovalRequest,
+    enabled: bool,
+    compact: bool,
+    motion: &crate::motion::owned::Owned,
+    decide: Decide,
+) -> gpui::Div {
+    let mut options = h_flex()
+        .flex_1()
+        .min_w_0()
+        .gap_2()
+        .items_center()
+        .flex_wrap();
+    for option in &request.options {
+        let request_id = request.id.clone();
+        let option_id = option.id.clone();
+        let rejects = matches!(
+            option.kind,
+            ApprovalOptionKind::RejectOnce | ApprovalOptionKind::RejectAlways
+        );
+        let id = gpui::SharedString::from(format!("{id}-option-{}", option.id));
+        let decide = decide.clone();
+        let button = Button::new(id.clone())
+            .motion(motion)
+            .chip()
+            .touch(compact)
+            .disabled(!enabled)
+            .label(option.label.clone())
+            .when(rejects, |button| button.danger().outline())
+            .debug_selector(move || id.to_string())
+            .on_click(move |_, window, cx| {
+                decide(
+                    request_id.clone(),
+                    ApprovalDecision::Option(option_id.clone()),
+                    window,
+                    cx,
+                );
+            });
+        options = options.child(button);
+    }
+    let request_id = request.id.clone();
+    let cancel = gpui::SharedString::from(format!("{id}-cancel"));
+    h_flex()
+        .w_full()
+        .gap_2()
+        .items_start()
+        .child(options)
+        .child(
+            Button::new(cancel.clone())
+                .motion(motion)
+                .ghost()
+                .chip()
+                .touch(compact)
+                .disabled(!enabled)
+                .label(crate::tr!("approval.cancel_turn"))
+                .debug_selector(move || cancel.to_string())
+                .on_click(move |_, window, cx| {
+                    decide(request_id.clone(), ApprovalDecision::Cancel, window, cx);
+                }),
+        )
 }
 
 #[cfg(test)]

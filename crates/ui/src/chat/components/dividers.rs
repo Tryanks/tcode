@@ -1,52 +1,33 @@
 use crate::icon::{Icon, IconName};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
-use agent::ProviderKind;
 use gpui::{
-    AnyElement, App, Div, Hsla, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, Styled, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, Hsla, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    SharedString, Styled, div, prelude::FluentBuilder as _,
 };
 use gpui_base::h_flex;
 
 /// How long a divider's label takes to cross-fade to its next one.
 const LABEL: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// Width of the hairline stub flanking a divider label. Short on purpose: a
-/// full-width rule would cut the flow in two, and these events only annotate it.
-const STUB_WIDTH: f32 = 24.;
-
-/// One hairline stub of the divider grammar, shared with the centered
-/// disclosure rows so every ambient notification flanks its label identically.
-pub(crate) fn divider_stub(cx: &App) -> Div {
-    div().h(px(1.)).w(px(STUB_WIDTH)).bg(cx.theme().border)
-}
-
-/// The one divider grammar: a centered small label between two hairline stubs.
-/// `tint` colors the label alone — the rules stay border-quiet no matter what
-/// the event is, so no divider can shout louder than another.
+/// The one divider grammar: a centred small label, led by `icon` where the
+/// notice has one, and nothing on either side. `tint` colours the label and
+/// its icon alike.
 fn divider(id: SharedString, label: String, tint: Hsla, cx: &App) -> AnyElement {
-    divider_in(id, label, tint, false, None, cx)
+    divider_in(id, label, tint, None, None, cx)
 }
 
-/// A [`divider`] for what went wrong while the thread carries on: the warning
-/// tint, led by the mark a warning notification carries. What ended the run
-/// is an error card instead.
-fn alert_divider(id: SharedString, label: String, cx: &App) -> AnyElement {
-    divider_in(id, label, cx.theme().warning, true, None, cx)
-}
-
-/// [`divider`] whose label changes (compaction running, then done) and
-/// cross-fades as it does, on `motion`'s clock when the chat keeps it.
-/// `alert` leads the label with the warning mark.
+/// [`divider`] led by `icon`, whose label changes (compaction running, then
+/// done) and cross-fades as it does, on `motion`'s clock when the chat keeps
+/// it.
 fn divider_in(
     id: SharedString,
     label: String,
     tint: Hsla,
-    alert: bool,
+    icon: Option<IconName>,
     motion: Option<&crate::motion::owned::Owned>,
     cx: &App,
 ) -> AnyElement {
-    let stub = || divider_stub(cx);
     let label_id = SharedString::from(format!("{id}-label"));
     let motion = motion.cloned();
     let label = crate::motion::Sampled::new(move |window, cx| {
@@ -62,256 +43,76 @@ fn divider_in(
             build,
         )
     });
+    let selector = id.to_string();
     h_flex()
         .id(id)
+        .debug_selector(move || selector)
         .w_full()
         .items_center()
         .justify_center()
-        .gap_2()
-        .child(stub())
         .child(
             h_flex()
                 .min_w_0()
                 .flex_shrink_1()
                 .items_center()
-                .gap_1()
+                .gap_1p5()
                 .text_token(&cx.theme().tokens.typography.xs)
                 .text_color(tint)
-                .when(alert, |row| row.child(Icon::new(IconName::TriangleAlert)))
-                // A label that wraps beside the mark starts each line at it.
+                .when_some(icon.clone(), |row, icon| {
+                    row.child(Icon::new(icon).flex_none())
+                })
+                // A label that wraps beside the icon starts each line at it.
                 .child(
                     div()
                         .min_w_0()
-                        .when(!alert, Styled::text_center)
+                        .when(icon.is_none(), Styled::text_center)
                         .child(label),
                 ),
         )
-        .child(stub())
         .into_any_element()
 }
 
-pub(crate) fn relay_divider(
-    id: &str,
-    from: ProviderKind,
-    to: ProviderKind,
-    moved_from: Option<&std::path::Path>,
-    cx: &App,
-) -> AnyElement {
-    let label = match moved_from {
-        Some(dir) => crate::tr!(
-            "chat.moved",
-            from = dir.to_string_lossy(),
-            to = to.display_name()
-        ),
-        // The same harness in a session started anew: another account of
-        // it, or a rewind or fork Tcode made for a harness with neither.
-        None if from == to => crate::tr!("chat.handed_over", to = to.display_name()),
-        None => crate::tr!(
-            "chat.relayed",
-            from = from.display_name(),
-            to = to.display_name()
-        ),
-    };
-    divider(
-        SharedString::from(format!("relay-{id}")),
-        label.into_owned(),
-        cx.theme().muted_foreground,
-        cx,
-    )
-}
-
-pub(crate) fn model_change_divider(
-    id: &str,
-    from: Option<&str>,
-    to: &str,
-    reason: Option<&str>,
-    cx: &App,
-) -> AnyElement {
-    let label = match from {
-        Some(from) => crate::tr!("chat.model_changed", from = from, to = to).into_owned(),
-        None => crate::tr!("chat.model_changed_to", to = to).into_owned(),
-    };
-    let label = match reason {
-        Some(reason) if !reason.is_empty() => format!("{label} ({reason})"),
-        _ => label,
-    };
-    // A model swap is worth noticing, so the text carries a warning tint — but
-    // nothing else about the row differs from a relay.
-    divider(
-        SharedString::from(format!("model-change-{id}")),
-        label,
-        cx.theme().warning,
-        cx,
-    )
-}
-
-/// Context compaction rewrites what the model remembers, so it announces
-/// itself at model-swap prominence rather than hiding in the work log.
+/// Context compaction rewrites what the model remembers, so it stands in the
+/// flow rather than in the work log: running, then what it left, in place.
 pub(crate) fn context_compacted_divider(
     id: &str,
     compaction: &agent::Compaction,
     motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
-    let mut label = if compaction.in_progress {
+    let label = if compaction.in_progress {
         crate::tr!("chat.context_compacting").into_owned()
     } else {
-        crate::tr!("chat.context_compacted").into_owned()
-    };
-    if let Some(trigger) = &compaction.trigger {
-        let trigger = match trigger.as_str() {
-            "manual" => crate::tr!("chat.context_manual").into_owned(),
-            "auto" => crate::tr!("chat.context_auto").into_owned(),
-            other => other.to_owned(),
-        };
-        label.push_str(&format!(" · {trigger}"));
-    }
-    if let Some(tokens) = compaction.pre_tokens {
-        label.push_str(&format!(
-            " · {}",
-            crate::tr!(
-                "chat.context_pre_tokens",
+        let auto = compaction.trigger.as_deref() == Some("auto");
+        let label = match (auto, compaction.pre_tokens) {
+            (true, Some(tokens)) => crate::tr!(
+                "chat.context_compacted_auto_from",
                 tokens = crate::context_meter::format_tokens(Some(tokens))
-            )
-        ));
-    }
+            ),
+            (true, None) => crate::tr!("chat.context_compacted_auto"),
+            (false, Some(tokens)) => crate::tr!(
+                "chat.context_compacted_from",
+                tokens = crate::context_meter::format_tokens(Some(tokens))
+            ),
+            (false, None) => crate::tr!("chat.context_compacted"),
+        }
+        .into_owned();
+        // A trigger other than these two is the harness's own word for it.
+        match compaction.trigger.as_deref() {
+            Some(trigger) if trigger != "auto" && trigger != "manual" => {
+                format!("{label} · {trigger}")
+            }
+            _ => label,
+        }
+    };
     divider_in(
         SharedString::from(format!("context-compacted-{id}")),
         label,
-        cx.theme().warning,
-        false,
+        cx.theme().muted_foreground,
+        Some(IconName::Minimize2),
         Some(motion),
         cx,
     )
-}
-
-pub(crate) fn control_action_divider(
-    id: &str,
-    action: &agent::ControlAction,
-    cx: &App,
-) -> AnyElement {
-    let mut label = crate::tr!(
-        "chat.control_action",
-        actor = action.actor_title.as_str(),
-        action = crate::control::action_label(&action.action)
-    )
-    .into_owned();
-    if let Some(detail) = action.detail.as_deref().filter(|detail| !detail.is_empty()) {
-        label.push_str(&format!(" ({detail})"));
-    }
-    divider(
-        SharedString::from(format!("control-action-{id}")),
-        label,
-        cx.theme().muted_foreground,
-        cx,
-    )
-}
-
-pub(crate) fn context_window_changed_divider(id: &str, window: u64, cx: &App) -> AnyElement {
-    divider(
-        SharedString::from(format!("context-window-changed-{id}")),
-        crate::tr!(
-            "chat.context_window_changed",
-            window = agent::context_window::format(window)
-        )
-        .into_owned(),
-        cx.theme().muted_foreground,
-        cx,
-    )
-}
-
-pub(crate) fn request_retry_divider(id: &str, message: &str, cx: &App) -> AnyElement {
-    alert_divider(
-        SharedString::from(format!("request-retry-{id}")),
-        message.to_owned(),
-        cx,
-    )
-}
-
-pub(crate) fn settings_kept_divider(id: &str, cx: &App) -> AnyElement {
-    divider(
-        SharedString::from(format!("settings-kept-{id}")),
-        crate::tr!("chat.settings_kept").into_owned(),
-        cx.theme().muted_foreground,
-        cx,
-    )
-}
-
-/// Where reading a withheld record whole stands, with what its control does.
-pub(crate) enum WithheldRead {
-    /// Not asked for; the control loads it.
-    Offered(super::changed_files::ClickHandler),
-    /// On its way; the control stops it.
-    Loading(super::changed_files::ClickHandler),
-    /// The read failed with this; the control tries again.
-    Failed(String, super::changed_files::ClickHandler),
-}
-
-/// A record too large to send to this client, which the host keeps, and the
-/// control that reads it whole (`read`, absent where its row is unknown).
-pub(crate) fn record_withheld_divider(
-    id: &str,
-    bytes: u64,
-    read: Option<WithheldRead>,
-    cx: &App,
-) -> AnyElement {
-    let size = crate::thread_export::format_size(bytes);
-    let control_id = SharedString::from(format!("withheld-{id}-read"));
-    let (label, control) = match read {
-        None => (crate::tr!("chat.record_withheld", size = size), None),
-        Some(WithheldRead::Offered(load)) => (
-            crate::tr!("chat.record_withheld", size = size),
-            Some((crate::tr!("chat.load_record"), load)),
-        ),
-        Some(WithheldRead::Loading(cancel)) => (
-            crate::tr!("chat.record_loading", size = size),
-            Some((crate::tr!("chat.cancel_record_load"), cancel)),
-        ),
-        Some(WithheldRead::Failed(error, load)) => (
-            crate::tr!("chat.record_load_failed", size = size, error = error),
-            Some((crate::tr!("chat.load_record"), load)),
-        ),
-    };
-    let label = label.into_owned();
-    let Some((action, on_click)) = control else {
-        return divider(
-            SharedString::from(format!("withheld-{id}")),
-            label,
-            cx.theme().muted_foreground,
-            cx,
-        );
-    };
-    h_flex()
-        .id(SharedString::from(format!("withheld-{id}")))
-        .w_full()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .child(divider_stub(cx))
-        .child(
-            div()
-                .min_w_0()
-                .flex_shrink_1()
-                .text_center()
-                .text_token(&cx.theme().tokens.typography.xs)
-                .text_color(cx.theme().muted_foreground)
-                .child(label),
-        )
-        .child(
-            div()
-                .debug_selector({
-                    let selector = control_id.to_string();
-                    move || selector.clone()
-                })
-                .child(super::changed_files::quiet_control(
-                    control_id,
-                    action.into_owned().into(),
-                    on_click,
-                    cx,
-                )),
-        )
-        .child(divider_stub(cx))
-        .into_any_element()
 }
 
 pub(crate) fn session_moved_divider(
@@ -320,7 +121,7 @@ pub(crate) fn session_moved_divider(
     to: &std::path::Path,
     cx: &App,
 ) -> AnyElement {
-    divider(
+    divider_in(
         SharedString::from(format!("moved-{id}")),
         crate::tr!(
             "chat.session_moved",
@@ -329,6 +130,8 @@ pub(crate) fn session_moved_divider(
         )
         .into_owned(),
         cx.theme().muted_foreground,
+        Some(IconName::ArrowRightLeft),
+        None,
         cx,
     )
 }
@@ -342,22 +145,9 @@ pub(crate) fn worktree_divider(
 ) -> AnyElement {
     use agent::{WorktreeAnswer, WorktreeRequest};
     let (label, refused) = match (request, answer) {
-        (WorktreeRequest::Create { name, .. }, WorktreeAnswer::Ready { path, reused }) => (
-            if *reused {
-                crate::tr!(
-                    "chat.worktree_reused",
-                    name = name,
-                    path = path.to_string_lossy()
-                )
-            } else {
-                crate::tr!(
-                    "chat.worktree_created",
-                    name = name,
-                    path = path.to_string_lossy()
-                )
-            },
-            false,
-        ),
+        (WorktreeRequest::Create { .. }, WorktreeAnswer::Ready { .. }) => {
+            unreachable!("a worktree Tcode made ready stays out of the flow")
+        }
         (WorktreeRequest::Create { name, .. }, WorktreeAnswer::Refused { error }) => (
             crate::tr!("chat.worktree_create_refused", name = name, error = error),
             true,
@@ -378,12 +168,16 @@ pub(crate) fn worktree_divider(
             (crate::tr!("chat.worktree_removed", path = name), false)
         }
     };
-    let id = SharedString::from(format!("worktree-{id}"));
     let label = label.into_owned();
     if refused {
-        alert_divider(id, label, cx)
+        super::notices::alert_line(format!("worktree-{id}"), label, cx)
     } else {
-        divider(id, label, cx.theme().muted_foreground, cx)
+        divider(
+            SharedString::from(format!("worktree-{id}")),
+            label,
+            cx.theme().muted_foreground,
+            cx,
+        )
     }
 }
 
@@ -436,27 +230,6 @@ pub(crate) fn rewound_label(rewound: &tcode_core::session::Rewound, harness: &st
         .into_owned();
     }
     label
-}
-
-/// A rewind, or the undo of one when `mode` is `None`, that the harness did
-/// not make.
-pub(crate) fn rewind_failed_divider(
-    id: &str,
-    mode: Option<agent::RewindMode>,
-    failure: &agent::RewindFailure,
-    harness: &str,
-    cx: &App,
-) -> AnyElement {
-    let reason = rewind_reason(failure, harness);
-    let label = match mode {
-        Some(_) => crate::tr!("rewind.failed", reason = reason),
-        None => crate::tr!("rewind.undo_failed", reason = reason),
-    };
-    alert_divider(
-        SharedString::from(format!("rewind-{id}")),
-        label.into_owned(),
-        cx,
-    )
 }
 
 #[cfg(test)]

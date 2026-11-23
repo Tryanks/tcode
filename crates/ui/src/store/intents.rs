@@ -145,9 +145,6 @@ impl WorkspaceStore {
                 SettingsPatch::LiveCommandPanelDisabled(value) => {
                     self.settings_replica.live_command_panel_disabled = value
                 }
-                SettingsPatch::SidebarProviderMarks(value) => {
-                    self.settings_replica.sidebar_provider_marks = value
-                }
                 SettingsPatch::InactiveFrameThrottleDisabled(value) => {
                     self.settings_replica.inactive_frame_throttle_disabled = value
                 }
@@ -198,9 +195,6 @@ impl WorkspaceStore {
     }
     pub fn set_live_command_panel_disabled(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::LiveCommandPanelDisabled(value));
-    }
-    pub fn set_sidebar_provider_marks(&mut self, value: bool) {
-        self.patch_settings(SettingsPatch::SidebarProviderMarks(value));
     }
     pub fn set_provider_update_checks_disabled(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ProviderUpdateChecksDisabled(value));

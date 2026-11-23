@@ -14,6 +14,7 @@ use gpui::{
 };
 use gpui_base::h_flex;
 use serde_json::Value;
+use tcode_core::session::TimelineEntry;
 
 use super::window::{Argument, Chip, Header, Verb, section};
 use super::{Bound, Call, ToolCtx, ToolView, bounded_text, copy, output_section};
@@ -81,6 +82,61 @@ pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView
 
 struct Threads {
     kind: Kind,
+}
+
+/// A thread a `start_thread` call starts, as the call asks for it and, once
+/// it returned, as its answer tells it.
+pub(in crate::chat) struct Start<'a> {
+    /// The provider by the name `list_providers` gives it.
+    pub(in crate::chat) provider: Option<&'a str>,
+    pub(in crate::chat) model: Option<&'a str>,
+    pub(in crate::chat) title: Option<String>,
+    pub(in crate::chat) message: Option<&'a str>,
+    /// Whether it reports back to the thread that started it.
+    pub(in crate::chat) subagent: bool,
+    /// The thread, once the call returned.
+    pub(in crate::chat) thread_id: Option<String>,
+    /// The branch of its own worktree, when it has one.
+    pub(in crate::chat) branch: Option<String>,
+    pub(in crate::chat) running: bool,
+    pub(in crate::chat) output: Option<&'a str>,
+}
+
+/// The thread `entry` starts: a `start_thread` call still running or
+/// completed. One that failed, was declined or was interrupted started
+/// nothing to show, and stays a tool row that shows what it reported.
+pub(in crate::chat) fn start(entry: &TimelineEntry) -> Option<Start<'_>> {
+    let call = Call::of(entry)?;
+    if !call.served(CONTROL, &["start_thread"])
+        || !matches!(call.status, ItemStatus::InProgress | ItemStatus::Completed)
+    {
+        return None;
+    }
+    let input = call.input;
+    let answer = call
+        .output
+        .and_then(|output| serde_json::from_str::<Value>(output.trim()).ok());
+    let answered = |key: &str| {
+        answer
+            .as_ref()
+            .and_then(|answer| string(answer, key))
+            .map(str::to_owned)
+    };
+    let subagent = match &answer {
+        Some(answer) => answer.get("subagent") == Some(&Value::Bool(true)),
+        None => input.get("subagent") == Some(&Value::Bool(true)),
+    };
+    Some(Start {
+        provider: string(input, "provider"),
+        model: string(input, "model"),
+        title: answered("title").or_else(|| string(input, "title").map(one_line)),
+        message: string(input, "message"),
+        subagent,
+        thread_id: answered("thread_id"),
+        branch: answered("worktree_branch"),
+        running: call.status == ItemStatus::InProgress,
+        output: call.output,
+    })
 }
 
 /// A thread, or an entry of one, that a call names: `<thread>#<position>`.

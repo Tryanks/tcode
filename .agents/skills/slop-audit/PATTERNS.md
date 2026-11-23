@@ -205,7 +205,7 @@ Each was found in one lane and is likely elsewhere.
   asserted.
 - **Motion as a contract**: a frame count, a fraction of an animation reached
   at a given frame, a pixel offset, with no user path depending on the number
-  (Principle 6).
+  (Principle 7).
 - **The test rebuilds the production loop**: aborts the real task, edits its
   private throttle, calls its private step by hand.
 - **The driver is unlike the real peer**: a test browser that never closes

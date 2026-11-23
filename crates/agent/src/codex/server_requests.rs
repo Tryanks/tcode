@@ -26,6 +26,7 @@ impl Actor {
             self.events
                 .emit(AgentEvent::UserInputRequested {
                     request_id: key,
+                    parent_item_id: None,
                     questions,
                     delivery: UserInputDelivery::Blocking,
                 })
@@ -241,6 +242,7 @@ impl Actor {
         self.events
             .emit(AgentEvent::UserInputRequested {
                 request_id,
+                parent_item_id: None,
                 questions,
                 delivery: UserInputDelivery::Blocking,
             })

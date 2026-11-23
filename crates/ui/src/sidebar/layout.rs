@@ -396,12 +396,16 @@ impl SessionsSidebar {
             .map(|store| store.read(cx).host_title());
         let thread =
             self.render_flat_thread(listed, &of.flags, project_name, host_name, window, cx);
-        let row = div().w_full().px_2().pb(px(2.)).child(drag_ghost::slot(
-            arrange::thread_slot(&listed.name),
-            thread,
-            window,
-            cx,
-        ));
+        let row = div()
+            .w_full()
+            .px_2()
+            .pb(px(row::DESKTOP_ROW_GAP))
+            .child(drag_ghost::slot(
+                arrange::thread_slot(&listed.name),
+                thread,
+                window,
+                cx,
+            ));
         let zone = DropZone::Row {
             thread: listed.key(),
             section: tcode_core::thread_sort::thread_section(&listed.meta),

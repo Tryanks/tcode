@@ -597,7 +597,7 @@ fn a_drag_in_the_transcript_selects_under_the_pointer_while_a_reply_streams(
     await_restore_update(&shell, cx, |store, cx| {
         !store.chat_loading_for(Some(session), cx)
     });
-    cx.simulate_resize(size(px(1200.), px(560.)));
+    cx.simulate_resize(size(px(1200.), px(680.)));
     draw(cx);
     // The finished answer's second paragraph, its first line.
     let text = cx
@@ -757,6 +757,7 @@ fn a_question_answer_field_stays_above_the_keyboard(cx: &mut TestAppContext) {
     });
     status.pending_user_input = Some(tcode_core::session::PendingUserInput {
         request_id: "ask".into(),
+        parent_item_id: None,
         questions: vec![agent::UserInputQuestion {
             id: "storage".into(),
             header: "Storage".into(),

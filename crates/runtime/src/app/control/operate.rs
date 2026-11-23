@@ -115,7 +115,6 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::ThemeMode(_)
         | SettingsPatch::WordWrapDiffs(_)
         | SettingsPatch::LiveCommandPanelDisabled(_)
-        | SettingsPatch::SidebarProviderMarks(_)
         | SettingsPatch::InactiveFrameThrottleDisabled(_)
         | SettingsPatch::ScrollToLatestOnSend(_)
         | SettingsPatch::ShortenLongCommands(_) => false,

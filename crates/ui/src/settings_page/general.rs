@@ -7,13 +7,10 @@ impl SettingsPage {
         let device_name_overridden = DevicePreferences::device_name_overridden(cx);
         let attachment_limit_overridden =
             DevicePreferences::remote_attachment_limit_mib(cx).is_some();
-        let mut appearance = vec![
+        let appearance = vec![
             self.language_row(language.as_deref(), cx),
             self.theme_row(theme, cx),
         ];
-        if self.settings_hosts(cx).len() <= 1 {
-            appearance.push(self.provider_marks_row(cx));
-        }
         let mut device = vec![
             self.device_name_row(device_name_overridden, cx),
             self.remote_attachment_limit_row(attachment_limit_overridden, cx),
@@ -37,28 +34,6 @@ impl SettingsPage {
                 device,
                 cx,
             ))
-    }
-
-    /// Whether the sidebar marks this host's threads with their provider: a
-    /// setting of the host, so over several hosts it is among the threads'.
-    pub(super) fn provider_marks_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let marks = self.store.read(cx).settings().sidebar_provider_marks;
-        let reset = crate::settings_rows::reset_action(
-            "reset-sidebar-provider-marks",
-            marks,
-            cx.listener(|this, _, _, cx| {
-                this.dispatch_settings(|store| store.set_sidebar_provider_marks(false), cx)
-            }),
-        );
-        self.toggle_row(
-            "sidebar-provider-marks",
-            crate::tr!("settings.sidebar_provider_marks.title"),
-            crate::tr!("settings.sidebar_provider_marks.description"),
-            marks,
-            reset,
-            cx,
-            WorkspaceStore::set_sidebar_provider_marks,
-        )
     }
 
     pub(super) fn render_maintenance(

@@ -1,7 +1,7 @@
 use std::{io, sync::Arc, time::Duration};
 
 use tcode_protocol::{OriginalTarget, Principal, ProtocolError};
-use tokio::io::{AsyncWrite, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use super::{Request, Shared};
 use crate::http::response;
@@ -9,7 +9,7 @@ use crate::http::response;
 /// The bound on an original that makes no progress.
 const IDLE: Duration = Duration::from_secs(60);
 
-pub(super) async fn serve<S: AsyncWrite + Unpin>(
+pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     request: Request,
     shared: &Arc<Shared>,
@@ -50,20 +50,20 @@ pub(super) async fn serve<S: AsyncWrite + Unpin>(
     let Some(target) = target else {
         return response(stream, "400 Bad Request", "text/plain", b"invalid target").await;
     };
-    let transfer = tokio::time::timeout(
-        IDLE,
-        shared.mux.open_original(
+    // An original may wait for a slot as long as the browser still wants it;
+    // aborting the fetch closes the connection.
+    let transfer = tokio::select! {
+        transfer = shared.mux.open_original(
             format!("browser:{device}"),
             Principal::Full,
             target,
             shared.policy,
-        ),
-    )
-    .await;
+        ) => transfer,
+        () = closed(stream) => return Ok(()),
+    };
     let transfer = match transfer {
-        Ok(Ok(transfer)) => transfer,
-        Ok(Err(error)) => return failure(stream, error).await,
-        Err(error) => return failure(stream, tcode_client::original::error(error)).await,
+        Ok(transfer) => transfer,
+        Err(error) => return failure(stream, error).await,
     };
     let source = &transfer.source;
     let len = source.metadata.len;
@@ -174,6 +174,13 @@ pub(super) async fn serve<S: AsyncWrite + Unpin>(
     }
 }
 
+/// Resolves once the browser closes the connection; it sends nothing after
+/// its request.
+async fn closed<S: AsyncRead + Unpin>(stream: &mut S) {
+    let mut byte = [0];
+    while let Ok(1..) = stream.read(&mut byte).await {}
+}
+
 fn parse_range(value: &str, len: u64) -> Option<(u64, u64)> {
     let value = value.strip_prefix("bytes=")?;
     let (start, end) = value.split_once('-')?;
@@ -208,7 +215,6 @@ async fn failure<S: AsyncWrite + Unpin>(stream: &mut S, error: ProtocolError) ->
         "not_found" => "404 Not Found",
         "not_a_file" => "400 Bad Request",
         "changed" => "409 Conflict",
-        "busy" => "429 Too Many Requests",
         _ => "500 Internal Server Error",
     };
     response(stream, status, "text/plain", error.message.as_bytes()).await

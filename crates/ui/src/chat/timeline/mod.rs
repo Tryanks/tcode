@@ -5,6 +5,8 @@ use gpui::WeakEntity;
 mod expansion;
 mod glide;
 mod list;
+mod notices;
+mod pull_request;
 mod render;
 mod residency;
 mod rewind;
@@ -15,6 +17,8 @@ use crate::motion::list_rows::{Arrival, Glide, RowGlide};
 pub(super) use expansion::{
     AutoActivityExpansions, AutoActivityRecency, auto_activity_snapshot_keys,
 };
+#[cfg(test)]
+pub(in crate::chat) use render::thread_card;
 pub(super) use render::{ActivityRow, FullOutput, WithheldLoad};
 pub(super) use residency::{
     PendingMarkdownBuild, tail_row_window, transcript_selection, viewport_row_window,
@@ -27,6 +31,19 @@ pub(super) struct LeftRow {
     pub(super) row: TimelineRow,
     pub(super) turn: TurnMeta,
     pub(super) own: Vec<Arc<TimelineEntry>>,
+}
+
+/// The answers chosen so far to a child's questions on a lead's card.
+pub(in crate::chat) struct CallbackDraft {
+    pub(in crate::chat) child_id: String,
+    pub(in crate::chat) request_id: String,
+    pub(in crate::chat) questions: Vec<agent::UserInputQuestion>,
+    /// The question shown.
+    pub(in crate::chat) index: usize,
+    pub(in crate::chat) selections: HashMap<String, Vec<String>>,
+    /// The typed answer to the question shown.
+    pub(in crate::chat) input: Entity<crate::widgets::input::TextareaState>,
+    pub(in crate::chat) _events: gpui::Subscription,
 }
 
 /// A conversation's timeline: its rows in their virtual list, everything
@@ -122,6 +139,12 @@ pub(crate) struct TimelineView {
     /// The row signature does not see approvals, so a change remeasures the
     /// rows of the plans gaining and losing it.
     pub(in crate::chat) deciding_plan: Option<String>,
+    /// The answers begun on each card of a child's question, by card key,
+    /// while the child waits on it.
+    pub(in crate::chat) callback_drafts: RefCell<HashMap<String, CallbackDraft>>,
+    /// Whether the lead's status had come, the children's requests pending in
+    /// it, and how many its log says were settled, as of the last frame.
+    pub(in crate::chat) callback_requests: (bool, Vec<(String, String)>, usize),
     pub(in crate::chat) md_states: HashMap<String, MdState>,
     /// The pages of the visualizations near the screen, resident and evicted
     /// as the messages' Markdown is.
@@ -283,6 +306,8 @@ impl TimelineView {
             rows_regrouped: false,
             shown_deliveries: Vec::new(),
             deciding_plan: None,
+            callback_drafts: RefCell::default(),
+            callback_requests: Default::default(),
             md_states: HashMap::new(),
             visuals: HashMap::new(),
             selection,
@@ -460,6 +485,7 @@ impl Render for TimelineView {
         if self.timeline_stale {
             self.sync_markdown_states(cx);
         }
+        self.sync_callback_requests(cx);
         self.land_sent_message(cx);
         self.inline_diffs.sweep();
         self.tool_texts.sweep(&cx.theme().highlight_theme);
@@ -806,10 +832,10 @@ impl TimelineView {
 
 /// Vertical rhythm between turns. Turns are separated by space and typographic
 /// hierarchy alone — there is deliberately no rule/divider under the user bubble.
-pub(super) const TURN_GAP: f32 = 32.;
+pub(super) const TURN_GAP: f32 = 36.;
 
 /// Vertical rhythm between the segments of one turn.
-pub(super) const SEGMENT_GAP: f32 = 10.;
+pub(super) const SEGMENT_GAP: f32 = 16.;
 
 // ListState retains measured row heights, so variable-height turns use the same
 // pixel geometry as scrolling rather than treating a long turn as one short row.
@@ -1322,7 +1348,14 @@ impl TimelineView {
                 .read(cx)
                 .with_timeline_for(
                     self.session_id.as_deref(),
-                    |timeline| timeline.entries.get(start).map(|entry| entry.id.clone()),
+                    |timeline| {
+                        timeline
+                            .entries
+                            .get(start)
+                            // A card stands outside the work log.
+                            .filter(|entry| crate::chat::tools::subagent::card(entry).is_none())
+                            .map(|entry| entry.id.clone())
+                    },
                     cx,
                 )
                 .flatten()

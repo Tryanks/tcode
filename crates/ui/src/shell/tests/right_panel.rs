@@ -513,3 +513,53 @@ fn working_tree_refresh_ignores_a_superseded_read(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("diff-line-new-newest.rs-1").is_some());
     assert!(cx.debug_bounds("diff-line-new-stale.rs-1").is_none());
 }
+
+/// The record of a call that linked a pull request to the thread stands in
+/// its flow, and its link opens that pull request in the thread's Pull
+/// requests panel. The answer is the runtime's `link_pull_request` object.
+#[gpui::test]
+fn a_pull_request_record_opens_its_pull_request_in_the_panel(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let call = |status| {
+        agent::ThreadItem {
+            id: "link".into(),
+            parent_item_id: None,
+            content: agent::ItemContent::ToolCall {
+                name: "mcp__tcode_pull_requests__link_pull_request".into(),
+                input: serde_json::json!({"url": "https://github.com/acme/api/pull/3"}),
+                output: (status == agent::ItemStatus::Completed).then(|| {
+                    r#"{"host":"github.com","repository":"acme/api","number":3,"url":"https://github.com/acme/api/pull/3","alreadyLinked":false,"wasLinked":false}"#.into()
+                }),
+                status,
+                image_reads: Vec::new(),
+                family: None,
+            },
+        }
+    };
+    let (shell, host, cx) = mount_thread_with(
+        cx,
+        vec![
+            agent::AgentEvent::ItemStarted(call(agent::ItemStatus::InProgress)),
+            agent::AgentEvent::ItemCompleted(call(agent::ItemStatus::Completed)),
+        ],
+    );
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    resize(cx, 1200.);
+    draw_until(cx, &host, "pull-request-record-link", None);
+
+    let open = cx
+        .debug_bounds("pull-request-record-open-link")
+        .expect("the record links to the panel");
+    cx.simulate_click(open.center(), gpui::Modifiers::default());
+    crate::test_frames::draw_settled(cx);
+    let store = store_of(&shell, cx);
+    store.read_with(cx, |store, _| {
+        assert_eq!(
+            store.open_pull_request("thread-1").map(|key| key.number),
+            Some(3)
+        );
+        let panel = store.panel_state_for(Some("thread-1"));
+        assert!(panel.right_panel_open);
+        assert_eq!(panel.right_tab, RightTab::PullRequests);
+    });
+}

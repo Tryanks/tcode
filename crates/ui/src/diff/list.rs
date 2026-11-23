@@ -1670,7 +1670,7 @@ mod tests {
             },
             path.into(),
             "rust",
-            &crate::highlight::HighlightTheme::default_dark(),
+            &crate::highlight::HighlightTheme::dark(gpui::white()),
             &DiffColors {
                 added_word_bg: gpui::green(),
                 removed_word_bg: gpui::red(),
@@ -1755,7 +1755,7 @@ mod tests {
                     },
                     "copy.rs".into(),
                     "rust",
-                    &crate::highlight::HighlightTheme::default_dark(),
+                    &crate::highlight::HighlightTheme::dark(gpui::white()),
                     &DiffColors {
                         added_word_bg: gpui::green(),
                         removed_word_bg: gpui::red(),

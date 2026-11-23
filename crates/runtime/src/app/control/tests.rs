@@ -296,6 +296,7 @@ fn notify(threads: &[&str], events: &[&str]) -> serde_json::Value {
 fn question(request_id: &str) -> AgentEvent {
     AgentEvent::UserInputRequested {
         request_id: request_id.into(),
+        parent_item_id: None,
         questions: vec![agent::UserInputQuestion {
             id: "which".into(),
             header: "Branch".into(),

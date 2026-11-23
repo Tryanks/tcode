@@ -1,5 +1,7 @@
 use super::*;
 use crate::chat::tools;
+use crate::widgets::input::{InputEvent, TextareaState};
+use tcode_core::notice::CallbackEvent;
 
 /// How long what is drawn here only some of the time takes to come in or go.
 const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
@@ -50,7 +52,7 @@ pub(in crate::chat) struct ActivityRow {
 impl TimelineView {
     /// `model` by the name the host's model list gives it for this thread's
     /// profile, or as the harness gave it where the list does not know it.
-    fn model_name(&self, model: &str, cx: &App) -> String {
+    pub(super) fn model_name(&self, model: &str, cx: &App) -> String {
         self.session_id
             .as_deref()
             .and_then(|session_id| {
@@ -89,49 +91,10 @@ impl TimelineView {
         for segment in segments.iter() {
             match segment {
                 Segment::Relay(entry) => {
-                    let EntryContent::ProviderRelay {
-                        from_provider,
-                        to_provider,
-                        prompt,
-                        moved_from,
-                        ..
-                    } = &entry.content
-                    else {
-                        unreachable!();
-                    };
-                    column = column.child(components::dividers::relay_divider(
-                        &entry.id,
-                        *from_provider,
-                        *to_provider,
-                        moved_from.as_deref(),
-                        cx,
-                    ));
-                    if let Some(prompt) = prompt {
-                        column = column.child(
-                            self.compose_disclosure(
-                                index,
-                                format!("relay-handoff-{}", entry.id),
-                                crate::tr!("chat.relay_handoff", to = to_provider.display_name())
-                                    .into_owned()
-                                    .into(),
-                                prompt,
-                                cx,
-                            ),
-                        );
-                    }
+                    column = column.child(self.compose_relay(index, entry, cx));
                 }
                 Segment::ModelChange(entry) => {
-                    let EntryContent::ModelChanged { from, to, reason } = &entry.content else {
-                        unreachable!();
-                    };
-                    let name = |model: &str| self.model_name(model, cx);
-                    column = column.child(components::dividers::model_change_divider(
-                        &entry.id,
-                        from.as_deref().map(name).as_deref(),
-                        &name(to),
-                        reason.as_deref(),
-                        cx,
-                    ));
+                    column = column.child(self.compose_model_change(entry, cx));
                 }
                 Segment::ContextCompacted(entry) => {
                     let EntryContent::ContextCompacted(compaction) = &entry.content else {
@@ -144,17 +107,9 @@ impl TimelineView {
                         cx,
                     ));
                 }
-                Segment::ContextWindowChanged(entry) => {
-                    let EntryContent::ContextWindowChanged { window } = entry.content else {
-                        unreachable!();
-                    };
-                    column = column.child(components::dividers::context_window_changed_divider(
-                        &entry.id, window, cx,
-                    ));
-                }
-                Segment::SettingsKept(entry) => {
-                    column =
-                        column.child(components::dividers::settings_kept_divider(&entry.id, cx));
+                Segment::ContextWindowChanged(entry) | Segment::SettingsKept(entry) => {
+                    let tags = Vec::from_iter(components::notices::MessageTag::of(&entry.content));
+                    column = column.child(components::notices::message_tags(&entry.id, &tags, cx));
                 }
                 Segment::SessionMoved(entry) => {
                     let EntryContent::SessionMoved { from, to } = &entry.content else {
@@ -172,13 +127,8 @@ impl TimelineView {
                         &entry.id, request, answer, cx,
                     ));
                 }
-                Segment::ControlAction(entry) => {
-                    let EntryContent::ControlAction(action) = &entry.content else {
-                        unreachable!();
-                    };
-                    column = column.child(components::dividers::control_action_divider(
-                        &entry.id, action, cx,
-                    ));
+                Segment::ControlAction(run) => {
+                    column = column.child(self.compose_control_actions(run, cx));
                 }
                 Segment::Rewind(entry) => {
                     column = column.child(self.compose_rewound(index, entry, cx));
@@ -296,70 +246,23 @@ impl TimelineView {
                 Segment::Visualize(entry) => {
                     column = column.child(self.compose_visualize(entry, cx));
                 }
+                Segment::PullRequest(entry) => {
+                    column = column.child(self.compose_pull_request_record(entry, cx));
+                }
+                Segment::ThreadCard(entry) => {
+                    column = column.child(self.compose_thread_card(entry, window, cx));
+                }
                 Segment::Withheld(entry) => {
                     let EntryContent::Withheld { bytes, row } = entry.content else {
                         unreachable!();
                     };
                     let read = row.map(|row| self.withheld_read(row, entry.turn, cx));
-                    column = column.child(components::dividers::record_withheld_divider(
+                    column = column.child(components::notices::withheld_placeholder(
                         &entry.id, bytes, read, cx,
                     ));
                 }
-                Segment::Unreadable(rows) => {
-                    let label = if rows.len() == 1 {
-                        crate::tr!("chat.unreadable_record_one")
-                    } else {
-                        crate::tr!("chat.unreadable_records", count = rows.len())
-                    };
-                    let lines = rows
-                        .iter()
-                        .filter_map(|entry| match &entry.content {
-                            EntryContent::Unreadable { line } => Some(line.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    column = column.child(self.compose_disclosure(
-                        index,
-                        format!("unreadable-{}", rows[0].id),
-                        label.into_owned().into(),
-                        &lines,
-                        cx,
-                    ));
-                }
-                Segment::RequestRetry(entry) => {
-                    let EntryContent::RequestRetry { message } = &entry.content else {
-                        unreachable!();
-                    };
-                    column = column.child(components::dividers::request_retry_divider(
-                        &entry.id, message, cx,
-                    ));
-                }
                 Segment::Warnings(warnings) => {
-                    let messages = warnings
-                        .iter()
-                        .filter_map(|entry| match &entry.content {
-                            EntryContent::Warning { message } => Some(message.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>();
-                    let label = match messages.as_slice() {
-                        [message] => message.lines().next().unwrap_or_default().to_owned(),
-                        _ => crate::tr!("chat.warnings", count = messages.len()).into_owned(),
-                    };
-                    let key = format!("warnings-{}", warnings[0].id);
-                    let toggle_key = key.clone();
-                    column = column.child(components::disclosure::warning_disclosure(
-                        &key,
-                        label.into(),
-                        &messages.join("\n"),
-                        self.expanded.contains(&key),
-                        cx.listener(move |this, _, _, cx| {
-                            this.toggle_expanded(index, &toggle_key, cx);
-                        }),
-                        &self.motion,
-                        cx,
-                    ));
+                    column = column.child(self.compose_warnings(index, warnings[0], cx));
                 }
                 Segment::Error(entry) => {
                     let harness = self
@@ -628,6 +531,10 @@ impl TimelineView {
             let started_here = turn
                 .start_ts
                 .map(|start| self.workspace_store.read(cx).host_moment_here(start));
+            let retry = turn
+                .running
+                .then(|| crate::chat::model::live_retry(entries))
+                .flatten();
             let turn = turn.clone();
             trailing = true;
             // The status moves with the trailer when the turn gains a last
@@ -680,6 +587,7 @@ impl TimelineView {
                                     started_here,
                                     stopping,
                                     served_model.clone(),
+                                    retry.clone(),
                                     &indicator_motion,
                                     cx,
                                 ))
@@ -903,24 +811,22 @@ impl TimelineView {
 
     /// A rewind's divider, with its removed turns to read and the Harness's
     /// undo while it lasts, then the branch it left where the Harness keeps
-    /// one; or a rewind the Harness did not make.
+    /// one.
     fn compose_rewound(
         &self,
         turn: usize,
         entry: &TimelineEntry,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let EntryContent::Rewound(rewound) = &entry.content else {
+            unreachable!("a rewind segment holds a rewind entry");
+        };
+        let undo_failure = rewound
+            .undo_token
+            .as_ref()
+            .and_then(|_| self.rewind_failure_label(&rewound.checkpoint_id, true, cx));
         let store = self.workspace_store.read(cx);
         let harness = store.harness_name_for(self.session_id.as_deref(), cx);
-        let rewound = match &entry.content {
-            EntryContent::Rewound(rewound) => rewound,
-            EntryContent::RewindFailed { mode, failure } => {
-                return components::dividers::rewind_failed_divider(
-                    &entry.id, *mode, failure, &harness, cx,
-                );
-            }
-            _ => unreachable!("a rewind segment holds a rewind entry"),
-        };
         let status = store
             .session_status_for(self.session_id.as_deref(), cx)
             .and_then(|status| status.rewind.as_ref());
@@ -945,6 +851,17 @@ impl TimelineView {
                     )))
                 }
                 _ => None,
+            })
+            .map(|undo| match (undo, undo_failure.clone()) {
+                (components::rewind::DividerUndo::Available(on_undo), Some(failure)) => {
+                    components::rewind::DividerUndo::Failed(failure, Some(on_undo))
+                }
+                (undo, _) => undo,
+            })
+            .or_else(|| {
+                undo_failure
+                    .clone()
+                    .map(|failure| components::rewind::DividerUndo::Failed(failure, None))
             })
             .or_else(|| {
                 rewound
@@ -1056,7 +973,7 @@ impl TimelineView {
 
         // A steer is a target only once its harness has a restore point for it.
         let steer = matches!(steering, Some(SteeringStatus::Accepted)).then(|| entry_id.to_owned());
-        let rewind_menu = (steering.is_none() || steer.is_some())
+        let rewind_target = (steering.is_none() || steer.is_some())
             .then(|| {
                 self.workspace_store.read(cx).chat_rewind_target_for(
                     self.session_id.as_deref(),
@@ -1065,22 +982,32 @@ impl TimelineView {
                     cx,
                 )
             })
-            .flatten()
-            .map(|target| components::bubble::RewindMenu {
-                key: entry_id.to_owned(),
-                turn,
-                steer,
-                blocked: target
-                    .rewind
-                    .blocked
-                    .filter(|_| !target.in_progress)
-                    .map(|blocked| components::rewind::blocked_reason(blocked, &target.harness)),
-                in_progress: target.in_progress,
-            });
+            .flatten();
+        // What the last rewind to the message failed at stands in its action
+        // row until a message is sent, while no other is being made.
+        let rewind_failure = rewind_target
+            .as_ref()
+            .filter(|target| !target.in_progress)
+            .and_then(|target| self.rewind_failure_label(&target.checkpoint_id, false, cx))
+            .map(|label| components::notices::rewind_failure(entry_id, label, cx));
+        let rewind_menu = rewind_target.map(|target| components::bubble::RewindMenu {
+            key: entry_id.to_owned(),
+            turn,
+            steer,
+            blocked: target
+                .rewind
+                .blocked
+                .filter(|_| !target.in_progress)
+                .map(|blocked| components::rewind::blocked_reason(blocked, &target.harness)),
+            in_progress: target.in_progress,
+        });
         let rewind = rewind_menu.map(|menu| {
             let action = self.compose_rewind(&menu, cx);
             (menu, action)
         });
+        let tags = self.message_tags_of(turn, entry_id, cx);
+        let tags =
+            (!tags.is_empty()).then(|| components::notices::message_tags(entry_id, &tags, cx));
         let markdown = self.md_states.get(entry_id).map(|md| md.state.clone());
         let copy_key = format!("user:{entry_id}");
         let copied = self.copied.is(&copy_key);
@@ -1140,6 +1067,8 @@ impl TimelineView {
                 copied,
                 markdown,
                 rewind,
+                rewind_failure,
+                tags,
                 hover: self.hover.clone(),
                 motion: self.motion.clone(),
             },
@@ -1345,36 +1274,38 @@ impl TimelineView {
                 cx,
             );
         };
-        // A notice is the host's, never the user's words: centered disclosure
-        // rows without an action row.
+        // A notice is the host's, never the user's words: a card, or the
+        // message coming in, without an action row.
         let pending = steering == Some(SteeringStatus::Pending);
-        let label = |label: String| -> SharedString {
-            if pending {
-                format!("{label} · {}", crate::tr!("chat.steering")).into()
-            } else {
-                label.into()
-            }
-        };
         let mut column = v_flex().w_full().gap_2();
         let mut keys = notice_keys(&notice, &entry.id).into_iter();
         let mut key = || keys.next().expect("a key per notice row");
         match &notice {
             HostNotice::Orchestrate(callbacks) => {
                 for callback in callbacks {
-                    let event =
-                        label(components::disclosure::callback_event_label(callback).into_owned());
-                    column =
-                        column.child(self.compose_callback_row(turn, key(), event, callback, cx));
+                    column = column.child(self.compose_callback_card(
+                        turn,
+                        key(),
+                        pending,
+                        callback,
+                        window,
+                        cx,
+                    ));
                 }
             }
-            HostNotice::PullRequest { .. }
-            | HostNotice::ReportReminder
-            | HostNotice::Control(_) => {
-                column = column.child(self.compose_disclosure(
-                    turn,
-                    key(),
-                    label(components::disclosure::notice_label(&notice)),
+            HostNotice::PullRequest { number, notice } => {
+                column = column.child(self.compose_pull_request_update(
+                    (turn, key(), pending),
+                    (*number, notice),
                     text,
+                    cx,
+                ));
+            }
+            HostNotice::ReportReminder | HostNotice::Control(_) => {
+                column = column.child(self.compose_host_message(
+                    (entry, text, cwd, steering),
+                    &notice,
+                    window,
                     cx,
                 ));
             }
@@ -1382,27 +1313,49 @@ impl TimelineView {
         column.into_any_element()
     }
 
-    fn compose_callback_row(
+    fn compose_callback_card(
         &self,
         turn: usize,
         key: String,
-        event: SharedString,
+        steering: bool,
         callback: &OrchestrateCallback,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let request = self.callback_request(turn, &key, callback, window, cx);
         let expanded = self.expanded.contains(&key);
         let child_id = callback.child_id.clone();
-        let exists = {
+        let (glyph, detail) = {
             let store = self.workspace_store.read(cx);
-            store.thread_meta(&child_id).is_some()
-                || store
+            let meta = store.thread_meta(&child_id).or_else(|| {
+                store
                     .archived_sessions()
                     .iter()
-                    .any(|meta| meta.id == child_id)
+                    .find(|meta| meta.id == child_id)
+            });
+            let glyph = meta.map(|meta| {
+                crate::provider_card::profile_glyph(
+                    store,
+                    meta.provider,
+                    meta.profile_id.as_deref(),
+                )
+            });
+            let detail = meta.map(|meta| {
+                std::iter::once(meta.provider.display_name().to_owned())
+                    .chain(meta.model.as_deref().map(|model| {
+                        store
+                            .thread_model_name(&child_id, model)
+                            .unwrap_or_else(|| model.to_owned())
+                    }))
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            });
+            (glyph, detail)
         };
+        let exists = glyph.is_some();
         let store = self.workspace_store.clone();
         let host = self.agent_host(cx);
-        // The row that opens the agent is what its card grows out of.
+        // The agent opens out of the card that opens it.
         let origin = SharedString::from(format!("callback-{key}"));
         let on_open = exists.then(|| {
             let origin = origin.clone();
@@ -1418,49 +1371,361 @@ impl TimelineView {
             }) as components::changed_files::ClickHandler
         });
         let toggle_key = key.clone();
-        let row = components::disclosure::callback_row(
+        let card = components::callback_card::callback_card(
             &key,
-            event,
             callback,
+            components::callback_card::CallbackChild {
+                glyph,
+                detail,
+                on_open,
+            },
+            request,
+            steering,
             expanded,
             cx.listener(move |this, _, _, cx| {
                 this.toggle_expanded(turn, &toggle_key, cx);
             }),
-            on_open,
             self.hover.clone(),
             &self.motion,
-            cx,
         );
         if exists {
             self.side_origins
-                .mark(origin, crate::material::radius_card(cx), row)
+                .mark(origin, px(crate::material::event_card::RADIUS), card)
                 .into_any_element()
         } else {
-            row
+            card
         }
     }
 
-    fn compose_disclosure(
+    /// Where the request `callback` carries stands: how the lead's log says
+    /// it was settled, else the child waits on it in the lead's status, which
+    /// the card then answers, else it is no longer pending. `None` for an
+    /// ending.
+    fn callback_request(
         &self,
         turn: usize,
-        key: String,
-        label: SharedString,
-        full_text: &str,
+        key: &str,
+        callback: &OrchestrateCallback,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let expanded = self.expanded.contains(&key);
-        let toggle_key = key.clone();
-        components::disclosure::disclosure(
-            &key,
-            label,
-            full_text,
-            expanded,
-            cx.listener(move |this, _, _, cx| {
-                this.toggle_expanded(turn, &toggle_key, cx);
-            }),
-            &self.motion,
-            cx,
-        )
+    ) -> Option<components::callback_card::CallbackRequest> {
+        use components::callback_card::{CallbackRequest, QuestionForm};
+        let request_id = callback.request_id()?.to_owned();
+        let child_id = callback.child_id.clone();
+        let store = self.workspace_store.read(cx);
+        let settled = store
+            .with_timeline_for(
+                self.session_id.as_deref(),
+                |timeline| {
+                    timeline
+                        .child_request_answers
+                        .get(&(child_id.clone(), request_id.clone()))
+                        .cloned()
+                },
+                cx,
+            )
+            .flatten();
+        if let Some(answer) = settled {
+            return Some(CallbackRequest::Settled(
+                components::callback_card::settled_lines(&answer, callback),
+            ));
+        }
+        let Some(status) = store.session_status_for(self.session_id.as_deref(), cx) else {
+            return Some(CallbackRequest::Unknown);
+        };
+        let waiting = status
+            .child_requests
+            .iter()
+            .find(|waiting| waiting.child_id == child_id);
+        let online = !matches!(store.connection_state(),
+            tcode_client::ConnectionState::Offline { reason } if reason.is_terminal());
+        Some(match callback.event {
+            CallbackEvent::Approval => {
+                let Some(request) = waiting
+                    .and_then(|waiting| waiting.approvals.iter().find(|r| r.id == request_id))
+                    .cloned()
+                else {
+                    return Some(CallbackRequest::Gone);
+                };
+                let enabled =
+                    online && !store.approval_delivery_pending_for(Some(&child_id), &request.id);
+                let answerable = crate::composer::approval_answerable(&request, store);
+                let store = self.workspace_store.clone();
+                CallbackRequest::Approval {
+                    request,
+                    answerable,
+                    enabled,
+                    decide: Rc::new(move |request_id, decision, _, cx| {
+                        store.update(cx, |store, _| {
+                            store.respond_approval_for(child_id.clone(), request_id, decision)
+                        });
+                    }),
+                }
+            }
+            CallbackEvent::Question => {
+                let Some(pending) = waiting
+                    .and_then(|waiting| waiting.user_input.as_ref())
+                    .filter(|pending| pending.request_id == request_id)
+                    .cloned()
+                else {
+                    return Some(CallbackRequest::Gone);
+                };
+                let enabled =
+                    online && !store.user_input_delivery_pending_for(&child_id, &request_id);
+                let (index, selections, input) =
+                    self.callback_draft(turn, key, &child_id, &pending, window, cx);
+                let act = cx.listener({
+                    let key = key.to_owned();
+                    move |this, action: &components::callback_card::QuestionAction, window, cx| {
+                        this.act_on_callback_question(
+                            turn, &key, &child_id, &pending, action, window, cx,
+                        );
+                    }
+                });
+                CallbackRequest::Question(QuestionForm {
+                    questions: self
+                        .callback_drafts
+                        .borrow()
+                        .get(key)
+                        .map(|draft| draft.questions.clone())
+                        .unwrap_or_default(),
+                    index,
+                    selections,
+                    input,
+                    enabled,
+                    act: Rc::new(move |action, window, cx| act(&action, window, cx)),
+                })
+            }
+            CallbackEvent::Ended(_) => return None,
+        })
+    }
+
+    /// The answers chosen so far to the question card `key` shows, begun for
+    /// `pending` when the card first shows it.
+    fn callback_draft(
+        &self,
+        turn: usize,
+        key: &str,
+        child_id: &str,
+        pending: &tcode_core::session::PendingUserInput,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (usize, HashMap<String, Vec<String>>, Entity<TextareaState>) {
+        let mut drafts = self.callback_drafts.borrow_mut();
+        if let Some(draft) = drafts
+            .get(key)
+            .filter(|draft| draft.request_id == pending.request_id)
+        {
+            return (draft.index, draft.selections.clone(), draft.input.clone());
+        }
+        let prefill = pending
+            .questions
+            .first()
+            .and_then(|question| question.prefill.clone())
+            .unwrap_or_default();
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .input_action(gpui::TextInputAction::Enter)
+                .auto_grow(1, 6)
+                .submit_on_enter(true)
+                .default_value(prefill)
+        });
+        let events = cx.subscribe_in(&input, window, {
+            let key = key.to_owned();
+            let child_id = child_id.to_owned();
+            let pending = pending.clone();
+            move |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { shift: false, .. } => this.act_on_callback_question(
+                    turn,
+                    &key,
+                    &child_id,
+                    &pending,
+                    &components::callback_card::QuestionAction::SendTyped,
+                    window,
+                    cx,
+                ),
+                // A line typed or wrapped grows the card.
+                InputEvent::Change => {
+                    this.remeasure_turn(turn);
+                    cx.notify();
+                }
+                _ => {}
+            }
+        });
+        drafts.insert(
+            key.to_owned(),
+            CallbackDraft {
+                child_id: child_id.to_owned(),
+                request_id: pending.request_id.clone(),
+                questions: pending.questions.clone(),
+                index: 0,
+                selections: HashMap::new(),
+                input: input.clone(),
+                _events: events,
+            },
+        );
+        (0, HashMap::new(), input)
+    }
+
+    /// A step taken in the question card `key`, by the composer's rules:
+    /// a single-select choice or a typed answer moves on, the set goes to
+    /// the child once every question is answered.
+    #[allow(clippy::too_many_arguments)]
+    fn act_on_callback_question(
+        &mut self,
+        turn: usize,
+        key: &str,
+        child_id: &str,
+        pending: &tcode_core::session::PendingUserInput,
+        action: &components::callback_card::QuestionAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::composer::model::{
+            UserInputStep, record_typed_user_input, submit_typed_user_input,
+            toggle_user_input_option, user_input_step,
+        };
+        use components::callback_card::QuestionAction;
+        let mut drafts = self.callback_drafts.borrow_mut();
+        let Some(draft) = drafts
+            .get_mut(key)
+            .filter(|draft| draft.request_id == pending.request_id)
+        else {
+            return;
+        };
+        let questions = &pending.questions;
+        let at = draft.index.min(questions.len().saturating_sub(1));
+        let Some(question) = questions.get(at) else {
+            return;
+        };
+        let typed = draft.input.read(cx).value().to_string();
+        let moves_on = match action {
+            QuestionAction::Choose(label) => {
+                toggle_user_input_option(&mut draft.selections, question, label.clone());
+                !question.multi_select
+            }
+            QuestionAction::Go(delta) => {
+                draft.index = at
+                    .saturating_add_signed(*delta)
+                    .min(questions.len().saturating_sub(1));
+                false
+            }
+            QuestionAction::SendTyped => {
+                submit_typed_user_input(&mut draft.selections, question, &typed)
+            }
+            QuestionAction::Confirm => {
+                // What is typed and not yet sent is part of the answer.
+                if !typed.trim().is_empty() {
+                    record_typed_user_input(&mut draft.selections, question, typed.trim().into());
+                }
+                true
+            }
+        };
+        let prefill = |index: usize| {
+            questions
+                .get(index)
+                .and_then(|question| question.prefill.clone())
+                .unwrap_or_default()
+        };
+        let mut answers = None;
+        let mut value = (draft.index != at).then(|| prefill(draft.index));
+        match moves_on
+            .then(|| user_input_step(questions, &draft.selections, at))
+            .flatten()
+        {
+            Some(UserInputStep::Send(set)) => {
+                answers = Some(set);
+                draft.selections.clear();
+                draft.index = 0;
+                value = Some(String::new());
+            }
+            Some(UserInputStep::Question(next)) => {
+                draft.index = next;
+                value = Some(prefill(next));
+            }
+            None => {}
+        }
+        let input = draft.input.clone();
+        drop(drafts);
+        if let Some(value) = value {
+            input.update(cx, |state, cx| state.set_value(value, window, cx));
+        }
+        if let Some(answers) = answers {
+            self.workspace_store.update(cx, |store, _| {
+                store.respond_user_input_for(
+                    child_id.to_owned(),
+                    pending.request_id.clone(),
+                    answers,
+                )
+            });
+        }
+        self.remeasure_turn(turn);
+        cx.notify();
+    }
+
+    /// The row signature sees neither the lead's status nor what its log
+    /// says of a child's request, so when either changes, the turns that
+    /// hold a child's callback are measured again, and the answers begun for
+    /// a request no longer pending go.
+    pub(in crate::chat) fn sync_callback_requests(&mut self, cx: &mut Context<Self>) {
+        let store = self.workspace_store.read(cx);
+        let status = store.session_status_for(self.session_id.as_deref(), cx);
+        let live: Vec<(String, String)> = status
+            .into_iter()
+            .flat_map(|status| &status.child_requests)
+            .flat_map(|waiting| {
+                waiting
+                    .approvals
+                    .iter()
+                    .map(|request| request.id.clone())
+                    .chain(
+                        waiting
+                            .user_input
+                            .iter()
+                            .map(|pending| pending.request_id.clone()),
+                    )
+                    .map(|id| (waiting.child_id.clone(), id))
+            })
+            .collect();
+        let answered = store
+            .with_timeline_for(
+                self.session_id.as_deref(),
+                |timeline| timeline.child_request_answers.len(),
+                cx,
+            )
+            .unwrap_or_default();
+        let signature = (status.is_some(), live, answered);
+        if signature == self.callback_requests {
+            return;
+        }
+        let turns: std::collections::BTreeSet<usize> = store
+            .with_timeline_for(
+                self.session_id.as_deref(),
+                |timeline| {
+                    timeline
+                        .entries
+                        .iter()
+                        .filter(|entry| {
+                            matches!(
+                                user_notice(&entry.content),
+                                Some(HostNotice::Orchestrate(_))
+                            )
+                        })
+                        .map(|entry| entry.turn)
+                        .collect()
+                },
+                cx,
+            )
+            .unwrap_or_default();
+        let live = &signature.1;
+        self.callback_drafts.borrow_mut().retain(|_, draft| {
+            live.iter()
+                .any(|(child, request)| *child == draft.child_id && *request == draft.request_id)
+        });
+        self.callback_requests = signature;
+        for turn in turns {
+            self.remeasure_turn(turn);
+        }
     }
 
     /// Prepare one stateless Work Log capsule, or the part of an expanded one
@@ -1510,8 +1775,10 @@ impl TimelineView {
         let mut flow = v_flex().w_full().gap_1();
         if !folded.is_empty() {
             let segment_counts = work_log_counts(folded);
-            let mut capsule_label = work_log_capsule_label(&segment_counts, folded.len());
-            if capsule_label.is_empty() {
+            let mut capsule_label =
+                work_log_capsule_label(&segment_counts, folded.len() - segment_counts.retries);
+            let retries = crate::chat::model::work_log_retries_label(&segment_counts);
+            if capsule_label.is_empty() && retries.is_none() {
                 capsule_label = crate::tr!("chat.work_log").into_owned();
             }
             let duration = activity_run_duration_ms(folded).map(format_elapsed);
@@ -1539,6 +1806,7 @@ impl TimelineView {
                     index,
                     segment_id: segment_id.to_string(),
                     capsule_label,
+                    retries,
                     duration,
                     outcome,
                     expanded,
@@ -1684,6 +1952,9 @@ impl TimelineView {
             return vec![self.compose_computer_run(activities, cwd, live_reasoning_id, window, cx)];
         }
         let entry = activities[0];
+        if let EntryContent::RequestRetry { message } = &entry.content {
+            return vec![components::notices::retry_row(&entry.id, message, cx)];
+        }
         let recency = AutoActivityRecency::from_newer_activity_count(newer);
         if let Some(edit) = tools::diff::edit(entry, cwd) {
             if edit.by_command && edit.files.len() > 1 {
@@ -1914,20 +2185,13 @@ impl TimelineView {
             path,
             ..
         } = activity;
-        let thread = self
-            .workspace_store
-            .read(cx)
-            .session_status_for(self.session_id.as_deref(), cx);
-        // A running command or agent the harness can move into the
-        // background, as its own Ctrl+B does.
-        let movable = thread.is_some_and(|status| {
-            status
-                .background_control
-                .is_some_and(|control| control.move_running)
-        }) && matches!(
-            &entry.content,
-            EntryContent::Item(ItemContent::CommandExecution { .. } | ItemContent::Subagent { .. })
-        );
+        // A running command the harness can move into the background, as
+        // its own Ctrl+B does.
+        let movable = self.moves_to_background(cx)
+            && matches!(
+                &entry.content,
+                EntryContent::Item(ItemContent::CommandExecution { .. })
+            );
         if self.runs_in_background(entry, status, cx) {
             status = agent::ItemStatus::InProgress;
             header.background = true;
@@ -1958,10 +2222,7 @@ impl TimelineView {
                 },
             )
         });
-        let child = tools::subagent::child_thread(self, entry, cx);
-        let detail = if child.is_some() {
-            tools::window::Detail::Elsewhere(crate::tr!("tools.open_thread").into_owned().into())
-        } else if !expandable {
+        let detail = if !expandable {
             tools::window::Detail::None
         } else {
             match tools::window::fold(&self.motion, &entry.id, expanded, window, cx) {
@@ -1973,34 +2234,11 @@ impl TimelineView {
                 None => tools::window::Detail::Shut,
             }
         };
-        // A window that opens an agent is what the agent's card grows out of.
-        let origin = child
-            .as_ref()
-            .map(|_| SharedString::from(format!("activity-window-{}", entry.id)));
-        let on_click: tools::window::ClickHandler = match child {
-            Some(child) => {
-                let store = self.workspace_store.clone();
-                let host = self.agent_host(cx);
-                let origin = origin.clone();
-                Box::new(move |_, window, cx| {
-                    crate::agents_panel::open_agent(
-                        &store,
-                        child.clone(),
-                        host.clone(),
-                        origin.clone(),
-                        window,
-                        cx,
-                    );
-                })
-            }
-            None => {
-                let click_key = key;
-                let entry_id = entry.id.clone();
-                Box::new(cx.listener(move |this, _, _, cx| {
-                    this.toggle_activity_expanded((turn, &entry_id), &click_key, expanded, cx);
-                }))
-            }
-        };
+        let click_key = key;
+        let entry_id = entry.id.clone();
+        let on_click = cx.listener(move |this, _, _, cx| {
+            this.toggle_activity_expanded((turn, &entry_id), &click_key, expanded, cx);
+        });
         let tool = tools::window::tool_window(
             tools::window::WindowSpec {
                 key: entry.id.clone(),
@@ -2019,41 +2257,64 @@ impl TimelineView {
             on_click,
             cx,
         );
-        // Pointed out from a row of the background work, the window is ringed
-        // a while.
+        self.ringed_when_located(
+            &entry.id,
+            crate::material::radius_chip(cx),
+            tool,
+            window,
+            cx,
+        )
+    }
+
+    /// `element`, the call `item_id`'s, ringed a while once a row of the
+    /// background work that names it is pressed.
+    fn ringed_when_located(
+        &self,
+        item_id: &str,
+        radius: gpui::Pixels,
+        element: AnyElement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let located = self
             .motion
             .shown(
-                format!("located-{}", entry.id),
-                (self.located.as_deref() == Some(entry.id.as_str())).then_some(()),
+                format!("located-{item_id}"),
+                (self.located.as_deref() == Some(item_id)).then_some(()),
                 CHANGE,
                 window,
                 cx,
             )
             .map(|shown| shown.progress());
-        let tool = match located {
+        match located {
             Some(progress) => div()
                 .relative()
                 .w_full()
-                .child(tool)
+                .child(element)
                 .child(
                     div()
                         .absolute()
                         .inset_0()
-                        .rounded(crate::material::radius_chip(cx))
+                        .rounded(radius)
                         .border_2()
                         .border_color(cx.theme().primary.opacity(progress)),
                 )
                 .into_any_element(),
-            None => tool,
-        };
-        match origin {
-            Some(origin) => self
-                .side_origins
-                .mark(origin, crate::material::radius_card(cx), tool)
-                .into_any_element(),
-            None => tool,
+            None => element,
         }
+    }
+
+    /// Whether the thread's harness can move a running call into the
+    /// background.
+    fn moves_to_background(&self, cx: &App) -> bool {
+        self.workspace_store
+            .read(cx)
+            .session_status_for(self.session_id.as_deref(), cx)
+            .is_some_and(|status| {
+                status
+                    .background_control
+                    .is_some_and(|control| control.move_running)
+            })
     }
 
     /// The way from a call's window to its row among the background work.
@@ -2225,8 +2486,8 @@ impl TimelineView {
         row: u64,
         turn: usize,
         cx: &mut Context<Self>,
-    ) -> components::dividers::WithheldRead {
-        use components::dividers::WithheldRead;
+    ) -> components::notices::WithheldRead {
+        use components::notices::WithheldRead;
         let load = || -> components::changed_files::ClickHandler {
             Box::new(cx.listener(move |this, _, _, cx| this.load_withheld(row, turn, cx)))
         };
@@ -2405,8 +2666,7 @@ fn goes_on(entry: &TimelineEntry, live_reasoning_id: Option<&str>) -> bool {
         EntryContent::Item(
             ItemContent::CommandExecution { status, .. }
             | ItemContent::FileChange { status, .. }
-            | ItemContent::ToolCall { status, .. }
-            | ItemContent::Subagent { status, .. },
+            | ItemContent::ToolCall { status, .. },
         ) => *status == agent::ItemStatus::InProgress,
         _ => false,
     }
@@ -2459,6 +2719,8 @@ impl TimelineView {
         counts
     }
 }
+
+pub(in crate::chat) mod thread_card;
 
 #[cfg(test)]
 mod tests;

@@ -3094,6 +3094,9 @@ pub enum AgentEvent {
     /// ending does not settle it; [`AgentEvent::UserInputResolved`] does.
     UserInputRequested {
         request_id: String,
+        /// Spawn item of the subagent that asks, as on [`ApprovalRequest`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_item_id: Option<String>,
         questions: Vec<UserInputQuestion>,
         #[serde(default, skip_serializing_if = "UserInputDelivery::is_blocking")]
         delivery: UserInputDelivery,
@@ -3155,6 +3158,14 @@ pub enum AgentEvent {
     /// Another thread's model acted on this thread through `tcode_control`. This is
     /// never emitted by an adapter; the runtime records it in the target thread.
     ControlAction(ControlAction),
+    /// A request a `tcode_control` child put to this thread in a callback has
+    /// left the host, answered or withdrawn. Never emitted by an adapter; the
+    /// runtime records it in the lead, whose card for the callback shows it.
+    ChildRequestSettled {
+        child_id: String,
+        request_id: String,
+        answer: ChildRequestAnswer,
+    },
     /// A row of a thread's log that this build cannot read, as it is stored:
     /// a record of a type or shape Tcode no longer has. Never emitted by an
     /// adapter nor written; the store reads it in the row's place.
@@ -3190,9 +3201,8 @@ pub enum AgentEvent {
         message: String,
     },
     /// The harness tries a failed request again inside its open turn.
-    /// `message` is its account of this attempt, which stands in for the
-    /// attempt before it; a request that fails for good is an
-    /// [`Self::Error`] or ends the turn.
+    /// `message` is its account of this attempt; a request that fails for
+    /// good is an [`Self::Error`] or ends the turn.
     RequestRetry {
         message: String,
     },
@@ -3949,6 +3959,23 @@ pub enum ContextFreshness {
     AwaitingObservation,
 }
 
+/// How a child's request ([`AgentEvent::ChildRequestSettled`]) was settled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChildRequestAnswer {
+    /// `label` is the chosen [`ApprovalOption`]'s, for an option.
+    Approval {
+        decision: ApprovalDecision,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    /// Keyed by question id, as [`AgentEvent::UserInputResolved`]'s; empty
+    /// when it ended unanswered.
+    Input {
+        answers: serde_json::Map<String, serde_json::Value>,
+    },
+}
+
 /// One `tcode_control` write, as the target thread records it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlAction {
@@ -4343,6 +4370,7 @@ mod thread_item_serde_tests {
         ));
         let event = AgentEvent::UserInputRequested {
             request_id: "q".into(),
+            parent_item_id: None,
             questions: Vec::new(),
             delivery: UserInputDelivery::Async,
         };

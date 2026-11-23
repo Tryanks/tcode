@@ -397,6 +397,7 @@ impl TurnBoundaries {
             | AgentEvent::WorktreeRequested { .. }
             | AgentEvent::UserInputRequested { .. }
             | AgentEvent::UserInputResolved { .. }
+            | AgentEvent::ChildRequestSettled { .. }
             | AgentEvent::PlanUpdated { .. }
             | AgentEvent::GoalUpdated { .. }
             | AgentEvent::UsageLimitReached { .. }

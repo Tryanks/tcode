@@ -55,6 +55,11 @@ pub(crate) struct BubbleData<'a> {
     /// The rewind the harness offers: what the context menu offers, and
     /// the action beside Copy.
     pub(crate) rewind: Option<(RewindMenu, AnyElement)>,
+    /// Why the last rewind to the message failed, leading its action row
+    /// whether or not the actions are revealed.
+    pub(crate) rewind_failure: Option<AnyElement>,
+    /// The notes on the settings the message ran on, under the bubble.
+    pub(crate) tags: Option<AnyElement>,
     /// The timeline's hover, which reveals the message's actions.
     pub(crate) hover: crate::motion::ListHover,
     /// The chat's motion, which keeps the rewind's fold and the pictures'
@@ -220,14 +225,16 @@ pub(crate) fn user_bubble(
         copied,
         markdown,
         rewind,
+        rewind_failure,
+        tags,
         hover,
         motion,
     } = data;
     let (offered, mut rewind) = rewind.unzip();
     let BubbleHandlers { copy, images } = handlers;
     let menu_items = bubble_menu_items(Arc::from(visible), offered.clone());
-    let prose = cx.theme().tokens.typography.md;
-    let spacing = &cx.theme().tokens.spacing;
+    let prose = crate::typography::chat_prose(cx);
+    let (padding_y, padding_x) = crate::material::user_bubble_padding(compact);
     let text_style = window.text_style();
     let text_width = visible.lines().fold(px(0.), |width, line| {
         let run = text_style.to_run(line.len());
@@ -410,13 +417,13 @@ pub(crate) fn user_bubble(
                     _ => None,
                 };
                 div()
-                    .w((text_width + spacing.md * 2.).ceil() + px(3.))
+                    .w((text_width + padding_x * 2.).ceil() + px(3.))
                     .flex_none()
                     .max_w_3_4()
-                    .px(spacing.md)
-                    .py(spacing.xs)
-                    .rounded(crate::material::radius_composer(cx))
-                    .bg(cx.theme().foreground.opacity(0.08))
+                    .px(padding_x)
+                    .py(padding_y)
+                    .rounded(crate::material::radius_user_bubble())
+                    .bg(crate::material::user_bubble_fill(cx))
                     .when_some(pending, |bubble, pending| {
                         bubble
                             .border_1()
@@ -428,9 +435,19 @@ pub(crate) fn user_bubble(
                     .child(content)
             })
         })
-        .child(assistant::reserve_action_row(
-            actions, reveal, pinned, compact,
-        ))
+        .children(tags)
+        .child(
+            h_flex()
+                .max_w_full()
+                .min_w_0()
+                .gap_1()
+                .items_center()
+                .justify_end()
+                .children(rewind_failure)
+                .child(assistant::reserve_action_row(
+                    actions, reveal, pinned, compact,
+                )),
+        )
         .context_menu(move |menu, window, cx| menu_items(menu, window, cx))
         .into_any_element()
 }

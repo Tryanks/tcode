@@ -85,7 +85,7 @@ pub(crate) fn appearance(state: PullRequestBadgeState, cx: &App) -> (IconName, H
         ),
         PullRequestBadgeState::Merged => (
             IconName::GitMerge,
-            cx.theme().info,
+            cx.theme().merged,
             "pull_requests.state_merged",
         ),
         PullRequestBadgeState::Closed => (
@@ -195,7 +195,9 @@ pub fn badge_label(links: &[ThreadPullRequestLink], cx: &App) -> Option<String> 
     };
     Some(label)
 }
-pub fn badge(links: &[ThreadPullRequestLink], cx: &App) -> Option<AnyElement> {
+/// `quiet`, the number alone in the muted text of the line it is on, without
+/// its state's glyph and colour.
+pub fn badge(links: &[ThreadPullRequestLink], quiet: bool, cx: &App) -> Option<AnyElement> {
     let (state, count, stacked) = pull_request::badge(links)?;
     let (glyph, color, _) = appearance(state, cx);
     let label = badge_label(links, cx)?;
@@ -207,6 +209,21 @@ pub fn badge(links: &[ThreadPullRequestLink], cx: &App) -> Option<AnyElement> {
     } else {
         format!("#{number}")
     };
+    if quiet {
+        return Some(
+            div()
+                .id("pull-request-badge")
+                .aria_label(label)
+                .flex_none()
+                .font_features(gpui::FontFeatures(std::sync::Arc::new(vec![(
+                    "tnum".into(),
+                    1,
+                )])))
+                .text_color(cx.theme().muted_foreground)
+                .child(text)
+                .into_any_element(),
+        );
+    }
     Some(
         crate::motion::Sampled::new(move |window, cx| {
             // A merge or a close recolours the badge where it stands.
@@ -336,9 +353,10 @@ pub fn sidebar_badge(
     links: &[ThreadPullRequestLink],
     id: &str,
     store: Entity<WorkspaceStore>,
+    quiet: bool,
     cx: &App,
 ) -> Option<AnyElement> {
-    let badge = badge(links, cx)?;
+    let badge = badge(links, quiet, cx)?;
     let id = id.to_owned();
     let hover_links = links.to_vec();
     let hover_store = store.clone();

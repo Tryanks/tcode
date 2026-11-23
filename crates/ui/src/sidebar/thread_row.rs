@@ -92,27 +92,26 @@ impl SessionsSidebar {
     }
 
     /// `base` carries the row's selectable surface, selected when `light` is
-    /// [`RowLight::Current`].
+    /// [`RowLight::Current`]; a `pinned` row rests on a faint fill. Its
+    /// accessible label says `details` after the thread's title.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn thread_clickable_row(
         &self,
         base: gpui::Div,
         meta: &SessionMeta,
         state: &ThreadRowState,
         light: RowLight,
+        pinned: bool,
+        details: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> crate::material::Clickable<gpui::Div> {
         let thread = state.thread.clone();
         let row_id = SharedString::from(format!("{}-row", state.row_key));
         // The selected fill glides from the row left to the row chosen.
-        let active = cx.theme().list_active;
         let fill = transition(
             (row_id.clone(), "selected-fill"),
-            active.opacity(match light {
-                RowLight::Current => 1.,
-                RowLight::Shown => SHOWN_FILL,
-                RowLight::None => 0.,
-            }),
+            row::row_fill(light, pinned, cx),
             gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
@@ -122,7 +121,7 @@ impl SessionsSidebar {
             .cells(&state.thread)
             .map(MapCell::place)
             .collect();
-        let label = if places.is_empty() {
+        let head = if places.is_empty() {
             crate::tr!("sidebar.thread", title = meta.title.clone())
         } else {
             crate::tr!(
@@ -132,6 +131,11 @@ impl SessionsSidebar {
             )
         }
         .into_owned();
+        let label = if details.is_empty() {
+            head
+        } else {
+            crate::i18n::join_list(std::iter::once(head).chain(details))
+        };
         let row =
             crate::material::accessible_clickable(base.bg(fill), row_id, Role::Button, label, cx)
                 .text_body(false, cx)
@@ -199,7 +203,6 @@ impl SessionsSidebar {
         &self,
         meta: &SessionMeta,
         state: &ThreadRowState,
-        emphasize_unread: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
@@ -214,9 +217,6 @@ impl SessionsSidebar {
                     cx.theme().muted_foreground
                 } else {
                     cx.theme().sidebar_foreground
-                })
-                .when(emphasize_unread && state.show_unread, |title| {
-                    title.font_semibold()
                 })
                 .into_any_element()
         };
@@ -278,17 +278,20 @@ impl SessionsSidebar {
 
     /// A thread's PR badge, widening in beside what precedes it (across
     /// `gap`) when a PR is linked and narrowing away when the last goes or
-    /// the title is renamed over it.
+    /// the title is renamed over it; `quiet`, the number alone in its line's
+    /// muted text.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn pr_badge(
         store: &Entity<WorkspaceStore>,
-        listed: &ListedThread,
+        meta: &SessionMeta,
+        name: &str,
         show: bool,
         gap: gpui::Pixels,
         slot: &'static str,
+        quiet: bool,
         window: &mut Window,
         cx: &mut App,
     ) -> Option<gpui::AnyElement> {
-        let (meta, name) = (&listed.meta, &listed.name);
         let links = show
             .then(|| meta.pull_requests.clone())
             .filter(|links| crate::pull_requests::badge_label(links, cx).is_some());
@@ -299,7 +302,8 @@ impl SessionsSidebar {
             window,
             cx,
         )?;
-        let badge = crate::pull_requests::sidebar_badge(&shown.value, &meta.id, store.clone(), cx)?;
+        let badge =
+            crate::pull_requests::sidebar_badge(&shown.value, &meta.id, store.clone(), quiet, cx)?;
         Some(shown.fold_across_gap(gap, badge))
     }
 
@@ -356,57 +360,6 @@ impl SessionsSidebar {
         )
     }
 
-    /// Status text and colour shared by every thread row shape, and whether
-    /// it is the background's, whose dot breathes as a call's window's does
-    /// while its work goes on.
-    pub(super) fn thread_status_label(
-        state: &ThreadRowState,
-        working: bool,
-        cx: &Context<Self>,
-    ) -> Option<(gpui::Hsla, std::borrow::Cow<'static, str>, bool)> {
-        if state.draft {
-            state.draft_kept.then(|| {
-                (
-                    cx.theme().muted_foreground,
-                    crate::tr!("sidebar.draft"),
-                    false,
-                )
-            })
-        } else if state.waiting_for_approval {
-            Some((
-                cx.theme().warning,
-                crate::tr!("sidebar.waiting_approval"),
-                false,
-            ))
-        } else if state.waiting_for_input {
-            Some((
-                cx.theme().primary,
-                crate::tr!("sidebar.waiting_input"),
-                false,
-            ))
-        } else if state.failed {
-            Some((cx.theme().danger, crate::tr!("sidebar.failed"), false))
-        } else if working {
-            Some((cx.theme().primary, crate::tr!("sidebar.working"), false))
-        } else if state.unsettled {
-            Some((cx.theme().warning, crate::tr!("sidebar.unsettled"), false))
-        } else if state.background != (0, 0) {
-            Some((
-                cx.theme().muted_foreground,
-                crate::tr!("sidebar.background"),
-                true,
-            ))
-        } else if !state.wakes.is_empty() {
-            Some((
-                cx.theme().muted_foreground,
-                crate::tr!("sidebar.waiting"),
-                false,
-            ))
-        } else {
-            None
-        }
-    }
-
     /// The dot leading a thread row's title: unread over the status's colour,
     /// breathing while only background work keeps the thread going; none
     /// while the row is renamed. A change cross-fades.
@@ -448,14 +401,14 @@ impl SessionsSidebar {
     /// that ends fades out in its place.
     pub(super) fn status_word(
         state: &ThreadRowState,
-        status: Option<(gpui::Hsla, std::borrow::Cow<'static, str>, bool)>,
+        status: Option<&row::RowStatus>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::Stateful<gpui::Div>> {
         let name = &state.name;
         let word = faded_status(
             format!("status-word-{name}"),
-            status.map(|(color, label, _)| (SharedString::from(label), color)),
+            status.map(|status| (SharedString::from(status.verb()), status.color(cx))),
             window,
             cx,
             |(label, color), _, cx| {
@@ -737,7 +690,7 @@ impl SessionsSidebar {
         let name = state.name.clone();
         let is_worktree = state.is_worktree;
         let show_unread = state.show_unread;
-        let status = Self::thread_status_label(&state, working, cx);
+        let status = row::RowStatus::of(&state, working);
 
         let row = self
             .thread_clickable_row(
@@ -745,26 +698,19 @@ impl SessionsSidebar {
                 meta,
                 &state,
                 light,
+                false,
+                Vec::new(),
                 window,
                 cx,
             )
             .pl(px(THREAD_INDENT))
-            // Ahead of the row's content, which paints over the mark.
-            .relative()
-            .children(Self::provider_mark(
-                store.read(cx),
-                meta,
-                &name,
-                crate::material::selectable_row_height(false),
-                crate::material::selectable_row_inset(false).into(),
-            ))
             .children(Self::status_dot(
                 &name,
                 show_unread,
                 state.renaming.is_some(),
                 status
                     .as_ref()
-                    .map(|(color, _, breathes)| (*color, *breathes)),
+                    .map(|status| (status.color(cx), status.breathes())),
                 window,
                 cx,
             ));
@@ -772,7 +718,7 @@ impl SessionsSidebar {
         // Row body: rename input, or the worktree glyph, the title and the
         // status word beside it, which gives up its width before the title.
         let row = if state.renaming.is_some() {
-            row.child(self.thread_title_or_input(meta, &state, false, window, cx))
+            row.child(self.thread_title_or_input(meta, &state, window, cx))
         } else {
             row.when(is_worktree, |row| {
                 row.child(
@@ -786,24 +732,28 @@ impl SessionsSidebar {
                     .flex_1()
                     .min_w_0()
                     .child(
-                        self.thread_title_or_input(meta, &state, false, window, cx)
+                        self.thread_title_or_input(meta, &state, window, cx)
                             .flex_initial(),
                     )
-                    .children(Self::status_word(&state, status, window, cx).map(|word| {
-                        word.flex_shrink(1000.)
-                            .min_w_0()
-                            .overflow_hidden()
-                            .pl(ROW_GAP)
-                    })),
+                    .children(
+                        Self::status_word(&state, status.as_ref(), window, cx).map(|word| {
+                            word.flex_shrink(1000.)
+                                .min_w_0()
+                                .overflow_hidden()
+                                .pl(ROW_GAP)
+                        }),
+                    ),
             )
             .children(Self::follow_up_glyph(meta, &name, window, cx))
             .children(self.pin_glyph(meta, &state, window, cx))
             .children(Self::pr_badge(
                 &store,
-                listed,
+                meta,
+                &name,
                 state.renaming.is_none(),
                 ROW_GAP,
                 "pr-badge-row",
+                false,
                 window,
                 cx,
             ))
@@ -827,7 +777,10 @@ impl SessionsSidebar {
                         window,
                         cx,
                     );
-                    row.child(shown.fold_across_gap(ROW_GAP, slot))
+                    row.child(shown.fold_across_gap(
+                        ROW_GAP,
+                        div().flex_none().text_secondary(false, cx).child(slot),
+                    ))
                 },
             )
         };
@@ -883,7 +836,6 @@ impl SessionsSidebar {
                     .h_full()
                     .items_center()
                     .whitespace_nowrap()
-                    .text_secondary(false, cx)
                     .opacity(1. - hover)
                     .children(ago.map(crate::widgets::fade_text)),
             )
@@ -946,7 +898,8 @@ impl SessionsSidebar {
             return div().into_any_element();
         };
         let meta = &listed.meta;
-        let working = flags.get(&meta.id).is_some_and(|flags| flags.working);
+        let own_flags = flags.get(&meta.id);
+        let working = own_flags.is_some_and(|flags| flags.working);
         let state = self.thread_row_state(
             store.read(cx),
             listed,
@@ -954,143 +907,42 @@ impl SessionsSidebar {
             format!("flat-thread-{}", listed.name),
         );
         let light = self.shown.light(&state.thread);
-        let name = state.name.clone();
-        let show_unread = state.show_unread;
-        let renaming = state.renaming.is_some();
-        let status = Self::thread_status_label(&state, working, cx);
-
-        let row = self
-            .thread_clickable_row(
-                crate::material::selectable_row_two_line(
-                    v_flex(),
-                    light == RowLight::Current,
-                    false,
-                    cx,
-                ),
+        let shows = row::RowShows::of(
+            store.read(cx),
+            meta,
+            &state,
+            working,
+            project_name.map(SharedString::from),
+            host_name,
+        );
+        let time = self
+            .render_flat_thread_right_slot(
                 meta,
                 &state,
-                light,
+                shown_timestamp(
+                    meta,
+                    own_flags.map(|flags| flags.standing).unwrap_or_default(),
+                ),
+                !state.settle_blocked,
                 window,
                 cx,
             )
-            .debug_selector({
-                let name = name.clone();
-                move || format!("sidebar-thread-{name}")
-            })
+            .into_any_element();
+        let lines = self.row_lines(&store, meta, &state, &shows, time, false, window, cx);
+        let row = self
+            .thread_clickable_row(
+                row::desktop_row_surface(light == RowLight::Current, cx),
+                meta,
+                &state,
+                light,
+                shows.pinned,
+                shows.details(),
+                window,
+                cx,
+            )
             .items_stretch()
             .justify_center()
-            // Ahead of the row's content, which paints over the mark.
-            .relative()
-            .children(Self::provider_mark(
-                store.read(cx),
-                meta,
-                &name,
-                crate::material::selectable_row_two_line_height(false),
-                crate::material::selectable_row_inset(false).into(),
-            ));
-
-        let row = {
-            let title_or_input = self.thread_title_or_input(meta, &state, true, window, cx);
-            let dot = Self::status_dot(
-                &name,
-                show_unread,
-                renaming,
-                status
-                    .as_ref()
-                    .map(|(color, _, breathes)| (*color, *breathes)),
-                window,
-                cx,
-            );
-            let line_one = h_flex()
-                .w_full()
-                .min_w_0()
-                .items_center()
-                .gap(px(6.))
-                .children(dot)
-                .child(title_or_input)
-                .when(!renaming, |line| {
-                    line.children(Self::follow_up_glyph(meta, &name, window, cx))
-                        .children(self.pin_glyph(meta, &state, window, cx))
-                        .children(self.pane_glyph(&state, window, cx))
-                        .child(
-                            self.render_flat_thread_right_slot(
-                                meta,
-                                &state,
-                                shown_timestamp(
-                                    meta,
-                                    flags
-                                        .get(&meta.id)
-                                        .map(|flags| flags.standing)
-                                        .unwrap_or_default(),
-                                ),
-                                !state.settle_blocked,
-                                window,
-                                cx,
-                            ),
-                        )
-                });
-
-            let has_project = project_name.is_some();
-            let has_status = status.is_some();
-            let status_word = Self::status_word(&state, status, window, cx);
-            let line_two = h_flex()
-                .w_full()
-                .min_w_0()
-                .items_center()
-                .gap_1()
-                .text_secondary(false, cx)
-                .children(status_word.map(|word| word.flex_none()))
-                .when(has_status && has_project, |line| {
-                    line.child(div().flex_none().child("·"))
-                })
-                .when_some(project_name, |line, project_name| {
-                    let store = store.read(cx);
-                    line.child(
-                        store
-                            .project(meta.project_id.as_deref().unwrap_or_default())
-                            .map(|project| {
-                                crate::project_icon::artwork(store.image_host(), project, 12.)
-                                    .into_any_element()
-                            })
-                            .unwrap_or_else(|| Icon::new(IconName::Folder).into_any_element()),
-                    )
-                    .child(sidebar_label(project_name))
-                })
-                // Without a project label there is no flex-1 element on the
-                // line, so a spacer keeps the host and worktree glyph
-                // bottom-right.
-                .when(!has_project, |line| line.child(div().flex_1()))
-                .when_some(host_name, |line, host| {
-                    line.child(
-                        div()
-                            .debug_selector({
-                                let name = name.clone();
-                                move || format!("flat-host-{name}")
-                            })
-                            .min_w_0()
-                            .max_w(gpui::relative(0.5))
-                            .overflow_hidden()
-                            .child(crate::widgets::fade_text(host)),
-                    )
-                })
-                .when(meta.worktree.is_some(), |line| {
-                    line.child(
-                        Icon::empty()
-                            .path("icons/git-branch.svg")
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                });
-            let line_two = line_two.children(Self::pr_badge(
-                &store,
-                listed,
-                !renaming,
-                px(4.),
-                "pr-badge-line",
-                window,
-                cx,
-            ));
-            row.child(line_one).child(line_two)
-        };
+            .child(lines);
 
         self.thread_context_menu(row, meta, &state, working, false, cx)
     }

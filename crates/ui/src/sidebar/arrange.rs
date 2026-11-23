@@ -236,9 +236,9 @@ fn carried_thread(
         );
         return drag_ghost::lifted(v_flex(), lift)
             .w_full()
-            .min_h(px(crate::material::LIST_ROW_MIN_HEIGHT))
+            .h(px(super::row::PHONE_ROW_HEIGHT))
             .justify_center()
-            .px(px(COMPACT_PAGE_INSET))
+            .px(px(super::row::PHONE_ROW_INSET))
             .py(cx.theme().tokens.spacing.sm)
             .rounded(crate::material::radius_overlay(cx))
             .bg(cx.theme().list_active)
@@ -285,15 +285,13 @@ fn carried_thread(
                 .into_any_element()
         },
     );
-    drag_ghost::lifted(
-        crate::material::selectable_row_two_line(h_flex(), true, false, cx),
-        lift,
-    )
-    .w_full()
-    .text_color(cx.theme().sidebar_foreground)
-    .child(sidebar_label(title.clone()).text_body(false, cx))
-    .child(div().flex_none().child(badge))
-    .into_any_element()
+    drag_ghost::lifted(super::row::desktop_row_surface(true, cx).flex_row(), lift)
+        .w_full()
+        .bg(cx.theme().list_active)
+        .text_color(cx.theme().sidebar_foreground)
+        .child(sidebar_label(title.clone()).text_body(false, cx))
+        .child(div().flex_none().child(badge))
+        .into_any_element()
 }
 
 impl SessionsSidebar {

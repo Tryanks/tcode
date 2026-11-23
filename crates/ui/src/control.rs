@@ -56,6 +56,35 @@ impl ActivityDay {
     }
 }
 
+/// Whether a `ControlAction`'s operation only changed how the thread stands
+/// in Tcode (where it is listed, what it is called, who watches it) and
+/// nothing its runs do.
+pub(crate) fn changes_only_the_thread(key: &str) -> bool {
+    use tcode_core::control::action;
+    matches!(
+        key,
+        action::SETTLE
+            | action::SETTLED_ITSELF
+            | action::UNSETTLE
+            | action::ARCHIVE
+            | action::UNARCHIVE
+            | action::PIN
+            | action::UNPIN
+            | action::RENAME
+            | action::MARK_READ
+            | action::MARK_UNREAD
+            | action::FOLLOW_UP
+            | action::FOLLOW_UP_OFF
+            | action::PARK
+            | action::PARK_OFF
+            | action::KEEP
+            | action::KEEP_OFF
+            | action::SETTLE_SELF
+            | action::NOTIFY_WHEN
+            | action::CANCEL_NOTIFY
+    )
+}
+
 /// A `ControlAction`'s operation in words; an operation this client does not
 /// know keeps the key the host recorded.
 pub(crate) fn action_label(key: &str) -> String {

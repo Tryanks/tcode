@@ -704,6 +704,7 @@ impl<'a> ActivityProjection<'a> {
             },
             waiting_for_approval: !approvals.is_empty(),
             waiting_for_input: input.is_some(),
+            asking: self.state.subagents_asking(&meta.id, approvals, input),
             settle_blocked: self.state.settle_thread_busy(&meta.id),
             failed: self
                 .state
@@ -1274,6 +1275,31 @@ impl AppState {
         )
     }
 
+    /// What `lead_id`'s `tcode_control` children wait on now, in child id
+    /// order.
+    fn child_requests(&self, lead_id: &str) -> Vec<tcode_protocol::ChildRequests> {
+        let mut children: Vec<_> = self
+            .residents
+            .ids()
+            .filter_map(|id| {
+                let child = self.resident(id)?;
+                if child.meta.parent_session_id.as_deref() != Some(lead_id) {
+                    return None;
+                }
+                let (approvals, user_input) = self.open_requests(id, child);
+                (!approvals.is_empty() || user_input.is_some()).then(|| {
+                    tcode_protocol::ChildRequests {
+                        child_id: id.to_owned(),
+                        approvals: approvals.to_vec(),
+                        user_input: user_input.cloned(),
+                    }
+                })
+            })
+            .collect();
+        children.sort_unstable_by(|a, b| a.child_id.cmp(&b.child_id));
+        children
+    }
+
     pub(super) fn agent_status(&self, meta: &SessionMeta) -> Option<AgentStatus> {
         ActivityProjection::new(self).agent_status(meta)
     }
@@ -1462,6 +1488,7 @@ impl AppState {
                 .flatten(),
             pending_approvals: approvals.to_vec(),
             pending_user_input: user_input.cloned(),
+            child_requests: self.child_requests(session_id),
             steering_supported: session.can_steer(),
             provider_option_descriptors,
             provider_option_selections,

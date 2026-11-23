@@ -794,6 +794,7 @@ impl Session {
         });
         self.emit(AgentEvent::UserInputRequested {
             request_id,
+            parent_item_id: None,
             questions,
             delivery: UserInputDelivery::Blocking,
         })

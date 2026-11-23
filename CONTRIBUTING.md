@@ -59,21 +59,21 @@ is derived from it. **Process** is how to build, check and submit work.
    sees it; and no SLA is promised. Current status
    and plan: [#376](https://github.com/Tryanks/tcode/issues/376).
 
-6. **gpui-base is the infrastructure; no house UI principles.** Tcode follows
-   the recommendations and defaults of gpui-base and gpui-kit, and keeps no
-   separate design contract in sync with the code: no house-wide UI rules of
-   its own, such as a single duration for every transition or classes of
-   change that must stay instant. Everything gpui-base
-   provides on top of GPUI — selection, scrolling, positioning, dismissal,
-   focus, theme tokens, motion, virtual lists, form controls — is used as it
-   is, defaults included, before anything of the kind is written in Tcode.
-   Tcode's own components are styled compositions of those primitives; they
-   never re-derive a primitive's rules locally. Where gpui-base demonstrably
-   cannot meet the need, Tcode builds what is missing — a primitive
-   reimplemented, a default overridden, or an element gpui-base does not have
-   — and the site names that gap; it is removed once gpui-base closes it.
-   This principle decides how something is built, never whether it is built:
-   what the interface does is the maintainer's call, and a primitive
+6. **Upstream for behaviour; the look is Tcode's own.** gpui-base and
+   gpui-kit are the infrastructure for behaviour. Everything they provide on
+   top of GPUI — selection, scrolling, positioning, dismissal, focus, motion,
+   virtual lists, form controls — is used as it is before anything of the
+   kind is written in Tcode, and Tcode never re-derives a primitive's rules
+   locally. Where gpui-base demonstrably cannot meet the need, Tcode builds
+   what is missing — a primitive reimplemented, a behaviour default
+   overridden, or an element gpui-base does not have — and the site names
+   that gap; it is removed once gpui-base closes it. How the interface looks
+   is Tcode's to design and develop, not gpui-base's defaults: its type
+   scale, spacing, radii, elevation, colours and motion timing, the
+   components it composes from those primitives, and which form each kind of
+   information takes. Tcode gives gpui-base's theme tokens its own values so
+   upstream components follow them, rather than restyling each use. What the
+   interface does and how it looks is the maintainer's call, and a primitive
    gpui-base lacks is never a reason to leave an effect out, make it instant,
    or settle for less.
 

@@ -691,6 +691,7 @@ mod tests {
         active.turn_in_flight = true;
         active.timeline.pending_user_input = Some(tcode_core::session::PendingUserInput {
             request_id: "question".into(),
+            parent_item_id: None,
             questions: Vec::new(),
             delivery: agent::UserInputDelivery::Blocking,
         });
