@@ -9,3 +9,6 @@ rustflags = ["-C", "target-feature=+crt-static"]
 [env]
 MACOSX_DEPLOYMENT_TARGET = "27.0"
 IPHONEOS_DEPLOYMENT_TARGET = "27.0"
+# GPUI lays out and paints the element tree recursively. The app does it on its
+# 8 MiB main thread (crates/app/build.rs); a test's thread gets the same.
+RUST_MIN_STACK = "8388608"

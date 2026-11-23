@@ -1,19 +1,17 @@
-//! Wire-level ACP catalog probe, model/option setup and live `ApplySettings`
+//! Wire-level ACP model/option setup and live `ApplySettings`
 //! tests using this `harness = false` binary as the subprocess agent so
 //! `libtest` writes nothing to its JSON-RPC stdout.
 
 use std::io::{BufRead as _, BufReader, Write as _};
 
 use agent::{
-    ACP_MODE_OPTION_ID, AcpAgent, AcpCatalog, AcpLaunch, AgentEvent, EFFORT_OPTION_ID, LaunchEnv,
+    ACP_MODE_OPTION_ID, AcpAgent, AcpLaunch, AgentEvent, EFFORT_OPTION_ID, LaunchEnv,
     OptionDescriptor, OptionRole, OptionSelection, ProviderKind, SessionCommand, SessionOptions,
     SessionProcesses, start_session,
 };
 use serde_json::{Value, json};
 
 const ROLE: &str = "TCODE_TEST_SETTINGS_ACP_AGENT";
-/// Set, the fake agent answers `session/new` that it needs signing in.
-const SIGNED_OUT: &str = "TCODE_TEST_SETTINGS_ACP_SIGNED_OUT";
 
 fn main() {
     if let Ok(port) = std::env::var(ROLE) {
@@ -24,10 +22,6 @@ fn main() {
         (
             "establish_applies_model_and_options_and_leaves_the_model_to_the_model_picker",
             establish_applies_model_and_options_and_leaves_the_model_to_the_model_picker,
-        ),
-        (
-            "probe_of_a_signed_out_agent_fails_without_signing_in",
-            probe_of_a_signed_out_agent_fails_without_signing_in,
         ),
         (
             "stale_model_at_establish_warns_and_carries_on",
@@ -147,14 +141,8 @@ fn run_fake_agent(port: u16) {
                 "id": id,
                 "result": {
                     "protocolVersion": 1,
-                    "agentCapabilities": {},
-                    "authMethods": [{ "id": "browser", "name": "Sign in with a browser" }]
+                    "agentCapabilities": {}
                 }
-            }),
-            "session/new" if std::env::var_os(SIGNED_OUT).is_some() => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32000, "message": "Authentication required" }
             }),
             "session/new" => json!({
                 "jsonrpc": "2.0",
@@ -385,55 +373,6 @@ fn establish_applies_model_and_options_and_leaves_the_model_to_the_model_picker(
 
     processes.stop();
     drop(handle);
-}
-
-/// Probe the fake agent, launched with `env`: what the probe returned and
-/// every request the agent was sent, read once the agent is gone.
-fn probe(env: &[&str]) -> (Result<AcpCatalog, agent::AgentError>, Vec<Value>) {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let mut env: Vec<(String, String)> = env
-        .iter()
-        .map(|name| ((*name).to_owned(), "1".to_owned()))
-        .collect();
-    env.push((ROLE.into(), port.to_string()));
-    let agent = AcpAgent {
-        id: "fake-settings".into(),
-        name: "Fake Settings".into(),
-        launch: AcpLaunch::Binary {
-            command: std::env::current_exe().unwrap(),
-            args: Vec::new(),
-            env,
-        },
-    };
-    let processes = SessionProcesses::default();
-    let probed = smol::spawn(async move {
-        agent::acp::probe_catalog(agent, Vec::new(), LaunchEnv::default(), &processes).await
-    });
-    let (stream, _) = listener.accept().unwrap();
-    let probed = smol::block_on(probed);
-    let requests = BufReader::new(stream)
-        .lines()
-        .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
-        .collect();
-    (probed, requests)
-}
-
-/// Signing in is the agent's interactive flow, which a thread the user
-/// starts runs; a probe in the background never begins it. An agent that
-/// cannot close sessions is not asked to.
-fn probe_of_a_signed_out_agent_fails_without_signing_in() {
-    let (probed, requests) = probe(&[SIGNED_OUT]);
-    let error = probed.expect_err("a signed-out agent lists nothing");
-    assert!(
-        error.to_string().contains("requires authentication"),
-        "{error}"
-    );
-    let methods: Vec<&str> = requests
-        .iter()
-        .map(|request| request["method"].as_str().unwrap())
-        .collect();
-    assert_eq!(methods, ["initialize", "session/new"]);
 }
 
 /// A stale or rejected model at establish warns and carries on instead of

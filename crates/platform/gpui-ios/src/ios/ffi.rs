@@ -618,7 +618,7 @@ pub extern "C" fn gpui_ios_text_range(kind: u32) -> TextRange {
                     .selected_text_range(true)
                     .map(|selection| selection.range),
                 1 => handler.marked_text_range(),
-                _ => text_input::text_length(handler).map(|length| 0..length),
+                _ => handler.text_length_utf16().map(|length| 0..length),
             })
             .flatten();
     });
@@ -699,7 +699,7 @@ pub extern "C" fn gpui_ios_select_text(range: TextRange) {
 pub extern "C" fn gpui_ios_unmark_text() {
     with_window(|window| {
         window.input_activity();
-        window.with_stored_input_handler(text_input::commit_marked_text);
+        window.with_stored_input_handler(gpui::PlatformInputHandler::unmark_text);
     });
 }
 

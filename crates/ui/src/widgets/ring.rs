@@ -32,7 +32,7 @@ fn stroked_arc(
     start_deg: f32,
     end_deg: f32,
     width: Pixels,
-) -> Option<gpui::Path<Pixels>> {
+) -> Option<gpui::Path> {
     let mut builder = PathBuilder::stroke(width);
     let steps = 48;
     for i in 0..=steps {

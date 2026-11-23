@@ -1,5 +1,4 @@
 use rushdown::parser::ParserExtension as _;
-use std::borrow::Cow;
 
 use rushdown::ast::{
     Arena, CodeBlockKind, KindData, NodeRef, TableCellAlignment, Task, TextQualifier,
@@ -52,8 +51,7 @@ fn parse_document_inner(source: &str) -> ParsedDocument {
             .and(super::math_parse::MathParser)
             .and(super::math_parse::MathBlockParser),
     );
-    let mut reader = rushdown::text::BasicReader::new(source);
-    let (arena, doc_ref) = parser.parse(&mut reader);
+    let (arena, doc_ref) = parser.parse(source, rushdown::parser::ParseOptions::default());
     let mut root_starts = Vec::new();
     let mut positions_available = true;
     let children = arena[doc_ref]
@@ -126,10 +124,9 @@ fn block_node(
             let value = code.value().iter(source).collect::<String>();
             let fenced = matches!(code.code_block_kind(), CodeBlockKind::Fenced);
             let lang = fenced
-                .then(|| code.language_str(source))
-                .flatten()
+                .then(|| code.language(source))
                 .filter(|lang| !lang.is_empty())
-                .map(Into::into);
+                .map(|lang| lang.value(source).into_owned().into());
             let (closed, open_line) = node
                 .pos()
                 .filter(|_| fenced)
@@ -345,7 +342,7 @@ fn parse_inline(
             math.source.clone()
         }
         KindData::Text(text) => {
-            let mut value = decode_entities(text.str(source));
+            let mut value = text.value().value(source).into_owned();
             if text.has_qualifiers(TextQualifier::SOFT_LINE_BREAK)
                 || text.has_qualifiers(TextQualifier::HARD_LINE_BREAK)
             {
@@ -355,7 +352,7 @@ fn parse_inline(
             value
         }
         KindData::CodeSpan(code) => {
-            let value = code.str(source).into_owned();
+            let value = code.value().value(source).into_owned();
             paragraph
                 .children
                 .push(marked_inline(value.clone(), TextMark::default().code()));
@@ -388,19 +385,21 @@ fn parse_inline(
             node_ref,
             source,
             TextMark::default().link(LinkMark {
-                url: link.destination_str(source).into(),
+                url: destination(link.destination(), source).into(),
                 title: link
-                    .title_str(source)
-                    .map(|title| title.into_owned().into()),
+                    .title()
+                    .as_option()
+                    .map(|title| title.value(source).into_owned().into()),
             }),
         ),
         KindData::Image(image) => {
             let alt = descendant_text(arena, node_ref, source);
             paragraph.children.push(InlineNode::image(ImageNode {
-                url: image.destination_str(source).to_string().into(),
+                url: destination(image.destination(), source).into(),
                 title: image
-                    .title_str(source)
-                    .map(|title| title.into_owned().into()),
+                    .title()
+                    .as_option()
+                    .map(|title| title.value(source).into_owned().into()),
                 alt: Some(alt.into()),
                 ..Default::default()
             }));
@@ -495,84 +494,18 @@ fn descendant_text(arena: &Arena, parent: NodeRef, source: &str) -> String {
     let mut result = String::new();
     for child in arena[parent].children(arena) {
         match arena[child].kind_data() {
-            KindData::Text(text) => result.push_str(&decode_entities(text.str(source))),
-            KindData::CodeSpan(code) => result.push_str(&code.str(source)),
+            KindData::Text(text) => result.push_str(&text.value().value(source)),
+            KindData::CodeSpan(code) => result.push_str(&code.value().value(source)),
             _ => result.push_str(&descendant_text(arena, child, source)),
         }
     }
     result
 }
 
-/// Decode backslash escapes and entity references in one left-to-right pass,
-/// mirroring rushdown's HTML renderer (src/renderer/html.rs): a `\` before
-/// ASCII punctuation emits the punctuation literally (per CommonMark; `\`
-/// elsewhere is kept), and the emitted character is final — it is NOT
-/// re-scanned, so `\&amp;` renders as `&amp;`, not `&`. Unescaped entity
-/// references (`&#32;`, `&#x20;`, `&amp;`) decode normally.
-fn decode_entities(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' if i + 1 < bytes.len() && bytes[i + 1].is_ascii_punctuation() => {
-                out.push(bytes[i + 1] as char);
-                i += 2;
-            }
-            b'&' => match decode_entity_at(&bytes[i..]) {
-                Some((decoded, consumed)) => {
-                    out.push_str(&decoded);
-                    i += consumed;
-                }
-                None => {
-                    out.push('&');
-                    i += 1;
-                }
-            },
-            _ => {
-                let len = utf8_len(bytes[i]);
-                out.push_str(&text[i..i + len]);
-                i += len;
-            }
-        }
-    }
-    out
-}
-
-/// Resolve a single entity reference at the start of `bytes` (`&` included).
-/// Returns the decoded text and the reference's byte length, or `None` when
-/// the text is not a valid reference.
-fn decode_entity_at(bytes: &[u8]) -> Option<(String, usize)> {
-    // Longest named reference is ~32 chars; cap the scan.
-    let end = bytes
-        .iter()
-        .take(35)
-        .position(|b| *b == b';')?
-        .checked_add(1)?;
-    if end < 3 {
-        return None;
-    }
-    let fragment = &bytes[..end];
-    // A valid reference resolves to different (shorter) bytes; an invalid
-    // fragment is returned unchanged by the resolvers.
-    let numeric = rushdown::util::resolve_numeric_references(Cow::Borrowed(fragment));
-    if numeric.as_ref() != fragment {
-        return Some((String::from_utf8_lossy(&numeric).into_owned(), end));
-    }
-    let named = rushdown::util::resolve_entity_references(Cow::Borrowed(fragment));
-    if named.as_ref() != fragment {
-        return Some((String::from_utf8_lossy(&named).into_owned(), end));
-    }
-    None
-}
-
-fn utf8_len(first: u8) -> usize {
-    match first {
-        0x00..=0x7f => 1,
-        0xc0..=0xdf => 2,
-        0xe0..=0xef => 3,
-        _ => 4,
-    }
+/// A link's or image's destination as it was written: decoding its backslash escapes would
+/// take separators out of a Windows path (`C:\Users\me\.claude`).
+fn destination(value: &rushdown::text::Value, source: &str) -> String {
+    value.str(source).into_owned()
 }
 
 #[cfg(test)]
