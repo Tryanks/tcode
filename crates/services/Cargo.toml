@@ -25,7 +25,7 @@ smol = "2"
 tar = "0.4"
 # Default features add a global allocator (mimalloc) and full-text search
 # (tantivy, zstd); the store needs neither.
-turso = { version = "=0.8.3", default-features = false }
+turso = { version = "=0.8.4", default-features = false }
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
