@@ -84,8 +84,7 @@ pub async fn list_models(
 }
 
 /// Whether the agent opens a session for the account it is launched with.
-/// The agent answers at once either way; `agy --print /usage` waits a minute
-/// for a sign-in before it says there is none (1.5.14).
+/// The agent answers at once either way and never starts a sign-in.
 pub async fn signed_in(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
@@ -222,10 +221,27 @@ async fn open_session(
 
 /// Ask a short-lived `agy --print /usage --output-format json` process for
 /// account quota windows (handled locally by the CLI with zero model turns).
+///
+/// Print mode signs in on its own when it finds no Google sign-in: it opens
+/// Google's sign-in page in the browser and waits a minute for it (1.5.15,
+/// also when `GEMINI_API_KEY` is set, before or after `agy acp` has chosen the
+/// key). So it is started only for a Google sign-in, which `session/new`
+/// reports at once without signing in, and never while the key is set.
 pub async fn read_usage(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
 ) -> Result<Value, AgentError> {
+    if launch_env
+        .child_path(ProviderKind::Antigravity, "GEMINI_API_KEY")
+        .is_some_and(|key| !key.as_os_str().is_empty())
+    {
+        return Err(AgentError::Provider(
+            "Antigravity reports usage only for a Google sign-in, not for GEMINI_API_KEY.".into(),
+        ));
+    }
+    if !signed_in(binary_path.clone(), launch_env.clone()).await? {
+        return Err(signed_out());
+    }
     let binary = crate::resolve_binary(binary_path.as_deref(), "agy")?;
     let binary_display = binary.to_string_lossy().into_owned();
     let mut cmd = crate::process::command(&binary);
@@ -241,9 +257,7 @@ pub async fn read_usage(
         .await
         .map_err(|err| AgentError::Spawn(format!("spawning `{binary_display}`: {err}")))?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    // A failed command still prints its envelope, whose `error` says why
-    // (signed out, 1.5.14: `authentication failed or timed out`, exit 1, with
-    // the sign-in page and its prompt on stderr).
+    // A failed command still prints its envelope, whose `error` says why.
     let envelope = serde_json::from_str(&stdout);
     if output.status.success() || envelope.is_ok() {
         return envelope.map_err(|err| {
