@@ -61,8 +61,11 @@ use crate::{
     widgets::copy::{action_button, copy_button},
 };
 
+/// Never in a browser, where the fence shows its code: mermaid-rs-renderer
+/// 0.3.1 times every layout by `std::time::Instant`, which panics on wasm and
+/// takes the page with it.
 pub(super) fn is_mermaid(lang: Option<&str>) -> bool {
-    lang.is_some_and(|lang| lang.eq_ignore_ascii_case("mermaid"))
+    !cfg!(target_family = "wasm") && lang.is_some_and(|lang| lang.eq_ignore_ascii_case("mermaid"))
 }
 
 /// How long a new picture rests before the next may replace it. A growing
