@@ -400,15 +400,15 @@ pub use wire::{
 //
 // Version 32 (v0.4.7): SelectOption gains optional per-choice apply timing.
 //
-// SessionStatus gains child_requests, what a lead's tcode_control children
-// wait on; AgentEvent gains ChildRequestSettled, which the host records in a
-// lead when a request a child put to it in a callback is settled.
-// Unreleased: SessionActivity gains asking, the harness's own subagents that
-// wait on the user through the thread; the agent event stream's
-// user_input_requested and PendingUserInput gain parent_item_id.
-// Unreleased: Settings loses sidebar_provider_marks, and SettingsPatch its
-// sidebar_provider_marks patch.
-pub const PROTOCOL_VERSION: u32 = 32;
+// Version 33 (v0.5.0): SessionStatus gains child_requests, what a lead's
+// tcode_control children wait on; AgentEvent gains ChildRequestSettled, which
+// the host records in a lead when a request a child put to it in a callback is
+// settled. The timeline's rewind_failed entry gains checkpoint_id.
+// SessionActivity gains asking, the harness's own subagents that wait on the
+// user through the thread; the agent event stream's user_input_requested and
+// PendingUserInput gain parent_item_id. Settings loses sidebar_provider_marks,
+// and SettingsPatch its sidebar_provider_marks patch.
+pub const PROTOCOL_VERSION: u32 = 33;
 
 #[cfg(test)]
 mod tests;
