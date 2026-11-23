@@ -65,10 +65,11 @@ targets:
           - Security
           - "-framework"
           - Network
-          # netdev and system-configuration read DNS and proxy settings from
-          # SCDynamicStore.
+          # system-configuration reads proxy settings from SCDynamicStore.
           - "-framework"
           - SystemConfiguration
+          # netdev reads DNS settings through libresolv.
+          - "-lresolv"
           - "-lc++"
 
 schemes:
