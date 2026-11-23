@@ -720,10 +720,10 @@ fn jump_to_latest_shows_behind_the_end_and_the_reader_keeps_their_place(cx: &mut
         }
     }
     // Five records a turn: its start, three items and its end. The
-    // thread opens on its last thirty turns.
+    // thread opens on its last twenty-five turns.
     const RECORDS: usize = 5;
     let log = |turns: usize| log_of(&synthetic_markdown_timeline(turns));
-    let mut thread = ScriptedThread::new(cx, log(120), 90 * RECORDS, false);
+    let mut thread = ScriptedThread::new(cx, log(120), 95 * RECORDS, false);
     cx.update(|cx| cx.set_reduce_motion(true));
     let store = thread.store.clone();
     let window_state = cx.new(|_| WindowState::default());

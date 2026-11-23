@@ -369,7 +369,7 @@ pub(crate) fn assistant(
         .child(
             div()
                 .w_full()
-                .text_token(&cx.theme().tokens.typography.md)
+                .text_token(&crate::typography::chat_prose(cx))
                 .child(content),
         )
         .when(summarized, |message| {

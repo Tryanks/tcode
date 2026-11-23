@@ -88,6 +88,8 @@ pub struct Button {
     touch_in_row: bool,
     /// The composer's chip control: 28 tall at the chip radius.
     chip: bool,
+    /// Its children are one glyph, drawn as an icon is: a square of its size.
+    square: bool,
     loading: bool,
     size: Size,
     tooltip: Option<SharedString>,
@@ -126,6 +128,7 @@ impl Button {
             touch: false,
             touch_in_row: false,
             chip: false,
+            square: false,
             loading: false,
             size: Size::Medium,
             tooltip: None,
@@ -162,6 +165,12 @@ impl Button {
     pub fn chip(mut self) -> Self {
         self.chip = true;
         self.rounded = ButtonRounded::Chip;
+        self
+    }
+    /// A button whose children are one glyph of its own, not an icon,
+    /// drawn as an icon-only button is: a square of its size.
+    pub fn square(mut self) -> Self {
+        self.square = true;
         self
     }
     pub fn rounded(mut self, rounded: impl Into<Pixels>) -> Self {
@@ -392,7 +401,7 @@ impl RenderOnce for Button {
             ButtonRounded::Size(value) => Corners::all(value),
             ButtonRounded::Corners(corners) => corners,
         };
-        let icon_only = self.label.is_none() && self.children.is_empty();
+        let icon_only = self.square || (self.label.is_none() && self.children.is_empty());
         // A custom size sets the hit box, not the glyph: a 44pt touch control
         // keeps the medium icon rather than a 33pt one.
         let icon_size = match self.size {
@@ -527,10 +536,10 @@ impl RenderOnce for Button {
             .when(
                 !self.chip && !icon_only && !matches!(self.variant, ButtonVariant::Text),
                 |this| match self.size {
-                    Size::XSmall => this.h_5().px_1(),
-                    Size::Small => this.h_6().px_2(),
-                    Size::Size(v) => this.h(v).px(v * 0.2),
-                    _ => this.h_8().px(if self.compact { px(8.) } else { px(10.) }),
+                    Size::XSmall => this.h_5().px(px(6.)),
+                    Size::Small => this.h_6().px(px(10.)),
+                    Size::Size(v) => this.h(v).px(v * 0.2 + px(2.)),
+                    _ => this.h_8().px(if self.compact { px(10.) } else { px(12.) }),
                 },
             )
             .when(self.touch, |this| {

@@ -233,7 +233,7 @@ pub(crate) fn user_bubble(
     let (offered, mut rewind) = rewind.unzip();
     let BubbleHandlers { copy, images } = handlers;
     let menu_items = bubble_menu_items(Arc::from(visible), offered.clone());
-    let prose = cx.theme().tokens.typography.md;
+    let prose = crate::typography::chat_prose(cx);
     let (padding_y, padding_x) = crate::material::user_bubble_padding(compact);
     let text_style = window.text_style();
     let text_width = visible.lines().fold(px(0.), |width, line| {
@@ -423,7 +423,7 @@ pub(crate) fn user_bubble(
                     .px(padding_x)
                     .py(padding_y)
                     .rounded(crate::material::radius_user_bubble())
-                    .bg(cx.theme().foreground.opacity(0.08))
+                    .bg(crate::material::user_bubble_fill(cx))
                     .when_some(pending, |bubble, pending| {
                         bubble
                             .border_1()

@@ -630,7 +630,7 @@ fn type_into(pane: &Entity<ThreadPanel>, cx: &mut VisualTestContext) {
     let bounds = pane.read_with(cx, |pane, _| pane.bounds());
     let card = cx.debug_bounds("composer-card").expect("a composer");
     cx.simulate_click(
-        gpui::point(bounds.center().x, card.center().y),
+        gpui::point(bounds.center().x, card.top() + px(24.)),
         gpui::Modifiers::default(),
     );
     draw(cx);

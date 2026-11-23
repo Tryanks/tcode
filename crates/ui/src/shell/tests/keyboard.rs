@@ -597,7 +597,7 @@ fn a_drag_in_the_transcript_selects_under_the_pointer_while_a_reply_streams(
     await_restore_update(&shell, cx, |store, cx| {
         !store.chat_loading_for(Some(session), cx)
     });
-    cx.simulate_resize(size(px(1200.), px(640.)));
+    cx.simulate_resize(size(px(1200.), px(680.)));
     draw(cx);
     // The finished answer's second paragraph, its first line.
     let text = cx

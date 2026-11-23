@@ -16,10 +16,10 @@ use super::CARD_INSET;
 
 /// The card's corner radius, which whatever lies over its whole surface
 /// (a hover fill, a ring) follows.
-pub(crate) const RADIUS: f32 = 12.;
-const TILE: f32 = 30.;
-const TILE_RADIUS: f32 = 8.;
-const TILE_ICON: f32 = 16.;
+pub(crate) const RADIUS: f32 = 14.;
+const TILE: f32 = 32.;
+const TILE_RADIUS: f32 = 9.;
+const TILE_ICON: f32 = 17.;
 const BADGE: f32 = 12.;
 
 /// What a card asks of whoever reads it, which tints its surface: neutral
@@ -76,7 +76,7 @@ pub(crate) fn raised_event_card(tone: CardTone, cx: &App) -> super::Raised<Div> 
 fn surface_colors(tone: CardTone, cx: &App) -> (Hsla, Hsla) {
     let theme = cx.theme();
     match tone.color(cx) {
-        None => (theme.border, theme.foreground.opacity(0.025)),
+        None => (theme.border, theme.foreground.opacity(0.03)),
         Some(tone) => (tone.opacity(0.4), tone.opacity(0.06)),
     }
 }
@@ -90,7 +90,7 @@ pub(crate) fn header(slim: bool, cx: &App) -> Div {
         .min_w_0()
         .items_center()
         .px(px(CARD_INSET))
-        .py(px(if slim { 8. } else { 10. }))
+        .py(px(if slim { 9. } else { 12. }))
         .gap(px(10.))
         .text_token(&cx.theme().tokens.typography.xs)
         .text_color(cx.theme().foreground)
@@ -206,7 +206,7 @@ pub(crate) fn section(cx: &App) -> Div {
         .w_full()
         .min_w_0()
         .px(px(CARD_INSET))
-        .py(px(9.))
+        .py(px(11.))
         .gap(theme.tokens.spacing.sm)
         .border_t_1()
         .border_color(theme.border)

@@ -264,9 +264,18 @@ impl RenderOnce for Input {
             "input-motion",
             base.entity_id()
         )));
+        // The keyboard lifts the field rather than colouring it: the border
+        // only darkens as a shadow comes in under it.
         let border = gpui_base::motion::transition(
             (motion_id.clone(), "border"),
-            if focused { theme.ring } else { theme.input },
+            material::field_border(focused, cx),
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
+        let lift = gpui_base::motion::transition(
+            (motion_id.clone(), "lift"),
+            if focused { 1f32 } else { 0. },
             gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
@@ -377,6 +386,9 @@ impl RenderOnce for Input {
                 .when_some(aria_label.clone(), |this, label| {
                     this.accessibility_label(label)
                 })
+                // The field's fill is translucent, so its lift is drawn only
+                // around it.
+                .map(|field| material::raised(field).see_through())
                 .relative()
                 .flex()
                 .size_full()
@@ -394,7 +406,12 @@ impl RenderOnce for Input {
                         .when_some(self.height, |this, height| this.h(height))
                 })
                 .when(self.appearance, |this| {
-                    this.bg(theme.background).border_1().border_color(border)
+                    this.bg(theme.background)
+                        .border_1()
+                        .border_color(border)
+                        .when(lift > 0., |this| {
+                            this.shadow(vec![material::field_lift(lift, cx)])
+                        })
                 })
                 .refine_style(&self.style)
                 .text_color(foreground)
@@ -571,16 +588,19 @@ impl RenderOnce for NumberInput {
         let focused = self.state.read(cx).focus_handle(cx).is_focused(window);
         let border = gpui_base::motion::transition(
             gpui::ElementId::from(("number-input-border", self.state.entity_id())),
-            if focused {
-                cx.theme().ring
-            } else {
-                cx.theme().input
-            },
+            material::field_border(focused, cx),
             gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
-        gpui_base::NumberInput::new(&self.state)
+        let lift = gpui_base::motion::transition(
+            gpui::ElementId::from(("number-input-lift", self.state.entity_id())),
+            if focused { 1f32 } else { 0. },
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
+        let field = gpui_base::NumberInput::new(&self.state)
             .when_some(self.accessibility_label, |this, label| {
                 this.accessibility_label(label)
             })
@@ -591,6 +611,9 @@ impl RenderOnce for NumberInput {
             .bg(cx.theme().background)
             .border_1()
             .border_color(border)
+            .when(lift > 0., |this| {
+                this.shadow(vec![material::field_lift(lift, cx)])
+            })
             .input(Input::new(&self.state).appearance(false).h_full())
             .increment_button(|button| {
                 button
@@ -605,7 +628,9 @@ impl RenderOnce for NumberInput {
                     .items_center()
                     .justify_center()
                     .child(crate::icon::Icon::new(crate::icon::IconName::ChevronDown).size_3())
-            })
+            });
+        // The field's fill is translucent, so its lift is drawn only around it.
+        material::raised(field).see_through()
     }
 }
 

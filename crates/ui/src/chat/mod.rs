@@ -1196,9 +1196,9 @@ impl ChatView {
                             .max_w_3_4()
                             .px(padding_x)
                             .py(padding_y)
-                            .text_token(&cx.theme().tokens.typography.md)
+                            .text_token(&crate::typography::chat_prose(cx))
                             .rounded(crate::material::radius_user_bubble())
-                            .bg(cx.theme().foreground.opacity(0.08))
+                            .bg(crate::material::user_bubble_fill(cx))
                             .text_color(text_color)
                             .child(text),
                     )

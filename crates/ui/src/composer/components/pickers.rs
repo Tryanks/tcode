@@ -527,7 +527,8 @@ impl Composer {
             .debug_selector(|| "context-meter".into())
             .aria_label(crate::tr!("composer.context_window_title").into_owned())
             .ghost()
-            .chip()
+            .with_size(px(BAR_ICON_SIZE))
+            .square()
             .touch(self.compact)
             .disabled(!self.interactive(cx))
             // The ring is a glyph at an icon's default size.
@@ -650,6 +651,7 @@ impl Composer {
                 crate::tr!("attach.attach_files"),
                 compact,
             )
+            .when(!compact, |button| button.with_size(px(BAR_ICON_SIZE)))
             .debug_selector(|| "attach-files".into())
             .on_click(cx.listener(|composer, _, window, cx| composer.pick_paths(window, cx)))
             .into_any_element();
@@ -660,6 +662,7 @@ impl Composer {
             crate::tr!("attach.add"),
             compact,
         )
+        .when(!compact, |button| button.with_size(px(BAR_ICON_SIZE)))
         .debug_selector(|| "attach-menu".into());
 
         crate::material::overlay_popover("attach-popover", cx)
@@ -740,6 +743,7 @@ impl Composer {
             crate::tr!("composer.more_controls"),
             self.compact,
         )
+        .when(!self.compact, |button| button.with_size(px(BAR_ICON_SIZE)))
         .disabled(!self.interactive(cx))
         .debug_selector(|| "overflow-controls".into());
 

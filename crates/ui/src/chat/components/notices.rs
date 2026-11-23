@@ -60,7 +60,7 @@ fn capsule(capsule: Capsule, warning: bool, cx: &App) -> Div {
         .min_w_0()
         .items_center()
         .gap(spacing.xs + px(2.))
-        .px(spacing.sm + px(3.))
+        .px(spacing.sm + px(5.))
         .py(px(3.))
         .rounded_full()
         .bg(fill)
@@ -100,8 +100,11 @@ pub(crate) fn capsule_row(
         .text_token(&theme.tokens.typography.xs)
         .text_color(muted)
         .when_some(from, |row, from| {
-            row.child(capsule(from, warning, cx))
-                .child(Icon::new(IconName::ArrowRight).text_color(muted))
+            row.child(capsule(from, warning, cx)).child(
+                Icon::new(IconName::ArrowRight)
+                    .size(px(15.))
+                    .text_color(muted),
+            )
         })
         .child(capsule(to, warning, cx))
         .children(trailing)
@@ -196,7 +199,7 @@ pub(crate) fn incoming(message: Incoming<'_>, window: &mut Window, cx: &App) -> 
     let theme = cx.theme();
     let (padding_y, padding_x) = crate::material::user_bubble_padding(compact);
     let primary = theme.primary;
-    let prose = theme.tokens.typography.md;
+    let prose = crate::typography::chat_prose(cx);
     // As a user's bubble is, as wide as its longest line, up to its share of
     // the column.
     let text_style = window.text_style();

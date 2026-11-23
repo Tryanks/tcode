@@ -175,7 +175,8 @@ impl Composer {
         Some(
             Button::new("voice-mic")
                 .ghost()
-                .chip()
+                .with_size(px(BAR_ICON_SIZE))
+                .square()
                 .debug_selector(|| "voice-mic".into())
                 .disabled(!available)
                 .aria_label(tooltip.clone())

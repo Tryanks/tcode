@@ -136,19 +136,23 @@ pub fn radius_chip(cx: &App) -> Pixels {
 }
 /// Composer card corners.
 pub fn radius_composer(compact: bool) -> Pixels {
-    px(if compact { 20. } else { 18. })
+    px(if compact { 22. } else { 20. })
 }
 /// The user's message bubble.
 pub fn radius_user_bubble() -> Pixels {
-    px(16.)
+    px(18.)
 }
 /// Padding inside the user's message bubble, as (vertical, horizontal).
 pub(crate) fn user_bubble_padding(compact: bool) -> (Pixels, Pixels) {
     if compact {
-        (px(8.), px(12.))
-    } else {
         (px(9.), px(14.))
+    } else {
+        (px(10.), px(16.))
     }
+}
+/// The user's message bubble's fill.
+pub(crate) fn user_bubble_fill(cx: &App) -> Hsla {
+    cx.theme().foreground.opacity(0.06)
 }
 /// The phone's bottom sheet, top corners only.
 pub fn radius_overlay_sheet(cx: &App) -> Pixels {
@@ -156,9 +160,71 @@ pub fn radius_overlay_sheet(cx: &App) -> Pixels {
 }
 
 /// A T3 overlay popover: one panel surface at the overlay radius with the
-/// component library's large soft shadow.
+/// [overlay's shadow](overlay_shadow).
 pub fn overlay_popover(id: impl Into<ElementId>, cx: &App) -> Popover {
-    Popover::new(id).rounded(radius_overlay(cx)).shadow_xl()
+    Popover::new(id)
+        .rounded(radius_overlay(cx))
+        .shadow(overlay_shadow(cx))
+}
+
+/// What a lifted surface's shadows are drawn in: the ink in light mode,
+/// black in dark, where the ink is light.
+fn shadow_ink(cx: &App) -> Hsla {
+    let theme = cx.theme();
+    theme.by_mode(theme.foreground, gpui::black())
+}
+
+/// A T3 overlay's shadow, in two layers: a contact shadow close under its
+/// edge and a wide soft lift.
+fn overlay_shadow(cx: &App) -> Vec<BoxShadow> {
+    let ink = shadow_ink(cx);
+    vec![
+        BoxShadow::new(px(0.), px(1.), ink.opacity(0.06)).blur_radius(px(2.)),
+        BoxShadow::new(px(0.), px(16.), ink.opacity(0.22))
+            .blur_radius(px(40.))
+            .spread_radius(px(-12.)),
+    ]
+}
+
+/// The composer card's shadows, `focus` of the way from resting on the page
+/// to lifted off it while it holds the keyboard. Its border keeps its colour
+/// throughout: the lift alone says where the keyboard is.
+pub(crate) fn composer_shadow(focus: f32, cx: &App) -> Vec<BoxShadow> {
+    let theme = cx.theme();
+    let lift = theme.by_mode(theme.foreground.opacity(0.24), gpui::black().opacity(0.5));
+    vec![
+        BoxShadow::new(
+            px(0.),
+            px(1.),
+            theme.by_mode(theme.foreground.opacity(0.05), gpui::black().opacity(0.25)),
+        )
+        .blur_radius(px(2.)),
+        BoxShadow::new(px(0.), px(12.), lift.opacity(focus))
+            .blur_radius(px(30.))
+            .spread_radius(px(-12.)),
+    ]
+}
+
+/// A text field's lift, `focus` of the way to where it is while it holds
+/// the keyboard: [`composer_shadow`]'s lift at three quarters of its depth
+/// and strength.
+pub(crate) fn field_lift(focus: f32, cx: &App) -> BoxShadow {
+    let theme = cx.theme();
+    let lift = theme.by_mode(theme.foreground.opacity(0.18), gpui::black().opacity(0.375));
+    BoxShadow::new(px(0.), px(6.), lift.opacity(focus))
+        .blur_radius(px(16.))
+        .spread_radius(px(-8.))
+}
+
+/// A text field's border, which turns no colour with the keyboard: it only
+/// darkens, while the field [lifts](field_lift).
+pub(crate) fn field_border(focused: bool, cx: &App) -> Hsla {
+    let theme = cx.theme();
+    if focused {
+        theme.foreground.opacity(0.22)
+    } else {
+        theme.input
+    }
 }
 
 /// A 1px separator that fades out toward both ends, replacing full-bleed
@@ -182,14 +248,15 @@ pub fn faded_hairline(cx: &App) -> impl IntoElement {
         )))
 }
 
-/// Applies the T3 overlay contour: fully opaque fill, hairline border and a
-/// large soft shadow. Radius stays the caller's choice (`radius_overlay`).
+/// Applies the T3 overlay contour: fully opaque fill, hairline border and
+/// the [overlay's shadow](overlay_shadow). Radius stays the caller's choice
+/// (`radius_overlay`).
 pub fn overlay_contour<E: Styled>(el: E, cx: &App) -> Raised<E> {
     raised(
         el.bg(cx.theme().popover)
             .border_1()
             .border_color(cx.theme().border)
-            .shadow_xl(),
+            .shadow(overlay_shadow(cx)),
     )
 }
 
@@ -298,15 +365,25 @@ pub fn card_raised(cx: &App) -> Raised<Div> {
 pub fn raised<E: Styled>(surface: E) -> Raised<E> {
     Raised {
         inner: Some(surface),
+        see_through: false,
     }
 }
 
 /// See [`raised`].
 pub struct Raised<E> {
     inner: Option<E>,
+    /// The surface's fill lets what is under it show at rest too.
+    see_through: bool,
 }
 
 impl<E> Raised<E> {
+    /// Draw the shadows only around the surface at rest as well, for a
+    /// surface whose own fill is translucent.
+    pub(crate) fn see_through(mut self) -> Self {
+        self.see_through = true;
+        self
+    }
+
     fn inner(&mut self) -> &mut E {
         self.inner
             .as_mut()
@@ -497,7 +574,7 @@ impl<E: IntoElement + Styled + 'static> gpui::Element for Raised<E> {
                     shadow
                 })
                 .collect();
-            let faint = opacity * crate::motion::faded::opacity() < 1.;
+            let faint = self.see_through || opacity * crate::motion::faded::opacity() < 1.;
             let scale = window.scale_factor();
             for shadow in &shadows {
                 let shadow = std::slice::from_ref(shadow);
@@ -745,7 +822,7 @@ pub(crate) fn row_hover(radius: Pixels, cx: &App) -> crate::motion::Sampled {
 /// item must be given an id.
 pub fn menu_item_frame(touch: bool, fill: ItemFill, cx: &App) -> Div {
     let spacing = &cx.theme().tokens.spacing;
-    let radius = radius_button(cx);
+    let radius = px(8.);
     let hover = cx.theme().muted;
     h_flex()
         .relative()
@@ -1352,8 +1429,7 @@ impl gpui::StyledImage for Clickable<gpui::Img> {
 /// Inset: GPUI paints a drop shadow's whole rectangle beneath its element
 /// rather than only outside it, so an outset ring fills a transparent control.
 pub(crate) fn focus_ring(cx: &App) -> BoxShadow {
-    let theme = cx.theme();
-    let ring = theme.by_mode(theme.ring.opacity(0.58), theme.ring.opacity(0.72));
+    let ring = cx.theme().foreground.opacity(0.35);
     BoxShadow::new(px(0.), px(0.), ring)
         .spread_radius(px(2.))
         .inset()

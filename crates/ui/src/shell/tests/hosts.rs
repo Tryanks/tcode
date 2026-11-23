@@ -32,7 +32,10 @@ fn a_host_refused_and_paired_again_changes_nothing_on_another(cx: &mut TestAppCo
     });
     crate::test_frames::draw_settled(cx);
     let card = cx.debug_bounds("composer-card").expect("A's composer");
-    cx.simulate_click(card.center(), gpui::Modifiers::default());
+    cx.simulate_click(
+        gpui::point(card.center().x, card.top() + px(24.)),
+        gpui::Modifiers::default(),
+    );
     cx.simulate_input("half a thought");
     draw(cx);
     let pane = shell.read_with(cx, |shell, _| {
@@ -88,7 +91,10 @@ fn a_host_refused_and_paired_again_changes_nothing_on_another(cx: &mut TestAppCo
     assert!(b.read_with(cx, |store, _| store.connection_state().is_connected()));
     unchanged(cx);
     let card = cx.debug_bounds("composer-card").expect("A's composer");
-    cx.simulate_click(card.center(), gpui::Modifiers::default());
+    cx.simulate_click(
+        gpui::point(card.center().x, card.top() + px(24.)),
+        gpui::Modifiers::default(),
+    );
     cx.simulate_keystrokes("enter");
     draw(cx);
     assert_eq!(

@@ -113,9 +113,13 @@ const FILE_MENU_ROW_CAP: usize = 50;
 /// Matching threads an `@` menu offers above the files.
 const THREAD_MENU_ROW_CAP: usize = 5;
 
-/// The desktop send and stop square: as tall as the control row's chips
-/// ([`Button::chip`]), which carry no square form.
-const SEND_SIZE: f32 = 28.;
+/// The desktop send and stop disc.
+const SEND_SIZE: f32 = 32.;
+/// The square of each of the control row's icon buttons on the desktop.
+const BAR_ICON_SIZE: f32 = 30.;
+/// The narrowest the model picker's name truncates to: a chip's height, so
+/// the picker can still be opened.
+const MODEL_PICKER_MIN_WIDTH: f32 = 28.;
 /// Below this measured control-row width the row collapses its context /
 /// permission / mode chips into a "⋯" overflow popover so nothing spills past
 /// the card edge (diff panel open, or a small window).
@@ -1269,6 +1273,7 @@ impl Composer {
             .danger()
             .with_size(size)
             .w(size)
+            .rounded(size / 2.)
             .aria_label(crate::tr!("composer.stop"))
             .disabled(!self.interactive(cx) || self.composer_state(cx).stopping)
             .child(div().size(px(11.)).rounded(px(2.)).bg(cx.theme().danger))
@@ -1417,6 +1422,7 @@ impl Composer {
                             .debug_selector(|| "steer-turn".into())
                             .primary()
                             .with_size(px(SEND_SIZE))
+                            .rounded(px(SEND_SIZE / 2.))
                             .icon(IconName::ArrowUp)
                             .aria_label(crate::tr!("composer.steer_tooltip"))
                             .tooltip(queue_hint)
@@ -1441,6 +1447,7 @@ impl Composer {
                         .debug_selector(|| "send-message".into())
                         .primary()
                         .with_size(px(SEND_SIZE))
+                        .rounded(px(SEND_SIZE / 2.))
                         .icon(IconName::ArrowUp)
                         .aria_label(crate::tr!("composer.send"))
                         .disabled(!has_text)
@@ -1897,9 +1904,7 @@ impl Composer {
                     Some((_, picker)) if !shown.leaving() => picker,
                     _ => leaving_chip("model-picker-leaving", &shown.value, cx),
                 };
-                // The name truncates to make room, down to one
-                // control's width so the picker can still be opened.
-                shown.fold_across(div().min_w(px(SEND_SIZE)).child(picker))
+                shown.fold_across(div().min_w(px(MODEL_PICKER_MIN_WIDTH)).child(picker))
             });
         let mut traits_picker = self.render_traits_picker(cx);
         // The chips give way to the send/stop control: Stop must stay
@@ -2134,17 +2139,13 @@ impl Composer {
             field.disabled = subagent;
         });
 
-        // The keyboard turns the hairline primary, gliding there and back.
-        // Geometry stays fixed: focus never changes border width, radius, or
-        // layout.
+        // The keyboard lifts the card off the page, gliding there and back;
+        // its hairline keeps its colour. Geometry stays fixed: focus never
+        // changes border width, radius, or layout.
         let composer_focused = !subagent && self.has_keyboard(window, cx);
-        let hairline = self.motion.transition(
-            self.motion_key("hairline"),
-            if composer_focused {
-                cx.theme().primary
-            } else {
-                cx.theme().border
-            },
+        let lift = self.motion.transition(
+            self.motion_key("lift"),
+            if composer_focused { 1f32 } else { 0. },
             GLIDE,
             window,
             cx,
@@ -2178,6 +2179,23 @@ impl Composer {
                         .child(self.render_image_strip(window, cx)),
                 )
             });
+        let radius = crate::material::radius_composer(self.compact);
+        let (inset_y, inset_x) = if self.compact { (10., 12.) } else { (12., 14.) };
+        // The fill darkens a shade toward the bottom, and a highlight lies
+        // along its top edge inside the hairline, so the card reads as a
+        // solid thing lit from above.
+        let theme = cx.theme();
+        let (top, hairline) = (theme.popover, theme.border);
+        let bottom =
+            top.blend(theme.by_mode(theme.foreground.opacity(0.025), gpui::black().opacity(0.04)));
+        let highlight = theme.by_mode(gpui::white().opacity(0.9), gpui::white().opacity(0.06));
+        let highlight = div()
+            .absolute()
+            .inset_0()
+            .rounded(radius - px(1.))
+            .shadow(vec![
+                gpui::BoxShadow::new(px(0.), px(1.), highlight.opacity(frame)).inset(),
+            ]);
         v_flex()
             .debug_selector(move || {
                 if subagent {
@@ -2186,15 +2204,20 @@ impl Composer {
                     "composer-card".into()
                 }
             })
+            .relative()
             .w_full()
-            .px(px(10.))
-            .py(px(10. * frame))
-            .rounded(crate::material::radius_composer(self.compact))
+            .px(px(inset_x))
+            .py(px(inset_y * frame))
+            .rounded(radius)
             .border_1()
             .border_color(hairline.opacity(frame))
             // The editor needs an opaque fill over the translucent canvas.
-            .bg(cx.theme().popover.opacity(frame))
-            .shadow_sm()
+            .bg(gpui::linear_gradient(
+                180.,
+                gpui::linear_color_stop(top.opacity(frame), 0.),
+                gpui::linear_color_stop(bottom.opacity(frame), 1.),
+            ))
+            .shadow(crate::material::composer_shadow(lift, cx))
             .map(|mut card| {
                 for shadow in card.style().box_shadow.iter_mut().flatten() {
                     shadow.color.a *= frame;
@@ -2267,6 +2290,7 @@ impl Composer {
                     });
                 },
             )
+            .child(highlight)
             .children(draft)
             .child(div().w_full().child(control_row))
     }
@@ -2441,7 +2465,9 @@ impl Render for ComposerField {
             Textarea::new(&self.input)
                 .placeholder(self.placeholder.clone())
                 .disabled(self.disabled)
-                .appearance(false),
+                .appearance(false)
+                .text_size(px(15.))
+                .line_height(px(22.)),
         )
         .on_change(draft_key)
     }
