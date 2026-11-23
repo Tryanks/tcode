@@ -1,6 +1,6 @@
 use rushdown::{
     as_type_data_mut,
-    ast::{Arena, KindData, NodeKind, NodeRef, NodeType, PrettyPrint},
+    ast::{Arena, InlineChars, KindData, NodeKind, NodeRef, NodeType, PrettyPrint},
     parser::{BlockParser, Context, InlineParser, NoParserOptions, Parser, ParserExtension, State},
     text::{BasicReader, BlockReader, Reader},
 };
@@ -26,6 +26,8 @@ impl NodeKind for MathSpan {
         "Math"
     }
 }
+
+impl InlineChars for MathSpan {}
 
 impl PrettyPrint for MathSpan {
     fn pretty_print(&self, w: &mut dyn std::fmt::Write, _: &str, _: usize) -> std::fmt::Result {
@@ -121,6 +123,8 @@ impl NodeKind for MathBlock {
         "MathBlock"
     }
 }
+
+impl InlineChars for MathBlock {}
 
 impl PrettyPrint for MathBlock {
     fn pretty_print(&self, _: &mut dyn std::fmt::Write, _: &str, _: usize) -> std::fmt::Result {

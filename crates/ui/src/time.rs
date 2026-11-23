@@ -1,20 +1,26 @@
+use std::time::Duration;
+#[cfg(not(target_family = "wasm"))]
+use std::time::UNIX_EPOCH;
+#[cfg(target_family = "wasm")]
+use web_time::UNIX_EPOCH;
+
 use gpui::{App, BackgroundExecutor};
 
-/// Now, in unix milliseconds, by the clock the executor's timers run on:
+/// Now, since the unix epoch, by the clock the executor's timers run on:
 /// the system's in the app, the one a test advances in a test.
-pub(crate) fn executor_millis(executor: &BackgroundExecutor) -> u64 {
+fn since_epoch(executor: &BackgroundExecutor) -> Duration {
     let now = executor.scheduler_executor().scheduler().clock().utc_now();
-    u64::try_from(now.timestamp_millis()).unwrap_or(0)
+    now.duration_since(UNIX_EPOCH).unwrap_or_default()
+}
+
+/// Now, in unix milliseconds, by the executor's clock.
+pub(crate) fn executor_millis(executor: &BackgroundExecutor) -> u64 {
+    since_epoch(executor).as_millis() as u64
 }
 
 /// Now, on the local time zone's wall clock, by the executor's clock.
 pub(crate) fn now_local(cx: &App) -> chrono::DateTime<chrono::Local> {
-    cx.background_executor()
-        .scheduler_executor()
-        .scheduler()
-        .clock()
-        .utc_now()
-        .with_timezone(&chrono::Local)
+    (std::time::UNIX_EPOCH + since_epoch(cx.background_executor())).into()
 }
 
 /// Now, in unix milliseconds, by the executor's clock.

@@ -273,11 +273,10 @@ fn orphan_sweep_leaves_worktrees_a_thread_works_in_or_the_user_kept() {
     cx.run_until_parked();
     assert!(source.cwd.exists(), "the fork still works in it");
     // The next start is past the age that marks a worktree as abandoned.
-    let abandoned = filetime::FileTime::from_system_time(
-        std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60),
-    );
+    let abandoned = std::fs::FileTimes::new()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60));
     for path in [&source.cwd, &kept.cwd, &orphan, &away.cwd] {
-        filetime::set_file_mtime(path, abandoned).unwrap();
+        std::fs::set_times(path, abandoned).unwrap();
     }
 
     let summary = cleanup_orphans(&store, std::time::SystemTime::now()).unwrap();

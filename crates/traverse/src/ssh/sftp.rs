@@ -3,13 +3,15 @@
 //! a path reads `/C:/Users/...`, as Win32-OpenSSH writes it.
 use std::{
     collections::HashMap,
+    ffi::OsString,
     io,
     path::{Component, Path, PathBuf},
 };
 
 use russh_sftp::{
     protocol::{
-        Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
+        Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, SftpHandle, SftpString, Status,
+        StatusCode, Version,
     },
     server::StatusReply,
 };
@@ -17,7 +19,7 @@ use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 
 pub(super) struct Sftp {
     home: PathBuf,
-    handles: HashMap<String, Open>,
+    handles: HashMap<SftpHandle, Open>,
     next_handle: u64,
 }
 
@@ -43,23 +45,26 @@ impl Sftp {
         }
     }
 
-    fn local(&self, path: &str) -> PathBuf {
+    fn local(&self, path: &SftpString) -> PathBuf {
         #[cfg(windows)]
-        let path = match path.as_bytes() {
-            [b'/', drive, b':', ..] if drive.is_ascii_alphabetic() => &path[1..],
-            _ => path,
+        let path = {
+            let path = path.to_string_lossy();
+            match path.as_bytes() {
+                [b'/', drive, b':', ..] if drive.is_ascii_alphabetic() => path[1..].to_owned(),
+                _ => path.into_owned(),
+            }
         };
         normalize(&self.home.join(path))
     }
 
-    fn insert(&mut self, open: Open) -> String {
+    fn insert(&mut self, open: Open) -> SftpHandle {
         self.next_handle += 1;
-        let handle = self.next_handle.to_string();
+        let handle = SftpHandle::from(self.next_handle.to_string());
         self.handles.insert(handle.clone(), open);
         handle
     }
 
-    fn file(&mut self, handle: &str) -> Result<&mut tokio::fs::File, StatusReply> {
+    fn file(&mut self, handle: &SftpHandle) -> Result<&mut tokio::fs::File, StatusReply> {
         match self.handles.get_mut(handle) {
             Some(Open::File(file)) => Ok(file),
             _ => Err(StatusCode::Failure.with_message("no such handle")),
@@ -84,14 +89,26 @@ fn normalize(path: &Path) -> PathBuf {
     normal
 }
 
-fn remote(path: &Path) -> String {
+/// A name as the machine has it: its bytes on Unix, where it need not be UTF-8.
+fn name(name: OsString) -> SftpString {
+    #[cfg(unix)]
+    {
+        name.into()
+    }
+    #[cfg(not(unix))]
+    {
+        name.to_string_lossy().into_owned().into()
+    }
+}
+
+fn remote(path: PathBuf) -> SftpString {
     #[cfg(windows)]
     {
-        format!("/{}", path.to_string_lossy().replace('\\', "/"))
+        format!("/{}", path.to_string_lossy().replace('\\', "/")).into()
     }
     #[cfg(not(windows))]
     {
-        path.to_string_lossy().into_owned()
+        name(path.into_os_string())
     }
 }
 
@@ -167,7 +184,7 @@ impl russh_sftp::server::Handler for Sftp {
     async fn open(
         &mut self,
         id: u32,
-        filename: String,
+        filename: SftpString,
         pflags: OpenFlags,
         attrs: FileAttributes,
     ) -> Result<Handle, Self::Error> {
@@ -199,7 +216,7 @@ impl russh_sftp::server::Handler for Sftp {
         })
     }
 
-    async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
+    async fn close(&mut self, id: u32, handle: SftpHandle) -> Result<Status, Self::Error> {
         match self.handles.remove(&handle) {
             Some(Open::File(mut file)) => file.flush().await.map_err(failure)?,
             Some(Open::Dir { .. }) => {}
@@ -211,7 +228,7 @@ impl russh_sftp::server::Handler for Sftp {
     async fn read(
         &mut self,
         id: u32,
-        handle: String,
+        handle: SftpHandle,
         offset: u64,
         len: u32,
     ) -> Result<Data, Self::Error> {
@@ -231,7 +248,7 @@ impl russh_sftp::server::Handler for Sftp {
     async fn write(
         &mut self,
         id: u32,
-        handle: String,
+        handle: SftpHandle,
         offset: u64,
         data: Vec<u8>,
     ) -> Result<Status, Self::Error> {
@@ -243,7 +260,7 @@ impl russh_sftp::server::Handler for Sftp {
         Ok(ok(id))
     }
 
-    async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+    async fn lstat(&mut self, id: u32, path: SftpString) -> Result<Attrs, Self::Error> {
         let metadata = tokio::fs::symlink_metadata(self.local(&path))
             .await
             .map_err(failure)?;
@@ -253,7 +270,7 @@ impl russh_sftp::server::Handler for Sftp {
         })
     }
 
-    async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+    async fn stat(&mut self, id: u32, path: SftpString) -> Result<Attrs, Self::Error> {
         let metadata = tokio::fs::metadata(self.local(&path))
             .await
             .map_err(failure)?;
@@ -263,7 +280,7 @@ impl russh_sftp::server::Handler for Sftp {
         })
     }
 
-    async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, Self::Error> {
+    async fn fstat(&mut self, id: u32, handle: SftpHandle) -> Result<Attrs, Self::Error> {
         let metadata = match self.handles.get(&handle) {
             Some(Open::File(file)) => file.metadata().await,
             Some(Open::Dir { path, .. }) => tokio::fs::metadata(path).await,
@@ -279,7 +296,7 @@ impl russh_sftp::server::Handler for Sftp {
     async fn setstat(
         &mut self,
         id: u32,
-        path: String,
+        path: SftpString,
         attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
         apply(&self.local(&path), &attrs).await.map_err(failure)?;
@@ -289,7 +306,7 @@ impl russh_sftp::server::Handler for Sftp {
     async fn fsetstat(
         &mut self,
         id: u32,
-        handle: String,
+        handle: SftpHandle,
         attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
         let file = self.file(&handle)?;
@@ -319,7 +336,7 @@ impl russh_sftp::server::Handler for Sftp {
         Ok(ok(id))
     }
 
-    async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
+    async fn opendir(&mut self, id: u32, path: SftpString) -> Result<Handle, Self::Error> {
         let path = self.local(&path);
         let metadata = tokio::fs::metadata(&path).await.map_err(failure)?;
         if !metadata.is_dir() {
@@ -334,7 +351,7 @@ impl russh_sftp::server::Handler for Sftp {
         })
     }
 
-    async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, Self::Error> {
+    async fn readdir(&mut self, id: u32, handle: SftpHandle) -> Result<Name, Self::Error> {
         let Some(Open::Dir { path, entries }) = self.handles.get_mut(&handle) else {
             return Err(StatusCode::Failure.with_message("no such handle"));
         };
@@ -346,7 +363,7 @@ impl russh_sftp::server::Handler for Sftp {
                     continue;
                 };
                 read.push_back(File::new(
-                    entry.file_name().to_string_lossy(),
+                    name(entry.file_name()),
                     FileAttributes::from(&metadata),
                 ));
             }
@@ -363,7 +380,7 @@ impl russh_sftp::server::Handler for Sftp {
         })
     }
 
-    async fn remove(&mut self, id: u32, filename: String) -> Result<Status, Self::Error> {
+    async fn remove(&mut self, id: u32, filename: SftpString) -> Result<Status, Self::Error> {
         tokio::fs::remove_file(self.local(&filename))
             .await
             .map_err(failure)?;
@@ -373,7 +390,7 @@ impl russh_sftp::server::Handler for Sftp {
     async fn mkdir(
         &mut self,
         id: u32,
-        path: String,
+        path: SftpString,
         attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
         let path = self.local(&path);
@@ -390,25 +407,25 @@ impl russh_sftp::server::Handler for Sftp {
         Ok(ok(id))
     }
 
-    async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
+    async fn rmdir(&mut self, id: u32, path: SftpString) -> Result<Status, Self::Error> {
         tokio::fs::remove_dir(self.local(&path))
             .await
             .map_err(failure)?;
         Ok(ok(id))
     }
 
-    async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
+    async fn realpath(&mut self, id: u32, path: SftpString) -> Result<Name, Self::Error> {
         Ok(Name {
             id,
-            files: vec![File::dummy(remote(&self.local(&path)))],
+            files: vec![File::dummy(remote(self.local(&path)))],
         })
     }
 
     async fn rename(
         &mut self,
         id: u32,
-        oldpath: String,
-        newpath: String,
+        oldpath: SftpString,
+        newpath: SftpString,
     ) -> Result<Status, Self::Error> {
         tokio::fs::rename(self.local(&oldpath), self.local(&newpath))
             .await
@@ -416,13 +433,13 @@ impl russh_sftp::server::Handler for Sftp {
         Ok(ok(id))
     }
 
-    async fn readlink(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
+    async fn readlink(&mut self, id: u32, path: SftpString) -> Result<Name, Self::Error> {
         let target = tokio::fs::read_link(self.local(&path))
             .await
             .map_err(failure)?;
         Ok(Name {
             id,
-            files: vec![File::dummy(target.to_string_lossy())],
+            files: vec![File::dummy(name(target.into_os_string()))],
         })
     }
 }

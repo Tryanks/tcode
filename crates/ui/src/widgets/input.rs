@@ -49,15 +49,9 @@ pub(crate) fn commit_marked_text<M: gpui_base::input::InputModeKind>(
     cx: &mut gpui::Context<gpui_base::input::InputBaseState<M>>,
 ) {
     use gpui::EntityInputHandler as _;
-    // gpui-base leaves the mark and undo transaction open on blur;
-    // its unmark_text also omits Change, so commit through replacement.
-    if let Some(marked) = state.marked_text_range(window, cx)
-        && let Some(text) = state.text_for_range(marked.clone(), &mut None, window, cx)
-    {
-        let selection = state.selected_range();
-        let reversed = state.is_selection_reversed();
-        state.replace_text_in_range(Some(marked), &text, window, cx);
-        state.set_selected_range_with_direction(selection, reversed, cx);
+    // gpui-base leaves the mark and undo transaction open on blur.
+    if state.marked_text_range(window, cx).is_some() {
+        state.unmark_text(window, cx);
     }
 }
 

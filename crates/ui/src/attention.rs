@@ -96,7 +96,7 @@ impl Notices {
             .is_some_and(|posted| posted.0.contains_key(&tag))
         {
             cx.global_mut::<Self>().0.remove(&tag);
-            cx.dismiss_system_notification(&tag);
+            cx.dismiss_system_notification(&tag).detach();
         }
     }
 

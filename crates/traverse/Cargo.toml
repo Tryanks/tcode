@@ -45,13 +45,12 @@ base64 = { version = "0.23", optional = true }
 futures-lite = "2"
 futures-util = { version = "0.3", default-features = false, features = ["sink"], optional = true }
 getrandom = "0.4"
-iroh = { version = "1.2", default-features = false, features = ["metrics", "portmapper", "tls-ring", "unstable-net-report"] }
+iroh = { version = "1.5", default-features = false, features = ["metrics", "portmapper", "tls-ring", "unstable-net-report"] }
 log = "0.4"
-mdns-sd = { version = "0.21", default-features = false, features = ["async", "logging"] }
+mdns-sd = { version = "0.22", default-features = false, features = ["async", "logging"] }
 pbkdf2 = { version = "0.13", optional = true }
 russh = { version = "0.65", default-features = false, features = ["ring"], optional = true }
-# 3.x needs a newer wasm-bindgen-futures than the one crates/web pins.
-russh-sftp = { version = "3.0", optional = true }
+russh-sftp = { version = "4.0", features = ["raw-string"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = { version = "0.11", optional = true }

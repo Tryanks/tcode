@@ -48,15 +48,6 @@ pub fn utf16_slice(text: &str, range: Range<usize>) -> Option<&str> {
     text.get(byte_offset(text, range.start)?..byte_offset(text, range.end)?)
 }
 
-pub fn text_length(handler: &mut PlatformInputHandler) -> Option<usize> {
-    handler.text_length_utf16().or_else(|| {
-        // gpui-base has no length query and clamps oversized reads to the document.
-        handler
-            .text_for_range(0..usize::MAX / 2, &mut None)
-            .map(|text| text.encode_utf16().count())
-    })
-}
-
 pub fn read_text(handler: &mut PlatformInputHandler, range: Range<usize>) -> Option<String> {
     let mut adjusted = None;
     let text = handler.text_for_range(range.clone(), &mut adjusted)?;
@@ -66,33 +57,18 @@ pub fn read_text(handler: &mut PlatformInputHandler, range: Range<usize>) -> Opt
     utf16_slice(&text, start..end).map(str::to_owned)
 }
 
-pub fn commit_marked_text(handler: &mut PlatformInputHandler) {
-    // gpui-base leaves the mark/undo transaction open on blur, and
-    // unmark_text emits no Change. Replacing the preedit commits and emits it.
-    if let Some(marked) = handler.marked_text_range()
-        && let Some(text) = read_text(handler, marked.clone())
-    {
-        let selection = handler.selected_text_range(true);
-        handler.replace_text_in_range(Some(marked), &text);
-        if let Some(selection) = selection {
-            handler.set_selected_text_range(selection.range);
-        }
-    }
-}
-
 /// The caret offset nearest `target`, walking one grapheme at a time from the
 /// caret at `from`.
 ///
-/// gpui-base's `character_index_for_point` tests the point against every
-/// line as if that line began at the top of the input, so it finds no index
-/// below the first line, and none past a line's last glyph. Caret bounds are
-/// right for every visible offset, so the walk follows those.
+/// gpui-base's `character_index_for_point` finds no index past a line's last
+/// glyph. Caret bounds are right for every visible offset, so the walk follows
+/// those.
 pub fn caret_toward(
     handler: &mut PlatformInputHandler,
     from: usize,
     target: Point<Pixels>,
 ) -> Option<usize> {
-    let length = text_length(handler)?;
+    let length = handler.text_length_utf16()?;
     let text = read_text(handler, 0..length)?;
     let mut stops = vec![0];
     stops.extend(text.graphemes(true).scan(0, |end, grapheme| {
@@ -165,7 +141,7 @@ mod tests {
         let (_, cx, mut handler) = textarea(cx);
         cx.simulate_input("前😀e\u{301}后");
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert_eq!(text_length(&mut handler), Some(6));
+        assert_eq!(handler.text_length_utf16(), Some(6));
         assert_eq!(read_text(&mut handler, 1..3).as_deref(), Some("😀"));
         assert_eq!(read_text(&mut handler, 1..2), None);
     }
@@ -183,7 +159,7 @@ mod tests {
             })
         });
         handler.replace_and_mark_text_in_range(None, "你好", Some(0..0));
-        commit_marked_text(&mut handler);
+        handler.unmark_text();
         assert_eq!(handler.marked_text_range(), None);
         assert_eq!(handler.selected_text_range(true).unwrap().range, 0..0);
         assert_eq!(
@@ -197,7 +173,7 @@ mod tests {
             window.blur(cx);
             window.draw(cx).clear(cx);
         });
-        commit_marked_text(&mut handler);
+        handler.unmark_text();
         assert_eq!(handler.marked_text_range(), None);
         assert_eq!(changes.get(), 2);
         cx.update(|window, cx| {

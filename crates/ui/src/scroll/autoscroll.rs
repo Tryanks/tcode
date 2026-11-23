@@ -35,9 +35,8 @@ use gpui::{
     ScrollHandle, ScrollSource, Stateful, StatefulInteractiveElement, Styled as _, TouchPhase,
     Window, anchored, canvas, deferred, div, point, px,
 };
-use gpui::{PathBuilder, PathStyle, StrokeOptions};
+use gpui::{LineCap, LineJoin, PathBuilder, PathStyle, StrokeOptions};
 use gpui_base::ScrollbarHandle;
-use lyon::tessellation::{LineCap, LineJoin};
 
 use crate::theme::ActiveTheme as _;
 
@@ -447,13 +446,14 @@ fn marker(anchor: Point<Pixels>, room: Axes, cx: &App) -> impl IntoElement {
             let reach = px((edge + MARKER_DOT / 2. + MARKER_ARROW_DEPTH) / 2.);
             let (half, depth) = (px(MARKER_ARROW_HALF), px(MARKER_ARROW_DEPTH));
             let mut chevron = |tip: Point<Pixels>, back: Point<Pixels>, side: Point<Pixels>| {
-                let mut path =
-                    PathBuilder::stroke(px(MARKER_STROKE)).with_style(PathStyle::Stroke(
-                        StrokeOptions::default()
-                            .with_line_width(MARKER_STROKE)
-                            .with_line_cap(LineCap::Round)
-                            .with_line_join(LineJoin::Round),
-                    ));
+                let mut path = PathBuilder::stroke(px(MARKER_STROKE)).with_style(
+                    PathStyle::Stroke(StrokeOptions {
+                        line_width: MARKER_STROKE,
+                        line_cap: LineCap::Round,
+                        line_join: LineJoin::Round,
+                        ..Default::default()
+                    }),
+                );
                 path.move_to(back + side);
                 path.line_to(tip);
                 path.line_to(back - side);

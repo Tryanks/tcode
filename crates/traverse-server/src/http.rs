@@ -17,7 +17,7 @@ use axum::{
 use hyper::{body::Incoming, server::conn::http1, service::Service};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use iroh_relay::{
-    http::{RELAY_PATH, RELAY_PROBE_PATH},
+    http::{RELAY_PROBE_RELATIVE_PATH, RELAY_RELATIVE_PATH},
     server::{
         RelayService,
         http_server::{HyperError, RelayServiceWithNotify},
@@ -29,8 +29,9 @@ use tower::ServiceExt as _;
 
 use crate::{pkarr::PeerAddr, tls::Tls};
 
-/// Bounds the TLS handshake and each request's header read (which, on a
-/// keep-alive connection, is also the idle time).
+/// Bounds the TLS handshake, each request's header read (which, on a
+/// keep-alive connection, is also the idle time) and a relay connection's
+/// authentication.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
@@ -65,9 +66,13 @@ impl Service<Request<Incoming>> for Dispatch {
     fn call(&self, request: Request<Incoming>) -> Self::Future {
         if let Some(relay) = &self.relay
             && request.method() == http::Method::GET
-            && request.uri().path() == RELAY_PATH
+            && request.uri().path().strip_prefix('/') == Some(RELAY_RELATIVE_PATH)
         {
-            let relay = RelayServiceWithNotify::new(relay.clone(), Arc::new(Notify::new()));
+            let relay = RelayServiceWithNotify::with_timeout(
+                relay.clone(),
+                Arc::new(Notify::new()),
+                HANDSHAKE_TIMEOUT,
+            );
             let response = relay.call(request);
             return Box::pin(async move { response.await.map(|response| response.map(Body::new)) });
         }
@@ -153,7 +158,7 @@ pub fn base_router(manifest_json: Arc<String>) -> Router {
         )
         .route("/healthz", get(|| async { "ok" }))
         .route(
-            RELAY_PROBE_PATH,
+            &format!("/{RELAY_PROBE_RELATIVE_PATH}"),
             get(|| async { [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")] }),
         )
         .route("/generate_204", get(no_content))

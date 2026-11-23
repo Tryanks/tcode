@@ -30,7 +30,6 @@ visualize-mcp = { path = "../visualize-mcp" }
 
 [dev-dependencies]
 ureq = { version = "3", default-features = false, features = ["rustls"] }
-filetime = "0.2"
 tcode-traverse = { path = "../traverse", default-features = false }
 
 [target.'cfg(unix)'.dev-dependencies]
