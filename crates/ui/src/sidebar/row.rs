@@ -1,5 +1,5 @@
 //! A thread's row in the threads view: its project and marks, its title, and
-//! its harness with what the thread does or the model it runs. The desktop
+//! what the thread does before its harness and the model it runs. The desktop
 //! list and the phone's draw it from one [`RowShows`] and one
 //! [`SessionsSidebar::row_lines`], so the two say the same.
 
@@ -16,6 +16,8 @@ pub(super) const PHONE_ROW_HEIGHT: f32 = 84.;
 pub(super) const PHONE_ROW_INSET: f32 = 20.;
 /// The fill a pinned row rests on, of the muted foreground.
 const PINNED_FILL: f32 = 0.05;
+/// Between a row's status and the harness's glyph after it.
+const STATUS_GAP: gpui::Pixels = px(8.);
 /// How far a settled row's project artwork is greyed.
 const SETTLED_ARTWORK: f32 = 0.5;
 
@@ -57,7 +59,7 @@ impl Scale {
     }
 }
 
-/// What a row's third line says its thread does, in place of the model.
+/// What a row's third line says its thread does, before the model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum StatusKind {
     Approval,
@@ -70,6 +72,32 @@ pub(super) enum StatusKind {
     Draft,
 }
 
+impl StatusKind {
+    fn verb(self) -> Cow<'static, str> {
+        match self {
+            StatusKind::Approval => crate::tr!("sidebar.waiting_approval"),
+            StatusKind::Answer => crate::tr!("sidebar.waiting_input"),
+            StatusKind::Working => crate::tr!("sidebar.working"),
+            StatusKind::Failed => crate::tr!("sidebar.failed"),
+            StatusKind::Background => crate::tr!("sidebar.background"),
+            StatusKind::Waiting => crate::tr!("sidebar.waiting"),
+            StatusKind::Draft => crate::tr!("sidebar.draft"),
+        }
+    }
+
+    /// Amber waits on the user, so the lamp alone tells it from work.
+    fn color(self, cx: &App) -> gpui::Hsla {
+        match self {
+            StatusKind::Approval | StatusKind::Answer => cx.theme().warning,
+            StatusKind::Working => cx.theme().primary,
+            StatusKind::Failed => cx.theme().danger,
+            StatusKind::Background | StatusKind::Waiting | StatusKind::Draft => {
+                cx.theme().muted_foreground
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RowStatus {
     pub(super) kind: StatusKind,
@@ -78,8 +106,7 @@ pub(super) struct RowStatus {
 }
 
 impl RowStatus {
-    /// What a thread's row says it does; `None` for a thread at rest, whose
-    /// row names its model.
+    /// What a thread's row says it does; `None` for a thread at rest.
     pub(super) fn of(state: &ThreadRowState, working: bool) -> Option<Self> {
         let status = |kind| Some(Self { kind, name: None });
         if state.draft {
@@ -141,25 +168,11 @@ impl RowStatus {
     }
 
     pub(super) fn verb(&self) -> Cow<'static, str> {
-        match self.kind {
-            StatusKind::Approval => crate::tr!("sidebar.waiting_approval"),
-            StatusKind::Answer => crate::tr!("sidebar.waiting_input"),
-            StatusKind::Working => crate::tr!("sidebar.working"),
-            StatusKind::Failed => crate::tr!("sidebar.failed"),
-            StatusKind::Background => crate::tr!("sidebar.background"),
-            StatusKind::Waiting => crate::tr!("sidebar.waiting"),
-            StatusKind::Draft => crate::tr!("sidebar.draft"),
-        }
+        self.kind.verb()
     }
 
     pub(super) fn color(&self, cx: &App) -> gpui::Hsla {
-        match self.kind {
-            StatusKind::Approval | StatusKind::Answer | StatusKind::Working => cx.theme().primary,
-            StatusKind::Failed => cx.theme().danger,
-            StatusKind::Background | StatusKind::Waiting | StatusKind::Draft => {
-                cx.theme().muted_foreground
-            }
-        }
+        self.kind.color(cx)
     }
 
     /// Only background work keeps the thread going.
@@ -196,14 +209,6 @@ pub(super) fn native_subagent_asking(
         })
 }
 
-/// A row's third line after its harness's glyph.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum LineThree {
-    Status(RowStatus),
-    /// The model the thread runs, by the name the host's list gives it.
-    Model(Option<SharedString>),
-}
-
 /// What a thread's row in the threads view shows.
 #[derive(Clone)]
 pub(super) struct RowShows {
@@ -216,7 +221,10 @@ pub(super) struct RowShows {
     /// Its host, over several.
     pub(super) host: Option<SharedString>,
     pub(super) harness: (agent::ProviderKind, gpui::Hsla),
-    pub(super) line_three: LineThree,
+    /// What its thread does, unless it is at rest.
+    pub(super) status: Option<RowStatus>,
+    /// The model the thread runs, by the name the host's list gives it.
+    pub(super) model: SharedString,
 }
 
 impl RowShows {
@@ -229,16 +237,13 @@ impl RowShows {
         host: Option<SharedString>,
     ) -> Self {
         let settled = meta.is_settled();
-        let line_three = match RowStatus::of(state, working) {
-            Some(status) => LineThree::Status(status),
-            // With no model chosen, the harness runs its own default: name the harness.
-            None => LineThree::Model(Some(match meta.model.as_deref() {
-                Some(model) => store
-                    .thread_model_name(&meta.id, model)
-                    .unwrap_or_else(|| model.to_owned())
-                    .into(),
-                None => meta.provider.display_name().into(),
-            })),
+        // With no model chosen, the harness runs its own default: name the harness.
+        let model = match meta.model.as_deref() {
+            Some(model) => store
+                .thread_model_name(&meta.id, model)
+                .unwrap_or_else(|| model.to_owned())
+                .into(),
+            None => meta.provider.display_name().into(),
         };
         Self {
             title: meta.title.clone().into(),
@@ -249,18 +254,17 @@ impl RowShows {
             project,
             host,
             harness: (meta.provider, gpui::rgb(store.provider_color(meta)).into()),
-            line_three,
+            status: RowStatus::of(state, working),
+            model,
         }
     }
 
     /// What the row's accessible label says after the thread's title: its
-    /// project, what it does or its model, and that it is pinned.
+    /// project, what it does, its model, and that it is pinned.
     pub(super) fn details(&self) -> Vec<String> {
         let mut details: Vec<String> = self.project.iter().map(|p| p.to_string()).collect();
-        match &self.line_three {
-            LineThree::Status(status) => details.push(status.spoken()),
-            LineThree::Model(model) => details.extend(model.iter().map(|m| m.to_string())),
-        }
+        details.extend(self.status.as_ref().map(RowStatus::spoken));
+        details.push(self.model.to_string());
         if self.pinned {
             details.push(crate::tr!("sidebar.pinned").into_owned());
         }
@@ -288,6 +292,22 @@ pub(super) fn desktop_row_surface(selected: bool, cx: &App) -> gpui::Div {
         selected,
         cx,
     )
+}
+
+/// A status's dot, breathing while its work goes on in the background.
+pub(super) fn lamp(color: gpui::Hsla, breathes: bool) -> gpui::AnyElement {
+    let diameter = px(6.);
+    if breathes {
+        crate::widgets::BreathingDot::new(color)
+            .diameter(diameter)
+            .into_any_element()
+    } else {
+        div()
+            .size(diameter)
+            .rounded_full()
+            .bg(color)
+            .into_any_element()
+    }
 }
 
 fn sized_text<E: gpui::Styled>(el: E, (size, line): (gpui::Pixels, gpui::Pixels)) -> E {
@@ -441,47 +461,103 @@ impl SessionsSidebar {
         let (provider, color) = shows.harness;
         let keeps = keeps_going(state);
         let failed = state.failed && !state.waiting();
-        let content = crate::motion::cross_fade(
-            SharedString::from(format!("row-line-three-{name}")),
-            shows.line_three.clone(),
+        let status = shows.status.as_ref();
+        let lamp = folded_status(
+            format!("row-lamp-{name}"),
+            status
+                .map(|status| (status.color(cx), status.breathes()))
+                .or_else(|| shows.unread.then(|| (cx.theme().primary, false))),
+            div().flex_none().debug_selector({
+                let name = name.clone();
+                move || format!("row-lamp-{name}")
+            }),
+            window,
+            cx,
+            |(color, breathes), _, _| {
+                div()
+                    .pr(px(5.))
+                    .child(lamp(*color, *breathes))
+                    .into_any_element()
+            },
+        );
+        let verb = crate::motion::shown(
+            SharedString::from(format!("row-verb-{name}")),
+            status.map(|status| (status.kind, status.name.is_some())),
+            SHOW,
+            window,
+            cx,
+        )
+        .map(|shown| {
+            let glide = crate::motion::GlideState::keyed(
+                SharedString::from(format!("row-verb-width-{name}")),
+                window,
+                cx,
+            );
+            let word = crate::motion::cross_fade(
+                SharedString::from(format!("row-verb-swap-{name}")),
+                shown.value,
+                CHANGE,
+                window,
+                cx,
+                |(kind, named), _, cx| {
+                    div()
+                        .whitespace_nowrap()
+                        .text_color(kind.color(cx))
+                        .pr(if *named { px(4.) } else { STATUS_GAP })
+                        .child(kind.verb())
+                        .into_any_element()
+                },
+            );
+            // One verb's width glides to the next's, and what follows with it.
+            let key = u64::from(shown.value.1) << 8 | shown.value.0 as u64;
+            let word = crate::motion::SizeGlide::new(&glide, word)
+                .axes(crate::motion::GlideAxes::Width)
+                .on_change(key);
+            shown.fold_across(
+                div()
+                    .flex_none()
+                    .debug_selector({
+                        let name = name.clone();
+                        move || format!("row-status-verb-{name}")
+                    })
+                    .child(word),
+            )
+        });
+        let who = folded_status(
+            format!("row-who-{name}"),
+            status.and_then(|status| Some((status.name.clone()?, status.color(cx)))),
+            // Who waits gives up its width before the model.
+            div().min_w_0().flex_shrink(1000.).overflow_hidden(),
+            window,
+            cx,
+            |(who, color), _, _| {
+                h_flex()
+                    .min_w_0()
+                    .gap(px(4.))
+                    .pr(STATUS_GAP)
+                    .text_color(*color)
+                    .child(div().flex_none().child("·"))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(who.clone())),
+                    )
+                    .into_any_element()
+            },
+        );
+        let model = crate::motion::cross_fade(
+            SharedString::from(format!("row-model-{name}")),
+            shows.model.clone(),
             CHANGE,
             window,
             cx,
-            {
-                let name = name.clone();
-                move |line, _, cx| match line {
-                    LineThree::Status(status) => h_flex()
-                        .w_full()
-                        .min_w_0()
-                        .gap(px(4.))
-                        .text_color(status.color(cx))
-                        .child(
-                            div()
-                                .flex_none()
-                                .whitespace_nowrap()
-                                .debug_selector({
-                                    let name = name.clone();
-                                    move || format!("row-status-verb-{name}")
-                                })
-                                .child(status.verb()),
-                        )
-                        .when_some(status.name.clone(), |line, who| {
-                            line.child(div().flex_none().child("·")).child(
-                                div()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .child(crate::widgets::fade_text(who)),
-                            )
-                        })
-                        .into_any_element(),
-                    LineThree::Model(model) => div()
-                        .w_full()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_color(cx.theme().muted_foreground)
-                        .children(model.clone().map(crate::widgets::fade_text))
-                        .into_any_element(),
-                }
+            |model, _, _| {
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(model.clone()))
+                    .into_any_element()
             },
         );
         let spinner = crate::motion::shown(
@@ -495,34 +571,46 @@ impl SessionsSidebar {
             shown.fold_across_gap(px(4.), Spinner::new().with_size(scale.glyph).color(muted))
         });
         let line_three = sized_text(h_flex(), scale.small)
+            .id(SharedString::from(format!("thread-status-{name}")))
             .w_full()
             .min_w_0()
             .items_center()
-            .gap(px(4.))
+            .when(status.is_some(), |line| {
+                line.when_some(keeps, |line, keeps| {
+                    line.with_tooltip(move |_, _| Tooltip::new(keeps.clone()))
+                })
+                .when(failed, |line| {
+                    line.with_tooltip(|_, _| Tooltip::new(crate::tr!("sidebar.failed_tooltip")))
+                })
+            })
+            .children(lamp)
+            .children(verb)
+            .children(who)
             .child(
-                crate::provider_card::provider_glyph(provider)
-                    .flex_none()
-                    .size(scale.glyph)
-                    .text_color(color),
-            )
-            .children(spinner)
-            .child(
-                div()
-                    .id(SharedString::from(format!("thread-status-{name}")))
-                    .flex_1()
+                h_flex()
+                    .flex_auto()
                     .min_w_0()
-                    .overflow_hidden()
-                    .when(matches!(shows.line_three, LineThree::Status(_)), |line| {
-                        line.when_some(keeps, |line, keeps| {
-                            line.with_tooltip(move |_, _| Tooltip::new(keeps.clone()))
-                        })
-                        .when(failed, |line| {
-                            line.with_tooltip(|_, _| {
-                                Tooltip::new(crate::tr!("sidebar.failed_tooltip"))
+                    .items_center()
+                    .gap(px(4.))
+                    .text_color(muted)
+                    .child(
+                        crate::provider_card::provider_glyph(provider)
+                            .flex_none()
+                            .size(scale.glyph)
+                            .text_color(color),
+                    )
+                    .children(spinner)
+                    .child(
+                        div()
+                            .flex_auto()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .debug_selector({
+                                let name = name.clone();
+                                move || format!("row-model-{name}")
                             })
-                        })
-                    })
-                    .child(content),
+                            .child(model),
+                    ),
             );
         v_flex()
             .w_full()

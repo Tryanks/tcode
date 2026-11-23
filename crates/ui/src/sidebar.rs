@@ -211,6 +211,30 @@ fn faded_status<T: Clone + PartialEq + 'static>(
     Some(shown.fade(content))
 }
 
+/// [`faded_status`] in a row that makes way for it: `item`, its place in the
+/// row, grows to its width as it comes and narrows away as it goes. It folds
+/// inside `item`, so it shrinks with the row by the same rule throughout.
+fn folded_status<T: Clone + PartialEq + 'static>(
+    id: impl Into<SharedString>,
+    value: Option<T>,
+    item: gpui::Div,
+    window: &mut Window,
+    cx: &mut App,
+    build: impl Fn(&T, &mut Window, &mut App) -> gpui::AnyElement,
+) -> Option<gpui::AnyElement> {
+    let id: SharedString = id.into();
+    let shown = crate::motion::shown(id.clone(), value, SHOW, window, cx)?;
+    let content = crate::motion::cross_fade(
+        (gpui::ElementId::from(id), "swap"),
+        shown.value.clone(),
+        CHANGE,
+        window,
+        cx,
+        build,
+    );
+    Some(item.child(shown.fold_across(content)).into_any_element())
+}
+
 /// The disclosures of a sidebar list: a host's section, a project's rows, a
 /// project's rows past the first few, and a Settled shelf (by its shelf key).
 #[derive(Clone, Copy)]
