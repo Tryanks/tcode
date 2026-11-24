@@ -113,13 +113,6 @@ impl AppState {
         } else {
             None
         };
-        let instructions: Vec<String> = pull_request_registration
-            .is_some()
-            .then(|| self.pull_request_instructions(&meta.id))
-            .into_iter()
-            .chain(collaboration_brief)
-            .collect();
-        let instructions = (!instructions.is_empty()).then(|| instructions.concat());
         let computer_use_registration = if computer_use_attaches(meta.provider, &self.settings) {
             self.computer_use_registration_for(&meta)
         } else {
@@ -127,6 +120,26 @@ impl AppState {
         };
         let control_registration = self.control_registration_for(&meta);
         let visualize_registration = self.visualize_registration_for(&meta);
+        // A harness that keeps its servers' instructions from the model is given them here.
+        let server_instructions = (!meta.provider.caps().mcp_server_instructions)
+            .then(|| self.mcp_server_instructions(&meta))
+            .filter(|servers| !servers.is_empty())
+            .map(|servers| {
+                let mut text = String::from("<mcp_server_instructions>\n");
+                for (name, instructions) in servers {
+                    text.push_str(&format!("## {name}\n{instructions}\n\n"));
+                }
+                text.push_str("</mcp_server_instructions>\n");
+                text
+            });
+        let instructions: Vec<String> = pull_request_registration
+            .is_some()
+            .then(|| self.pull_request_instructions(&meta.id))
+            .into_iter()
+            .chain(collaboration_brief)
+            .chain(server_instructions)
+            .collect();
+        let instructions = (!instructions.is_empty()).then(|| instructions.concat());
         let provider_launcher = self.provider_launcher.clone();
         let session_id = meta.id.clone();
         if let Some(cursor) = &meta.resume_cursor {

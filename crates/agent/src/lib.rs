@@ -176,6 +176,10 @@ pub struct Caps {
     /// Whether this adapter can attach tcode's HTTP MCP servers to a session.
     /// Preview attachment rides the same capability as every other MCP server.
     pub mcp_servers: bool,
+    /// The harness gives the model the `instructions` of the MCP servers it
+    /// connects. Otherwise Tcode adds its servers' to
+    /// [`SessionOptions::instructions`].
+    pub mcp_server_instructions: bool,
     /// The harness drives the desktop itself, so tcode's computer-use MCP
     /// server is not attached to its sessions.
     pub native_computer_use: bool,
@@ -419,6 +423,7 @@ impl ProviderKind {
                 // `set_model` and `apply_flag_settings` (2.1.318).
                 live_settings: true,
                 mcp_servers: true,
+                mcp_server_instructions: true,
                 native_computer_use: false,
                 launch_args: true,
                 option_descriptors: OptionDescriptors::Catalog,
@@ -484,6 +489,7 @@ impl ProviderKind {
                 }),
                 live_settings: true,
                 mcp_servers: true,
+                mcp_server_instructions: true,
                 // `codex features list` reports `computer_use stable` (0.159.3).
                 native_computer_use: true,
                 launch_args: false,
@@ -527,6 +533,7 @@ impl ProviderKind {
                 // ACP support is negotiated per agent; capable agents receive
                 // every tcode HTTP MCP registration in session/new or load.
                 mcp_servers: true,
+                mcp_server_instructions: true,
                 native_computer_use: false,
                 launch_args: true,
                 option_descriptors: OptionDescriptors::Wire,
@@ -569,6 +576,9 @@ impl ProviderKind {
                 // An extension Tcode passes with `--extension` registers
                 // them (`pi.registerMcpServer`).
                 mcp_servers: true,
+                // pi declares a `direct` server's tools alone; its instructions
+                // reach only codemode's `describeNamespace()` (`docs/mcp.md`).
+                mcp_server_instructions: false,
                 native_computer_use: false,
                 launch_args: true,
                 option_descriptors: OptionDescriptors::Catalog,
@@ -625,6 +635,7 @@ impl ProviderKind {
                 }),
                 live_settings: true,
                 mcp_servers: true,
+                mcp_server_instructions: true,
                 native_computer_use: false,
                 launch_args: true,
                 option_descriptors: OptionDescriptors::Catalog,
@@ -664,6 +675,7 @@ impl ProviderKind {
                 background: None,
                 live_settings: false,
                 mcp_servers: true,
+                mcp_server_instructions: true,
                 native_computer_use: false,
                 launch_args: true,
                 option_descriptors: OptionDescriptors::Wire,
@@ -716,6 +728,7 @@ impl ProviderKind {
                 }),
                 live_settings: false,
                 mcp_servers: true,
+                mcp_server_instructions: true,
                 native_computer_use: false,
                 launch_args: true,
                 option_descriptors: OptionDescriptors::Wire,
@@ -754,6 +767,7 @@ impl ProviderKind {
                 background: None,
                 live_settings: true,
                 mcp_servers: true,
+                mcp_server_instructions: true,
                 native_computer_use: false,
                 launch_args: true,
                 option_descriptors: OptionDescriptors::Wire,

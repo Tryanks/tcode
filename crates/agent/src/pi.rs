@@ -381,7 +381,7 @@ async fn run_actor(
         requests: HashMap::new(),
         entries_cursor: None,
         session_file: None,
-        _launch_files: launch_files.into_iter().map(|(_, file)| file).collect(),
+        launch_files,
     };
     let startup = actor.initialize().await;
     if let Err(err) = startup {
@@ -435,8 +435,9 @@ struct PiActor {
     entries_cursor: Option<String>,
     /// The session file pi works in now: what a fork leaves, to return to.
     session_file: Option<String>,
-    /// The files of the launch's arguments, which a `/reload` reads again.
-    _launch_files: Vec<LaunchFile>,
+    /// The files of the launch's arguments, by flag, which a `/reload` reads
+    /// again.
+    launch_files: Vec<(&'static str, LaunchFile)>,
 }
 
 /// What a pi RPC response settles.
@@ -848,6 +849,15 @@ impl PiActor {
                         self.events
                             .emit(AgentEvent::Warning { message: warning })
                             .await;
+                    } else if message.get("type").and_then(Value::as_str) == Some("extension_error")
+                    {
+                        // pi connects what an extension registers only while
+                        // its built-in MCP support is loaded (`--no-mcp`, an
+                        // extension replacing `/mcp`), and says so here.
+                        if self.refused_tcode_servers(&message) {
+                            self.events.emit(AgentEvent::McpServersNotAttached).await;
+                        }
+                        self.events.emit(extension_error(&message)).await;
                     } else if message.get("type").and_then(Value::as_str)
                         == Some("extension_ui_request")
                     {
@@ -862,6 +872,25 @@ impl PiActor {
                 }
             }
         }
+    }
+
+    /// Whether an `extension_error` is pi refusing the registration of
+    /// Tcode's MCP servers by the extension of this launch.
+    fn refused_tcode_servers(&self, message: &Value) -> bool {
+        let Some(extension) = self
+            .launch_files
+            .iter()
+            .find(|(flag, _)| *flag == MCP_EXTENSION_FLAG)
+            .and_then(|(_, file)| file.path().file_name())
+        else {
+            return false;
+        };
+        message.get("event").and_then(Value::as_str) == Some("register_mcp_server")
+            && message
+                .get("extensionPath")
+                .and_then(Value::as_str)
+                .and_then(|path| Path::new(path).file_name())
+                == Some(extension)
     }
 
     /// The session pi works in now, from a `get_state` response.
@@ -1490,19 +1519,7 @@ impl PiMapper {
                 }]
             }
             "thinking_level_changed" => thinking_level(message.get("level")).into_iter().collect(),
-            "extension_error" => vec![AgentEvent::Warning {
-                message: format!(
-                    "pi extension error in {}: {}",
-                    message
-                        .get("event")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown event"),
-                    message
-                        .get("error")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown error")
-                ),
-            }],
+            "extension_error" => vec![extension_error(message)],
             _ => Vec::new(),
         }
     }
@@ -2224,6 +2241,26 @@ fn resume_session(resume: &Option<ResumeCursor>) -> Option<&str> {
     resume.as_ref()?.str_field(&["session_file", "session_id"])
 }
 
+/// The flag the extension registering Tcode's MCP servers is passed with.
+const MCP_EXTENSION_FLAG: &str = "--extension";
+
+/// What pi said of an extension that failed.
+fn extension_error(message: &Value) -> AgentEvent {
+    AgentEvent::Warning {
+        message: format!(
+            "pi extension error in {}: {}",
+            message
+                .get("event")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown event"),
+            message
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error")
+        ),
+    }
+}
+
 /// The flags and files through which Tcode gives pi what goes beside the
 /// conversation: an extension registering its MCP servers (`--extension`,
 /// `pi.registerMcpServer`, `docs/extensions.md`) and its instructions,
@@ -2238,7 +2275,7 @@ fn launch_files(
     if !servers.is_empty() {
         let extension = mcp_extension(servers);
         files.push((
-            "--extension",
+            MCP_EXTENSION_FLAG,
             LaunchFile::write("tcode-pi-mcp", "ts", &extension)?,
         ));
     }

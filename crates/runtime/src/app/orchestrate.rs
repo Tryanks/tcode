@@ -127,6 +127,50 @@ impl AppState {
         }
     }
 
+    /// The `instructions` of each Tcode MCP server registered for thread `meta`, by server name.
+    pub(super) fn mcp_server_instructions(
+        &self,
+        meta: &SessionMeta,
+    ) -> Vec<(&'static str, String)> {
+        let id = meta.id.as_str();
+        let servers = [
+            (
+                agent::McpRegistration::SERVER_NAME_PULL_REQUESTS,
+                pull_request_mcp::INSTRUCTIONS,
+                self.mcp.pull_request_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_PREVIEW,
+                preview_mcp::INSTRUCTIONS,
+                self.mcp.preview_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_COMPUTER_USE,
+                computer_use_mcp::tools::INSTRUCTIONS,
+                self.mcp.computer_use_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_VISUALIZE,
+                visualize_mcp::INSTRUCTIONS,
+                self.mcp.visualize_registrations.contains_key(id),
+            ),
+        ];
+        let control_instructions = self
+            .mcp
+            .control_registrations
+            .contains_key(id)
+            .then(|| control_mcp::instructions(meta.is_dispatched()));
+        servers
+            .into_iter()
+            .filter(|(_, _, registered)| *registered)
+            .map(|(name, text, _)| (name, text.to_owned()))
+            .chain(
+                control_instructions
+                    .map(|text| (agent::McpRegistration::SERVER_NAME_CONTROL, text)),
+            )
+            .collect()
+    }
+
     /// Every MCP tool offered to this thread's provider, and every text Tcode gives its model
     /// outside the conversation, as delivered; `None` for a provider that takes no MCP server.
     pub(super) fn injected_tools(
@@ -174,43 +218,10 @@ impl AppState {
                 text: agent::codex::PREVIEW_BROWSER_INSTRUCTIONS.to_owned(),
             });
         }
-        let servers = [
-            (
-                agent::McpRegistration::SERVER_NAME_PULL_REQUESTS,
-                pull_request_mcp::INSTRUCTIONS,
-                self.mcp.pull_request_registrations.contains_key(id),
-            ),
-            (
-                agent::McpRegistration::SERVER_NAME_PREVIEW,
-                preview_mcp::INSTRUCTIONS,
-                self.mcp.preview_registrations.contains_key(id),
-            ),
-            (
-                agent::McpRegistration::SERVER_NAME_COMPUTER_USE,
-                computer_use_mcp::tools::INSTRUCTIONS,
-                self.mcp.computer_use_registrations.contains_key(id),
-            ),
-            (
-                agent::McpRegistration::SERVER_NAME_VISUALIZE,
-                visualize_mcp::INSTRUCTIONS,
-                self.mcp.visualize_registrations.contains_key(id),
-            ),
-        ];
-        let control_instructions = self
-            .mcp
-            .control_registrations
-            .contains_key(id)
-            .then(|| control_mcp::instructions(meta.is_dispatched()));
         instructions.extend(
-            servers
+            self.mcp_server_instructions(meta)
                 .into_iter()
-                .filter(|(_, _, registered)| attached && *registered)
-                .map(|(name, text, _)| (name, text.to_owned()))
-                .chain(
-                    control_instructions
-                        .filter(|_| attached)
-                        .map(|text| (agent::McpRegistration::SERVER_NAME_CONTROL, text)),
-                )
+                .filter(|_| attached)
                 .map(|(name, text)| InjectedInstructions {
                     channel: InjectedChannel::McpServer(name.to_owned()),
                     text,
@@ -330,8 +341,8 @@ impl AppState {
     ) -> String {
         // The report contract rides with every first message: the subagent sees nothing of
         // the thread that started it, and the tool description alone yields missing or
-        // one-line reports. Skipped for providers without MCP attachment (pi), where the
-        // tool does not exist.
+        // one-line reports. Skipped for providers without MCP attachment, where the tool does
+        // not exist.
         let message = if meta.provider.caps().mcp_servers {
             format!("{message}{CHILD_REPORT_FOOTER}")
         } else {
