@@ -310,7 +310,8 @@ pub struct GoalControl {
 #[serde(rename_all = "snake_case")]
 pub enum InstructionChannel {
     /// Part of the session's system instructions, set at every start, on creation and resume
-    /// alike (Claude Code's appended system prompt, an OpenCode session instruction entry).
+    /// alike (Claude Code's and pi's appended system prompt, an OpenCode session instruction
+    /// entry).
     SessionAppend,
     /// Developer context Codex re-sends when it changes; restored after a compaction.
     DeveloperContext,
@@ -565,7 +566,9 @@ impl ProviderKind {
                 confirmed_options: OptionIds::Only(&[EFFORT_OPTION_ID]),
                 background: None,
                 live_settings: true,
-                mcp_servers: false,
+                // An extension Tcode passes with `--extension` registers
+                // them (`pi.registerMcpServer`).
+                mcp_servers: true,
                 native_computer_use: false,
                 launch_args: true,
                 option_descriptors: OptionDescriptors::Catalog,
@@ -581,7 +584,7 @@ impl ProviderKind {
                     source_install: true,
                     ..PluginManagement::NONE
                 },
-                instruction_channel: InstructionChannel::None,
+                instruction_channel: InstructionChannel::SessionAppend,
                 account_login: false,
                 session_transfer: false,
                 session_move: false,

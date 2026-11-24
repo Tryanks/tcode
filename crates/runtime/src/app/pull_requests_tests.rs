@@ -285,7 +285,7 @@ fn the_agent_tools_are_disclosed_before_the_first_turn_and_follow_their_setting(
     let store = TestStore::new("tcode-pr-tools-disclosed");
     let threads = [
         (ProviderKind::ClaudeCode, true),
-        (ProviderKind::Pi, false),
+        (ProviderKind::Pi, true),
         (ProviderKind::ClaudeCode, true),
     ]
     .map(|(provider, disclosed)| {

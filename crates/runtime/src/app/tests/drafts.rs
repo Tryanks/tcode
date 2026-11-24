@@ -893,7 +893,6 @@ fn session_launch_scopes_mcp_registrations() {
     for (provider, preview_supported, computer_supported) in [
         (ProviderKind::ClaudeCode, true, true),
         (ProviderKind::Codex, true, false),
-        (ProviderKind::Pi, false, true),
     ] {
         let mut settings = Settings::default();
         for computer_enabled in [false, true] {

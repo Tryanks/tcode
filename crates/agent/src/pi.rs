@@ -13,14 +13,16 @@ use serde_json::{Value, json};
 use smol::channel::{Receiver, Sender};
 
 use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
-use crate::process::{ChildOutput, ProcessTree, send_json as write_json, spawn_line_reader};
+use crate::process::{
+    ChildOutput, LaunchFile, ProcessTree, send_json as write_json, spawn_line_reader,
+};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
     ApprovalRequest, Attachment, Compaction, DeltaKind, FileChange, FileChangeKind, ForkPoint,
-    ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection,
-    ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SearchHit, SearchScope,
-    SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
-    ToolFamily, ToolOutput, UserInputDelivery, UserInputOption, UserInputQuestion,
+    ItemContent, ItemStatus, LaunchEnv, McpRegistration, ModelSpec, OptionDescriptor,
+    OptionSelection, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SearchHit,
+    SearchScope, SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem,
+    TokenUsage, ToolFamily, ToolOutput, UserInputDelivery, UserInputOption, UserInputQuestion,
 };
 
 /// The directory pi launched with `launch_env` keeps its settings, sign-in
@@ -288,6 +290,23 @@ async fn run_actor(
     if let Some(session) = session {
         cmd.arg("--session").arg(session);
     }
+    // Every launch: pi keeps neither Tcode's MCP servers nor its instructions
+    // in the session. Held as long as the actor: pi reads them again when a
+    // `/reload` loads its resources anew.
+    let launch_files = match launch_files(&opts.mcp_servers, opts.instructions.as_deref()) {
+        Ok(files) => files,
+        Err(err) => {
+            let _ = ready
+                .send(Err(AgentError::Spawn(format!(
+                    "writing Tcode's MCP servers and instructions for pi: {err}"
+                ))))
+                .await;
+            return;
+        }
+    };
+    for (flag, file) in &launch_files {
+        cmd.arg(flag).arg(file.path());
+    }
     cmd.current_dir(&opts.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -362,6 +381,7 @@ async fn run_actor(
         requests: HashMap::new(),
         entries_cursor: None,
         session_file: None,
+        _launch_files: launch_files.into_iter().map(|(_, file)| file).collect(),
     };
     let startup = actor.initialize().await;
     if let Err(err) = startup {
@@ -369,17 +389,6 @@ async fn run_actor(
         let details = actor.stderr_tail.append_to(err.to_string(), "\nstderr:\n");
         let _ = ready.send(Err(AgentError::Provider(details))).await;
         return;
-    }
-    let unattached = unattached_servers(&opts);
-    if !unattached.is_empty() {
-        actor.events
-            .emit(AgentEvent::Warning {
-                message: format!(
-                    "Tcode does not connect its {} tools to pi, so they are unavailable in this session",
-                    unattached.join(", ")
-                ),
-            })
-            .await;
     }
     if ready.send(Ok(())).await.is_err() {
         actor.stop();
@@ -426,6 +435,8 @@ struct PiActor {
     entries_cursor: Option<String>,
     /// The session file pi works in now: what a fork leaves, to return to.
     session_file: Option<String>,
+    /// The files of the launch's arguments, which a `/reload` reads again.
+    _launch_files: Vec<LaunchFile>,
 }
 
 /// What a pi RPC response settles.
@@ -2213,26 +2224,55 @@ fn resume_session(resume: &Option<ResumeCursor>) -> Option<&str> {
     resume.as_ref()?.str_field(&["session_file", "session_id"])
 }
 
-/// The tcode tool families this session does without, named the way the user
-/// knows them from Settings.
-///
-/// pi 1.5.2 connects the MCP servers of its configuration files
-/// (`docs/mcp.md`) and those an extension registers (`pi.registerMcpServer`,
-/// `docs/extensions.md`). Tcode registers none, so explicitly enabled tcode
-/// MCP servers stay behind.
-fn unattached_servers(opts: &SessionOptions) -> Vec<&'static str> {
-    [(
-        crate::McpRegistration::SERVER_NAME_COMPUTER_USE,
-        "computer-use",
-    )]
-    .into_iter()
-    .filter_map(|(server_name, label)| {
-        opts.mcp_servers
-            .iter()
-            .any(|server| server.name == server_name)
-            .then_some(label)
-    })
-    .collect()
+/// The flags and files through which Tcode gives pi what goes beside the
+/// conversation: an extension registering its MCP servers (`--extension`,
+/// `pi.registerMcpServer`, `docs/extensions.md`) and its instructions,
+/// appended to the system prompt (`--append-system-prompt`, which reads an
+/// existing file). Files keep the arguments on one line for a Windows batch
+/// launcher.
+fn launch_files(
+    servers: &[McpRegistration],
+    instructions: Option<&str>,
+) -> std::io::Result<Vec<(&'static str, LaunchFile)>> {
+    let mut files = Vec::new();
+    if !servers.is_empty() {
+        let extension = mcp_extension(servers);
+        files.push((
+            "--extension",
+            LaunchFile::write("tcode-pi-mcp", "ts", &extension)?,
+        ));
+    }
+    if let Some(instructions) = instructions {
+        files.push((
+            "--append-system-prompt",
+            LaunchFile::write("tcode-pi-instructions", "md", instructions)?,
+        ));
+    }
+    Ok(files)
+}
+
+/// A pi extension registering `servers` for the session. Their tools are
+/// declared to the model as `mcp__<server>__<tool>` (`exposure: "direct"`):
+/// pi's default, `codemode`, reaches them only from inside a script, whose
+/// calls are not tool calls of the conversation.
+fn mcp_extension(servers: &[McpRegistration]) -> String {
+    let servers: serde_json::Map<String, Value> = servers
+        .iter()
+        .map(|server| {
+            (
+                server.name.clone(),
+                json!({
+                    "url": server.url,
+                    "headers": {"Authorization": format!("Bearer {}", server.bearer_token)},
+                    "exposure": "direct",
+                }),
+            )
+        })
+        .collect();
+    format!(
+        "const servers = {};\nexport default function (pi) {{\n  for (const [name, config] of Object.entries(servers)) {{\n    pi.registerMcpServer(name, config);\n  }}\n}}\n",
+        Value::Object(servers)
+    )
 }
 
 /// The id of the last entry a `get_entries` response holds.
