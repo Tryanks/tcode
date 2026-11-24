@@ -1262,6 +1262,8 @@ mod platform {
         }
         #[cfg(target_os = "ios")]
         super::super::ios::adopt(webview.read(cx).raw());
+        #[cfg(target_os = "macos")]
+        keep_scripts_off_the_keyboard(webview.read(cx).raw());
         webview.update(cx, |view, _| set_webview_visible(view, false));
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         let remote = lifecycle
@@ -1278,6 +1280,28 @@ mod platform {
             },
         );
         Availability::Ready(webview)
+    }
+
+    /// A page takes the keyboard when the user presses it, never because its
+    /// script focused an element. WebKit otherwise makes the web view the
+    /// window's first responder for that, hidden or not, and GPUI's fields
+    /// then get no text while GPUI still shows them focused.
+    ///
+    /// Gap: GPUI Fast refuses such a request only from its own `NativeView`s,
+    /// and gpui-webview puts the page on a composition surface instead.
+    #[cfg(target_os = "macos")]
+    fn keep_scripts_off_the_keyboard(raw: &wry::WebView) {
+        use objc2::runtime::NSObjectProtocol as _;
+        use wry::WebViewExtMacOS as _;
+
+        let webview = raw.webview();
+        // WebKit's private API: a macOS without it would raise on the call.
+        if !webview.respondsToSelector(objc2::sel!(_setShouldSuppressFirstResponderChanges:)) {
+            log::warn!("preview: a page's script can take the keyboard on this macOS");
+            return;
+        }
+        let () =
+            unsafe { objc2::msg_send![&*webview, _setShouldSuppressFirstResponderChanges: true] };
     }
 }
 

@@ -412,6 +412,29 @@
     el.dispatchEvent(event);
   };
 
+  const activeElement = () => {
+    let el = document.activeElement;
+    while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+    return el === document.body ? null : el;
+  };
+
+  // A page without the keyboard moves its active element but holds back
+  // `blur` and `focus`, which its own listeners wait for.
+  const focus = (el, options) => {
+    const before = activeElement();
+    let told = false;
+    const note = () => {
+      told = true;
+    };
+    for (const type of ["blur", "focus"]) window.addEventListener(type, note, true);
+    el.focus(options);
+    for (const type of ["blur", "focus"]) window.removeEventListener(type, note, true);
+    const after = activeElement();
+    if (told || after === before) return;
+    if (before) before.dispatchEvent(new FocusEvent("blur", { composed: true, relatedTarget: after }));
+    if (after) after.dispatchEvent(new FocusEvent("focus", { composed: true, relatedTarget: before }));
+  };
+
   const setValue = (el, value) => {
     const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     const setter = Object.getOwnPropertyDescriptor(proto, "value");
@@ -449,7 +472,7 @@
       const y = rect.top + rect.height / 2;
       pointer(el, "pointerdown", x, y);
       pointer(el, "mousedown", x, y);
-      if (typeof el.focus === "function") el.focus({ preventScroll: true });
+      if (typeof el.focus === "function") focus(el, { preventScroll: true });
       pointer(el, "pointerup", x, y);
       pointer(el, "mouseup", x, y);
       if (typeof el.click === "function") el.click();
@@ -461,7 +484,7 @@
     type: (args) => {
       const el = resolve(args);
       const text = String(args.text == null ? "" : args.text);
-      el.focus();
+      focus(el);
       if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
         setValue(el, text);
         el.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, data: text, inputType: "insertText" }));
