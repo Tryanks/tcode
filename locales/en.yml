@@ -2238,7 +2238,7 @@ pull_requests:
   kind_merged: "merged"
   kind_unreadable: "could not be read"
   update_title: "PR #%{number}"
-  record_opened: "Opened PR"
+  record_linked: "Linked PR"
   record_already_linked: "PR already linked"
   record_open: "See its latest status in the PR panel"
   watch_update: "#%{number}: %{kinds}"
