@@ -890,10 +890,9 @@ fn session_launch_scopes_mcp_registrations() {
     let computer = registration(agent::McpRegistration::SERVER_NAME_COMPUTER_USE, 10);
     let control = registration(agent::McpRegistration::SERVER_NAME_CONTROL, 11);
     let visualize = registration(agent::McpRegistration::SERVER_NAME_VISUALIZE, 12);
-    for (provider, preview_supported, computer_supported) in [
-        (ProviderKind::ClaudeCode, true, true),
-        (ProviderKind::Codex, true, false),
-        (ProviderKind::Pi, false, true),
+    for (provider, computer_supported) in [
+        (ProviderKind::ClaudeCode, true),
+        (ProviderKind::Codex, false),
     ] {
         let mut settings = Settings::default();
         for computer_enabled in [false, true] {
@@ -913,10 +912,10 @@ fn session_launch_scopes_mcp_registrations() {
             .unwrap();
             let mut expected = Vec::new();
             for (enabled, reg) in [
-                (preview_supported, &preview),
+                (true, &preview),
                 (computer_enabled && computer_supported, &computer),
-                (preview_supported, &control),
-                (preview_supported, &visualize),
+                (true, &control),
+                (true, &visualize),
             ] {
                 if enabled {
                     expected.push((&reg.name, &reg.url, &reg.bearer_token));

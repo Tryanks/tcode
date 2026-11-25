@@ -664,3 +664,46 @@ fn maps_recorded_rpc_fixture() {
         }) if *cost == 0.75
     ));
 }
+
+/// Tcode's MCP servers reach pi as an extension that registers each with its
+/// bearer token, its tools declared to the model, and that reads Tcode's
+/// instructions from a file.
+#[test]
+fn a_launch_registers_tcodes_servers_and_gives_its_instructions() {
+    let server = McpRegistration {
+        name: McpRegistration::SERVER_NAME_CONTROL.into(),
+        url: "http://127.0.0.1:4100/control".into(),
+        bearer_token: "token".into(),
+    };
+    let files =
+        LaunchFiles::write(&[server], Some("Link every pull request.\nThen stop.")).unwrap();
+    let extension_path = files.extension.as_ref().unwrap().path().to_owned();
+    let instructions_path = files.instructions.as_ref().unwrap().path().to_owned();
+
+    let extension = std::fs::read_to_string(&extension_path).unwrap();
+    let constant = |name: &str| -> Value {
+        let line = extension
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("const {name} = ")))
+            .unwrap();
+        serde_json::from_str(line.strip_suffix(';').unwrap()).unwrap()
+    };
+    assert_eq!(
+        constant("servers"),
+        json!({
+            "tcode_control": {
+                "url": "http://127.0.0.1:4100/control",
+                "headers": {"Authorization": "Bearer token"},
+                "exposure": "direct",
+            }
+        })
+    );
+    assert_eq!(constant("instructions"), json!(instructions_path));
+    assert_eq!(
+        std::fs::read_to_string(&instructions_path).unwrap(),
+        "Link every pull request.\nThen stop."
+    );
+
+    drop(files);
+    assert!(!extension_path.exists() && !instructions_path.exists());
+}

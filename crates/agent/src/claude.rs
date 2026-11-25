@@ -343,7 +343,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     let instructions_file = opts
         .instructions
         .as_deref()
-        .map(InstructionsFile::write)
+        .map(|text| crate::process::LaunchFile::write("tcode-claude-instructions", "md", text))
         .transpose()
         .map_err(|err| AgentError::Spawn(format!("writing Tcode's instructions: {err}")))?;
     cmd.args(launch_args(
@@ -351,7 +351,9 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         &launch,
         resume_args(&opts.resume, opts.fork.is_some(), fork_anchor.as_deref()),
         &opts.mcp_servers,
-        instructions_file.as_ref().map(|file| file.0.as_path()),
+        instructions_file
+            .as_ref()
+            .map(crate::process::LaunchFile::path),
         &opts.extra_args,
     ));
     log::debug!(
@@ -520,35 +522,6 @@ fn launch_args(
     // anything Tcode set.
     args.extend(extra_args.iter().map(Into::into));
     args
-}
-
-/// Tcode's instructions for `--append-system-prompt-file`, removed when dropped. Text that spans
-/// lines cannot be an argument to a Windows batch file, which `claude.cmd` may be.
-struct InstructionsFile(PathBuf);
-
-impl InstructionsFile {
-    fn write(text: &str) -> std::io::Result<Self> {
-        use std::io::Write as _;
-        let path = std::env::temp_dir().join(format!(
-            "tcode-claude-instructions-{}.md",
-            uuid::Uuid::new_v4()
-        ));
-        // A new file: in a shared temporary directory, a name someone else
-        // created first must not be written through.
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        let written = Self(path);
-        file.write_all(text.as_bytes())?;
-        Ok(written)
-    }
-}
-
-impl Drop for InstructionsFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
 }
 
 const USAGE_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);

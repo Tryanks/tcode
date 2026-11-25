@@ -426,7 +426,7 @@ mod tests {
                 Some("2.0.6"),
             ),
             (ProviderKind::OpenCode, "opencode v2.1.0", "2.1.0", None),
-            (ProviderKind::Pi, "0.40.0", "0.40.0", None),
+            (ProviderKind::Pi, "0.40.0", "0.40.0", Some("1.2.0")),
             (
                 ProviderKind::Grok,
                 "grok 0.9.1 (0123456789ab)",

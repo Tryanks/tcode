@@ -219,6 +219,11 @@ impl ProviderKind {
                 default_config_dir: Some("~/.pi/agent"),
                 toggles: &[TRUST_PROJECT_EXTENSIONS],
                 native_mcp: Some(NativeMcpConfig::McpServersJson),
+                // `pi.registerMcpServer()`, through which Tcode's MCP servers
+                // reach a session, first appears in 0.99.0; a run an extension
+                // starts keeps the prompt sections of `before_agent_start`
+                // from 1.2.0 (`CHANGELOG.md`).
+                min_version: Some((1, 2, 0)),
                 ..none
             },
             ProviderKind::OpenCode => HarnessFacts {

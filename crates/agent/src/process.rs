@@ -465,6 +465,39 @@ fn descendants(_root: libc::pid_t) -> Vec<libc::pid_t> {
     Vec::new()
 }
 
+/// A file Tcode hands a harness by path, removed when dropped. Text that spans lines cannot be an
+/// argument to a Windows batch file, which the harness's launcher may be.
+pub(crate) struct LaunchFile(std::path::PathBuf);
+
+impl LaunchFile {
+    /// Writes `text` to a new file `<prefix>-<uuid>.<extension>` in the temporary directory, which
+    /// only its owner may read: what it holds may be a credential.
+    pub(crate) fn write(prefix: &str, extension: &str, text: &str) -> std::io::Result<Self> {
+        let path =
+            std::env::temp_dir().join(format!("{prefix}-{}.{extension}", uuid::Uuid::new_v4()));
+        // A new file: in a shared temporary directory, a name someone else
+        // created first must not be written through.
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&path)?;
+        let written = Self(path);
+        file.write_all(text.as_bytes())?;
+        Ok(written)
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for LaunchFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// Refuses an argument holding a line break for a Windows batch file, which
 /// `cmd.exe` would cut short there; std refuses it too, in words that name
 /// neither the program nor a way out.
