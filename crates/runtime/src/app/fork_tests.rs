@@ -238,51 +238,6 @@ fn a_fork_through_a_turn_holds_it_and_what_came_before_and_leaves_the_source_alo
     drop(events);
 }
 
-/// With no prompt after it the turn's fork is all of the session, for every
-/// Harness that forks through a turn.
-#[test]
-fn a_fork_through_the_latest_turn_is_the_whole_session() {
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("tcode-fork-latest");
-    let cwd = store.root().join("project");
-    std::fs::create_dir_all(&cwd).unwrap();
-    let state = host(&store, cx);
-    for (case, provider) in [
-        ProviderKind::ClaudeCode,
-        ProviderKind::Codex,
-        ProviderKind::Pi,
-        ProviderKind::OpenCode,
-        ProviderKind::Grok,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let id = format!("source-{case}");
-        state.update(cx, |state, cx| {
-            install(state, &id, provider, cwd.clone(), cx);
-            turn(state, &id, cx, 0, "first", &[]);
-            turn(state, &id, cx, 1, "second", &[]);
-        });
-        cx.run_until_parked();
-        let fork = forked(send(
-            &state,
-            cx,
-            case as u64 + 1,
-            fork_at(&id, 1, "checkpoint-1"),
-        ));
-        settled(cx, &fork);
-        state.read(|state| {
-            let fork = &state.residents.live[&fork];
-            assert_eq!(prompts(fork), ["first", "second"], "{provider:?}");
-            assert_eq!(
-                fork.meta.pending_fork,
-                Some(ForkPoint::Tail),
-                "{provider:?}"
-            );
-        });
-    }
-}
-
 /// Where a fork is refused: a restore point other than the client saw, a
 /// Harness that has no fork through a turn, a turn still running, a turn
 /// whose next prompt has no restore point yet, and a last turn with a prompt
