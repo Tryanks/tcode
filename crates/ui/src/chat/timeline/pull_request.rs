@@ -39,7 +39,7 @@ impl TimelineView {
         let said = if linked.already {
             crate::tr!("pull_requests.record_already_linked")
         } else {
-            crate::tr!("pull_requests.record_opened")
+            crate::tr!("pull_requests.record_linked")
         };
         let at = entry
             .ts
