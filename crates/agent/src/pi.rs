@@ -293,7 +293,7 @@ async fn run_actor(
     // Every launch: pi keeps neither Tcode's MCP servers nor its instructions
     // in the session. Held as long as the actor: pi reads them again when a
     // `/reload` loads its resources anew.
-    let launch_files = match launch_files(&opts.mcp_servers, opts.instructions.as_deref()) {
+    let launch_files = match LaunchFiles::write(&opts.mcp_servers, opts.instructions.as_deref()) {
         Ok(files) => files,
         Err(err) => {
             let _ = ready
@@ -304,8 +304,8 @@ async fn run_actor(
             return;
         }
     };
-    for (flag, file) in &launch_files {
-        cmd.arg(flag).arg(file.path());
+    if let Some(extension) = &launch_files.extension {
+        cmd.arg("--extension").arg(extension.path());
     }
     cmd.current_dir(&opts.cwd)
         .stdin(Stdio::piped())
@@ -435,9 +435,7 @@ struct PiActor {
     entries_cursor: Option<String>,
     /// The session file pi works in now: what a fork leaves, to return to.
     session_file: Option<String>,
-    /// The files of the launch's arguments, by flag, which a `/reload` reads
-    /// again.
-    launch_files: Vec<(&'static str, LaunchFile)>,
+    launch_files: LaunchFiles,
 }
 
 /// What a pi RPC response settles.
@@ -854,7 +852,9 @@ impl PiActor {
                         // pi connects what an extension registers only while
                         // its built-in MCP support is loaded (`--no-mcp`, an
                         // extension replacing `/mcp`), and says so here.
+                        // Tcode's instructions speak of those servers' tools.
                         if self.refused_tcode_servers(&message) {
+                            self.launch_files.instructions = None;
                             self.events.emit(AgentEvent::McpServersNotAttached).await;
                         }
                         self.events.emit(extension_error(&message)).await;
@@ -879,9 +879,9 @@ impl PiActor {
     fn refused_tcode_servers(&self, message: &Value) -> bool {
         let Some(extension) = self
             .launch_files
-            .iter()
-            .find(|(flag, _)| *flag == MCP_EXTENSION_FLAG)
-            .and_then(|(_, file)| file.path().file_name())
+            .extension
+            .as_ref()
+            .and_then(|file| file.path().file_name())
         else {
             return false;
         };
@@ -2241,9 +2241,6 @@ fn resume_session(resume: &Option<ResumeCursor>) -> Option<&str> {
     resume.as_ref()?.str_field(&["session_file", "session_id"])
 }
 
-/// The flag the extension registering Tcode's MCP servers is passed with.
-const MCP_EXTENSION_FLAG: &str = "--extension";
-
 /// What pi said of an extension that failed.
 fn extension_error(message: &Value) -> AgentEvent {
     AgentEvent::Warning {
@@ -2261,38 +2258,42 @@ fn extension_error(message: &Value) -> AgentEvent {
     }
 }
 
-/// The flags and files through which Tcode gives pi what goes beside the
-/// conversation: an extension registering its MCP servers (`--extension`,
-/// `pi.registerMcpServer`, `docs/extensions.md`) and its instructions,
-/// appended to the system prompt (`--append-system-prompt`, which reads an
-/// existing file). Files keep the arguments on one line for a Windows batch
-/// launcher.
-fn launch_files(
-    servers: &[McpRegistration],
-    instructions: Option<&str>,
-) -> std::io::Result<Vec<(&'static str, LaunchFile)>> {
-    let mut files = Vec::new();
-    if !servers.is_empty() {
-        let extension = mcp_extension(servers);
-        files.push((
-            MCP_EXTENSION_FLAG,
-            LaunchFile::write("tcode-pi-mcp", "ts", &extension)?,
-        ));
-    }
-    if let Some(instructions) = instructions {
-        files.push((
-            "--append-system-prompt",
-            LaunchFile::write("tcode-pi-instructions", "md", instructions)?,
-        ));
-    }
-    Ok(files)
+/// What Tcode gives pi beside the conversation, through an extension
+/// (`--extension`, `docs/extensions.md`).
+struct LaunchFiles {
+    extension: Option<LaunchFile>,
+    /// Read by the extension at each run: without the file, pi's prompt has
+    /// no section of Tcode's.
+    instructions: Option<LaunchFile>,
 }
 
-/// A pi extension registering `servers` for the session. Their tools are
-/// declared to the model as `mcp__<server>__<tool>` (`exposure: "direct"`):
-/// pi's default, `codemode`, reaches them only from inside a script, whose
-/// calls are not tool calls of the conversation.
-fn mcp_extension(servers: &[McpRegistration]) -> String {
+impl LaunchFiles {
+    fn write(servers: &[McpRegistration], instructions: Option<&str>) -> std::io::Result<Self> {
+        let instructions = instructions
+            .map(|text| LaunchFile::write("tcode-pi-instructions", "md", text))
+            .transpose()?;
+        let extension = (!servers.is_empty() || instructions.is_some())
+            .then(|| {
+                let text = launch_extension(servers, instructions.as_ref().map(LaunchFile::path));
+                LaunchFile::write("tcode-pi-extension", "ts", &text)
+            })
+            .transpose()?;
+        Ok(Self {
+            extension,
+            instructions,
+        })
+    }
+}
+
+/// A pi extension registering `servers` for the session and giving its model
+/// the text of `instructions`.
+///
+/// The servers' tools are declared to the model as `mcp__<server>__<tool>`
+/// (`exposure: "direct"`): pi's default, `codemode`, reaches them only from
+/// inside a script, whose calls are not tool calls of the conversation. The
+/// text is a section of the system prompt: pi takes `--append-system-prompt`
+/// in place of the user's `APPEND_SYSTEM.md`, not beside it.
+fn launch_extension(servers: &[McpRegistration], instructions: Option<&Path>) -> String {
     let servers: serde_json::Map<String, Value> = servers
         .iter()
         .map(|server| {
@@ -2307,8 +2308,22 @@ fn mcp_extension(servers: &[McpRegistration]) -> String {
         })
         .collect();
     format!(
-        "const servers = {};\nexport default function (pi) {{\n  for (const [name, config] of Object.entries(servers)) {{\n    pi.registerMcpServer(name, config);\n  }}\n}}\n",
-        Value::Object(servers)
+        r#"import {{ existsSync, readFileSync }} from "node:fs";
+const servers = {};
+const instructions = {};
+export default function (pi) {{
+  for (const [name, config] of Object.entries(servers)) {{
+    pi.registerMcpServer(name, config);
+  }}
+  pi.on("before_agent_start", (event) => {{
+    if (instructions !== null && existsSync(instructions)) {{
+      event.systemPromptOptions.sections.tcode_instructions = readFileSync(instructions, "utf8");
+    }}
+  }});
+}}
+"#,
+        Value::Object(servers),
+        json!(instructions),
     )
 }
 

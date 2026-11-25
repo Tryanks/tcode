@@ -666,44 +666,44 @@ fn maps_recorded_rpc_fixture() {
 }
 
 /// Tcode's MCP servers reach pi as an extension that registers each with its
-/// bearer token, its tools declared to the model, and Tcode's instructions as
-/// a file appended to the system prompt.
+/// bearer token, its tools declared to the model, and that reads Tcode's
+/// instructions from a file.
 #[test]
-fn a_launch_registers_tcodes_servers_and_appends_its_instructions() {
+fn a_launch_registers_tcodes_servers_and_gives_its_instructions() {
     let server = McpRegistration {
         name: McpRegistration::SERVER_NAME_CONTROL.into(),
         url: "http://127.0.0.1:4100/control".into(),
         bearer_token: "token".into(),
     };
-    let files = launch_files(&[server], Some("Link every pull request.\nThen stop.")).unwrap();
-    let flags: Vec<_> = files.iter().map(|(flag, _)| *flag).collect();
-    assert_eq!(flags, ["--extension", "--append-system-prompt"]);
+    let files =
+        LaunchFiles::write(&[server], Some("Link every pull request.\nThen stop.")).unwrap();
+    let extension_path = files.extension.as_ref().unwrap().path().to_owned();
+    let instructions_path = files.instructions.as_ref().unwrap().path().to_owned();
 
-    let extension = std::fs::read_to_string(files[0].1.path()).unwrap();
-    let servers = extension
-        .strip_prefix("const servers = ")
-        .and_then(|rest| rest.split_once(";\n"))
-        .map(|(servers, _)| serde_json::from_str::<Value>(servers).unwrap());
+    let extension = std::fs::read_to_string(&extension_path).unwrap();
+    let constant = |name: &str| -> Value {
+        let line = extension
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("const {name} = ")))
+            .unwrap();
+        serde_json::from_str(line.strip_suffix(';').unwrap()).unwrap()
+    };
     assert_eq!(
-        servers,
-        Some(json!({
+        constant("servers"),
+        json!({
             "tcode_control": {
                 "url": "http://127.0.0.1:4100/control",
                 "headers": {"Authorization": "Bearer token"},
                 "exposure": "direct",
             }
-        }))
+        })
     );
-    assert!(extension.contains("pi.registerMcpServer(name, config)"));
+    assert_eq!(constant("instructions"), json!(instructions_path));
     assert_eq!(
-        std::fs::read_to_string(files[1].1.path()).unwrap(),
+        std::fs::read_to_string(&instructions_path).unwrap(),
         "Link every pull request.\nThen stop."
     );
 
-    let paths: Vec<_> = files
-        .iter()
-        .map(|(_, file)| file.path().to_owned())
-        .collect();
     drop(files);
-    assert!(paths.iter().all(|path| !path.exists()));
+    assert!(!extension_path.exists() && !instructions_path.exists());
 }

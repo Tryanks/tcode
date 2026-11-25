@@ -1642,7 +1642,11 @@ fn skills_list_response_parses_to_provider_commands() {
 fn startup_failure_reports_exit_status_and_stderr_tail() {
     let message = smol::block_on(list_models(
         Some(PathBuf::from("/bin/cat")),
-        LaunchEnv::default(),
+        LaunchEnv {
+            // `cat` words its error in the user's language.
+            env: vec![("LC_ALL".into(), "C".into())],
+            home: None,
+        },
         &Default::default(),
     ))
     .unwrap_err()

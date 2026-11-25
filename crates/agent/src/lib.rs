@@ -314,8 +314,8 @@ pub struct GoalControl {
 #[serde(rename_all = "snake_case")]
 pub enum InstructionChannel {
     /// Part of the session's system instructions, set at every start, on creation and resume
-    /// alike (Claude Code's and pi's appended system prompt, an OpenCode session instruction
-    /// entry).
+    /// alike (Claude Code's appended system prompt, a section of pi's, an OpenCode session
+    /// instruction entry).
     SessionAppend,
     /// Developer context Codex re-sends when it changes; restored after a compaction.
     DeveloperContext,
