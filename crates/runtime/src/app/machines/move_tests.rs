@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use agent::{AgentEvent, ProviderKind, TurnStatus};
 use tcode_core::project::{Project, SessionMeta, WorktreeInfo};
 use tcode_protocol::{
-    Command, CommandResponse, GroupAction, MachineRequest, MachineResponse, MovePart, MovePhase,
-    ProjectMoveStatus, ProtocolError, Query, QueryResponse, ServerEvent, Subscription, Topic,
+    Command, CommandResponse, GroupAction, MachineRequest, MachineResponse, MovePart, MovePause,
+    MovePhase, ProjectMoveStatus, ProtocolError, Query, QueryResponse, ServerEvent, Subscription,
+    Topic,
 };
 use tcode_services::store::SessionStore;
 
@@ -201,8 +202,9 @@ fn rename(id: &str) -> Command {
 
 /// The project moves with every thread: the laptop lists it at the root it
 /// was given with each thread, its history and a `thread_moved` entry, the
-/// worktree thread in a worktree of the laptop's own; the desk lists neither
-/// and says where each thread went.
+/// worktree thread in a worktree of the laptop's own; the desk lists neither,
+/// says where each thread went, and keeps neither the move's parts nor its
+/// refs.
 #[test]
 fn a_project_moves_with_its_threads_and_the_desk_says_where_they_went() {
     let (desk_dir, laptop_dir) = (TestDir::new("desk"), TestDir::new("laptop"));
@@ -216,7 +218,22 @@ fn a_project_moves_with_its_threads_and_the_desk_says_where_they_went() {
     let root = laptop_dir.0.join("code").join("app");
 
     move_to(&desk, &laptop, &root).unwrap();
+    let begun = desk.moves_until(|moves| !moves.is_empty());
     desk.moves_until(|moves| moves.is_empty());
+    assert!(
+        !desk_dir
+            .0
+            .join("store")
+            .join("moves")
+            .join("out")
+            .join(&begun[0].move_id)
+            .exists(),
+        "the desk keeps the move's parts"
+    );
+    assert_eq!(
+        git(&seeded.project.root, &["for-each-ref", "refs/tcode/move"]),
+        ""
+    );
 
     let (projects, threads) = laptop.listed();
     let [project] = projects.as_slice() else {
@@ -339,13 +356,15 @@ fn a_cancelled_move_leaves_both_machines_as_they_were() {
     desk.command(rename(&first)).unwrap();
 }
 
-/// A move whose connection is lost in the middle of a part goes on from
-/// the bytes the laptop holds, not from the start, and completes.
+/// A move whose laptop stops in the middle of a part says the laptop cannot
+/// be reached, and keeps saying so while it tries again, until the laptop
+/// answers; then it goes on from the bytes the laptop holds, not from the
+/// start, and completes.
 #[test]
 fn a_move_interrupted_mid_part_resumes_where_the_laptop_is() {
     let (desk_dir, laptop_dir) = (TestDir::new("desk"), TestDir::new("laptop"));
     let seeded = seed(&desk_dir.0, 48 << 20);
-    let (mut desk, laptop) = desk_and_laptop(&desk_dir, &laptop_dir);
+    let (desk, mut laptop) = desk_and_laptop(&desk_dir, &laptop_dir);
     let root = laptop_dir.0.join("app");
 
     move_to(&desk, &laptop, &root).unwrap();
@@ -354,19 +373,27 @@ fn a_move_interrupted_mid_part_resumes_where_the_laptop_is() {
             .iter()
             .any(|status| status.phase == MovePhase::SendingCode && status.done > 0)
     });
-    desk.stop_hosting();
+    laptop.stop_hosting();
     let paused =
         desk.moves_until(|moves| moves.iter().any(|status| status.phase == MovePhase::Paused));
+    assert_eq!(paused[0].paused, Some(MovePause::Unreachable));
     let held = paused[0].done;
     assert!(held > 0 && held < paused[0].total, "{paused:?}");
 
-    desk.start_hosting();
+    laptop.start_hosting();
     move_to(&desk, &laptop, &root).unwrap();
     let resumed = desk.moves_until(|moves| {
-        moves
-            .iter()
-            .any(|status| status.phase == MovePhase::SendingCode)
+        assert!(
+            moves
+                .iter()
+                .all(|status| status.phase != MovePhase::Preparing
+                    && (status.phase != MovePhase::Paused || status.paused.is_some())),
+            "a paused move stopped saying why before the laptop answered: {moves:?}"
+        );
+        moves.iter().any(|status| status.phase != MovePhase::Paused)
     });
+    assert_eq!(resumed[0].phase, MovePhase::SendingCode, "{resumed:?}");
+    assert_eq!(resumed[0].paused, None);
     assert!(resumed[0].done >= held, "{resumed:?} after {held}");
     desk.moves_until(|moves| moves.is_empty());
     let (projects, threads) = laptop.listed();

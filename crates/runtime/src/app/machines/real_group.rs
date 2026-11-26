@@ -42,6 +42,9 @@ pub(super) struct Machine {
     pub(super) events: async_channel::Receiver<EventEnvelope>,
     pub(super) link: MachineLink,
     pub(super) store: SessionStore,
+    /// The UDP port its endpoint last had, which it binds again when it
+    /// starts hosting again, as a machine on a fixed port does.
+    port: Option<u16>,
 }
 
 impl Machine {
@@ -76,6 +79,7 @@ impl Machine {
             events,
             link,
             store,
+            port: None,
         }
     }
 
@@ -111,13 +115,21 @@ impl Machine {
 
     pub(super) fn stop_hosting(&mut self) {
         if let Some(endpoint) = self.endpoint.take() {
+            self.port = endpoint
+                .direct_addrs()
+                .iter()
+                .find(|addr| addr.is_ipv4())
+                .map(|addr| addr.port());
             endpoint.shutdown();
         }
     }
 
     pub(super) fn start_hosting(&mut self) {
-        self.endpoint =
-            Some(TraverseHost::start(self.mux.clone(), config(&self.dir, &self.name)).unwrap());
+        let config = HostConfig {
+            bind_port: self.port,
+            ..config(&self.dir, &self.name)
+        };
+        self.endpoint = Some(TraverseHost::start(self.mux.clone(), config).unwrap());
     }
 }
 

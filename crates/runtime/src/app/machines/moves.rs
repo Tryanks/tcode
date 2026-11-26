@@ -462,13 +462,8 @@ impl AppState {
         let Some(outgoing) = self.moves.outgoing.get_mut(project_id) else {
             return;
         };
-        outgoing.paused = None;
-        if outgoing.phase == MovePhase::Paused {
-            outgoing.phase = match outgoing.journal.stage {
-                Stage::Sending => MovePhase::Preparing,
-                _ => MovePhase::Committing,
-            };
-        }
+        // A paused move stays paused, and says why, until the other machine
+        // answers the driver.
         let driver = Driver {
             host: cx.clone(),
             link,
@@ -774,33 +769,49 @@ impl AppState {
 
     /// The other machine has the project: remove it and its threads here,
     /// their Tcode worktrees with them, leaving where each thread went. The
-    /// project's directory stays.
-    fn let_moved_project_go(&mut self, journal: &Journal, cx: &mut HostCx) {
-        let Some(outgoing) = self.moves.outgoing.remove(&journal.project_id) else {
-            return;
-        };
-        for id in &outgoing.journal.thread_ids {
+    /// project's directory stays. The move itself ends with
+    /// [`Self::end_moved_project`], once what it left is cleared.
+    fn let_moved_project_go(
+        &mut self,
+        journal: &Journal,
+        cx: &mut HostCx,
+    ) -> Option<HostTask<Result<(), ProtocolError>>> {
+        for id in &journal.thread_ids {
             self.moves
                 .moved_threads
                 .insert(id.clone(), journal.machine.clone());
         }
-        let mut ids = outgoing.journal.thread_ids.clone();
+        let mut ids = journal.thread_ids.clone();
         for meta in self.moving_threads(&journal.project_id) {
             if !ids.contains(&meta.id) {
                 ids.push(meta.id);
             }
         }
-        if self
-            .projects
+        self.projects
             .iter()
             .any(|project| project.id == journal.project_id)
+            .then(|| self.remove_project_and_threads(&journal.project_id, &ids, true, cx))
+    }
+
+    /// The move of `project_id` that `run` drives is over.
+    fn end_moved_project(&mut self, project_id: &str, run: u64, cx: &mut HostCx) {
+        if self
+            .moves
+            .outgoing
+            .get(project_id)
+            .is_none_or(|outgoing| outgoing.run != run)
         {
-            let task = self.remove_project_and_threads(&journal.project_id, &ids, true, cx);
-            cx.spawn_detached(async move {
-                if let Err(error) = task.await {
-                    log::warn!("{}", error.message);
-                }
-            });
+            return;
+        }
+        if let Some(driver) = self
+            .moves
+            .outgoing
+            .remove(project_id)
+            .and_then(|outgoing| outgoing.driver)
+        {
+            // This is the driver ending the move: dropping its handle would
+            // cancel it before it returns.
+            driver.detach();
         }
         self.publish_project_moves(cx);
     }
@@ -1043,8 +1054,12 @@ impl Driver {
 
     async fn send(&self, journal: Journal) -> Result<(), Stop> {
         self.record(&journal).await?;
-        self.update(|outgoing| outgoing.phase = MovePhase::Preparing)
-            .await?;
+        self.update(|outgoing| {
+            if outgoing.paused.is_none() {
+                outgoing.phase = MovePhase::Preparing;
+            }
+        })
+        .await?;
         let parts = self.parts(&journal).await?;
         let total = parts.iter().map(|part| part.size).sum::<u64>();
         let begun = self
@@ -1075,6 +1090,7 @@ impl Driver {
             .sum();
         self.update(move |outgoing| {
             outgoing.phase = MovePhase::SendingCode;
+            outgoing.paused = None;
             outgoing.total = total;
             outgoing.done = done;
             outgoing.waits = 0;
@@ -1221,8 +1237,6 @@ impl Driver {
     /// The commit went out and no answer came: ask the other machine what
     /// became of it.
     async fn settle_commit(&self, mut journal: Journal) -> Result<(), Stop> {
-        self.update(|outgoing| outgoing.phase = MovePhase::Committing)
-            .await?;
         let state = self
             .call(
                 &journal,
@@ -1231,6 +1245,11 @@ impl Driver {
                 },
             )
             .await?;
+        self.update(|outgoing| {
+            outgoing.phase = MovePhase::Committing;
+            outgoing.paused = None;
+        })
+        .await?;
         match state {
             MachineResponse::MoveState(MoveState::Committed { project_id }) => {
                 self.settle(journal, Ok(MachineResponse::MoveCommitted { project_id }))
@@ -1259,7 +1278,9 @@ impl Driver {
         }
     }
 
-    /// Let the project go here now that the other machine has it.
+    /// Let the project go here now that the other machine has it, clear
+    /// what the move left, and only then forget the move: a restart before
+    /// that finds it committed and does this again.
     async fn finish(&self, journal: Journal) -> Result<(), Stop> {
         let redirects: Vec<Mutation> = journal
             .thread_ids
@@ -1272,25 +1293,50 @@ impl Driver {
             .await
             .map_err(|error| failed(format!("could not record where the threads went: {error}")))?;
         let let_go = journal.clone();
-        self.host
+        let removed = self
+            .host
             .enqueue_and_wait(move |app, cx| app.let_moved_project_go(&let_go, cx))
             .await
             .map_err(|()| Stop::Superseded)?;
+        if let Some(removed) = removed
+            && let Err(error) = removed.await
+        {
+            log::warn!("{}", error.message);
+        }
+        // The project's and threads' removal is queued; the journal goes only
+        // once the store holds it.
+        let barrier = self
+            .host
+            .enqueue_and_wait(|app, cx| app.store_write_barrier(cx))
+            .await
+            .map_err(|()| Stop::Superseded)?;
+        match barrier.recv().await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(failed(format!("the store failed: {error}"))),
+            Err(_) => return Err(Stop::Superseded),
+        }
         let (store, data_dir) = (self.store.clone(), self.store.root().clone());
+        let move_id = journal.move_id.clone();
         let ended = self
             .host
             .unblock(move || {
-                let ended = disk::end_outgoing(&data_dir, &journal.move_id, &journal.project_root);
+                disk::end_outgoing(&data_dir, &move_id, &journal.project_root)?;
                 store
-                    .apply(&[Mutation::remove_move_record(&journal.move_id)])
+                    .apply(&[Mutation::remove_move_record(&move_id)])
                     .map_err(|error| error.to_string())
-                    .and(ended)
             })
             .await;
         if let Err(error) = ended {
-            log::warn!("a moved project left something behind: {error}");
+            log::warn!(
+                "moved project {} left something behind, cleared at the next start: {error}",
+                self.project_id
+            );
         }
-        Ok(())
+        let (project_id, run) = (self.project_id.clone(), self.run);
+        self.host
+            .enqueue_and_wait(move |app, cx| app.end_moved_project(&project_id, run, cx))
+            .await
+            .map_err(|()| Stop::Superseded)
     }
 }
 
