@@ -834,7 +834,7 @@ impl Render for ImageViewer {
                 .child(transfer.fade(panel))
         });
 
-        let traffic_lights = crate::window_caption::traffic_light_inset(window);
+        let traffic_lights = crate::window_caption::traffic_light_inset(window, cx);
         let bar = crate::material::bar_divider_below(
             crate::material::bar(
                 "image-viewer-toolbar",

@@ -56,10 +56,18 @@ pub(crate) const RIGHT_PANEL_CAPTION_WIDTH: f32 = if CLIENT_DECORATED {
 /// What [`traffic_light_inset`] reserves, for width budgets with no window to ask.
 pub(crate) const TRAFFIC_LIGHT_INSET: f32 = 80.;
 
+/// Whether the system draws traffic lights over the top-left of this app's
+/// windows outside full screen. Only macOS has them, and not where the app
+/// lays out as a mobile build: the window the phone preview opens there
+/// (`examples/phone.rs`) has no titlebar to hold them.
+pub(crate) fn has_traffic_lights(cx: &App) -> bool {
+    cfg!(target_os = "macos") && !crate::window_seam::is_mobile(cx)
+}
+
 /// Left inset a top strip keeps clear of the native macOS traffic lights,
 /// which the system draws over the window's top-left outside full screen.
-pub(crate) fn traffic_light_inset(window: &Window) -> Pixels {
-    if cfg!(target_os = "macos") && !window.is_fullscreen() {
+pub(crate) fn traffic_light_inset(window: &Window, cx: &App) -> Pixels {
+    if has_traffic_lights(cx) && !window.is_fullscreen() {
         px(TRAFFIC_LIGHT_INSET)
     } else {
         Pixels::ZERO

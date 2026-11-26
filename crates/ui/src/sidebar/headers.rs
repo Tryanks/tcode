@@ -6,7 +6,7 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let traffic_lights = crate::window_caption::traffic_light_inset(window);
+        let traffic_lights = crate::window_caption::traffic_light_inset(window, cx);
         window_drag_area(
             "sidebar-app-row-drag",
             bar("sidebar-app-row", Bar::Strip, false, cx)
