@@ -125,9 +125,12 @@ joins. Existing members keep access until the owner removes them, deletes the
 space or revokes their device. A removed member can join again with the old
 link if it remains enabled and valid.
 
-`traverse.json` is written as version 6. Versions 3 (spaces and device
-access), 4 (the group) and 5 (space policies), written by earlier releases,
-are read as they are;
+`traverse.json` is written as version 6, which adds what a machine accepts
+from its group and what the group's devices may do on it. Versions 3 (spaces
+and device access), 4 (the group) and 5 (space policies), written by earlier
+releases, are read as they are, with **Accept threads other machines start
+here** on, **Accept projects other machines move here** off and the group's
+devices operating the machine;
 an older build reads only the versions it knows, so it refuses a file this
 build wrote. Loading a version 2 file migrates existing paired devices to
 explicit full access and starts with no spaces. Existing devices do not become
@@ -141,8 +144,8 @@ lost phone on any of them and every one refuses it. No machine is in charge.
 The machine that started the group can stop or leave, and the others carry on.
 
 **The risk is yours to take.** Every member can admit devices into every
-other member, so a compromised member, or a leaked invitation, reaches the
-whole group. Groups are off until you create one; leave them off if you do
+other member and, while they accept threads, start threads on them, so a
+compromised member, or a leaked invitation, reaches the whole group. Groups are off until you create one; leave them off if you do
 not need them.
 
 Inside a group there is one way in: a member's invitation. A device that
@@ -203,48 +206,281 @@ publishes to. They exchange the group when it changes and every five minutes.
 ### Between machines
 
 The members of a group also connect to each other over `tcode/1`, each under
-its own machine key, to ask each other for work: a machine admits such a
-connection only from another member, serves it nothing a device opens, and
-refuses a device's connection that asks as a machine. Each machine decides
-for itself, in its group section, whether it takes the threads the others
-start on it (on until switched off) and the projects they move to it (off
-until switched on). An answer to something a machine itself sent out comes
-back whatever those switches say.
+its own machine key, to ask each other for work: to start a thread, to hand a
+project over, to report back. A machine admits such a connection only from a
+current member, serves it nothing a device opens, and refuses a device's
+connection that asks as a machine. Each machine decides for itself what it
+takes (see [What a machine accepts](#what-a-machine-accepts)) and what the
+group's other devices may do on it (see
+[What the group's other devices may do](#what-the-groups-other-devices-may-do)).
+An answer to something a machine itself sent out comes back whatever those
+settings say.
 
-Any member can give any machine a label, which the whole group and its
-devices show for it; clearing it brings back the machine's own name.
+### Label a machine
 
-A thread can start a thread on another machine of its group through
-`tcode_control`: `list_machines` lists the group's machines, and
-`start_thread_on_machine` starts the thread in a project that machine already
-has. Nothing goes with it but its first message: it runs on that machine's
-code as it is there, carries no files or attachments, and that machine's
-harnesses, models, permission defaults and **Settings → Control** apply. The
-tools that read threads and projects, send messages, drive a run, watch threads
-and answer a subagent's questions and approvals take the machine too, and a
-thread elsewhere is linked as `tcode-thread://<thread_id>@<machine_id>`.
-Started as a subagent, the thread is an ordinary thread on its machine; its
-report, approvals and questions come back to the thread that started it, and
-a report made while the starting machine is off is kept until that machine
-returns and its thread has taken it. A cancel that cannot reach a machine is
-sent when it can. **Let threads start threads on other machines of the
-group** in **Settings → Control** decides whether this machine's threads are
-offered those tools at all; **Accept threads other machines start here**
-decides whether this machine takes what the others' threads ask. A thread
-started from another machine never runs under a more permissive mode than the
-thread that started it. A thread on another machine may read, start, message,
-interrupt, cancel and watch threads here, and answer its own subagent; it may
-not delete or rewind threads, use git, pull requests or terminals, change
-settings, create or move projects, or start threads from here on a third
-machine. A space member's turn reaches no other machine.
+Any member can give any machine of the group a label, and everyone in the
+group sees it. Set it in either place:
 
-**Group devices** sets what the group's full-access devices may do on this
-machine: operate it as its own window does, only view it (read threads,
-projects and settings, change nothing, open no terminal, tunnel or editor),
-or not connect at all, which a device shows as **Not open to the group's
-other devices**. A change closes those devices' connections and they
-reconnect under it. While it is below operate, the machine takes no threads
-or projects from the other machines either. Space members are not affected.
+- **Settings → Remote → Machine group**: **Rename** on the machine's row
+  under **Machines**.
+- **Machines**: **⋯ → Set label…** on the machine's row.
+
+The dialog, **Label for «‹name›»**, ends with **Save**. Leave the field empty
+and the machine goes by its own name again.
+
+The label is shown wherever the machine is named: its heading in the sidebar,
+the **Machines** page, the move dialog, the cards of threads started on it.
+It does not change the machine's own name, which is **Machine name** in
+**Settings → Remote** on that machine; the group's row shows that name under
+the label as **Machine name ‹name›**.
+
+### What a machine accepts
+
+Under the group's name in **Settings → Remote → Machine group**, each machine
+has two switches for what the group's other machines may ask of it:
+
+| Switch | Default | What it allows |
+| --- | --- | --- |
+| **Accept threads other machines start here** | On | Threads on the group's other machines may start threads on this machine. They run under this machine's accounts, Harnesses and permissions. |
+| **Accept projects other machines move here** | Off | The group's other machines may move a project here together with its threads. |
+
+The **Machines** list in the same section says what each other machine takes:
+**Takes threads and projects from the group**, **Takes threads from the
+group, not projects**, **Takes projects from the group, not threads** or
+**Takes no threads or projects from the group**. A machine that has not said,
+because it may run an older Tcode, reads **Has not said what it takes; it may
+run an older Tcode**. Moving a project offers only a machine that takes
+projects.
+
+A switch applies at once. While the group's other devices may not operate a
+machine, both switches on it are off and cannot be changed (see below).
+
+### What the group's other devices may do
+
+**Other devices of the group**, in the same section, sets what the group's
+other devices may do on this machine. It is a setting of this machine alone
+and covers every other device of the group, your own phone included.
+
+| Choice | What a device can do |
+| --- | --- |
+| **May operate this machine** | What the machine's own window can. This is the default. |
+| **May only view** | Open the machine and read what is on it: its projects, threads and what is in them, files, Git status and diffs, settings. Every command is refused: no message, approval or answer, no new thread, no change to a project or a setting. No terminal, no upload, no Preview tunnel, no editor connection, no browsing of the machine's folders. |
+| **Cannot open this machine** | A device cannot connect. It shows the machine as **Not open to the group's other devices**, stops retrying, and is not offered **Pair again**: it is still paired. |
+
+On a machine that only lets a device view it, the device's heading for the
+machine says **View only**, its composer is disabled with **‹machine› only
+lets other devices view.**, and approvals and questions show but cannot be
+answered.
+
+The machine's own window is not affected: it operates the machine as before
+and can still open the group's other machines. Space members are not
+affected, and neither is a browser logged in to a headless machine.
+
+Choosing a narrower level asks first, because every full-access device of the
+group is disconnected at once and reconnects under the new level, a window
+that was already open included. Choosing a wider one does not ask. While a
+machine is below **May operate this machine** it takes no threads and no
+projects from the other machines either, whatever its two switches held.
+
+### Start a thread on another machine
+
+A thread can start a thread on another machine of its group, to run work
+where that machine's code, tools or hardware are. A thread does this through
+`tcode_control`, with two tools:
+
+- `list_machines` lists the group's machines: each one's id, its name, whether
+  it answered, whether it takes threads and projects, and whether it runs the
+  same protocol.
+- `start_thread_on_machine` starts a thread with a first message in a project
+  that machine already has. The other tools that read threads and projects,
+  send messages, interrupt or cancel, watch threads and answer a question
+  take the machine too. A thread elsewhere is linked as
+  `tcode-thread://<thread_id>@<machine_id>`.
+
+`start_thread_on_machine` is a tool of its own, separate from
+`start_thread`: whether a call needs your approval is the Harness's
+permission mode to decide for each of them, as for any other tool. A thread
+is offered both tools only while **Let threads use tcode_control** and **Let
+threads start threads on other machines of the group** are on in **Settings →
+Control** (the second is on by default) and this machine is in a group. With
+either off, threads on this machine are not offered them. Threads on other
+machines can still ask this machine, unless **Let threads use tcode_control**
+is off here.
+
+The thread starts in a project the other machine already has, on that
+machine's code as it is there. Nothing goes with it but its first message: no
+files, no attachments. That machine's Harnesses, models, profiles and
+**Settings → Control** apply, including the models listed under **Available
+models** there, which limit the threads the group's other machines start. The
+other machine must have **Accept threads other machines start here** on, must
+let the group's devices operate it and must have **Let threads use
+tcode_control** on.
+
+The thread never runs under a more permissive permission mode than the thread
+that started it: the class of the starting thread's own mode is the limit, or,
+where the other machine cannot tell what that is, the class of the Harness's
+default mode. A Harness with no mode as strict starts nothing.
+
+Started without `subagent`, the thread is an ordinary thread of that machine.
+Started as a subagent, it is still an ordinary thread there, and its report,
+approval requests and questions come back to the thread that started it as
+messages. The started thread:
+
+- is in the sidebar under its own machine's section, and any device open on
+  that machine can answer it;
+- says who started it: its log names the starting thread as **‹thread› on
+  ‹machine›**, and a subagent's header has an arrow back to its starter, which
+  is disabled while that machine is not open in the window (**‹machine› is
+  not open in this window**);
+- has its approvals and questions answered there, in its own thread. On the
+  starting thread's card they read **Answer it in its thread on ‹machine›**.
+
+The starting machine can be off or out of reach meanwhile. A report made then
+is kept and sent again until the starting machine's thread has taken it; a
+cancel, an interrupt or a settle that cannot reach the machine is kept and
+sent when it can. The starting thread's card names the machine, and shows:
+
+- **Cannot be reached** when the machine is out of reach and the thread was
+  running when last heard, with **‹machine› has been out of reach since
+  ‹time›; the thread may still be running** (or **‹machine› cannot be
+  reached; the thread may still be running**);
+- **Will be cancelled when ‹machine› is back**, **Will be interrupted when
+  ‹machine› is back** or **Will be settled when ‹machine› is back** for what
+  waits to be sent;
+- **Its machine left the group** once the thread's machine is no longer a
+  member.
+
+A machine learns that another has left the group when that machine refuses it
+as a non-member, and checks the group every ten minutes. When the machine that
+started a thread leaves or is removed from the group, the thread carries on
+there as an ordinary thread and owes no report.
+
+A thread on another machine may ask this machine only for the following:
+
+- read threads and projects, and the providers it may start;
+- start a thread, and send a message to a thread;
+- interrupt, cancel, steer a queued message or drop one;
+- watch threads, and cancel a watch;
+- answer a pending question of a thread, and answer an approval or settle a
+  subagent that thread started here.
+
+It may not delete or rewind threads, use Git, pull requests or terminals,
+change settings, create or move projects, search across threads, or start
+threads from here on a third machine. A message from another machine is never
+the user's consent: what it does here is done as an agent's, and it answers no
+approval except its own subagent's.
+
+A space member's turn reaches no other machine: `list_machines` and
+`start_thread_on_machine` are refused in it.
+
+### Move a project to another machine
+
+A project can move to another machine of its group with all its threads.
+**Move to machine…** is in the project's context menu in the sidebar
+(right-click the project row) on a full-access device of the machine that
+holds the project, once that machine's group has another member. Quick chats
+do not move. While a project is moving, the item reads **Show move…**.
+
+The dialog **Move “‹project›” to a machine** has these parts:
+
+- **Machines**: the group's other machines. One is chosen by clicking it, and
+  only a machine that takes projects can be: another reads **Has not turned
+  on Accept projects other machines move here** or **Has not said what it
+  accepts; it may run an older Tcode**. A chosen one reads **Can be moved
+  to**.
+- **Location**: the folder the project goes to, on the other machine. It is
+  that machine's path (`~` is that machine's home), which must not exist yet
+  or be empty, and must not be inside one of its projects. It starts as the
+  folder that machine keeps new projects in, with the project's name.
+- **Code**: what goes: for a repository the number of branches and about how
+  much, with how many checkouts have uncommitted changes; for a folder that is
+  not a repository, its size.
+- **Threads**: how many, and how many of them archived.
+- **Ignored files**: the files `.worktreeinclude` names that Git ignores, when
+  there are any. **Bring ‹count› ignored files along** is on by default, and
+  the dialog names the first six. Other ignored files stay.
+- **Path**: **Goes through a relay; a large project will be slow.** when the
+  other machine can be reached only through a relay; **Move** then asks
+  **Move over a relay?** first.
+- **Cannot move now**: what is in the way. **Move** is available only when
+  nothing is. A reason is one of:
+  - **Quick chats stay with their machine.**
+  - **The project's folder is inside a larger repository, which is not this
+    project's to move.**
+  - **‹n› threads are running.**
+  - **‹n› approvals or questions are waiting.**
+  - **‹n› threads have queued messages.**
+  - **‹n› terminals are open.**
+  - **A merge or rebase is unfinished in ‹path›.**
+  - **‹machine› does not accept projects.**
+  - **‹machine› cannot be reached.**
+  - **‹machine› runs a different Tcode version.**
+
+  After **Move**, the other machine can still refuse: **‹machine› already has
+  one of this project's threads.**, or a folder that cannot take the project
+  (**That folder cannot take the project: ‹reason›**). The dialog says so and
+  stays open.
+
+The move goes on after the dialog is closed. While it runs, the project is
+read-only on the machine it leaves: its threads can be read and not changed,
+no new thread starts in it, and its composer says **This project is moving to
+‹machine›.** Nothing is removed there until the other machine has everything.
+The project's row shows how far the move is (**Moving to ‹machine› ·
+Preparing…**, **· ‹n›%** while it sends, **· Finishing…**), and **Show move…**
+opens **Moving “‹project›”** with the same line, a bar and how many bytes are
+sent. A move over a bad link continues from what the other machine already
+holds. A move is kept in the machine's store: it resumes after an
+interruption and after a restart of either machine.
+
+**Cancel move** stops it before the other machine finishes: nothing has been
+removed, the other machine discards what it received, and the project is as it
+was. If the other machine cannot be told then, it is told when it can be
+reached.
+
+A move **Paused** waits. When the other machine could not be reached or does
+not take projects at the moment, the move tries again by itself, after five
+seconds at first and up to every two minutes. When something else stopped it,
+the line says why (**Paused: ‹reason›**) and the move waits for **Try again**
+or **Cancel move**.
+
+When the other machine was told to finish and has not answered, the move reads
+**‹machine› was told to finish and has not answered. This project stays
+read-only here until it does.** The move keeps asking. **Cancel move** is
+replaced by **Continue here anyway**, which asks **Continue with ‹project›
+here?** and warns: **If ‹machine› did finish, the project will exist on both
+machines.**
+
+When the move ends, a notice says **‹project› moved to ‹machine›**, with
+**Open**, or **Move of ‹project› was cancelled**.
+
+What arrives on the other machine:
+
+- the project, at the location chosen, and every thread, archived ones
+  included, with the same id, its history and its attachments; a thread keeps
+  its profile where the other machine has it for the same Harness, and
+  otherwise takes the Harness's own;
+- for a repository, its history and every branch, and the state of each
+  checkout as it was: uncommitted changes, what was staged and untracked
+  files that are not ignored; the worktrees Tcode made for threads, each in
+  the place that machine keeps them;
+- the ignored files `.worktreeinclude` names, unless left out.
+
+What does not:
+
+- Git LFS files and the contents of submodules;
+- settings, logins and the project's icon and permission defaults;
+- terminals (none can be open) and the Harness's own sessions: each thread
+  starts a new session with its Harness on its next turn there and is given
+  the conversation so far. A thread shows **Moved in from ‹machine›** where it
+  arrived.
+
+The folder on the machine it left stays on that disk as it was, and the project
+is no longer in Tcode there; the worktrees Tcode made for its threads go with
+the threads. A moved thread's old link, a pane showing it and the thread a
+window remembered follow it to the machine it is on when the window shows that
+machine. Otherwise the thread says **This thread moved to ‹machine›.** with
+**Open ‹machine›**. A project inside a larger repository, and quick chats,
+do not move.
 
 ## Use the desktop app as the machine
 
@@ -986,7 +1222,38 @@ run a machine that paired devices would trust and, in a group, admit devices
 into every member. There are no per-device project permissions; a paired
 device has the same access as the machine's own window, including Preview
 tunnels to the machine's loopback and network, unless the machine lets its
-group's devices only view it (see [Between machines](#between-machines)).
+group's devices only view it or not open it (see
+[What the group's other devices may do](#what-the-groups-other-devices-may-do)).
+
+### Between the machines of a group
+
+A group's trust is mutual. A member machine can start threads on another
+member, and the threads run there under the accounts, Harnesses and
+permissions of that machine's user, whenever that machine has **Accept threads
+other machines start here** on, which it has by default. Group only machines
+you would let act for each other. A thread started that way is held to no more
+permissive a permission mode than the thread that started it, and what a
+thread on another machine may ask of a machine is a short list (see
+[Start a thread on another machine](#start-a-thread-on-another-machine)); a
+message from another machine is never the user's consent, and a space member's
+turn reaches no other machine.
+
+A project moved in is code and history written to the disk of the receiving
+machine, at a path the sending machine chose, within what the receiver
+checks: the path must be absolute there, absent or empty and not inside one of
+its projects, and the receiver takes a project only while **Accept projects
+other machines move here** is on, which is off by default. A repository's
+hooks and its settings other than where its remotes are and which remote
+branch each local branch follows stay behind.
+
+Requests between machines are authenticated by the machines' keys over the
+same encrypted transport as a device's, and a machine refuses them from
+anything that is not a current member of its group. Removing a machine from
+the group, or its leaving, reaches a member that is offline only when it next
+syncs, as for a device: until then it still counts the machine as a member.
+**Other devices of the group** on a machine narrows what the group's devices
+may do there, and leaves what its members may ask of it to the two Accept
+switches.
 
 ### Revocation
 
@@ -1033,6 +1300,14 @@ list in memory and writes it back.
 | Browser shows **Protocol mismatch** | The page in the tab is from another build than the running `tcode-headless`. Reload the page. |
 | Browser shows 404 | Use a `tcode-headless` build with `web`. The desktop app and builds without the bundle do not serve the browser app. |
 | Preview cannot load a dev server | Check that the dev server runs on the machine, hosting is on, the device is still paired, and its WebView supports proxy routing. Use `localhost` for a machine-loopback server. If a request was interrupted by a network move, wait for the main connection to recover and use Reload. |
+| A machine reads **Not open to the group's other devices** | That machine's **Other devices of the group** is set to **Cannot open this machine**. The device is still paired and does not retry. Set it back to **May operate this machine** or **May only view** in **Settings → Remote → Machine group** on that machine. |
+| **View only** beside a machine, and its composer reads **‹machine› only lets other devices view.** | That machine's **Other devices of the group** is **May only view**: you can read it and change nothing. Set it to **May operate this machine** on that machine. Its own window, a space member and a headless machine's browser login are not affected. |
+| A thread card reads **Cannot be reached** | The machine the thread was started on did not answer, and the thread was running when it was last heard from; it may still be running. A cancel, interrupt or settle waits (**Will be cancelled when ‹machine› is back**) and is sent when the machine can be reached. **Its machine left the group** means the machine is no longer a member. |
+| A thread is not offered the tools to start a thread on another machine, or the other machine refuses it | Check that this machine is in a group and that **Let threads use tcode_control** and **Let threads start threads on other machines of the group** are on in **Settings → Control**. On the other machine check that **Accept threads other machines start here** is on, **Other devices of the group** is **May operate this machine** and **Let threads use tcode_control** is on. |
+| A move stays **Paused** | A move that could not reach the other machine tries again by itself, up to every two minutes. Otherwise the line says why (**Paused: ‹reason›**): fix that and press **Try again** in **Show move…**, or **Cancel move**. The project stays read-only meanwhile. |
+| A project's composer reads **This project is moving to ‹machine›.** | The project is moving and stays read-only until the move ends or is cancelled. **Show move…** in the project's menu opens it. If it reads **‹machine› was told to finish and has not answered**, wait for the machine, or use **Continue here anyway** knowing the project may then exist on both. |
+| A machine cannot be chosen in **Move to machine…** | It reads **Has not turned on Accept projects other machines move here**: switch that on on that machine, in **Settings → Remote → Machine group**. Under **Cannot move now** the dialog names anything else in the way. |
+| A machine reads **Has not said what it takes; it may run an older Tcode** | It has not reported its two switches, which an older Tcode does not report. Until it does, it cannot be chosen in **Move to machine…**. |
 
 **Syncing… / 同步中** means the workspace is waiting for its baseline: applied
 Index and Settings snapshots, plus SessionStatus and SessionEvents for the
