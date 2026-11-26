@@ -54,12 +54,20 @@ fn divider_in(
             h_flex()
                 .min_w_0()
                 .flex_shrink_1()
-                .items_center()
+                .items_start()
                 .gap_1p5()
                 .text_token(&cx.theme().tokens.typography.xs)
                 .text_color(tint)
+                // The icon stands on the label's first line, however many
+                // lines the label runs to.
                 .when_some(icon.clone(), |row, icon| {
-                    row.child(Icon::new(icon).flex_none())
+                    row.child(
+                        h_flex()
+                            .flex_none()
+                            .h(cx.theme().tokens.typography.xs.line_height)
+                            .items_center()
+                            .child(Icon::new(icon)),
+                    )
                 })
                 // A label that wraps beside the icon starts each line at it.
                 .child(
