@@ -10,7 +10,7 @@ chat:
   discard_delivery: "Discard"
   handed_over: "%{to} continues in a new session, handed the conversation so far"
   relay_content: "Handoff text"
-  model_rerouted: "%{harness} switched to %{to} on its own: %{reason}"
+  model_rerouted: "%{harness} switched models on its own: %{reason}"
   model_switch_back: "Switch back to %{model}"
   context_compacted_from: "Context compacted (was %{tokens}); earlier details are kept only as a summary"
   context_compacted_auto: "Context compacted automatically; earlier details are kept only as a summary"

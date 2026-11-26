@@ -10,7 +10,7 @@ chat:
   discard_delivery: "破棄"
   handed_over: "%{to} は新しいセッションで続行し、これまでの会話を引き継ぎました"
   relay_content: "引き継ぎ内容"
-  model_rerouted: "%{harness} が自動的に %{to} に切り替えました：%{reason}"
+  model_rerouted: "%{harness} が自動的にモデルを切り替えました：%{reason}"
   model_switch_back: "%{model} に戻す"
   context_compacted_from: "コンテキストを圧縮しました（元 %{tokens}）。以前の詳細は要約のみ残ります"
   context_compacted_auto: "コンテキストを自動的に圧縮しました。以前の詳細は要約のみ残ります"

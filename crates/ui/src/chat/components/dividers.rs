@@ -54,20 +54,12 @@ fn divider_in(
             h_flex()
                 .min_w_0()
                 .flex_shrink_1()
-                .items_start()
+                .items_center()
                 .gap_1p5()
                 .text_token(&cx.theme().tokens.typography.xs)
                 .text_color(tint)
-                // The icon stands on the label's first line, however many
-                // lines the label runs to.
                 .when_some(icon.clone(), |row, icon| {
-                    row.child(
-                        h_flex()
-                            .flex_none()
-                            .h(cx.theme().tokens.typography.xs.line_height)
-                            .items_center()
-                            .child(Icon::new(icon)),
-                    )
+                    row.child(Icon::new(icon).flex_none())
                 })
                 // A label that wraps beside the icon starts each line at it.
                 .child(
@@ -118,36 +110,6 @@ pub(crate) fn context_compacted_divider(
         label,
         cx.theme().muted_foreground,
         Some(IconName::Minimize2),
-        Some(motion),
-        cx,
-    )
-}
-
-/// A warning of the harness, whole and in its words.
-pub(crate) fn warning_divider(id: &str, message: &str, cx: &App) -> AnyElement {
-    divider_in(
-        SharedString::from(format!("warning-{id}")),
-        message.to_owned(),
-        cx.theme().warning,
-        Some(IconName::TriangleAlert),
-        None,
-        cx,
-    )
-}
-
-/// A request the harness tries again, in its own words: one line where it
-/// happened, which each further attempt at that request rewrites.
-pub(crate) fn request_retry_divider(
-    id: &str,
-    message: &str,
-    motion: &crate::motion::owned::Owned,
-    cx: &App,
-) -> AnyElement {
-    divider_in(
-        SharedString::from(format!("request-retry-{id}")),
-        message.to_owned(),
-        cx.theme().muted_foreground,
-        Some(IconName::RefreshCw),
         Some(motion),
         cx,
     )

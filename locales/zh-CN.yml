@@ -10,7 +10,7 @@ chat:
   discard_delivery: "丢弃"
   handed_over: "%{to} 以新会话继续，并已接收此前的对话"
   relay_content: "接力内容"
-  model_rerouted: "%{harness} 自动改用 %{to}：%{reason}"
+  model_rerouted: "%{harness} 自动换了模型：%{reason}"
   model_switch_back: "切回 %{model}"
   context_compacted_from: "上下文已压缩（原 %{tokens}），更早的细节只保留摘要"
   context_compacted_auto: "上下文已自动压缩，更早的细节只保留摘要"

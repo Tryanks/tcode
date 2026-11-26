@@ -1,9 +1,11 @@
 //! The notices of the flow that are not a divider: the capsules a change of
 //! model or of harness is drawn with; a message Tcode or another thread sent
 //! the model, drawn as a bubble coming in; tags under the message they
-//! describe; amber lines for what went wrong while the thread carries on; a
-//! muted line for what other threads did; a placeholder for content that is
-//! missing; and the thread's banner for records this build cannot read.
+//! describe; what the harness said in a turn, a warning or a request tried
+//! again, as a centred line of its words; amber lines for what went wrong
+//! while the thread carries on; a muted line for what other threads did; a
+//! placeholder for content that is missing; and the thread's banner for
+//! records this build cannot read.
 
 use std::path::Path;
 
@@ -40,35 +42,66 @@ fn selector(selector: String) -> impl Fn() -> String {
 pub(crate) struct Capsule {
     pub(crate) glyph: Option<Icon>,
     pub(crate) label: String,
+    /// Going back to what it names, where that is offered: the words that
+    /// name the act, and the act.
+    pub(crate) back: Option<(String, ClickHandler)>,
 }
 
 /// One capsule: a rounded pill with a faint fill, in the warning tint when
-/// the change it is part of was not the user's.
-fn capsule(capsule: Capsule, warning: bool, cx: &App) -> Div {
+/// the change it is part of was not the user's. One that takes the thread
+/// back to what it names ends in the undo mark and presses as a button.
+fn capsule(id: SharedString, capsule: Capsule, warning: bool, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let spacing = &theme.tokens.spacing;
-    let fill = if warning {
-        theme.warning.opacity(0.12)
+    let tint = if warning {
+        theme.warning
     } else {
-        theme.foreground.opacity(0.06)
+        theme.foreground
     };
-    h_flex()
-        .min_w_0()
-        .items_center()
-        .gap(spacing.xs + px(2.))
-        .px(spacing.sm + px(5.))
-        .py(px(3.))
-        .rounded_full()
-        .bg(fill)
-        .text_color(theme.foreground)
-        .font_medium()
-        .children(capsule.glyph.map(|glyph| glyph.flex_none()))
-        .child(
-            div()
-                .min_w_0()
-                .overflow_hidden()
-                .child(crate::widgets::fade_text(capsule.label)),
-        )
+    let fill = tint.opacity(if warning { 0.12 } else { 0.06 });
+    let Capsule { glyph, label, back } = capsule;
+    let content = |pill: Div| {
+        pill.min_w_0()
+            .items_center()
+            .gap(spacing.xs + px(2.))
+            .px(spacing.sm + px(5.))
+            .py(px(3.))
+            .rounded_full()
+            .bg(fill)
+            .text_color(theme.foreground)
+            .font_medium()
+            .children(glyph.map(|glyph| glyph.flex_none()))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(label)),
+            )
+    };
+    match back {
+        None => content(h_flex()).into_any_element(),
+        Some((name, on_press)) => {
+            let tooltip = name.clone();
+            crate::material::accessible_clickable(
+                content(h_flex()).child(
+                    Icon::new(IconName::Undo2)
+                        .size(px(13.))
+                        .flex_none()
+                        .text_color(tint),
+                ),
+                id.clone(),
+                Role::Button,
+                name,
+                cx,
+            )
+            .debug_selector(selector(id.to_string()))
+            .cursor_pointer()
+            .hover(move |pill| pill.bg(tint.opacity(if warning { 0.22 } else { 0.11 })))
+            .on_click(move |event, window, cx| on_press(event, window, cx))
+            .with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
+            .into_any_element()
+        }
+    }
 }
 
 /// A change from one capsule to another, centred, with what follows it on
@@ -85,6 +118,8 @@ pub(crate) fn capsule_row(
 ) -> Stateful<Div> {
     let theme = cx.theme();
     let muted = theme.muted_foreground;
+    let from_id = SharedString::from(format!("{id}-from"));
+    let to_id = SharedString::from(format!("{id}-to"));
     h_flex()
         .id(id.clone())
         .debug_selector(move || id.to_string())
@@ -96,37 +131,31 @@ pub(crate) fn capsule_row(
         .text_token(&theme.tokens.typography.xs)
         .text_color(muted)
         .when_some(from, |row, from| {
-            row.child(capsule(from, warning, cx)).child(
+            row.child(capsule(from_id, from, warning, cx)).child(
                 Icon::new(IconName::ArrowRight)
                     .size(px(15.))
                     .text_color(muted),
             )
         })
-        .child(capsule(to, warning, cx))
+        .child(capsule(to_id, to, warning, cx))
         .children(trailing)
 }
 
-/// A centred line under a [`capsule_row`] that says in words what it shows,
-/// with the action that answers it.
+/// A centred line under a [`capsule_row`] that says in words what it shows.
 pub(crate) fn capsule_note(
     id: SharedString,
     text: String,
     tint: gpui::Hsla,
-    action: Option<AnyElement>,
     cx: &App,
 ) -> Stateful<Div> {
     h_flex()
         .id(id.clone())
         .debug_selector(move || id.to_string())
         .w_full()
-        .flex_wrap()
-        .items_center()
         .justify_center()
-        .gap_2()
         .text_token(&cx.theme().tokens.typography.xs)
         .text_color(tint)
         .child(div().min_w_0().text_center().child(text))
-        .children(action)
 }
 
 /// A thread's title as a link of its own, which opens that thread where
@@ -297,17 +326,17 @@ pub(crate) fn incoming(message: Incoming<'_>, window: &mut Window, cx: &App) -> 
 }
 
 /// A change of the model serving the thread. `rerouted` is what the
-/// harness said when it changed it on its own, in words, with the control
-/// that switches back.
+/// harness said when it changed it on its own, in words; the way back, where
+/// it is offered, is the `from` capsule's.
 pub(crate) struct ModelChange {
     pub(crate) from: Option<Capsule>,
     pub(crate) to: Capsule,
-    pub(crate) rerouted: Option<(String, Option<(String, ClickHandler)>)>,
+    pub(crate) rerouted: Option<String>,
 }
 
 pub(crate) fn model_change(id: &str, change: ModelChange, cx: &App) -> AnyElement {
     let ModelChange { from, to, rerouted } = change;
-    let warning = cx.theme().warning;
+    let muted = cx.theme().muted_foreground;
     v_flex()
         .w_full()
         .gap_1()
@@ -319,22 +348,11 @@ pub(crate) fn model_change(id: &str, change: ModelChange, cx: &App) -> AnyElemen
             None,
             cx,
         ))
-        .when_some(rerouted, |column, (note, switch_back)| {
-            let action = switch_back.map(|(label, on_click)| {
-                let selector = format!("model-switch-back-{id}");
-                Button::new(SharedString::from(selector.clone()))
-                    .outline()
-                    .xsmall()
-                    .label(label)
-                    .on_click(on_click)
-                    .debug_selector(move || selector)
-                    .into_any_element()
-            });
+        .when_some(rerouted, |column, note| {
             column.child(capsule_note(
                 SharedString::from(format!("model-change-reason-{id}")),
                 note,
-                warning,
-                action,
+                muted,
                 cx,
             ))
         })
@@ -427,7 +445,6 @@ pub(crate) fn relay_handoff(
                     SharedString::from(format!("relay-note-{id}")),
                     note,
                     muted,
-                    None,
                     cx,
                 ))
             })
@@ -532,6 +549,123 @@ pub(crate) fn rewind_failure(key: &str, label: String, cx: &App) -> AnyElement {
         .child(crate::widgets::fade_text(label))
         .with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
         .into_any_element()
+}
+
+/// What the harness said in the flow of a turn: a warning, or the request
+/// it tries again.
+pub(crate) struct Said<'a> {
+    pub(crate) key: &'a str,
+    pub(crate) icon: IconName,
+    pub(crate) tint: gpui::Hsla,
+    /// The harness's words, as said.
+    pub(crate) message: &'a str,
+    pub(crate) expanded: bool,
+}
+
+/// [`Said`] as a centred line of `tint`: the icon, then the words on one
+/// line. A line the column cuts short fades where it is cut and, pressed,
+/// opens on the words whole; one that fits shows them all and takes no
+/// press. A message that changes cross-fades to the next.
+pub(crate) fn said_line(
+    said: Said<'_>,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    motion: &crate::motion::owned::Owned,
+) -> AnyElement {
+    let Said {
+        key,
+        icon,
+        tint,
+        message,
+        expanded,
+    } = said;
+    let key = key.to_owned();
+    let message = message.to_owned();
+    let motion = motion.clone();
+    let on_toggle = std::rc::Rc::new(on_toggle);
+    crate::motion::Sampled::new(move |window, cx| {
+        let cut =
+            window.use_keyed_state(SharedString::from(format!("{key}-cut")), cx, |_, _| false);
+        let label = crate::motion::Clock::from(&motion).cross_fade(
+            SharedString::from(format!("{key}-label")),
+            message.clone(),
+            &crate::motion::Curve::new(SHOW),
+            window,
+            cx,
+            |message: &String, _, _| {
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(message.clone()).reporting_cut(cut.clone()))
+                    .into_any_element()
+            },
+        );
+        let content = [
+            Icon::new(icon)
+                .flex_none()
+                .text_color(tint)
+                .into_any_element(),
+            div()
+                .min_w_0()
+                .flex_shrink_1()
+                .child(label)
+                .into_any_element(),
+        ];
+        let line_id = SharedString::from(format!("{key}-line"));
+        let line = if *cut.read(cx) || expanded {
+            let on_toggle = on_toggle.clone();
+            crate::material::accessible_clickable(
+                h_flex(),
+                line_id.clone(),
+                Role::Button,
+                message.clone(),
+                cx,
+            )
+            .aria_expanded(expanded)
+            .cursor_pointer()
+            .on_click(move |event, window, cx| on_toggle(event, window, cx))
+            .min_w_0()
+            .flex_shrink_1()
+            .gap_1p5()
+            .items_center()
+            .children(content)
+            .into_any_element()
+        } else {
+            h_flex()
+                .id(line_id.clone())
+                .min_w_0()
+                .flex_shrink_1()
+                .gap_1p5()
+                .items_center()
+                .children(content)
+                .into_any_element()
+        };
+        let body = motion
+            .shown(
+                format!("{key}-fold"),
+                expanded.then_some(()),
+                SHOW,
+                window,
+                cx,
+            )
+            .map(|fold| fold.fold(super::disclosure::disclosure_body(&key, &message, cx)));
+        v_flex()
+            .id(SharedString::from(key.clone()))
+            .debug_selector(selector(key.clone()))
+            .w_full()
+            .gap_1()
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_center()
+                    .px_4()
+                    .text_token(&cx.theme().tokens.typography.xs)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(line),
+            )
+            .children(body)
+            .into_any_element()
+    })
+    .into_any_element()
 }
 
 /// The warning mark and `label` on one amber line, for what went wrong while

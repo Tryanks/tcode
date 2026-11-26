@@ -265,22 +265,35 @@ impl TimelineView {
                     let EntryContent::RequestRetry { message } = &entry.content else {
                         unreachable!();
                     };
-                    column = column.child(components::dividers::request_retry_divider(
-                        &entry.id,
+                    let said = components::notices::Said {
+                        key: &format!("request-retry-{}", entry.id),
+                        icon: IconName::RefreshCw,
+                        tint: cx.theme().muted_foreground,
                         message,
-                        &self.motion,
-                        cx,
-                    ));
+                        expanded: false,
+                    };
+                    column = column.child(self.compose_said(index, said, cx));
                 }
                 Segment::Warnings(warnings) => {
-                    column = column.child(v_flex().w_full().gap_1().children(
-                        warnings.iter().filter_map(|entry| match &entry.content {
-                            EntryContent::Warning { message } => Some(
-                                components::dividers::warning_divider(&entry.id, message, cx),
-                            ),
+                    let tint = cx.theme().warning;
+                    let lines: Vec<AnyElement> = warnings
+                        .iter()
+                        .filter_map(|entry| match &entry.content {
+                            EntryContent::Warning { message } => Some(self.compose_said(
+                                index,
+                                components::notices::Said {
+                                    key: &format!("warning-{}", entry.id),
+                                    icon: IconName::TriangleAlert,
+                                    tint,
+                                    message,
+                                    expanded: false,
+                                },
+                                cx,
+                            )),
                             _ => None,
-                        }),
-                    ));
+                        })
+                        .collect();
+                    column = column.child(v_flex().w_full().gap_1().children(lines));
                 }
                 Segment::Error(entry) => {
                     let harness = self
