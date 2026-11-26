@@ -54,7 +54,9 @@ pub(crate) use images::{
     pull_request_media, pull_request_media_state, remote_image, retry_failed_pull_request_media,
 };
 use thread::{Part, ThreadReplica};
+mod moves;
 mod snapshots;
+pub(crate) use moves::ProjectMoveEnded;
 
 pub(crate) use snapshots::PanelState;
 pub use snapshots::{ComposerCheckoutState, ComposerQueue, ComposerState};
@@ -271,6 +273,8 @@ pub struct WorkspaceStore {
     /// view holds it.
     disk_usage: DiskUsageState,
     disk_usage_holds: usize,
+    /// The host's projects moving to another machine of its group.
+    project_moves: moves::ProjectMoves,
     connection_state: ConnectionState,
     /// How far the host's wall clock is ahead of this client's, in
     /// milliseconds, as its last scope snapshot said; until one lands, none.
@@ -516,6 +520,7 @@ impl WorkspaceStore {
             storage_migration_holds: 0,
             disk_usage: DiskUsageState::default(),
             disk_usage_holds: 0,
+            project_moves: Default::default(),
             removed_session: None,
             settings_replica: Settings::default(),
             member_settings_unreadable: false,
@@ -863,6 +868,7 @@ impl WorkspaceStore {
             self.settings_hydrated = false;
             self.providers_replica = Default::default();
             self.scoped_providers.clear();
+            self.forget_project_moves();
         }
         self.baseline_topics.insert(Topic::Scope);
         self.scope = next;
@@ -886,6 +892,7 @@ impl WorkspaceStore {
                         after: None,
                     });
                 }
+                self.follow_project_moves();
                 // Only a client that can render pages offers to: the host
                 // hands an agent's requests to a client that renders them.
                 if crate::preview_backend() && !view_only {
@@ -2778,6 +2785,7 @@ pub(crate) fn unexpected_pull_request_response() -> ProtocolError {
 impl EventEmitter<StoreChange> for WorkspaceStore {}
 impl EventEmitter<TerminalChange> for WorkspaceStore {}
 impl EventEmitter<ShowThread> for WorkspaceStore {}
+impl EventEmitter<ProjectMoveEnded> for WorkspaceStore {}
 impl EventEmitter<PreviewReleased> for WorkspaceStore {}
 impl EventEmitter<ConnectionState> for WorkspaceStore {}
 impl EventEmitter<tcode_protocol::HostingState> for WorkspaceStore {}

@@ -16,6 +16,7 @@
 mod compact;
 mod events;
 mod hosts;
+mod moves;
 mod navigation;
 mod pane_layout;
 mod wide;
@@ -739,6 +740,9 @@ pub struct AppShell {
     panel_shows_terminal: bool,
     navigation: Option<NavigationPersistence>,
     pending_navigation_restore: Option<PendingNavigationRestore>,
+    /// Threads that moved to a machine this window shows, waiting for it to
+    /// list them.
+    pending_moved: Vec<moves::PendingMoved>,
     /// A host numbers its own operations.
     operation_toasts: HashMap<(HostKey, RuntimeOperationId), ToastId>,
     next_toast_id: ToastId,
@@ -986,6 +990,7 @@ impl AppShell {
                 task: None,
             }),
             pending_navigation_restore: None,
+            pending_moved: Vec::new(),
             operation_toasts: HashMap::new(),
             next_toast_id: 1,
             palette_was_open: false,

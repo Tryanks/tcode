@@ -239,6 +239,9 @@ pub(crate) struct ThreadPanel {
     /// conversation is rendering.
     session_id: Option<String>,
     store: Entity<WorkspaceStore>,
+    /// The thread the pane showed went to another machine of the group with
+    /// its project, and is not open in this window there.
+    moved_away: Option<MovedAway>,
     /// The pane's own focus, tracked by its tab group. The composer's would
     /// make the group's click-to-focus bypass the composer's refusals (a
     /// software keyboard, a read-only thread) and add the composer to the tab
@@ -323,6 +326,7 @@ impl ThreadPanel {
         let mut panel = Self {
             session_id: None,
             store,
+            moved_away: None,
             chat,
             frame,
             preview,
@@ -384,6 +388,11 @@ impl ThreadPanel {
         self.frame.clone()
     }
 
+    /// Whether the pane says where its thread went.
+    pub(crate) fn shows_moved_away(&self) -> bool {
+        self.moved_away.is_some()
+    }
+
     /// The thread the pane shows.
     pub(crate) fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
@@ -425,6 +434,9 @@ impl ThreadPanel {
         self.store = chat.read(cx).workspace_store().clone();
         self.frame = chat.read(cx).frame();
         self.fading_out = false;
+        if session_id.is_some() {
+            self.moved_away = None;
+        }
         self.await_chat(false, cx);
         let replaced = std::mem::replace(&mut self.chat, chat);
         self.hold(session_id.as_deref(), cx);
@@ -453,6 +465,9 @@ impl ThreadPanel {
             && self.among_others
             && (self.session_id.is_some() || self.fading_out);
         let waited = self.among_others && self.session_id.is_none() && !self.fading_out;
+        if session_id.is_some() {
+            self.moved_away = None;
+        }
         self.session_id = session_id.clone();
         self.fading_out = fading_out;
         self.await_chat(waited && session_id.is_some(), cx);
@@ -461,6 +476,14 @@ impl ThreadPanel {
             self.chat
                 .update(cx, |chat, cx| chat.set_session(session_id, cx));
         }
+        cx.notify();
+    }
+
+    /// The pane's thread went to another machine this window does not show:
+    /// the pane says where, in place of the thread.
+    pub(crate) fn show_moved_away(&mut self, moved: MovedAway, cx: &mut Context<Self>) {
+        self.set_session(None, cx);
+        self.moved_away = Some(moved);
         cx.notify();
     }
 
@@ -610,6 +633,18 @@ impl Focusable for ThreadPanel {
     }
 }
 
+/// Opens a machine in the window.
+pub(crate) type OpenMachine = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// Where a pane's thread went, and how to get to it from here.
+#[derive(Clone)]
+pub(crate) struct MovedAway {
+    /// What the group calls the machine.
+    pub machine: String,
+    /// Opening the machine in this window, when this client has it saved.
+    pub open: Option<(String, OpenMachine)>,
+}
+
 impl ThreadPanel {
     /// A pane beside others waits for a thread rather than offering the
     /// empty workspace's way to start one.
@@ -628,20 +663,28 @@ impl ThreadPanel {
     ) -> AnyElement {
         const WAITING: usize = 0;
         const CHAT: usize = 1;
-        let (waiting, awaiting, fading_out, motion) = {
+        const MOVED: usize = 2;
+        let (waiting, awaiting, fading_out, moved_away, motion) = {
             let pane = this.read(cx);
             (
                 pane.waiting(),
                 pane.awaiting,
                 pane.fading_out,
+                pane.moved_away.clone(),
                 pane.motion.clone(),
             )
         };
         let content = motion
             .layers(
                 "pane-content",
-                if waiting { WAITING } else { CHAT },
-                2,
+                if moved_away.is_some() {
+                    MOVED
+                } else if waiting {
+                    WAITING
+                } else {
+                    CHAT
+                },
+                3,
                 GLIDE,
                 window,
                 cx,
@@ -653,6 +696,43 @@ impl ThreadPanel {
             content
         };
         let mut layers = Vec::new();
+        if content.shows(MOVED)
+            && let Some(moved) = moved_away
+        {
+            let spacing = cx.theme().tokens.spacing.sm;
+            let open = moved.open.map(|(label, open)| {
+                Button::new("moved-away-open")
+                    .debug_selector(|| "moved-away-open".into())
+                    .label(label)
+                    .on_click(move |_, window, cx| open(window, cx))
+            });
+            layers.push((
+                MOVED,
+                v_flex()
+                    .debug_selector(|| "moved-away-pane".into())
+                    .relative()
+                    .size_full()
+                    .child(
+                        crate::material::empty_state(
+                            Icon::new(IconName::ArrowRightLeft),
+                            crate::tr!("machines.move.thread_moved", machine = moved.machine),
+                            "",
+                            cx,
+                        )
+                        .children(open),
+                    )
+                    .when(waiting, |pane| {
+                        pane.child(
+                            div()
+                                .absolute()
+                                .top(spacing)
+                                .right(spacing)
+                                .child(close_button("moved-away-close", this.downgrade())),
+                        )
+                    })
+                    .into_any_element(),
+            ));
+        }
         if content.shows(WAITING) {
             // A waiting pane draws no chat header, so its close button sits in
             // its corner instead.

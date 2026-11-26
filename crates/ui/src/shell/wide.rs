@@ -347,6 +347,7 @@ impl AppShell {
             .key_context("TcodeShell")
             .on_action(cx.listener(Self::on_thread_undo))
             .on_action(cx.listener(Self::on_open_thread_anchor))
+            .on_action(cx.listener(Self::on_open_machine_thread_anchor))
             .on_action(cx.listener(Self::on_start_draft_for_project))
             .on_action(cx.listener(Self::on_quick_chat))
             .child(
@@ -428,6 +429,7 @@ impl AppShell {
             .key_context("TcodeShell")
             .on_action(cx.listener(Self::on_thread_undo))
             .on_action(cx.listener(Self::on_open_thread_anchor))
+            .on_action(cx.listener(Self::on_open_machine_thread_anchor))
             .on_action(cx.listener(Self::on_start_draft_for_project))
             .on_action(cx.listener(Self::on_quick_chat))
             .child(
@@ -597,6 +599,7 @@ impl AppShell {
             .key_context("TcodeShell")
             .on_action(cx.listener(Self::on_thread_undo))
             .on_action(cx.listener(Self::on_open_thread_anchor))
+            .on_action(cx.listener(Self::on_open_machine_thread_anchor))
             .on_action(cx.listener(Self::on_start_draft_for_project))
             .on_action(cx.listener(Self::on_quick_chat))
             .child(

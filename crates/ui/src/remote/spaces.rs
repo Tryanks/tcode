@@ -29,8 +29,8 @@ use serde::Deserialize;
 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
 use tcode_core::project::Project;
 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-use tcode_protocol::{GroupAction, GroupInfo, HostedDevice};
-use tcode_protocol::{HostingAction, HostingState, SpaceAction, SpaceInfo};
+use tcode_protocol::{GroupAction, HostedDevice};
+use tcode_protocol::{GroupInfo, HostingAction, HostingState, SpaceAction, SpaceInfo};
 
 use super::{Submit, report, submit_actions};
 use crate::icon::Icon;
@@ -214,7 +214,6 @@ impl Spaces {
     }
 
     /// The machine's group, when it is in one.
-    #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
     pub(crate) fn group(&self) -> Option<&GroupInfo> {
         self.state.as_ref()?.group.as_ref()
     }

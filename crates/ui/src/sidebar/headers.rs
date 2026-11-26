@@ -516,6 +516,8 @@ impl SessionsSidebar {
         let header_toggle = project.clone();
         let plus_cwd = group.project.root.clone();
         let plus_project_id = project.project_id.clone();
+        // The host starts nothing in a project that is moving.
+        let plus_moving = store.read(cx).project_move(&project.project_id).is_some();
         let menu_project = project.clone();
         // A machine that lets this device only view starts and changes
         // nothing of its projects.
@@ -621,6 +623,7 @@ impl SessionsSidebar {
                     .tooltip(new_thread_label)
                     // Opacity keeps the button a tab stop, as the settle button does.
                     .opacity(hover)
+                    .disabled(plus_moving)
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         let cwd = plus_cwd.clone();
@@ -642,7 +645,18 @@ impl SessionsSidebar {
         let full = store.read(cx).may_operate();
         // Another machine's project is not on this client to reveal.
         let local = !store.read(cx).is_remote();
-        header
+        let moving = store.read(cx).project_move(&project.project_id).cloned();
+        let move_item = if moving.is_some() {
+            Some(crate::tr!("machines.move.show_move"))
+        } else if crate::move_project_dialog::offers_move(&store, cx) {
+            Some(crate::tr!("machines.move.menu_item"))
+        } else {
+            None
+        };
+        let move_line =
+            moving.map(|status| self.render_project_move(&store, &project, &name_id, &status, cx));
+        let moving = move_line.is_some();
+        let header = header
             .context_menu(move |menu, _window, cx| {
                 let id = menu_project.clone();
                 let delete_label = crate::tr!("sidebar.remove_project").into_owned();
@@ -655,6 +669,9 @@ impl SessionsSidebar {
                         crate::tr!("sidebar.change_project_root"),
                         Box::new(ChangeProjectRoot(id.clone())),
                     )
+                    .when_some(move_item.clone(), |menu, label| {
+                        menu.menu(label, Box::new(MoveProjectToMachine(id.clone())))
+                    })
                 })
                 .when(full, |menu| {
                     menu.menu(
@@ -686,9 +703,78 @@ impl SessionsSidebar {
                 .when_some(share.as_ref(), |menu, share| {
                     spaces::share_items(menu, share, false, cx)
                 })
+                // The host takes no change to a moving project.
+                .when(moving, |menu| {
+                    menu.disable_items_except(|action| {
+                        let action = action.as_any();
+                        action.is::<MoveProjectToMachine>()
+                            || action.is::<ProjectReveal>()
+                            || action.is::<spaces::ToggleShare>()
+                            || action.is::<spaces::NewSpaceAndShare>()
+                    })
+                })
             })
             .touch(false)
             .reveals(&self.hover, group_key)
+            .into_any_element();
+        match move_line {
+            Some(line) => v_flex()
+                .w_full()
+                .child(header)
+                .child(line)
+                .into_any_element(),
+            None => header,
+        }
+    }
+
+    /// The line under a moving project: how far the move is, and its bar,
+    /// which open the move's progress.
+    pub(super) fn render_project_move(
+        &self,
+        store: &Entity<WorkspaceStore>,
+        project: &ProjectKey,
+        name_id: &str,
+        status: &tcode_protocol::ProjectMoveStatus,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let machine = crate::move_project_dialog::machine_name(store, &status.machine, cx);
+        let line = crate::move_project_dialog::status_line(status, &machine);
+        let open = project.clone();
+        let selector = format!("project-move-{name_id}");
+        v_flex()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
+            .role(Role::Button)
+            .aria_label(line.clone())
+            .w_full()
+            .pl(px(THREAD_INDENT))
+            .pr_2()
+            .pb_1()
+            .gap_1()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if let Some(store) = this.store_of(&open.host) {
+                    crate::move_project_dialog::open_progress(
+                        store,
+                        open.project_id.clone(),
+                        window,
+                        cx,
+                    );
+                }
+            }))
+            .child(
+                div()
+                    .text_secondary(false, cx)
+                    .child(crate::widgets::fade_text(line)),
+            )
+            .child(
+                crate::move_project_dialog::status_bar(
+                    SharedString::from(format!("project-move-bar-{name_id}")),
+                    status,
+                    cx,
+                )
+                .xsmall(),
+            )
             .into_any_element()
     }
 

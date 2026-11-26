@@ -312,6 +312,17 @@ impl Composer {
             && !self.view_only(cx)
             && !matches!(self.workspace_store.read(cx).connection_state(),
             tcode_client::ConnectionState::Offline { reason } if reason.is_terminal())
+            && self.moving_to(cx).is_none()
+    }
+
+    /// The machine the thread's project is moving to, while it moves: the
+    /// host takes no work in it until the move ends.
+    fn moving_to(&self, cx: &App) -> Option<String> {
+        let session_id = self.session_id.as_deref()?;
+        self.workspace_store
+            .read(cx)
+            .thread_project_move(session_id, cx)
+            .map(|status| status.machine.clone())
     }
 
     /// Whether the thread's machine lets this device only view it: nothing
@@ -893,7 +904,9 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.subagent(cx) || self.view_only(cx) {
+        // The host takes no work from a device that may only view, nor in a thread
+        // whose project is moving.
+        if self.subagent(cx) || self.view_only(cx) || self.moving_to(cx).is_some() {
             return;
         }
         #[cfg(feature = "voice")]
@@ -1749,6 +1762,10 @@ impl Composer {
                 "machines.access.composer",
                 machine = self.workspace_store.read(cx).host_title()
             )
+        } else if let Some(machine) = self.moving_to(cx) {
+            let machine =
+                crate::move_project_dialog::machine_name(&self.workspace_store, &machine, cx);
+            crate::tr!("machines.move.composer", machine = machine)
         } else if !self.interactive(cx) {
             crate::tr!("mobile.offline_message")
         } else if composer_state.pending_plan.is_some() {

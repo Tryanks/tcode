@@ -452,6 +452,7 @@ impl SessionsSidebar {
         let hover = self.hover.clone();
         let row_key = state.row_key.clone();
         let draft = state.draft;
+        let moving = store.read(cx).thread_project_move(&meta.id, cx).is_some();
         let menu = row
             .context_menu(move |menu, window, cx| {
                 let id = thread.clone();
@@ -677,6 +678,20 @@ impl SessionsSidebar {
                 })
                 .when_some(share.as_ref(), |menu, share| {
                     spaces::share_items(menu, share, true, cx)
+                })
+                // The host takes no work in a thread whose project is moving.
+                .when(moving, |menu| {
+                    menu.disable_items_except(|action| {
+                        let action = action.as_any();
+                        action.is::<crate::panes::OpenInNewPane>()
+                            || action.is::<ThreadMarkUnread>()
+                            || action.is::<ThreadCopyPath>()
+                            || action.is::<ThreadCopyId>()
+                            || action.is::<ThreadExportJsonl>()
+                            || action.is::<ThreadExportMarkdown>()
+                            || action.is::<spaces::ToggleShare>()
+                            || action.is::<spaces::NewSpaceAndShare>()
+                    })
                 })
             })
             .touch(compact);

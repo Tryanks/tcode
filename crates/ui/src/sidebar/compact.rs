@@ -824,8 +824,15 @@ impl SessionsSidebar {
     ) -> impl IntoElement + use<> {
         let project = row.project.clone();
         let collapsed = row.collapsed;
+        let move_line = self.store_of(&row.project.host).and_then(|store| {
+            let status = store
+                .read(cx)
+                .project_move(&row.project.project_id)?
+                .clone();
+            Some(self.render_project_move(&store, &row.project, &row.id, &status, cx))
+        });
         let spacing = &cx.theme().tokens.spacing;
-        crate::material::accessible_clickable(
+        let header = crate::material::accessible_clickable(
             h_flex(),
             row.row_id.clone(),
             Role::Button,
@@ -879,7 +886,8 @@ impl SessionsSidebar {
                 cx,
             )
             .text_color(cx.theme().foreground),
-        )
+        );
+        v_flex().w_full().child(header).children(move_line)
     }
 
     /// One thread row. Long press opens the shared thread context menu.

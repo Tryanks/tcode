@@ -40,6 +40,7 @@ pub mod markdown;
 mod macos_backdrop;
 pub mod material;
 mod motion;
+mod move_project_dialog;
 mod move_thread_dialog;
 pub mod overlay;
 /// The shared pairing form: origin validation, stale-result

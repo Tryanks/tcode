@@ -926,6 +926,17 @@ impl SessionsSidebar {
         }
     }
 
+    pub(super) fn on_move_project_to_machine(
+        &mut self,
+        action: &MoveProjectToMachine,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(store) = self.store_of(&action.0.host) {
+            crate::move_project_dialog::open(store, action.0.project_id.clone(), window, cx);
+        }
+    }
+
     pub(super) fn on_project_reveal(
         &mut self,
         action: &ProjectReveal,

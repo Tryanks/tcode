@@ -710,6 +710,11 @@ struct ChangeProjectRoot(ProjectKey);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_project, no_json)]
 struct ProjectReveal(ProjectKey);
+/// Move a project to another machine of its group, or show its move while
+/// one runs.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_project, no_json)]
+struct MoveProjectToMachine(ProjectKey);
 
 /// Ask before removing a project and its threads from Tcode.
 pub(super) fn confirm_remove_project(
@@ -1293,7 +1298,10 @@ impl SessionsSidebar {
                         _subscription: cx.subscribe(&store, |this, _, change: &StoreChange, cx| {
                             if matches!(
                                 change.topic,
-                                TopicKind::Index | TopicKind::Settings | TopicKind::SessionStatus
+                                TopicKind::Index
+                                    | TopicKind::Settings
+                                    | TopicKind::SessionStatus
+                                    | TopicKind::ProjectMoves
                             ) {
                                 this.compact_model_dirty = true;
                                 cx.notify();
@@ -1691,6 +1699,7 @@ impl Render for SessionsSidebar {
         .on_action(cx.listener(Self::on_change_project_icon))
         .on_action(cx.listener(Self::on_change_project_root))
         .on_action(cx.listener(Self::on_project_reveal))
+        .on_action(cx.listener(Self::on_move_project_to_machine))
         .on_action(cx.listener(Self::on_filter_project))
         .on_action(cx.listener(Self::on_add_project))
         .on_action(cx.listener(Self::on_sort_projects))

@@ -260,10 +260,20 @@ impl AppShell {
             return;
         };
         if store.read(cx).thread_meta(&anchor.thread_id).is_none() {
-            window.push_notification(
-                crate::overlay::Notification::warning(
-                    crate::tr!("control.anchor_missing").into_owned(),
-                ),
+            // A thread that went with its project is on another machine now.
+            self.find_moved_thread(
+                &store,
+                anchor.thread_id.clone(),
+                anchor.position,
+                |_, window, cx| {
+                    window.push_notification(
+                        crate::overlay::Notification::warning(
+                            crate::tr!("control.anchor_missing").into_owned(),
+                        ),
+                        cx,
+                    );
+                },
+                window,
                 cx,
             );
             return;
