@@ -261,8 +261,39 @@ impl TimelineView {
                         &entry.id, bytes, read, cx,
                     ));
                 }
+                Segment::RequestRetry(entry) => {
+                    let EntryContent::RequestRetry { message } = &entry.content else {
+                        unreachable!();
+                    };
+                    let said = components::notices::Said {
+                        key: &format!("request-retry-{}", entry.id),
+                        icon: IconName::RefreshCw,
+                        tint: cx.theme().muted_foreground,
+                        message,
+                        expanded: false,
+                    };
+                    column = column.child(self.compose_said(index, said, cx));
+                }
                 Segment::Warnings(warnings) => {
-                    column = column.child(self.compose_warnings(index, warnings[0], cx));
+                    let tint = cx.theme().warning;
+                    let lines: Vec<AnyElement> = warnings
+                        .iter()
+                        .filter_map(|entry| match &entry.content {
+                            EntryContent::Warning { message } => Some(self.compose_said(
+                                index,
+                                components::notices::Said {
+                                    key: &format!("warning-{}", entry.id),
+                                    icon: IconName::TriangleAlert,
+                                    tint,
+                                    message,
+                                    expanded: false,
+                                },
+                                cx,
+                            )),
+                            _ => None,
+                        })
+                        .collect();
+                    column = column.child(v_flex().w_full().gap_1().children(lines));
                 }
                 Segment::Error(entry) => {
                     let harness = self
@@ -531,10 +562,6 @@ impl TimelineView {
             let started_here = turn
                 .start_ts
                 .map(|start| self.workspace_store.read(cx).host_moment_here(start));
-            let retry = turn
-                .running
-                .then(|| crate::chat::model::live_retry(entries))
-                .flatten();
             let turn = turn.clone();
             trailing = true;
             // The status moves with the trailer when the turn gains a last
@@ -587,7 +614,6 @@ impl TimelineView {
                                     started_here,
                                     stopping,
                                     served_model.clone(),
-                                    retry.clone(),
                                     &indicator_motion,
                                     cx,
                                 ))
@@ -1775,10 +1801,8 @@ impl TimelineView {
         let mut flow = v_flex().w_full().gap_1();
         if !folded.is_empty() {
             let segment_counts = work_log_counts(folded);
-            let mut capsule_label =
-                work_log_capsule_label(&segment_counts, folded.len() - segment_counts.retries);
-            let retries = crate::chat::model::work_log_retries_label(&segment_counts);
-            if capsule_label.is_empty() && retries.is_none() {
+            let mut capsule_label = work_log_capsule_label(&segment_counts, folded.len());
+            if capsule_label.is_empty() {
                 capsule_label = crate::tr!("chat.work_log").into_owned();
             }
             let duration = activity_run_duration_ms(folded).map(format_elapsed);
@@ -1806,7 +1830,6 @@ impl TimelineView {
                     index,
                     segment_id: segment_id.to_string(),
                     capsule_label,
-                    retries,
                     duration,
                     outcome,
                     expanded,
@@ -1952,9 +1975,6 @@ impl TimelineView {
             return vec![self.compose_computer_run(activities, cwd, live_reasoning_id, window, cx)];
         }
         let entry = activities[0];
-        if let EntryContent::RequestRetry { message } = &entry.content {
-            return vec![components::notices::retry_row(&entry.id, message, cx)];
-        }
         let recency = AutoActivityRecency::from_newer_activity_count(newer);
         if let Some(edit) = tools::diff::edit(entry, cwd) {
             if edit.by_command && edit.files.len() > 1 {

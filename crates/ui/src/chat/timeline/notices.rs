@@ -1,8 +1,8 @@
 //! The notices the timeline draws from more than the row they stand in: a
 //! change of model, a handoff to another harness, what Tcode or another
-//! thread sent this thread's model, the turn's warnings, other threads'
-//! actions, the thread's unreadable records, a message's settings, and the
-//! rewind of a message that failed.
+//! thread sent this thread's model, other threads' actions, the thread's
+//! unreadable records, a message's settings, and the rewind of a message
+//! that failed.
 use super::*;
 use crate::chat::components::notices::{self, Capsule, Expandable, MessageTag, Sender};
 use crate::chat::model::{message_tags, one_line, standing_rewind_failure};
@@ -118,55 +118,6 @@ impl TimelineView {
             .flatten()
     }
 
-    /// The turn's warnings as one amber line, drawn where the first stands,
-    /// opening on each in full.
-    pub(super) fn compose_warnings(
-        &self,
-        turn: usize,
-        first: &TimelineEntry,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let messages = self
-            .turn_entries(
-                turn,
-                |entries| {
-                    entries
-                        .iter()
-                        .filter_map(|entry| match &entry.content {
-                            EntryContent::Warning { message } => Some(message.clone()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                },
-                cx,
-            )
-            .unwrap_or_default();
-        let said = messages
-            .iter()
-            .map(|message| one_line(message))
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let label = if messages.len() == 1 {
-            crate::tr!("chat.warning_one", warnings = said)
-        } else {
-            crate::tr!("chat.warnings", count = messages.len(), warnings = said)
-        }
-        .into_owned();
-        let key = format!("warnings-{}", first.id);
-        let toggle_key = key.clone();
-        notices::expandable_alert(
-            Expandable {
-                key: &key,
-                label,
-                texts: messages,
-                expanded: self.expanded.contains(&key),
-                banner: false,
-            },
-            cx.listener(move |this, _, _, cx| this.toggle_expanded(turn, &toggle_key, cx)),
-            &self.motion,
-        )
-    }
-
     /// A run of one other thread's actions on this thread's run: who, which
     /// opens it, and what it did, each action told once with how often.
     pub(super) fn compose_control_actions(
@@ -251,11 +202,27 @@ impl TimelineView {
                 .into_owned(),
                 texts: lines,
                 expanded: self.expanded.contains(UNREADABLE_KEY),
-                banner: true,
             },
             cx.listener(move |this, _, _, cx| this.toggle_expanded(turn, UNREADABLE_KEY, cx)),
             &self.motion,
         ))
+    }
+
+    /// What the harness said in the turn, as [`notices::said_line`], open
+    /// while the user keeps it open.
+    pub(super) fn compose_said(
+        &self,
+        turn: usize,
+        said: notices::Said<'_>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = said.key.to_owned();
+        let expanded = self.expanded.contains(&key);
+        notices::said_line(
+            notices::Said { expanded, ..said },
+            cx.listener(move |this, _, _, cx| this.toggle_expanded(turn, &key, cx)),
+            &self.motion,
+        )
     }
 
     pub(super) fn compose_model_change(
@@ -305,60 +272,60 @@ impl TimelineView {
         let capsule = |model: &str| Capsule {
             glyph: glyph.clone(),
             label: name(model),
+            back: None,
         };
         let rerouted = reason
             .as_deref()
             .filter(|reason| !reason.is_empty())
             .map(|reason| {
-                let note = crate::tr!(
+                crate::tr!(
                     "chat.model_rerouted",
                     harness = harness.as_str(),
-                    to = name(to),
                     reason = reason
                 )
-                .into_owned();
-                // Switching back sets the model the thread's next turn asks
-                // for, which is offered only while nothing has changed it
-                // since and the thread does not already ask for it.
-                let switch_back = from
-                    .clone()
-                    .zip(meta.filter(|_| latest))
-                    .filter(|(from, meta)| meta.model.as_deref() != Some(from.as_str()))
-                    .zip(self.session_id.clone())
-                    .map(|((from, meta), session_id)| {
-                        let label =
-                            crate::tr!("chat.model_switch_back", model = name(&from)).into_owned();
-                        let (provider, profile_id, acp_agent_id) = (
-                            meta.provider,
-                            meta.profile_id.clone(),
-                            meta.acp_agent_id.clone(),
-                        );
-                        let store = self.workspace_store.clone();
-                        let on_click: components::changed_files::ClickHandler =
-                            Box::new(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                                let (session_id, from) = (session_id.clone(), from.clone());
-                                store.update(cx, |store, _| match acp_agent_id.clone() {
-                                    Some(agent) => store.set_active_acp_agent_for(
-                                        session_id,
-                                        agent,
-                                        Some(from),
-                                    ),
-                                    None => store.set_active_model_for(
-                                        session_id,
-                                        provider,
-                                        Some(from),
-                                        profile_id.clone(),
-                                    ),
-                                });
-                            });
-                        (label, on_click)
+                .into_owned()
+            });
+        // Switching back sets the model the thread's next turn asks for,
+        // which is offered after a reroute only while nothing has changed it
+        // since and the thread does not already ask for it.
+        let back = from
+            .clone()
+            .filter(|_| rerouted.is_some())
+            .zip(meta.filter(|_| latest))
+            .filter(|(from, meta)| meta.model.as_deref() != Some(from.as_str()))
+            .zip(self.session_id.clone())
+            .map(|((from, meta), session_id)| {
+                let label = crate::tr!("chat.model_switch_back", model = name(&from)).into_owned();
+                let (provider, profile_id, acp_agent_id) = (
+                    meta.provider,
+                    meta.profile_id.clone(),
+                    meta.acp_agent_id.clone(),
+                );
+                let store = self.workspace_store.clone();
+                let on_click: components::changed_files::ClickHandler =
+                    Box::new(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        let (session_id, from) = (session_id.clone(), from.clone());
+                        store.update(cx, |store, _| match acp_agent_id.clone() {
+                            Some(agent) => {
+                                store.set_active_acp_agent_for(session_id, agent, Some(from))
+                            }
+                            None => store.set_active_model_for(
+                                session_id,
+                                provider,
+                                Some(from),
+                                profile_id.clone(),
+                            ),
+                        });
                     });
-                (note, switch_back)
+                (label, on_click)
             });
         notices::model_change(
             &entry.id,
             notices::ModelChange {
-                from: from.as_deref().map(capsule),
+                from: from.as_deref().map(|from| Capsule {
+                    back,
+                    ..capsule(from)
+                }),
                 to: capsule(to),
                 rerouted,
             },
@@ -386,6 +353,7 @@ impl TimelineView {
         let capsule = |provider: ProviderKind| Capsule {
             glyph: Some(provider_glyph(provider)),
             label: provider.display_name().to_owned(),
+            back: None,
         };
         let note = match moved_from {
             Some(dir) => Some(crate::tr!(

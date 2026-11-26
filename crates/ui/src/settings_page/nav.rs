@@ -338,7 +338,7 @@ impl SettingsPage {
                         false,
                         cx,
                     )
-                    .pl(window_caption::traffic_light_inset(window).max(spacing.sm)),
+                    .pl(window_caption::traffic_light_inset(window, cx).max(spacing.sm)),
                     window,
                     cx,
                 )

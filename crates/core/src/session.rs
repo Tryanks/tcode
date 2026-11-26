@@ -556,8 +556,7 @@ pub enum EntryContent {
     Warning {
         message: String,
     },
-    /// One attempt the harness makes again at a request that failed, in its
-    /// own words.
+    /// The harness's latest attempt at a request it is trying again.
     RequestRetry {
         message: String,
     },
@@ -1707,17 +1706,28 @@ impl Timeline {
             }
             AgentEvent::RequestRetry { message } => {
                 let turn = self.ensure_turn();
-                let id = self.synthetic_id("retry", ts);
-                self.entries.push(Arc::new(TimelineEntry {
-                    id,
-                    content: EntryContent::RequestRetry {
-                        message: message.clone(),
-                    },
-                    ts,
-                    finished_ts: None,
-                    background: false,
-                    turn,
-                }));
+                let content = EntryContent::RequestRetry {
+                    message: message.clone(),
+                };
+                match self.entries.last_mut() {
+                    Some(last) if matches!(last.content, EntryContent::RequestRetry { .. }) => {
+                        *last = Arc::new(TimelineEntry {
+                            content,
+                            ..(**last).clone()
+                        });
+                    }
+                    _ => {
+                        let id = self.synthetic_id("retry", ts);
+                        self.entries.push(Arc::new(TimelineEntry {
+                            id,
+                            content,
+                            ts,
+                            finished_ts: None,
+                            background: false,
+                            turn,
+                        }));
+                    }
+                }
             }
             AgentEvent::Warning { message } => {
                 let turn = self.ensure_turn();

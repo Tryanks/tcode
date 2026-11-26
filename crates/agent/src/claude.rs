@@ -2147,6 +2147,9 @@ pub(crate) struct Mapper {
     pending_settings: Option<PendingSettings>,
     /// The `get_settings` read awaiting its answer.
     pending_settings_read: Option<String>,
+    /// The skills init named: a pushed command list does not say which of
+    /// its commands are skills.
+    skills: Vec<String>,
     /// The model the session is set to as Claude last reported it.
     reported_model: Option<String>,
     /// Fast mode as Claude last reported it.
@@ -2221,6 +2224,7 @@ impl Mapper {
             applied_settings: ClaudeLaunchOptions::default(),
             pending_settings: None,
             pending_settings_read: None,
+            skills: Vec::new(),
             reported_model: None,
             reported_fast_mode: None,
             pending_rewinds: HashMap::new(),
@@ -2468,8 +2472,17 @@ impl Mapper {
                 self.applied_permission_mode = mode.to_owned();
                 return vec![self.permission_options()];
             }
-            Some("model_refusal_fallback") => return self.on_model_refusal_fallback(msg),
+            Some("model_refusal_fallback" | "model_fallback" | "model_consent_fallback") => {
+                return self.on_model_fallback(msg);
+            }
             Some("api_retry") => return vec![api_retry_notice(msg)],
+            // What Claude Code's own interface shows as a line of text: a
+            // banner of the loop's (hook feedback, a notice about the
+            // session) and an entry of its notification queue.
+            Some("informational") => return notice(msg.get("content")),
+            Some("notification") => return notice(msg.get("text")),
+            Some("session_writes_lost") => return vec![writes_lost_notice(msg)],
+            Some("commands_changed") => return self.on_commands_changed(msg),
             other => {
                 log::debug!("claude: ignoring system/{other:?}");
                 return Vec::new();
@@ -2536,6 +2549,11 @@ impl Mapper {
         // The `slash_commands` (Command) and `skills` (Skill) arrays feed the
         // composer's `/` and `$` menus. Both are arrays of names (no descriptions).
         let commands = parse_provider_commands(msg);
+        self.skills = commands
+            .iter()
+            .filter(|command| command.kind == ProviderCommandKind::Skill)
+            .map(|command| command.name.clone())
+            .collect();
         if !commands.is_empty() {
             events.push(AgentEvent::ProviderCommands { commands });
         }
@@ -2543,12 +2561,38 @@ impl Mapper {
         events
     }
 
-    fn on_model_refusal_fallback(&mut self, msg: &Value) -> Vec<AgentEvent> {
+    /// Claude Code answers from another model than the one asked for: after
+    /// a refusal, after the model failed, or where the account may not use
+    /// it. `content` is its own account of why.
+    fn on_model_fallback(&mut self, msg: &Value) -> Vec<AgentEvent> {
         let Some(actual) = msg.get("fallback_model").and_then(Value::as_str) else {
-            log::debug!("claude: ignoring malformed model_refusal_fallback");
+            log::debug!("claude: ignoring a model fallback that names no model");
             return Vec::new();
         };
-        self.observe_served_model(&json!({ "model": actual }), msg.get("original_model"))
+        let mut events =
+            self.observe_served_model(&json!({ "model": actual }), msg.get("original_model"));
+        let said = msg
+            .get("content")
+            .and_then(Value::as_str)
+            .filter(|said| !said.trim().is_empty());
+        for event in &mut events {
+            if let AgentEvent::ServedModel { reason, .. } = event {
+                *reason = said.map(str::to_owned);
+            }
+        }
+        events
+    }
+
+    /// The command list Claude Code pushes whole when it changes inside a
+    /// session, as when the agent's work in a subdirectory discovers skills.
+    fn on_commands_changed(&mut self, msg: &Value) -> Vec<AgentEvent> {
+        let Some(pushed) = msg.get("commands").and_then(Value::as_array) else {
+            log::debug!("claude: ignoring commands_changed without a command list");
+            return Vec::new();
+        };
+        vec![AgentEvent::ProviderCommands {
+            commands: pushed_provider_commands(pushed, &self.skills),
+        }]
     }
 
     fn accept_pending_steers(&mut self) -> Vec<AgentEvent> {
@@ -2682,6 +2726,47 @@ impl Mapper {
             usage,
         });
         events
+    }
+}
+
+/// A line of text Claude Code has for the user, as it wrote it.
+fn notice(text: Option<&Value>) -> Vec<AgentEvent> {
+    text.and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| AgentEvent::Warning {
+            message: text.to_owned(),
+        })
+        .into_iter()
+        .collect()
+}
+
+/// Claude Code exits having lost writes to a full disk: lines of a session
+/// transcript, changes to `~/.claude.json`, or both. It gives the facts and
+/// no text of its own on this stream.
+fn writes_lost_notice(msg: &Value) -> AgentEvent {
+    let lost = msg
+        .get("lost")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|what| match what {
+            "transcript" => "lines of the session transcript",
+            "global_config" => "changes to ~/.claude.json",
+            other => other,
+        })
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let code = msg
+        .get("error_code")
+        .and_then(Value::as_str)
+        .map(|code| format!(" ({code})"))
+        .unwrap_or_default();
+    AgentEvent::Warning {
+        message: format!(
+            "claude could not save {lost}: the disk is full or over its quota{code}. \
+             A session resumed from here may miss part of the conversation."
+        ),
     }
 }
 

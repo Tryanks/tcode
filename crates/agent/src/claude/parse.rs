@@ -562,6 +562,56 @@ pub(super) fn parse_provider_commands(init: &Value) -> Vec<ProviderCommand> {
     out
 }
 
+/// The commands of a `commands_changed` push: objects with a `name`, a
+/// `description` and the `aliases` the command also answers to (2.1.332).
+/// One that `skills`, the skills init named, holds under any of those names
+/// is listed as that skill too, as init lists it.
+pub(super) fn pushed_provider_commands(
+    pushed: &[Value],
+    skills: &[String],
+) -> Vec<ProviderCommand> {
+    let mut commands = Vec::new();
+    let mut pushed_skills = Vec::new();
+    for command in pushed {
+        let Some(name) = command
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let description = command
+            .get("description")
+            .and_then(Value::as_str)
+            .filter(|description| !description.trim().is_empty())
+            .map(str::to_owned);
+        let aliases = command.get("aliases").and_then(Value::as_array);
+        let skill = skills.iter().find(|skill| {
+            *skill == name
+                || aliases.is_some_and(|aliases| {
+                    aliases
+                        .iter()
+                        .any(|alias| alias.as_str() == Some(skill.as_str()))
+                })
+        });
+        if let Some(skill) = skill {
+            pushed_skills.push(ProviderCommand {
+                name: skill.clone(),
+                description: description.clone(),
+                kind: ProviderCommandKind::Skill,
+            });
+        }
+        commands.push(ProviderCommand {
+            name: name.to_owned(),
+            description,
+            kind: ProviderCommandKind::Command,
+        });
+    }
+    commands.extend(pushed_skills);
+    commands
+}
+
 /// The plan a call of `name` sets, when it is a `TodoWrite`: a session
 /// shows it as the plan, not as a call. The importer reads a transcript's
 /// calls through this.

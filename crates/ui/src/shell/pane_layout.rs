@@ -845,6 +845,8 @@ impl AppShell {
         } else {
             CHAT_MIN_WIDTH
         };
+        let traffic_lights =
+            collapsed && !fullscreen && crate::window_caption::has_traffic_lights(cx);
         let pane_min = |panel: PanelId, edges: crate::chat::WindowEdges| {
             let thread = thread_of(panel);
             let link = thread
@@ -855,8 +857,7 @@ impl AppShell {
                 + crate::chat::header_extra_width_for(
                     link.store.read(cx),
                     thread.as_ref().map(|thread| thread.session_id.as_str()),
-                    collapsed && edges.left,
-                    fullscreen,
+                    traffic_lights && edges.left,
                     false,
                 )
         };

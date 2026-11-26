@@ -10,7 +10,7 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, ContentMask, Element, ElementId, GlobalElementId, HighlightStyle, Hsla,
+    App, Bounds, ContentMask, Element, ElementId, Entity, GlobalElementId, HighlightStyle, Hsla,
     InspectorElementId, LayoutId, Overflow, Pixels, ShapedLine, SharedString, Style, TextAlign,
     TextRun, TextStyle, Window, point, px, size,
 };
@@ -36,12 +36,14 @@ const MAX_CHARS: usize = 1000;
 pub struct FadeText {
     text: SharedString,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
+    cut: Option<Entity<bool>>,
 }
 
 pub fn fade_text(text: impl Into<SharedString>) -> FadeText {
     FadeText {
         text: text.into(),
         highlights: Vec::new(),
+        cut: None,
     }
 }
 
@@ -53,6 +55,13 @@ impl FadeText {
         highlights: impl IntoIterator<Item = (Range<usize>, HighlightStyle)>,
     ) -> Self {
         self.highlights = highlights.into_iter().collect();
+        self
+    }
+
+    /// Keeps in `cut` whether the line was last painted cut short. A change
+    /// redraws the window, so that what is built around the line follows it.
+    pub fn reporting_cut(mut self, cut: Entity<bool>) -> Self {
+        self.cut = Some(cut);
         self
     }
 }
@@ -162,7 +171,14 @@ impl Element for FadeText {
         } = layout;
         let line_height = *line_height;
         let origin = point(bounds.left(), bounds.top() + *drop);
-        if line.width() <= bounds.size.width {
+        let fits = line.width() <= bounds.size.width;
+        if let Some(cut) = &self.cut
+            && *cut.read(cx) == fits
+        {
+            cut.update(cx, |cut, _| *cut = !fits);
+            window.refresh();
+        }
+        if fits {
             let align = window.text_style().text_align;
             line.paint(
                 origin,

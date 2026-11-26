@@ -76,13 +76,14 @@ fn parent_session<'a>(
     store.thread_meta(parent_id)
 }
 
-/// The header's left inset in place of the bar's own. Collapsed, the sidebar
-/// has zero width and the header starts at the window's left edge, where macOS
-/// draws the traffic lights — but only when it draws them: they are hidden in
-/// fullscreen, and other platforms never had them. The budget counts the whole
-/// inset, not its excess over the bar's, which leaves the widths a little slack.
-fn traffic_light_clearance(sidebar_collapsed: bool, fullscreen: bool) -> f32 {
-    if cfg!(target_os = "macos") && sidebar_collapsed && !fullscreen {
+/// The header's left inset in place of the bar's own, for a header that is
+/// `under_traffic_lights`: collapsed, the sidebar has zero width and the
+/// header starts at the window's left edge, where the window draws them when
+/// it has any ([`crate::window_caption::has_traffic_lights`]) and is not in
+/// fullscreen. The budget counts the whole inset, not its excess over the
+/// bar's, which leaves the widths a little slack.
+fn traffic_light_clearance(under_traffic_lights: bool) -> f32 {
+    if under_traffic_lights {
         crate::window_caption::TRAFFIC_LIGHT_INSET
     } else {
         0.
@@ -95,8 +96,7 @@ fn traffic_light_clearance(sidebar_collapsed: bool, fullscreen: bool) -> f32 {
 pub(crate) fn header_extra_width_for(
     store: &WorkspaceStore,
     session_id: Option<&str>,
-    sidebar_collapsed: bool,
-    fullscreen: bool,
+    under_traffic_lights: bool,
     labelled: bool,
 ) -> f32 {
     let parent_link = match (parent_session(store, session_id), labelled) {
@@ -104,7 +104,7 @@ pub(crate) fn header_extra_width_for(
         (Some(_), true) => PARENT_LINK_LABELLED_WIDTH,
         (Some(_), false) => PARENT_LINK_COMPACT_WIDTH,
     };
-    traffic_light_clearance(sidebar_collapsed, fullscreen) + parent_link
+    traffic_light_clearance(under_traffic_lights) + parent_link
 }
 
 /// The header's pane commands, for the pane it heads.
@@ -927,7 +927,8 @@ impl ChatView {
                 drawer.right_panel_open,
                 drawer.right_tab,
             );
-        let under_traffic_lights = collapsed && self.edges.left;
+        let traffic_lights = window_caption::traffic_light_inset(window, cx);
+        let under_traffic_lights = collapsed && self.edges.left && traffic_lights > px(0.);
         // The pane's close button holds the right end in every tier, so each
         // tier makes room for it while it is drawn.
         let close_width = if self.pane_close.is_some() {
@@ -945,7 +946,6 @@ impl ChatView {
             self.workspace_store.read(cx),
             self.session_id.as_deref(),
             under_traffic_lights,
-            window.is_fullscreen(),
             true,
         ) + close_width
             + caption_width;
@@ -960,12 +960,10 @@ impl ChatView {
             self.workspace_store.read(cx),
             self.session_id.as_deref(),
             under_traffic_lights,
-            window.is_fullscreen(),
             false,
         ) + close_width
             + caption_width;
         let overflow = width - compact_extra < HEADER_COMPACT_MIN_WIDTH;
-        let traffic_lights = window_caption::traffic_light_inset(window);
         let motion = self.motion.clone();
         // Controls that come and go with what the thread has widen into
         // their rows, so the title and their neighbours move aside. The
@@ -991,7 +989,7 @@ impl ChatView {
         // sidebar collapses or a pane moves to or off the window's left edge.
         let left_inset = self.motion.transition(
             "traffic-light-inset",
-            if under_traffic_lights && traffic_lights > px(0.) {
+            if under_traffic_lights {
                 traffic_lights
             } else {
                 cx.theme().tokens.spacing.sm

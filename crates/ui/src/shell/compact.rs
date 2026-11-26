@@ -40,9 +40,10 @@ fn nav_bar(
         actions.len() <= 2,
         "navigation bar allows at most two trailing actions"
     );
-    // A compact window on the desktop is still a window: it keeps the platform's
-    // own controls out of the content and stays draggable by its top strip.
-    let traffic_lights = window_caption::traffic_light_inset(window);
+    // The compact layout previewed in a desktop window is still a window: it
+    // keeps the controls the platform draws out of the content and stays
+    // draggable by its top strip.
+    let traffic_lights = window_caption::traffic_light_inset(window, cx);
     let hosts_caption = window_caption::compact_hosts_caption();
     let (dense, tight) = (cx.theme().tokens.spacing.sm, cx.theme().tokens.spacing.xs);
     // The sides carry the strip's insets themselves, so their floor is
