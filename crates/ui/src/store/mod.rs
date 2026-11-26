@@ -275,6 +275,9 @@ pub struct WorkspaceStore {
     disk_usage_holds: usize,
     /// The host's projects moving to another machine of its group.
     project_moves: moves::ProjectMoves,
+    /// What the host's group calls its machine, as the hosting state last
+    /// followed said; `None` without a label or before any was followed.
+    group_label: Option<String>,
     connection_state: ConnectionState,
     /// How far the host's wall clock is ahead of this client's, in
     /// milliseconds, as its last scope snapshot said; until one lands, none.
@@ -521,6 +524,7 @@ impl WorkspaceStore {
             disk_usage: DiskUsageState::default(),
             disk_usage_holds: 0,
             project_moves: Default::default(),
+            group_label: None,
             removed_session: None,
             settings_replica: Settings::default(),
             member_settings_unreadable: false,
@@ -770,7 +774,7 @@ impl WorkspaceStore {
     pub fn machine_label(&self) -> String {
         let machine = self.remote_host_name().unwrap_or_default();
         match &self.scope {
-            WorkspaceScope::Full => machine.to_owned(),
+            WorkspaceScope::Full => self.group_label.as_deref().unwrap_or(machine).to_owned(),
             WorkspaceScope::Space { space_name, .. } => {
                 crate::tr!("member.connection", space = space_name, machine = machine).into_owned()
             }

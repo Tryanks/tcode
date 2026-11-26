@@ -429,7 +429,16 @@ impl WorkspaceStore {
                     self.providers_replica = std::mem::take(status);
                     self.baseline_topics.insert(Topic::Providers);
                 }
-                (Topic::Hosting, ServerEvent::HostingReplaced(state)) => cx.emit((**state).clone()),
+                (Topic::Hosting, ServerEvent::HostingReplaced(state)) => {
+                    self.group_label = state.group.as_ref().and_then(|group| {
+                        group
+                            .machines
+                            .iter()
+                            .find(|machine| machine.this_machine)
+                            .and_then(|machine| machine.label.clone())
+                    });
+                    cx.emit((**state).clone())
+                }
                 (Topic::StorageMigration, ServerEvent::StorageMigrationReplaced(migration))
                     if self.storage_migration_holds > 0 =>
                 {

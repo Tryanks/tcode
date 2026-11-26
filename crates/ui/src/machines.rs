@@ -89,6 +89,39 @@ pub(crate) fn group_machines(
         .unwrap_or_default()
 }
 
+/// What `store`'s own machine is called: its group's label for it, else its
+/// own name; `None` while it has neither.
+pub(crate) fn own_name(store: &Entity<WorkspaceStore>, cx: &mut App) -> Option<String> {
+    group_machines(store, cx)
+        .into_iter()
+        .find(|machine| machine.this_machine)
+        .map(|machine| machine.title().to_owned())
+        .or_else(|| {
+            let store = store.read(cx);
+            match store.host_key() {
+                HostKey::Local => crate::remote::local_machine_name(cx),
+                HostKey::Remote(_) => store.remote_host_name().map(str::to_owned),
+            }
+        })
+        .filter(|name| !name.trim().is_empty())
+}
+
+/// [`WorkspaceStore::host_title`], with a machine of a group called by its
+/// label: a device reaching only a space has no group to ask.
+pub(crate) fn host_title(store: &Entity<WorkspaceStore>, cx: &mut App) -> SharedString {
+    let (remote, full) = {
+        let store = store.read(cx);
+        (store.is_remote(), store.scope().is_full())
+    };
+    if remote
+        && full
+        && let Some(name) = own_name(store, cx)
+    {
+        return name.into();
+    }
+    store.read(cx).host_title()
+}
+
 /// Machine `id`, named by the open store for it, else by the machine this
 /// device saved, else by the head of its id.
 pub(crate) fn machine(id: &str, cx: &App) -> Machine {

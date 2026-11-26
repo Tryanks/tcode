@@ -101,24 +101,31 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = self.window_state.read(cx).route() == Route::Hosts;
+        let (title, own_name) = if self.sectioned() {
+            (None, None)
+        } else {
+            (
+                Some(crate::machines::host_title(lead, cx)),
+                crate::machines::own_name(lead, cx),
+            )
+        };
         let store = lead.read(cx);
         let connection_state = store.connection_state();
         let view_only = !self.sectioned() && store.view_only();
 
         // Local, the control says "This machine" and the tooltip its name;
         // remote, the control names the machine and the tooltip the link.
-        let (name, detail): (SharedString, Option<SharedString>) = if self.sectioned() {
-            (crate::tr!("hosts.title").into_owned().into(), None)
-        } else {
-            (
-                store.host_title(),
+        let (name, detail): (SharedString, Option<SharedString>) = match title {
+            None => (crate::tr!("hosts.title").into_owned().into(), None),
+            Some(title) => (
+                title,
                 match store.host_key() {
                     HostKey::Remote(_) => {
                         Some(crate::remote::connection_label(&connection_state).into())
                     }
-                    HostKey::Local => crate::remote::local_machine_name(cx).map(SharedString::from),
+                    HostKey::Local => own_name.map(SharedString::from),
                 },
-            )
+            ),
         };
         let dot = (!self.sectioned()).then(|| {
             transition(
@@ -791,11 +798,11 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> Option<HostHeadingParts> {
         let store = self.store_of(host)?;
+        let title = crate::machines::host_title(&store, cx);
         let store = store.read(cx);
         let state = store.connection_state();
         let failure = crate::remote::connection_failure(state.clone());
         let up = failure.is_none();
-        let title = store.host_title();
         let menu = HostMenu {
             host: host.clone(),
             projects: (up && store.may_operate()).then(|| {
