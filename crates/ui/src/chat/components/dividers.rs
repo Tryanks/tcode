@@ -115,6 +115,18 @@ pub(crate) fn context_compacted_divider(
     )
 }
 
+/// A warning of the harness, whole and in its words.
+pub(crate) fn warning_divider(id: &str, message: &str, cx: &App) -> AnyElement {
+    divider_in(
+        SharedString::from(format!("warning-{id}")),
+        message.to_owned(),
+        cx.theme().warning,
+        Some(IconName::TriangleAlert),
+        None,
+        cx,
+    )
+}
+
 /// A request the harness tries again, in its own words: one line where it
 /// happened, which each further attempt at that request rewrites.
 pub(crate) fn request_retry_divider(

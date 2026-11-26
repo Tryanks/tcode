@@ -272,14 +272,14 @@ impl TimelineView {
                         cx,
                     ));
                 }
-                Segment::Warning(entry) => {
-                    let EntryContent::Warning { message } = &entry.content else {
-                        unreachable!();
-                    };
-                    column = column.child(components::notices::alert_line(
-                        format!("warning-{}", entry.id),
-                        message.clone(),
-                        cx,
+                Segment::Warnings(warnings) => {
+                    column = column.child(v_flex().w_full().gap_1().children(
+                        warnings.iter().filter_map(|entry| match &entry.content {
+                            EntryContent::Warning { message } => Some(
+                                components::dividers::warning_divider(&entry.id, message, cx),
+                            ),
+                            _ => None,
+                        }),
                     ));
                 }
                 Segment::Error(entry) => {
