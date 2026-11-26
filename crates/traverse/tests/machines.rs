@@ -351,13 +351,18 @@ fn only_the_group_s_machines_open_machine_streams_and_they_open_nothing_else() {
     tcode_traverse::block_on(as_b.close());
 }
 
-/// A request that has passed the gate reaches the host, whose answer for
-/// these is not built yet; one that has not is answered by the gate.
+/// A request that has passed the gate reaches the host; one that has not is
+/// answered by the gate.
 fn passes(result: Result<MachineResponse, ProtocolError>) -> bool {
-    match code(result).as_str() {
-        "not_implemented" => true,
-        MACHINE_REFUSES => false,
-        other => panic!("unexpected refusal {other}"),
+    // Whatever the host answers once the request reached it, an answer or
+    // its own refusal, the gate let it through.
+    match result {
+        Ok(_) => true,
+        Err(error) if error.code == MACHINE_REFUSES => false,
+        Err(error) if error.code == NOT_MEMBER || error.code == "machine_unreachable" => {
+            panic!("the request never reached the host: {}", error.code)
+        }
+        Err(_) => true,
     }
 }
 
