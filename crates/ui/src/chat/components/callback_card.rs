@@ -53,6 +53,8 @@ pub(crate) enum CallbackRequest {
         request: ApprovalRequest,
         /// This client's user may answer it ([`crate::composer::approval_answerable`]).
         answerable: bool,
+        /// Why it cannot be answered here, while it cannot.
+        refusal: SharedString,
         enabled: bool,
         decide: crate::composer::Decide,
     },
@@ -253,6 +255,7 @@ pub(crate) fn callback_card(
             Some(CallbackRequest::Approval {
                 request,
                 answerable,
+                refusal,
                 enabled,
                 decide,
             }) => {
@@ -271,11 +274,8 @@ pub(crate) fn callback_card(
                     None
                 } else {
                     Some(
-                        event_card::section(cx).child(
-                            div()
-                                .text_secondary(false, cx)
-                                .child(crate::tr!("approval.space_reviewed_only")),
-                        ),
+                        event_card::section(cx)
+                            .child(div().text_secondary(false, cx).child(refusal)),
                     )
                 }
             }

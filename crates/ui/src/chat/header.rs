@@ -1366,7 +1366,11 @@ impl ChatView {
             .session_status_for(self.session_id.as_deref(), cx)
             .and_then(|status| status.control.as_ref())
             .is_some_and(|control| control.self_settle.is_some());
-        let movable = !is_draft && {
+        // A machine that lets this device only view it keeps what reads the
+        // thread here, and nothing that changes it.
+        let changes = !self.workspace_store.read(cx).view_only();
+        let self_settles = changes && self_settles;
+        let movable = changes && !is_draft && {
             let active = self.session_id.as_deref();
             active
                 .and_then(|id| self.workspace_store.read(cx).thread_meta(id))
@@ -1381,10 +1385,12 @@ impl ChatView {
             });
             let menu = menu
                 .separator()
-                .menu(
-                    crate::tr!("pull_requests.link_menu").into_owned(),
-                    Box::new(crate::pull_requests::OpenLinkDialog),
-                )
+                .when(changes, |menu| {
+                    menu.menu(
+                        crate::tr!("pull_requests.link_menu").into_owned(),
+                        Box::new(crate::pull_requests::OpenLinkDialog),
+                    )
+                })
                 .when(movable, |menu| {
                     menu.menu(
                         crate::tr!("sidebar.ctx_move_thread").into_owned(),

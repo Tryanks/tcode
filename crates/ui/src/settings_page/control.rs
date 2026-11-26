@@ -331,6 +331,23 @@ impl SettingsPage {
             WorkspaceStore::set_control_enabled,
         );
 
+        let machines_reset = crate::settings_rows::reset_action(
+            "reset-control-machines",
+            !control.machines,
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_control_machines(true), cx)
+            }),
+        );
+        let machines = self.toggle_row(
+            "control-machines",
+            crate::tr!("control.settings.machines"),
+            crate::tr!("control.settings.machines_description"),
+            control.machines,
+            machines_reset,
+            cx,
+            WorkspaceStore::set_control_machines,
+        );
+
         let visualize_reset = crate::settings_rows::reset_action(
             "reset-visualize-enabled",
             !settings.visualize.enabled,
@@ -369,7 +386,12 @@ impl SettingsPage {
 
         v_flex()
             .gap(crate::material::section_gap(cx))
-            .child(crate::material::group(cx).child(enabled).child(visualize))
+            .child(
+                crate::material::group(cx)
+                    .child(enabled)
+                    .child(div().opacity(dim).child(machines))
+                    .child(visualize),
+            )
             .child(below.opacity(dim))
     }
 

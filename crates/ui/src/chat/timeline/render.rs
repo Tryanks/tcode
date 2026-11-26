@@ -1478,6 +1478,8 @@ impl TimelineView {
             .find(|waiting| waiting.child_id == child_id);
         let online = !matches!(store.connection_state(),
             tcode_client::ConnectionState::Offline { reason } if reason.is_terminal());
+        // A machine that lets this device only view it takes no answer from it.
+        let online = online && !store.view_only();
         Some(match callback.event {
             CallbackEvent::Approval => {
                 let Some(request) = waiting
@@ -1489,10 +1491,12 @@ impl TimelineView {
                 let enabled =
                     online && !store.approval_delivery_pending_for(Some(&child_id), &request.id);
                 let answerable = crate::composer::approval_answerable(&request, store);
+                let refusal = crate::composer::not_answerable(&self.workspace_store, cx);
                 let store = self.workspace_store.clone();
                 CallbackRequest::Approval {
                     request,
                     answerable,
+                    refusal,
                     enabled,
                     decide: Rc::new(move |request_id, decision, _, cx| {
                         store.update(cx, |store, _| {

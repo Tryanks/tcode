@@ -1965,7 +1965,13 @@ space_policy:
 group:
   section: "MACHINE GROUP"
   intro: "A group links your machines, so a device paired with one can open all of them."
-  risk: "Every machine in a group can admit devices to the others, so group only machines you trust."
+  risk: "Every machine in a group can admit devices to the others and start threads on them, so group only machines you trust."
+  accept_threads:
+    title: "Accept threads other machines start here"
+    description: "Threads on the group's other machines may start threads on this machine, which run under this machine's accounts, Harnesses and permissions."
+  accept_projects:
+    title: "Accept projects other machines move here"
+    description: "The group's other machines may move a project here together with its threads."
   failed: "Could not update the group: %{error}"
   leave: "Leave group"
   leave_title: "Leave «%{name}»?"
@@ -1999,6 +2005,12 @@ group:
     remove: "Remove"
     remove_title: "Remove «%{name}» from the group?"
     remove_description: "The other machines stop syncing with it; devices it already brought keep their access."
+    accepts:
+      both: "Takes threads and projects from the group"
+      threads: "Takes threads from the group, not projects"
+      projects: "Takes projects from the group, not threads"
+      neither: "Takes no threads or projects from the group"
+      unknown: "Has not said what it takes; it may run an older Tcode"
   declined:
     section: "WAITING FOR THIS MACHINE"
     description: "Other machines admitted these devices while this machine was not accepting new devices."
@@ -2927,7 +2939,7 @@ control:
   title: "Control"
   agents:
     section: "AVAILABLE MODELS"
-    footnote: "Threads that start other threads can only use the models listed here, collaborations included. Threads you start yourself are not limited."
+    footnote: "Threads that start other threads can only use the models listed here, collaborations included. Threads you start yourself are not limited. Threads other machines of the group start here are limited to these models too."
     none: "No models yet: no thread can be started here."
     add: "Add models to %{name}"
     remove: "Remove %{name}"
@@ -3023,6 +3035,8 @@ control:
     enabled: "Let threads use tcode_control"
     enabled_description: "A thread's model can then view other threads, organize them, delegate threads, message them and act on them. What a call may do without asking you is its Harness's permission mode to decide, as for any other tool."
     enabled_off_description: "Threads can't use these tools now."
+    machines: "Let threads start threads on other machines of the group"
+    machines_description: "When off, threads on this machine cannot start threads on other machines. Whether each one needs your approval is its Harness's permission mode to decide."
     visualize_enabled: "Let threads use tcode_visualize"
     visualize_enabled_description: "A thread's model can then draw a chart, a diagram or another visual in the thread."
     visualize_enabled_off_description: "Threads can't draw visuals now."
@@ -3436,6 +3450,26 @@ machines:
   dispatch:
   move:
   access:
+    title: "Other devices of the group"
+    operate: "May operate this machine"
+    view: "May only view"
+    none: "Cannot open this machine"
+    operate_description: "As they do now."
+    view_description: "Other devices can open this machine and see its projects, threads and what is in them, but cannot start or continue a conversation or change anything. This machine can still open the group's other machines."
+    none_description: "Other devices cannot connect to this machine. This machine can still open the group's other machines."
+    follows: "Off while the group's other devices may not operate this machine."
+    confirm_view_title: "Let other devices only view this machine?"
+    confirm_view: "Other devices will be disconnected and can only view when they reconnect."
+    confirm_none_title: "Close this machine to other devices?"
+    confirm_none: "Other devices will be disconnected and cannot open this machine."
+    mark: "View only"
+    composer: "%{machine} only lets other devices view."
   label:
+    rename: "Rename"
+    set: "Set label…"
+    title: "Label for «%{name}»"
+    note: "Everyone in the group sees this label. Leave it empty to use the machine's own name."
+    save: "Save"
+    machine_name: "Machine name %{name}"
   moved_in:
     from: "Moved in from %{machine}"

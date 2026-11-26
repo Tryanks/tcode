@@ -628,7 +628,7 @@ impl SettingsPage {
     }
 
     fn section_applies(&self, section: &Section, cx: &App) -> bool {
-        section.available(&self.capabilities, self.store.read(cx).scope().is_full())
+        section.available(&self.capabilities, self.store.read(cx).may_operate())
     }
     /// Open the section a link elsewhere in the app names, the way choosing
     /// it here would.

@@ -27,6 +27,18 @@ pub(crate) fn seed_full_scope_reply(
     deferred: Vec<String>,
     cx: &mut TestAppContext,
 ) {
+    seed_scope_reply(store, incoming, request_id, deferred, false, cx);
+}
+
+/// The whole machine, as it answers a device it lets `view_only`.
+pub(crate) fn seed_scope_reply(
+    store: &gpui::Entity<WorkspaceStore>,
+    incoming: &async_channel::Sender<String>,
+    request_id: u64,
+    deferred: Vec<String>,
+    view_only: bool,
+    cx: &mut TestAppContext,
+) {
     incoming
         .try_send(
             tcode_protocol::encode_line(&tcode_protocol::HostMessage::Event(EventEnvelope {
@@ -35,7 +47,7 @@ pub(crate) fn seed_full_scope_reply(
                 event: ServerEvent::ScopeSnapshot {
                     scope: tcode_protocol::Scope::Full,
                     host_unix_ms: 0,
-                    view_only: false,
+                    view_only,
                 },
             }))
             .unwrap(),

@@ -403,7 +403,26 @@ impl WorkspaceHost {
         last_project_id: Option<&str>,
         cx: &mut VisualTestContext,
     ) {
-        crate::store::tests::seed_full_scope(store, &self.host.incoming, Vec::new(), cx);
+        self.come_up_as(store, projects, last_project_id, false, cx);
+    }
+
+    /// [`Self::come_up`] for a machine that lets this device `view_only`.
+    fn come_up_as(
+        &self,
+        store: &Entity<WorkspaceStore>,
+        projects: Vec<tcode_core::project::Project>,
+        last_project_id: Option<&str>,
+        view_only: bool,
+        cx: &mut VisualTestContext,
+    ) {
+        crate::store::tests::seed_scope_reply(
+            store,
+            &self.host.incoming,
+            1,
+            Vec::new(),
+            view_only,
+            cx,
+        );
         send_events(
             &self.host,
             vec![

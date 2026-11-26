@@ -444,8 +444,24 @@ impl Composer {
             .content(
                 v_flex()
                     .w_full()
-                    .child(event_card::section(cx).child(body).child(custom_answer))
-                    .children(footer),
+                    // A machine that lets this device only view it shows the
+                    // questions and takes no answer from it.
+                    .map(|content| {
+                        if self.view_only(cx) {
+                            content.child(event_card::section(cx).child(body)).child(
+                                event_card::section(cx)
+                                    .text_secondary(self.compact, cx)
+                                    .child(crate::composer::not_answerable(
+                                        &self.workspace_store,
+                                        cx,
+                                    )),
+                            )
+                        } else {
+                            content
+                                .child(event_card::section(cx).child(body).child(custom_answer))
+                                .children(footer)
+                        }
+                    }),
             ),
         )
         .into_any_element()
@@ -465,6 +481,7 @@ impl Composer {
         let muted = cx.theme().muted_foreground;
         let primary = cx.theme().primary;
         let multi = question.multi_select;
+        let view_only = self.view_only(cx);
         let blocking = self
             .pending_user_input(cx)
             .is_none_or(|pending| pending.delivery.is_blocking());
@@ -540,7 +557,7 @@ impl Composer {
                 .w_full()
                 .items_start()
                 .text_body(self.compact, cx)
-                .cursor_pointer()
+                .when(!view_only, |row| row.cursor_pointer())
                 .bg(cx.theme().list_active.opacity(chosen))
                 .child(
                     div()
@@ -578,6 +595,9 @@ impl Composer {
                         }),
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
+                    if this.view_only(cx) {
+                        return;
+                    }
                     this.ui_toggle_option(&question_for_click, label.clone(), cx);
                     // Single-select answers flow onward by themselves: next
                     // unanswered question, or submission when none remain.
@@ -638,7 +658,7 @@ impl Composer {
         else {
             return false;
         };
-        if !delivery.is_blocking() {
+        if !delivery.is_blocking() || self.view_only(cx) {
             return false;
         }
         let index = self

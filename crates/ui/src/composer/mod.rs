@@ -11,7 +11,9 @@ pub(crate) use components::goal_strip::{
     status_label as goal_status_label, usage_line as goal_usage_line,
 };
 
-pub(crate) use components::approval::{Decide, approval_answerable, approval_decisions};
+pub(crate) use components::approval::{
+    Decide, approval_answerable, approval_decisions, not_answerable,
+};
 pub(crate) use components::checkout::{CheckoutRowAt, checkout_row};
 use components::images::PendingImage;
 use components::steer_gesture::SteerGesture;
@@ -307,8 +309,15 @@ impl Composer {
 
     fn interactive(&self, cx: &App) -> bool {
         !self.subagent(cx)
+            && !self.view_only(cx)
             && !matches!(self.workspace_store.read(cx).connection_state(),
             tcode_client::ConnectionState::Offline { reason } if reason.is_terminal())
+    }
+
+    /// Whether the thread's machine lets this device only view it: nothing
+    /// typed here can reach it.
+    pub(crate) fn view_only(&self, cx: &App) -> bool {
+        self.workspace_store.read(cx).view_only()
     }
 
     /// Whether the thread is a native subagent's, which only its lead
@@ -610,6 +619,9 @@ impl Composer {
         let Some(session_id) = self.input_destination.clone() else {
             return;
         };
+        if self.view_only(cx) {
+            return;
+        }
         let text = self.input.read(cx).value().to_string();
         self.workspace_store
             .update(cx, |store, _| store.set_draft_text(session_id, text));
@@ -881,7 +893,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.subagent(cx) {
+        if self.subagent(cx) || self.view_only(cx) {
             return;
         }
         #[cfg(feature = "voice")]
@@ -1726,9 +1738,18 @@ impl Composer {
         let subagent = composer_state.conversation_read_only;
         self.sync_keyboard(subagent, window, cx);
         let turn_running = composer_state.turn_running;
-        let control_row = self.render_control_row(subagent, turn_running, window, cx);
+        // On a machine that lets this device only view it the row shows what
+        // the thread runs with and takes nothing, as a subagent's does, and
+        // the field says why.
+        let view_only = self.view_only(cx);
+        let control_row = self.render_control_row(subagent || view_only, turn_running, window, cx);
 
-        let desired_placeholder = if !self.interactive(cx) {
+        let desired_placeholder = if view_only {
+            crate::tr!(
+                "machines.access.composer",
+                machine = self.workspace_store.read(cx).host_title()
+            )
+        } else if !self.interactive(cx) {
             crate::tr!("mobile.offline_message")
         } else if composer_state.pending_plan.is_some() {
             crate::tr!("composer.plan_feedback_placeholder")
@@ -2129,6 +2150,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let composer = cx.entity();
+        let view_only = self.view_only(cx);
         let chip_rows = self.render_chip_rows(window, cx);
         let input = self.input.clone();
         let draft_glide = self.motion.glide_state(self.motion_key("draft-glide"));
@@ -2136,7 +2158,7 @@ impl Composer {
             field.input = input;
             field.glide = draft_glide;
             field.placeholder = desired_placeholder.into();
-            field.disabled = subagent;
+            field.disabled = subagent || view_only;
         });
 
         // The keyboard lifts the card off the page, gliding there and back;

@@ -790,6 +790,7 @@ impl SessionsSidebar {
                 .overflow_hidden()
                 .child(crate::widgets::fade_text(parts.title)),
         )
+        .children(parts.mark)
         .children(parts.pair)
         .child(parts.menu)
         .when_some(row.collapsed, |heading, collapsed| {

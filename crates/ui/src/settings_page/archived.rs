@@ -72,7 +72,7 @@ impl SettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let full = self.store.read(cx).scope().is_full();
+        let full = self.store.read(cx).may_operate();
 
         let flat: Vec<((SharedString, SharedString), SessionMeta)> = groups
             .into_iter()
@@ -228,18 +228,21 @@ impl SettingsPage {
             gpui_base::h_flex()
                 .flex_none()
                 .gap_2()
-                .child(
-                    Button::new(SharedString::from(format!("unarchive-{}", meta.id)))
-                        .outline()
-                        .small()
-                        .label(crate::tr!("settings.unarchive"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let id = id_unarchive.clone();
-                            this.store.update(cx, |store, _cx| {
-                                store.unarchive_session(id);
-                            });
-                        })),
-                )
+                // Nothing is restored on a machine that lets this device only view it.
+                .when(!self.store.read(cx).view_only(), |row| {
+                    row.child(
+                        Button::new(SharedString::from(format!("unarchive-{}", meta.id)))
+                            .outline()
+                            .small()
+                            .label(crate::tr!("settings.unarchive"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let id = id_unarchive.clone();
+                                this.store.update(cx, |store, _cx| {
+                                    store.unarchive_session(id);
+                                });
+                            })),
+                    )
+                })
                 .when(full, |row| {
                     row.child(
                         Button::new(SharedString::from(format!("delete-perm-{}", meta.id)))

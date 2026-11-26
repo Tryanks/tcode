@@ -275,7 +275,7 @@ impl AcpPanel {
         let store = self.store.read(cx);
         let error = store.acp_registry_error();
         // What stands in the list's place, and whether it is a failure.
-        let notice = if !store.scope().is_full() {
+        let notice = if !store.may_operate() {
             Some((crate::tr!("providers.acp.owner_only").into_owned(), false))
         } else if !store.acp_registry_loaded() {
             error.clone().map(|error| (error, true))

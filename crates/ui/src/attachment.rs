@@ -114,7 +114,7 @@ impl Attachment {
                 client.connect(host),
                 WorkspaceAttachment::Remote {
                     host_id: host.host_id.clone(),
-                    host_name: host.name.clone(),
+                    host_name: host.title().to_owned(),
                 },
             ),
         };

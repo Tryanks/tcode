@@ -11,6 +11,19 @@ impl ChatView {
             )
             .into_any_element();
         }
+        // No draft comes to a machine that lets this device only view it.
+        if self.workspace_store.read(cx).view_only() {
+            return crate::material::empty_state(
+                Icon::new(IconName::Folder),
+                crate::tr!("machines.access.mark"),
+                crate::tr!(
+                    "machines.access.composer",
+                    machine = self.workspace_store.read(cx).host_title()
+                ),
+                cx,
+            )
+            .into_any_element();
+        }
         if self.window_state.read(cx).compact {
             return crate::material::empty_state(
                 Icon::new(IconName::Folder),
@@ -108,7 +121,7 @@ impl ChatView {
 
         // A thread with no folder of its own offers to give the host one.
         let add_project =
-            self.workspace_store.read(cx).scope().is_full().then(|| {
+            self.workspace_store.read(cx).may_operate().then(|| {
                 Button::new("new-thread-add-project")
                     .motion(&self.motion)
                     .ghost()

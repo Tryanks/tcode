@@ -96,6 +96,11 @@ struct MoveHost {
 #[action(namespace = tcode_hosts, no_json)]
 struct ForgetHost(String);
 
+/// Give the group member this row names the label its group shows for it.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_hosts, no_json)]
+struct SetHostLabel(String);
+
 /// Show a previously hidden group member again in its group's multi-host view.
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_hosts, no_json)]
@@ -115,6 +120,20 @@ pub(crate) fn local_machine_name(cx: &App) -> Option<String> {
     {
         let _ = cx;
         None
+    }
+}
+
+/// Whether this process hosts its machine now.
+fn hosting(cx: &App) -> bool {
+    #[cfg(feature = "remote-hosting")]
+    {
+        cx.try_global::<RemoteController>()
+            .is_some_and(RemoteController::is_hosting)
+    }
+    #[cfg(not(feature = "remote-hosting"))]
+    {
+        let _ = cx;
+        false
     }
 }
 
@@ -226,7 +245,7 @@ pub(crate) fn open_host_path_in_zed(
             path,
             tunnels,
         };
-        confirm_and_open(editor, target, machine.name, window, cx);
+        confirm_and_open(editor, target, machine.title().to_owned(), window, cx);
         return;
     }
     // Zed names the folder of an `ssh://` link by the link's path, which
@@ -247,7 +266,7 @@ pub(crate) fn open_host_path_in_zed(
                         path,
                         tunnels,
                     };
-                    confirm_and_open(editor, target, machine.name, window, cx);
+                    confirm_and_open(editor, target, machine.title().to_owned(), window, cx);
                 }
                 Ok(None) => window.push_notification(
                     Notification::error(crate::tr!(
@@ -739,7 +758,7 @@ impl RemotePanel {
                     Notification::error(
                         crate::tr!(
                             "hosts.pair.unsaved",
-                            name = host.name.as_str(),
+                            name = host.title(),
                             error = error.to_string()
                         )
                         .into_owned(),
@@ -958,11 +977,13 @@ impl RemotePanel {
 
     /// Saved machines offer pairing again when authorization is rejected.
     /// Clicking any machine opens that machine alone.
+    #[allow(clippy::too_many_arguments)]
     fn host_row(
         &self,
         host: &PairedHost,
         current: bool,
         hidden_in_group: bool,
+        local_group: Option<&str>,
         compact: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -975,7 +996,7 @@ impl RemotePanel {
         };
         let needs_pairing = reason == Some(tcode_client::ConnectionFailure::AuthenticationRejected)
             && !self.fixed_machine;
-        let name = SharedString::from(host.name.clone());
+        let name = SharedString::from(host.title().to_owned());
         let connect_host = host.clone();
         let part = |part: &str| SharedString::from(format!("host-{part}-{}", host.host_id));
         let reason = crate::motion::shown(
@@ -1037,6 +1058,19 @@ impl RemotePanel {
                         .overflow_hidden()
                         .child(crate::widgets::fade_text(name.clone())),
                 )
+                .when(host.label.is_some(), |column| {
+                    column.child(
+                        div().text_secondary(compact, cx).overflow_hidden().child(
+                            crate::widgets::fade_text(
+                                crate::tr!(
+                                    "machines.label.machine_name",
+                                    name = host.name.as_str()
+                                )
+                                .into_owned(),
+                            ),
+                        ),
+                    )
+                })
                 .when_some(host.space_name.as_deref(), |column, space| {
                     column.child(div().text_secondary(compact, cx).overflow_hidden().child(
                         crate::widgets::fade_text(
@@ -1064,7 +1098,13 @@ impl RemotePanel {
             })
         })
         // The row must keep its hover fill while the child menu is hovered.
-        .child(self.host_menu(host, current, hidden_in_group, cx));
+        .child(self.host_menu(
+            host,
+            current,
+            hidden_in_group,
+            self.labels(host, local_group, cx),
+            cx,
+        ));
         row.into_any_element()
     }
 
@@ -1073,6 +1113,7 @@ impl RemotePanel {
         host: &PairedHost,
         current: bool,
         hidden_in_group: bool,
+        labels: bool,
         cx: &App,
     ) -> AnyElement {
         let host_id = host.host_id.clone();
@@ -1085,7 +1126,7 @@ impl RemotePanel {
             .position(|store| store.read(cx).host_key() == key)
             .filter(|_| self.stores.len() > 1);
         let last = self.stores.len().saturating_sub(1);
-        let label = crate::tr!("hosts.actions", name = host.name.clone()).into_owned();
+        let label = crate::tr!("hosts.actions", name = host.title()).into_owned();
         div()
             .flex_none()
             .size(px(crate::material::TOUCH_TARGET))
@@ -1101,6 +1142,12 @@ impl RemotePanel {
                     .aria_label(label)
                     .dropdown_menu(move |menu, _window, _cx| {
                         let menu = menu
+                            .when(labels, |menu| {
+                                menu.menu(
+                                    crate::tr!("machines.label.set").into_owned(),
+                                    Box::new(SetHostLabel(host_id.clone())),
+                                )
+                            })
                             .when_some(include_group.clone(), |menu, group_id| {
                                 menu.menu(
                                     crate::tr!("hosts.include_in_group").into_owned(),
@@ -1176,6 +1223,7 @@ impl RemotePanel {
             active_scope,
             tcode_client::host::WorkspaceScope::Group { .. }
         );
+        let local_group_id = local_group.as_ref().map(|(id, _)| id.as_str());
         let left: &[String] = preference
             .as_ref()
             .map_or(&[], |preference| preference.left.as_slice());
@@ -1278,7 +1326,7 @@ impl RemotePanel {
                 window,
                 cx,
                 |_, (host, current, hidden), window, cx| {
-                    self.host_row(host, *current, *hidden, compact, window, cx)
+                    self.host_row(host, *current, *hidden, local_group_id, compact, window, cx)
                 },
             );
             column = column.child(settings_group(
@@ -1320,7 +1368,7 @@ impl RemotePanel {
                 cx,
                 |_, row, window, cx| match row {
                     Some((host, current)) => {
-                        self.host_row(host, *current, false, compact, window, cx)
+                        self.host_row(host, *current, false, local_group_id, compact, window, cx)
                     }
                     None => match &unreadable {
                         Some(error) => crate::material::empty_row(
@@ -1801,6 +1849,7 @@ impl RemotePanel {
                 .on_action(cx.listener(Self::on_include_in_group))
                 .on_action(cx.listener(Self::on_move))
                 .on_action(cx.listener(Self::on_forget))
+                .on_action(cx.listener(Self::on_set_label))
                 .child(crate::settings_rows::content_column(
                     body,
                     compact,
@@ -1879,6 +1928,77 @@ impl RemotePanel {
         );
     }
 
+    /// Whether this window can set `host`'s label: a group's label is set
+    /// through one of its machines, this one while it is a member, else
+    /// `host` itself while this window reaches it as a full device.
+    fn labels(&self, host: &PairedHost, local_group: Option<&str>, cx: &App) -> bool {
+        cfg!(any(feature = "remote-hosting", target_family = "wasm"))
+            && host.space_id.is_none()
+            && host.group_id.as_deref().is_some_and(|group_id| {
+                (local_group == Some(group_id) && hosting(cx))
+                    || self
+                        .store_of(&HostKey::Remote(host.host_id.clone()), cx)
+                        .is_some_and(|store| store.read(cx).can_manage_host())
+            })
+    }
+
+    #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+    fn on_set_label(&mut self, action: &SetHostLabel, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(host) = self
+            .client(cx)
+            .load_hosts()
+            .ok()
+            .and_then(|hosts| hosts.into_iter().find(|host| host.host_id == action.0))
+        else {
+            return;
+        };
+        let Some(group_id) = host.group_id.clone() else {
+            return;
+        };
+        #[cfg(feature = "remote-hosting")]
+        let local = spaces::local(cx).filter(|local| {
+            local
+                .read(cx)
+                .group()
+                .is_some_and(|group| group.id == group_id)
+        });
+        #[cfg(not(feature = "remote-hosting"))]
+        let local: Option<Entity<spaces::Spaces>> = None;
+        let Some(spaces) = local.or_else(|| {
+            let store = self
+                .store_of(&HostKey::Remote(host.host_id.clone()), cx)?
+                .clone();
+            spaces::for_store(&store, cx)
+        }) else {
+            return;
+        };
+        // What the group says of the machine now, else what this device
+        // last heard.
+        let machine = spaces
+            .read(cx)
+            .group()
+            .filter(|group| group.id == group_id)
+            .and_then(|group| {
+                group
+                    .machines
+                    .iter()
+                    .find(|machine| machine.id == host.host_id)
+                    .cloned()
+            })
+            .unwrap_or_else(|| tcode_protocol::GroupMachineInfo {
+                id: host.host_id.clone(),
+                name: host.name.clone(),
+                this_machine: false,
+                label: host.label.clone(),
+                accepts_threads: None,
+                accepts_projects: None,
+            });
+        group::open_label(spaces, &machine, window, cx);
+    }
+
+    #[cfg(not(any(feature = "remote-hosting", target_family = "wasm")))]
+    fn on_set_label(&mut self, _: &SetHostLabel, _: &mut Window, _: &mut Context<Self>) {}
+
     fn on_forget(&mut self, action: &ForgetHost, window: &mut Window, cx: &mut Context<Self>) {
         let id = action.0.clone();
         let Some(name) = self
@@ -1886,7 +2006,7 @@ impl RemotePanel {
             .load_hosts()
             .ok()
             .and_then(|hosts| hosts.into_iter().find(|host| host.host_id == id))
-            .map(|host| host.name)
+            .map(|host| host.title().to_owned())
         else {
             return;
         };

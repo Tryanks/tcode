@@ -51,7 +51,9 @@ impl WorkspaceStore {
                 self.host_clock_offset_ms =
                     *host_unix_ms as i64 - crate::time::now_millis(cx) as i64;
             }
-            if let ServerEvent::ScopeSnapshot { scope, .. } = &envelope.event
+            if let ServerEvent::ScopeSnapshot {
+                scope, view_only, ..
+            } = &envelope.event
                 && envelope.request_id.is_some()
                 && envelope.request_id != self.applied_scope_request
                 && !matches!(
@@ -60,7 +62,7 @@ impl WorkspaceStore {
                 )
             {
                 self.baseline_topics.clear();
-                self.apply_scope(scope, cx);
+                self.apply_scope(scope, *view_only, cx);
                 self.applied_scope_request = envelope.request_id;
             }
             return Reach::Store;
@@ -87,7 +89,7 @@ impl WorkspaceStore {
             return Reach::Store;
         }
         if matches!(envelope.topic, Topic::DevServers { .. })
-            && !self.space_allows(|policy| policy.preview)
+            && !self.space_reaches(|policy| policy.preview)
         {
             return Reach::Store;
         }

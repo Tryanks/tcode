@@ -266,8 +266,11 @@ pub(crate) fn host_down(store: &WorkspaceStore) -> bool {
 struct HostProjects {
     host: HostKey,
     title: SharedString,
-    /// Whether it holds its projects, not only a space.
+    /// Whether it holds its projects, not only a space, and may change them.
     full: bool,
+    /// Whether new threads start on it: not on a machine that lets this
+    /// device only view.
+    starts: bool,
     projects: Vec<(ProjectKey, tcode_core::project::Project)>,
 }
 
@@ -839,6 +842,8 @@ struct HostHeadingParts {
     dot: gpui::Hsla,
     status: Option<gpui::AnyElement>,
     pair: Option<gpui::AnyElement>,
+    /// That the host lets this device only view it, beside its name.
+    mark: Option<gpui::AnyElement>,
     menu: gpui::AnyElement,
 }
 

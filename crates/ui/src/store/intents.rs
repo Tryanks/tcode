@@ -32,8 +32,11 @@ impl WorkspaceStore {
         }
     }
 
+    /// How the reader arranges and has read the machine's threads stays on
+    /// this device for a space member, and for a device that may only view,
+    /// whose commands the machine refuses, for as long as it is connected.
     pub(super) fn dispatch(&mut self, command: Command) {
-        if !self.scope.is_full() {
+        if !self.scope.is_full() || self.view_only {
             match &command {
                 Command::ToggleProjectCollapsed { project_id } => {
                     if self
@@ -83,7 +86,9 @@ impl WorkspaceStore {
                 }
             }
             self.thread_list_revision += 1;
-            self.save_member_settings();
+            if !self.scope.is_full() {
+                self.save_member_settings();
+            }
             return;
         }
         self.send(command);
@@ -136,7 +141,7 @@ impl WorkspaceStore {
 
 impl WorkspaceStore {
     fn patch_settings(&mut self, patch: SettingsPatch) {
-        if !self.scope.is_full() {
+        if !self.scope.is_full() || self.view_only {
             match patch {
                 SettingsPatch::LastProject(id) => self.settings_replica.last_project_id = id,
                 SettingsPatch::WordWrapDiffs(value) => {
@@ -157,7 +162,9 @@ impl WorkspaceStore {
                 _ => return,
             }
             self.thread_list_revision += 1;
-            self.save_member_settings();
+            if !self.scope.is_full() {
+                self.save_member_settings();
+            }
             return;
         }
         self.dispatch(Command::PatchSettings { patch });
@@ -334,6 +341,9 @@ impl WorkspaceStore {
     }
     pub fn set_control_enabled(&mut self, enabled: bool) {
         self.patch_settings(SettingsPatch::ControlEnabled(enabled));
+    }
+    pub fn set_control_machines(&mut self, enabled: bool) {
+        self.patch_settings(SettingsPatch::ControlMachines(enabled));
     }
     pub fn set_control_agents(&mut self, agents: tcode_core::control::AgentScope) {
         self.patch_settings(SettingsPatch::ControlAgents(agents));
@@ -1066,6 +1076,11 @@ impl WorkspaceStore {
         beside: Option<(String, String)>,
         cx: &mut Context<Self>,
     ) {
+        // Every way to a new thread on a machine that lets this device
+        // only view is withdrawn; a key that still reaches here starts none.
+        if self.view_only {
+            return;
+        }
         self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
         let request_generation = self.creation_request_generation;
         let selection_generation = self.selection_generation;

@@ -481,6 +481,9 @@ impl WorkspaceStore {
         session_id: Option<&str>,
         cx: &App,
     ) -> Option<(QuickAction, Vec<MenuItem>)> {
+        if self.view_only() {
+            return None;
+        }
         let git = self.thread_git(session_id, cx)?;
         let remote = self.space_allows(|policy| policy.git_remote);
         git.status.as_ref().map(|status| {

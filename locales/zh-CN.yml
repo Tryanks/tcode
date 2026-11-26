@@ -1958,7 +1958,13 @@ space_policy:
 group:
   section: "主机组"
   intro: "主机组把你的多台主机连在一起，设备与其中任意一台配对后即可打开全部主机。"
-  risk: "组内每台主机都能为其他主机接纳设备，请只与你信任的主机组队。"
+  risk: "组内每台主机都能为其他主机接纳设备，并在其上启动线程，请只与你信任的主机组队。"
+  accept_threads:
+    title: "接受其他主机分派的线程"
+    description: "组内其他主机上的线程可以在本机启动线程，以本机的账户、Harness 和权限运行。"
+  accept_projects:
+    title: "接受其他主机移入的项目"
+    description: "组内其他主机可以把项目连同它的线程移到本机。"
   failed: "无法更新主机组：%{error}"
   leave: "退出主机组"
   leave_title: "退出「%{name}」？"
@@ -1992,6 +1998,12 @@ group:
     remove: "移除"
     remove_title: "将「%{name}」移出主机组？"
     remove_description: "其他主机将不再与它同步，它已带入的设备仍可访问。"
+    accepts:
+      both: "接受组内分派的线程和移入的项目"
+      threads: "接受组内分派的线程，不接受移入的项目"
+      projects: "接受组内移入的项目，不接受分派的线程"
+      neither: "不接受组内分派的线程和移入的项目"
+      unknown: "尚未告知接受哪些，可能在运行较旧的 Tcode"
   declined:
     section: "等待本机接纳"
     description: "本机已关闭新设备配对期间，其他主机接纳了这些设备。"
@@ -2920,7 +2932,7 @@ control:
   title: "控制"
   agents:
     section: "可用模型"
-    footnote: "线程互相启动时只能用这里列出的模型，协作方案也一样。你自己开的线程不受限制。"
+    footnote: "线程互相启动时只能用这里列出的模型，协作方案也一样。你自己开的线程不受限制。组内其他主机在本机启动的线程也只能用这些模型。"
     none: "还没有模型，线程无法在这里启动。"
     add: "给 %{name} 添加模型"
     remove: "移除 %{name}"
@@ -3016,6 +3028,8 @@ control:
     enabled: "允许线程使用 tcode_control"
     enabled_description: "线程的模型可以借此查看、整理、委派其他线程，给它们发消息并对它们操作。一次调用是否需要你批准，由 Harness 的权限模式决定，与其他工具一样。"
     enabled_off_description: "线程现在不能使用这些工具。"
+    machines: "允许线程向组内其他主机分派"
+    machines_description: "关闭后，本机上的线程不能在其他主机上启动线程。每次分派是否需要你批准，由 Harness 的权限模式决定。"
     visualize_enabled: "允许线程使用 tcode_visualize"
     visualize_enabled_description: "线程的模型可以借此把图表、示意图等可视化内容画在线程中。"
     visualize_enabled_off_description: "线程现在不能绘制可视化内容。"
@@ -3429,6 +3443,26 @@ machines:
   dispatch:
   move:
   access:
+    title: "组内其他设备"
+    operate: "可以操作本机"
+    view: "只能查看"
+    none: "不能打开本机"
+    operate_description: "和现在一样。"
+    view_description: "其他设备可以打开本机，查看项目、线程和线程内容，不能发起或继续对话，也不能做任何更改。本机仍可以打开组内其他主机。"
+    none_description: "其他设备无法连接本机。本机仍可以打开组内其他主机。"
+    follows: "组内其他设备不能操作本机时，此项保持关闭。"
+    confirm_view_title: "只允许其他设备查看本机？"
+    confirm_view: "其他设备会断开连接，重新连接后只能查看。"
+    confirm_none_title: "不让其他设备打开本机？"
+    confirm_none: "其他设备会断开连接，之后无法打开本机。"
+    mark: "仅查看"
+    composer: "%{machine} 只允许其他设备查看。"
   label:
+    rename: "重命名"
+    set: "设置标签…"
+    title: "「%{name}」的标签"
+    note: "组内所有人都会看到这个标签。留空则使用主机自己的名称。"
+    save: "保存"
+    machine_name: "主机名 %{name}"
   moved_in:
     from: "从 %{machine} 移入"

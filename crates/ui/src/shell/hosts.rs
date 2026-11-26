@@ -322,6 +322,21 @@ impl AppShell {
     /// members. On a desktop viewing this machine alone, newly joining a group
     /// upgrades the view to that group once.
     pub(super) fn on_saved_hosts_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Ok(saved) = self.client.load_hosts() {
+            for link in &self.links {
+                let Some(host) = link
+                    .store
+                    .read(cx)
+                    .remote_host_id()
+                    .and_then(|id| saved.iter().find(|host| host.host_id == id))
+                else {
+                    continue;
+                };
+                let title = host.title().to_owned();
+                link.store
+                    .update(cx, |store, cx| store.retitle_host(&title, cx));
+            }
+        }
         let current_local_group = self
             .client
             .local_machine_group()
@@ -978,7 +993,7 @@ impl AppShell {
     ) -> Option<HostKey> {
         let name = match &target {
             AttachmentTarget::Local => crate::tr!("hosts.this_computer").into_owned(),
-            AttachmentTarget::Remote(host) => host.name.clone(),
+            AttachmentTarget::Remote(host) => host.title().to_owned(),
         };
         let open = match Attachment::open(target, local, self.client.clone(), cx) {
             Ok(open) => open?,
