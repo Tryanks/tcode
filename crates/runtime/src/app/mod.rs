@@ -274,6 +274,7 @@ mod storage_pass;
 use history::{Hydration, SessionLog};
 mod fork;
 mod lifecycle;
+pub(crate) mod machines;
 mod options;
 mod orchestrate;
 mod plugins;
@@ -407,6 +408,9 @@ pub struct AppState {
     space_scopes: HashMap<String, BTreeSet<String>>,
     space_policies: HashMap<String, tcode_protocol::SpacePolicy>,
     space_policy_revisions: HashMap<String, u64>,
+    /// How this machine reaches the other machines of its group; `None` where the
+    /// composition has no transport for them.
+    machine_link: Option<tcode_client::machines::MachineLink>,
     space_archives_revision: Option<u64>,
     space_archives: HashMap<String, ArchivedSessions>,
     // Archive replies remain ordered after the last subscriber releases a projection.
@@ -695,6 +699,7 @@ impl AppState {
             space_scopes: HashMap::new(),
             space_policies: HashMap::new(),
             space_policy_revisions: HashMap::new(),
+            machine_link: None,
             space_archives_revision: None,
             space_archives: HashMap::new(),
             space_archive_revisions: HashMap::new(),

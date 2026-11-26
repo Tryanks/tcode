@@ -749,7 +749,7 @@ impl RemotePanel {
             }
             let attachment = cx.global::<ClientAttachment>();
             let request = attachment.requester();
-            request(HostRequest::Paired(host), window, cx);
+            request(HostRequest::Paired(Box::new(host)), window, cx);
         }
         cx.notify();
     }
@@ -2014,6 +2014,7 @@ fn failure_label(reason: &tcode_client::ConnectionFailure, pair_again_shown: boo
         .into(),
         ProtocolMismatch => crate::tr!("remote.failure.protocol_mismatch"),
         HostClosed => crate::tr!("remote.failure.host_closed"),
+        AccessClosed => crate::tr!("remote.failure.closed"),
     }
     .into_owned()
 }

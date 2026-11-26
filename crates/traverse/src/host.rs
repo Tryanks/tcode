@@ -1,7 +1,7 @@
 //! The machine side: one iroh endpoint that pairs devices over `tcode/pair/1`,
 //! serves paired devices over `tcode/1`, bridging each main stream into the
-//! [`HostMux`], and keeps its group in step with the other members over
-//! `tcode/group/1`.
+//! [`HostMux`], answers and asks the other machines of its group over
+//! `tcode/1` too, and keeps its group in step with them over `tcode/group/1`.
 use std::{
     collections::HashMap,
     io,
@@ -22,15 +22,15 @@ use tcode_client::pairing::{
     MAX_ADDRS, PairInvite, TRAVERSE_OFF, TRAVERSE_OFFICIAL, encode_secret, pair_url, parse_pair_url,
 };
 use tcode_protocol::{
-    DeviceAccess, GroupAction, GroupInfo, GroupMachineInfo, HostedDevice, HostingAction,
-    HostingState, PathInfo, Principal, ProtocolError, SpaceAction, SpaceInfo, TraverseRelayStatus,
-    TraverseSourceStatus,
+    DeviceAccess, GroupAction, GroupDeviceAccess, GroupInfo, GroupMachineInfo, HostedDevice,
+    HostingAction, HostingState, PathInfo, Principal, ProtocolError, SpaceAction, SpaceInfo,
+    TraverseRelayStatus, TraverseSourceStatus,
 };
 
 use crate::{
     group::{
         ALPN_GROUP, GroupLine, GroupMachine, GroupRecord, GroupRejection, GroupState,
-        JoiningDevice, JoiningMachine, MAX_GROUP_LINE, Membership, Roster,
+        JoiningDevice, JoiningMachine, MAX_GROUP_LINE, MachineAccepts, Membership, Roster,
     },
     identity::{
         DEVICE_FILE, DeviceGrant, DeviceRecord, HostIdentity, SpaceRecord, existing_device,
@@ -43,7 +43,9 @@ use crate::{
     wire::{self, ClientLine, DeviceClaim, HelloRejection, HostLine, LineReader, PairRejection},
 };
 
+mod machines;
 mod tasks;
+use machines::MachineBridge;
 use tasks::Tasks;
 
 /// The device sharing this data directory, if it has one; a `device.json`
@@ -169,6 +171,9 @@ struct Shared {
     hosting_changed: Arc<tokio::sync::Notify>,
     /// See [`TraverseHost::hosting_events`].
     hosting_listeners: Mutex<Vec<async_channel::Sender<HostingState>>>,
+    /// The connections this machine made to the other machines of its
+    /// group, by machine id, kept for their next request.
+    outbound: Mutex<HashMap<String, Connection>>,
     /// The SSH server `ssh` streams reach, set up on the first one that
     /// finds it can be.
     #[cfg(feature = "ssh")]
@@ -290,6 +295,7 @@ impl TraverseHost {
                 group_wake: Arc::new(tokio::sync::Notify::new()),
                 hosting_changed: Arc::new(tokio::sync::Notify::new()),
                 hosting_listeners: Mutex::new(Vec::new()),
+                outbound: Mutex::new(HashMap::new()),
                 #[cfg(feature = "ssh")]
                 ssh: Mutex::new(None),
                 tasks: Tasks::new(),
@@ -314,6 +320,11 @@ impl TraverseHost {
                 }));
             }
             shared.tasks.spawn(watch_status(Arc::downgrade(&shared)));
+            if let Some(link) = shared.mux.machine_link() {
+                shared
+                    .tasks
+                    .spawn(machines::serve_link(Arc::downgrade(&shared), link.serve()));
+            }
             shared.tasks.spawn(watch_hosting(Arc::downgrade(&shared)));
             let router = Router::builder(endpoint)
                 .accept(wire::ALPN_PAIR, PairHandler(shared.clone()))
@@ -1159,21 +1170,36 @@ impl Shared {
         }
     }
 
-    fn principal(&self, remote: EndpointId) -> Option<Principal> {
+    /// Who `remote` is on this machine: its device's access, under what this
+    /// machine lets its group's full-access devices do.
+    fn principal(&self, remote: EndpointId) -> Result<Principal, HelloRejection> {
         let state = self.state.lock().unwrap();
         let device = state
             .identity
             .devices
             .iter()
-            .find(|device| device.id == remote.to_string())?;
+            .find(|device| device.id == remote.to_string())
+            .ok_or(HelloRejection::Unpaired)?;
         match &device.access {
-            DeviceGrant::Full => Some(Principal::Full),
+            DeviceGrant::Full => match state.identity.group_device_access() {
+                GroupDeviceAccess::Operate => Ok(Principal::Full),
+                GroupDeviceAccess::View => Ok(Principal::Viewer {
+                    device_id: device.id.clone(),
+                    device_name: device.name.clone(),
+                }),
+                GroupDeviceAccess::None => Err(HelloRejection::Closed),
+            },
             DeviceGrant::Spaces(ids) => {
                 let [id] = ids.as_slice() else {
-                    return None;
+                    return Err(HelloRejection::Unpaired);
                 };
-                let space = state.identity.spaces.iter().find(|space| &space.id == id)?;
-                Some(Principal::Space {
+                let space = state
+                    .identity
+                    .spaces
+                    .iter()
+                    .find(|space| &space.id == id)
+                    .ok_or(HelloRejection::Unpaired)?;
+                Ok(Principal::Space {
                     policy_revision: state.identity.policy_revision,
                     space_id: space.id.clone(),
                     space_name: space.name.clone(),
@@ -1446,6 +1472,7 @@ impl Shared {
         let removed = state.identity.apply_group(accept, local.as_deref());
         self.revise(&mut state.identity);
         let machines_before = member_machines(&previous);
+        let labels_before = machine_labels(&previous);
         let group_before = previous.group.as_ref().map(|group| group.state.clone());
         if let Err(error) = state.identity.save() {
             state.identity = previous;
@@ -1465,6 +1492,10 @@ impl Shared {
             for id in full {
                 close_device(state, &id, 4, b"group changed");
             }
+        }
+        if member_machines(&state.identity) != machines_before
+            || machine_labels(&state.identity) != labels_before
+        {
             self.write_local_hosts(
                 state
                     .identity
@@ -1504,20 +1535,23 @@ impl Shared {
 
     /// Admit a `tcode/1` connection if its peer is paired, registering it
     /// under the same lock so a concurrent revocation either sees it or
-    /// refuses it.
-    fn admit(&self, connection: &Connection) -> bool {
+    /// refuses it, or if it is another member machine of the group.
+    fn admit(&self, connection: &Connection) -> Option<Peer> {
         let remote = connection.remote_id();
-        let mut state = self.state.lock().unwrap();
-        if !state.identity.is_paired(&remote) {
-            return false;
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.identity.is_paired(&remote) {
+                state
+                    .live
+                    .entry(remote)
+                    .or_default()
+                    .push(connection.clone());
+                self.hosting_changed.notify_one();
+                return Some(Peer::Device);
+            }
         }
-        state
-            .live
-            .entry(remote)
-            .or_default()
-            .push(connection.clone());
-        self.hosting_changed.notify_one();
-        true
+        self.member_machine(&remote.to_string())
+            .map(|name| Peer::Machine { name })
     }
 
     fn release(&self, connection: &Connection) {
@@ -1618,6 +1652,42 @@ fn roster(identity: &HostIdentity, device: &str) -> Option<Roster> {
         .then(|| group.state.roster())
 }
 
+/// Who a `tcode/1` connection's peer is to this machine.
+enum Peer {
+    Device,
+    /// Another member machine of the group, as it is named there.
+    Machine {
+        name: String,
+    },
+}
+
+fn machine_labels(identity: &HostIdentity) -> Vec<(String, Option<String>)> {
+    identity
+        .group
+        .iter()
+        .flat_map(|group| &group.state.machines)
+        .map(|machine| {
+            (
+                machine.id.clone(),
+                machine.label.as_ref().and_then(|label| label.text.clone()),
+            )
+        })
+        .collect()
+}
+
+/// A label as the group action gives it: blank clears it, and what is left
+/// must be a valid name.
+fn machine_label(label: Option<String>) -> io::Result<Option<String>> {
+    match label.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(text) if crate::group::valid_name(text) => Ok(Some(text.to_owned())),
+        Some(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid machine label",
+        )),
+    }
+}
+
 fn member_machines(identity: &HostIdentity) -> Vec<String> {
     identity
         .group
@@ -1665,13 +1735,20 @@ impl Shared {
     /// restarts. Members and devices get only addresses a connection to this
     /// machine actually selected.
     fn this_machine(&self, identity: &HostIdentity, addr: &EndpointAddrSnapshot) -> GroupMachine {
-        GroupMachine::new(
-            addr.id.clone(),
-            identity.host_name.clone(),
-            self.traverse.clone(),
-            addr.relay.clone(),
-            Vec::new(),
-        )
+        let operate = identity.group_device_access() == GroupDeviceAccess::Operate;
+        GroupMachine {
+            accepts: Some(MachineAccepts {
+                threads: operate && identity.accept_threads,
+                projects: operate && identity.accept_projects,
+            }),
+            ..GroupMachine::new(
+                addr.id.clone(),
+                identity.host_name.clone(),
+                self.traverse.clone(),
+                addr.relay.clone(),
+                Vec::new(),
+            )
+        }
     }
 
     fn group_info(&self, state: &State, addr: &EndpointAddrSnapshot) -> Option<GroupInfo> {
@@ -1686,6 +1763,9 @@ impl Shared {
                     id: machine.id.clone(),
                     name: machine.name.clone(),
                     this_machine: machine.id == addr.id,
+                    label: machine.label.as_ref().and_then(|label| label.text.clone()),
+                    accepts_threads: machine.accepts.map(|accepts| accepts.threads),
+                    accepts_projects: machine.accepts.map(|accepts| accepts.projects),
                 })
                 .collect(),
             declined: group
@@ -1701,6 +1781,9 @@ impl Shared {
                     path: None,
                 })
                 .collect(),
+            accept_threads: state.identity.accept_threads,
+            accept_projects: state.identity.accept_projects,
+            device_access: state.identity.device_access,
         })
     }
 
@@ -1735,6 +1818,8 @@ impl Shared {
         let mut state = self.state.lock().unwrap();
         let previous = state.identity.clone();
         let mut removed = None;
+        let mut switched = false;
+        let mut access_changed = false;
         let no_group = || io::Error::new(io::ErrorKind::NotFound, "this machine is not in a group");
         match action {
             GroupAction::Create { name } => {
@@ -1795,9 +1880,51 @@ impl Shared {
                     });
                 }
             }
+            GroupAction::SetLabel { machine, label } => {
+                let label = machine_label(label)?;
+                let group = state.identity.group.as_mut().ok_or_else(no_group)?;
+                if !group.state.set_label(&machine, label, &by) {
+                    return Err(missing("machine"));
+                }
+            }
+            GroupAction::SetAcceptThreads(accept) => {
+                state.identity.group.as_ref().ok_or_else(no_group)?;
+                state.identity.accept_threads = accept;
+                switched = true;
+            }
+            GroupAction::SetAcceptProjects(accept) => {
+                state.identity.group.as_ref().ok_or_else(no_group)?;
+                state.identity.accept_projects = accept;
+                switched = true;
+            }
+            GroupAction::SetDeviceAccess(access) => {
+                state.identity.group.as_ref().ok_or_else(no_group)?;
+                access_changed = state.identity.device_access != access;
+                state.identity.device_access = access;
+                switched = true;
+            }
             GroupAction::Join { .. } | GroupAction::Leave => unreachable!(),
         }
         self.commit(&mut state, previous)?;
+        // A full device connected under the access it had: it reconnects
+        // under the new one.
+        if access_changed {
+            let full: Vec<String> = state
+                .identity
+                .devices
+                .iter()
+                .filter(|device| device.access == DeviceGrant::Full)
+                .map(|device| device.id.clone())
+                .collect();
+            for id in full {
+                close_device(&mut state, &id, 5, b"access changed");
+            }
+        }
+        drop(state);
+        // This machine's own entry reports its switches to the others.
+        if switched {
+            self.group_wake.notify_one();
+        }
         // The members no longer sync with it, so it is told once now; if it
         // is unreachable it learns from the next member it syncs with.
         if let Some(machine) = removed {
@@ -2115,8 +2242,19 @@ impl Shared {
             return;
         };
         if !known.entry.is_member()
-            || (&known.name, &known.traverse, &known.relay, &known.addrs)
-                == (&this.name, &this.traverse, &this.relay, &this.addrs)
+            || (
+                &known.name,
+                &known.traverse,
+                &known.relay,
+                &known.addrs,
+                &known.accepts,
+            ) == (
+                &this.name,
+                &this.traverse,
+                &this.relay,
+                &this.addrs,
+                &this.accepts,
+            )
         {
             return;
         }
@@ -2503,7 +2641,17 @@ impl std::fmt::Debug for MainHandler {
 impl ProtocolHandler for MainHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let shared = self.0.clone();
-        if !shared.admit(&connection) {
+        let peer = shared.admit(&connection);
+        if let Some(Peer::Machine { name }) = peer {
+            let bridge = Arc::new(MachineBridge::attach(
+                &shared,
+                connection.remote_id().to_string(),
+                name,
+            ));
+            serve_streams(&shared, &connection, Some(bridge)).await;
+            return Ok(());
+        }
+        if peer.is_none() {
             // Say why before closing, so the device stops retrying and asks
             // to pair again instead of treating this as a network fault.
             if let Ok(Ok((mut send, recv))) =
@@ -2528,39 +2676,50 @@ impl ProtocolHandler for MainHandler {
             shared: shared.clone(),
             connection: connection.clone(),
         };
-        let policy = tcode_client::attachment::AttachmentPolicy::network();
-        let hello_done = Arc::new(AtomicBool::new(false));
-        let principal = Arc::new(Mutex::new(None));
-        let tunnels = Arc::new(AtomicUsize::new(0));
-        // The hosting list shows how each device is carried.
-        let mut paths = connection.path_events();
-        loop {
-            let accepted = tokio::select! {
-                accepted = connection.accept_bi() => accepted,
-                Some(_) = futures_lite::StreamExt::next(&mut paths) => {
-                    shared.hosting_changed.notify_one();
-                    continue;
-                }
-                _ = connection.closed() => break,
-            };
-            let Ok((send, recv)) = accepted else {
-                break;
-            };
-            let stream = StreamTask {
-                shared: shared.clone(),
-                connection: connection.clone(),
-                policy,
-                hello_done: hello_done.clone(),
-                principal: principal.clone(),
-                tunnels: tunnels.clone(),
-            };
-            shared.tasks.spawn(async move {
-                if let Err(error) = stream.run(send, wire::reader(recv)).await {
-                    log::debug!("main stream ended: {error}");
-                }
-            });
-        }
+        serve_streams(&shared, &connection, None).await;
         Ok(())
+    }
+}
+
+/// Serve every stream an admitted connection opens until it closes: a
+/// device's, or with `machine`, a member machine's.
+async fn serve_streams(
+    shared: &Arc<Shared>,
+    connection: &Connection,
+    machine: Option<Arc<MachineBridge>>,
+) {
+    let policy = tcode_client::attachment::AttachmentPolicy::network();
+    let hello_done = Arc::new(AtomicBool::new(false));
+    let principal = Arc::new(Mutex::new(None));
+    let tunnels = Arc::new(AtomicUsize::new(0));
+    // The hosting list shows how each device is carried.
+    let mut paths = connection.path_events();
+    loop {
+        let accepted = tokio::select! {
+            accepted = connection.accept_bi() => accepted,
+            Some(_) = futures_lite::StreamExt::next(&mut paths) => {
+                shared.hosting_changed.notify_one();
+                continue;
+            }
+            _ = connection.closed() => break,
+        };
+        let Ok((send, recv)) = accepted else {
+            break;
+        };
+        let stream = StreamTask {
+            shared: shared.clone(),
+            connection: connection.clone(),
+            policy,
+            hello_done: hello_done.clone(),
+            principal: principal.clone(),
+            tunnels: tunnels.clone(),
+            machine: machine.clone(),
+        };
+        shared.tasks.spawn(async move {
+            if let Err(error) = stream.run(send, wire::reader(recv)).await {
+                log::debug!("main stream ended: {error}");
+            }
+        });
     }
 }
 
@@ -2583,6 +2742,9 @@ struct StreamTask {
     hello_done: Arc<AtomicBool>,
     principal: Arc<Mutex<Option<Principal>>>,
     tunnels: Arc<AtomicUsize>,
+    /// The host as a member machine's connection reaches it; `None` on a
+    /// device's connection.
+    machine: Option<Arc<MachineBridge>>,
 }
 
 /// One of the connection's [`wire::MAX_TUNNELS`] tunnel slots, held while a
@@ -2618,11 +2780,22 @@ impl StreamTask {
             Some(Principal::Full) => Ok(()),
             Some(Principal::Space { policy, .. }) if allowed(policy) => Ok(()),
             Some(Principal::Space { .. }) => Err(refused),
+            Some(Principal::Viewer { .. }) => Err(VIEW_ONLY),
+            Some(Principal::Machine { .. }) => Err(MACHINE_STREAMS),
         }
     }
 
     async fn run(&self, mut send: SendStream, mut reader: LineReader) -> io::Result<()> {
         let first = wire::read_first::<ClientLine>(&mut reader, wire::MAX_CONTROL_LINE).await?;
+        if let Some(bridge) = &self.machine {
+            return match first {
+                ClientLine::Machine { protocol_version } => {
+                    self.serve_machine(bridge, protocol_version, send, reader)
+                        .await
+                }
+                _ => refuse(send, MACHINE_STREAMS).await,
+            };
+        }
         match first {
             ClientLine::Hello {
                 protocol_version,
@@ -2644,19 +2817,16 @@ impl StreamTask {
                 }
                 self.shared
                     .refresh_device(self.connection.remote_id(), &device);
-                let Some(principal) = self.shared.principal(self.connection.remote_id()) else {
-                    wire::write_line(
-                        &mut send,
-                        &HostLine::HelloRejected {
-                            reason: HelloRejection::Unpaired,
-                        },
-                    )
-                    .await?;
-                    send.finish()?;
-                    return Ok(());
+                let principal = match self.shared.principal(self.connection.remote_id()) {
+                    Ok(principal) => principal,
+                    Err(reason) => {
+                        wire::write_line(&mut send, &HostLine::HelloRejected { reason }).await?;
+                        send.finish()?;
+                        return Ok(());
+                    }
                 };
                 *self.principal.lock().unwrap() = Some(principal.clone());
-                let group = matches!(principal, Principal::Full)
+                let group = matches!(principal, Principal::Full | Principal::Viewer { .. })
                     .then(|| self.shared.roster(self.connection.remote_id()))
                     .flatten();
                 wire::write_line(
@@ -2721,8 +2891,11 @@ impl StreamTask {
             }
             ClientLine::Original { target } => {
                 let principal = self.principal.lock().unwrap().clone();
-                let Some(principal) = principal else {
-                    return refuse(send, "hello required").await;
+                let principal = match principal {
+                    None => return refuse(send, "hello required").await,
+                    Some(Principal::Viewer { .. }) => return refuse(send, VIEW_ONLY).await,
+                    Some(Principal::Machine { .. }) => return refuse(send, MACHINE_STREAMS).await,
+                    Some(principal @ (Principal::Full | Principal::Space { .. })) => principal,
                 };
                 crate::original::serve(
                     &self.shared.mux,
@@ -2735,6 +2908,9 @@ impl StreamTask {
                 .await
             }
             ClientLine::Pair { .. } => refuse(send, "pairing uses tcode/pair/1").await,
+            ClientLine::Machine { .. } => {
+                refuse(send, "machine streams are for the machines of the group").await
+            }
         }
     }
 
@@ -2884,6 +3060,9 @@ impl StreamTask {
         result
     }
 }
+
+const VIEW_ONLY: &str = "this machine lets the group's other devices only view it";
+const MACHINE_STREAMS: &str = "a machine of the group opens only machine streams";
 
 /// A device's hosting subscription, ended with its stream.
 struct Following(tokio::task::AbortHandle);

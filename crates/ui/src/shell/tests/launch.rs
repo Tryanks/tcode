@@ -37,6 +37,7 @@ fn pending_outbox_overrides_desktop_launch_without_a_snapshot(cx: &mut TestAppCo
             last_connected_unix: None,
             group_id: None,
             group_name: None,
+            label: None,
             space_id: None,
             space_name: None,
         },

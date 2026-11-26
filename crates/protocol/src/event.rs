@@ -81,6 +81,9 @@ pub enum Topic {
     /// device: answered on subscribe with the last measurement, and pushed
     /// when one starts or ends. The first subscription measures.
     DiskUsage,
+    /// The projects moving from this machine to another: answered on
+    /// subscribe and pushed after every change.
+    ProjectMoves,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -212,6 +215,9 @@ pub enum ServerEvent {
         scope: Scope,
         /// Unix milliseconds.
         host_unix_ms: u64,
+        /// The subscriber may read and change nothing.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        view_only: bool,
     },
     SettingsSnapshot(Settings),
     /// The current (or latest) external-import run for one project. `None`
@@ -229,6 +235,8 @@ pub enum ServerEvent {
     /// A [`Topic::DiskUsage`]'s state: the answer to subscribing, and a push
     /// when a measurement starts or ends.
     DiskUsageReplaced(DiskUsageState),
+    /// A [`Topic::ProjectMoves`]'s whole list.
+    ProjectMovesReplaced(Vec<crate::ProjectMoveStatus>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

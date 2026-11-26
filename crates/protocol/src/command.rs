@@ -524,6 +524,18 @@ pub enum Command {
     DeleteProject {
         project_id: String,
     },
+    /// Move the project and all its threads to another machine of the group,
+    /// to `root` there; `include_ignored` takes the files git ignores along.
+    MoveProject {
+        project_id: String,
+        machine: String,
+        root: String,
+        include_ignored: bool,
+    },
+    /// Stop a project's move before it is committed on the other machine.
+    CancelProjectMove {
+        project_id: String,
+    },
     MarkSessionUnread {
         session_id: String,
     },

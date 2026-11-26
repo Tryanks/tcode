@@ -50,6 +50,7 @@ fn is_provider_work(content: &EntryContent) -> bool {
         | EntryContent::ContextWindowChanged { .. }
         | EntryContent::SettingsKept
         | EntryContent::SessionMoved { .. }
+        | EntryContent::ThreadMoved { .. }
         | EntryContent::Worktree { .. }
         | EntryContent::ControlAction(_)
         | EntryContent::Rewound(_)
@@ -327,6 +328,14 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
                 "move",
                 "thread",
                 &format!("moved from `{}` to `{}`", from.display(), to.display()),
+            ),
+            EntryContent::ThreadMoved {
+                from_machine_name, ..
+            } => activity(
+                &mut body,
+                "move",
+                "thread",
+                &format!("moved to this machine from `{from_machine_name}`"),
             ),
             EntryContent::Worktree { request, answer } => activity(
                 &mut body,

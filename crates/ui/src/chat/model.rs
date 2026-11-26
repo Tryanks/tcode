@@ -39,6 +39,7 @@ pub(crate) enum Segment<'a> {
     /// Settings kept for a message not loaded here to carry them.
     SettingsKept(&'a TimelineEntry),
     SessionMoved(&'a TimelineEntry),
+    ThreadMoved(&'a TimelineEntry),
     Worktree(&'a TimelineEntry),
     /// Consecutive actions of one other thread on this thread's run.
     ControlAction(Vec<&'a TimelineEntry>),
@@ -302,6 +303,9 @@ pub(crate) fn segment_entries<'a>(
             }
             EntryContent::SessionMoved { .. } => {
                 single(&mut segments, &mut ranges, Segment::SessionMoved(entry));
+            }
+            EntryContent::ThreadMoved { .. } => {
+                single(&mut segments, &mut ranges, Segment::ThreadMoved(entry));
             }
             // The checkout row under the composer shows the worktree a
             // thread works in; only what went wrong stands in the flow.
@@ -1144,6 +1148,7 @@ pub(in crate::chat) mod tests {
                 EntryContent::ControlAction(agent::ControlAction {
                     actor_thread_id: "lead".into(),
                     actor_title: "Lead".into(),
+                    actor_machine: None,
                     action: action.into(),
                     detail: detail.map(str::to_owned),
                 }),

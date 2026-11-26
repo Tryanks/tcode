@@ -74,6 +74,7 @@ pub fn apply_roster(
         if let Some(host) = hosts.iter_mut().find(|host| host.host_id == from) {
             host.group_id = None;
             host.group_name = None;
+            host.label = None;
         }
         return;
     };
@@ -86,6 +87,7 @@ pub fn apply_roster(
                 host.group_id = Some(roster.id.clone());
                 host.group_name = Some(roster.name.clone());
                 host.name.clone_from(&machine.name);
+                host.label.clone_from(&machine.label);
                 if host.traverse.is_empty() {
                     host.traverse.clone_from(&machine.traverse);
                 }
@@ -102,6 +104,7 @@ pub fn apply_roster(
                 if host.group_id.as_deref() == Some(roster.id.as_str()) {
                     host.group_id = None;
                     host.group_name = None;
+                    host.label = None;
                 }
             }
             None if machine.member => hosts.push(PairedHost {
@@ -115,6 +118,7 @@ pub fn apply_roster(
                 last_connected_unix: None,
                 group_id: Some(roster.id.clone()),
                 group_name: Some(roster.name.clone()),
+                label: machine.label.clone(),
             }),
             None => {}
         }
@@ -224,6 +228,7 @@ mod tests {
             last_connected_unix: None,
             group_id: None,
             group_name: None,
+            label: None,
         }
     }
 

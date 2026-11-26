@@ -595,6 +595,13 @@ pub enum EntryContent {
         from: std::path::PathBuf,
         to: std::path::PathBuf,
     },
+    /// The thread came to this machine with its project from another machine of
+    /// the group.
+    ThreadMoved {
+        from_machine: String,
+        from_machine_name: String,
+        to_machine: String,
+    },
     /// What Tcode did with a git worktree the harness asked it for.
     Worktree {
         request: agent::WorktreeRequest,
@@ -1912,6 +1919,26 @@ impl Timeline {
                     content: EntryContent::SessionMoved {
                         from: from.clone(),
                         to: to.clone(),
+                    },
+                    ts,
+                    finished_ts: None,
+                    background: false,
+                    turn,
+                }));
+            }
+            AgentEvent::ThreadMoved {
+                from_machine,
+                from_machine_name,
+                to_machine,
+            } => {
+                let turn = self.ensure_turn();
+                let id = self.synthetic_id("thread-moved", ts);
+                self.entries.push(Arc::new(TimelineEntry {
+                    id,
+                    content: EntryContent::ThreadMoved {
+                        from_machine: from_machine.clone(),
+                        from_machine_name: from_machine_name.clone(),
+                        to_machine: to_machine.clone(),
                     },
                     ts,
                     finished_ts: None,

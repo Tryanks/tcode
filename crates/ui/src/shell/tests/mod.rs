@@ -170,6 +170,7 @@ fn mount_restored_with_outbox<'a>(
             last_connected_unix: Some(1),
             group_id: None,
             group_name: None,
+            label: None,
             space_id: None,
             space_name: None,
         },
@@ -443,6 +444,7 @@ fn saved_machine(host_id: &str, group: bool) -> tcode_client::pairing::PairedHos
         last_connected_unix: None,
         group_id: group.then(|| "group".into()),
         group_name: group.then(|| "Home".into()),
+        label: None,
         space_id: None,
         space_name: None,
     }

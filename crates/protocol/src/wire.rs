@@ -54,6 +54,18 @@ pub enum Principal {
         device_name: String,
         policy: crate::SpacePolicy,
     },
+    /// Another machine of this machine's group. It may send only
+    /// [`crate::Query::Machine`].
+    Machine {
+        machine_id: String,
+        machine_name: String,
+    },
+    /// A full-access device of the group while this machine lets the group's
+    /// devices only view: it reads, and changes nothing.
+    Viewer {
+        device_id: String,
+        device_name: String,
+    },
 }
 
 #[allow(clippy::large_enum_variant)] // Boxing would complicate the public contract.

@@ -144,6 +144,7 @@ fn activity_filters_by_thread_or_kind_and_offers_the_whole_log() {
         action: ControlAction {
             actor_thread_id: actor.into(),
             actor_title: actor.to_uppercase(),
+            actor_machine: None,
             action: action.into(),
             detail: None,
         },

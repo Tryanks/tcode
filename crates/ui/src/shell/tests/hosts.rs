@@ -1665,6 +1665,7 @@ fn a_local_host_that_does_not_start_is_shown_and_retried(cx: &mut TestAppContext
         last_connected_unix: None,
         group_id: None,
         group_name: None,
+        label: None,
         space_id: None,
         space_name: None,
     };

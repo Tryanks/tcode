@@ -1708,6 +1708,7 @@ remote:
     authentication_rejected: "访问被拒绝"
     protocol_mismatch: "协议版本不匹配 · 更新应用"
     host_closed: "主机已关闭连接"
+    closed: "不接受组内其他设备"
   state:
     connected: "已连接"
     reconnecting: "正在重新连接"
@@ -3423,3 +3424,11 @@ html:
   svg_too_long: "此图形过长，无法绘制。"
   data_uri_malformed: "无法绘制此图片：其 data: 地址没有内容。"
   image_too_large: "此图片过大，无法绘制：%{width} × %{height} 像素。"
+
+machines:
+  dispatch:
+  move:
+  access:
+  label:
+  moved_in:
+    from: "从 %{machine} 移入"

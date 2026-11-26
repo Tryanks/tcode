@@ -180,6 +180,15 @@ fn binary_payloads_use_base64() {
         },
         "/content/bytes",
     );
+    assert_binary_wire(
+        Query::Machine(crate::MachineRequest::MoveChunk {
+            move_id: "move".into(),
+            part: "code".into(),
+            offset: 0,
+            bytes: bytes.clone(),
+        }),
+        "/content/content/bytes",
+    );
     assert_binary_wire(QueryResponse::FileBytes(bytes), "/content");
 }
 
@@ -651,6 +660,7 @@ fn scope_subscriptions_and_provider_choices_have_literal_wire_contracts() {
             ServerEvent::ScopeSnapshot {
                 scope: Scope::Full,
                 host_unix_ms: 1_700_000_000_000,
+                view_only: false,
             },
             json!({"type":"scope_snapshot","content":{"scope":{"type":"full"},"host_unix_ms":1_700_000_000_000_u64}}),
         ),
@@ -658,6 +668,7 @@ fn scope_subscriptions_and_provider_choices_have_literal_wire_contracts() {
             ServerEvent::ScopeSnapshot {
                 scope: scope.clone(),
                 host_unix_ms: 1_700_000_000_000,
+                view_only: false,
             },
             json!({"type":"scope_snapshot","content":{"scope":scope_wire.clone(),"host_unix_ms":1_700_000_000_000_u64}}),
         ),

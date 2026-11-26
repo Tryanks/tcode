@@ -208,6 +208,13 @@ pub enum Query {
         key: tcode_core::pull_request::PullRequestKey,
         read: crate::PullRequestRead,
     },
+    /// A request from another machine of the group; refused from anyone else.
+    Machine(crate::MachineRequest),
+    /// What moving a project to `machine` would take.
+    ProjectMovePreview {
+        project_id: String,
+        machine: String,
+    },
 }
 
 /// The widest the host renders command output: a client asks for any width up
@@ -284,6 +291,8 @@ pub enum QueryResponse {
         /// its own clock's idea of the host's.
         fresh_for: u64,
     },
+    Machine(crate::MachineResponse),
+    ProjectMovePreview(crate::ProjectMovePreview),
 }
 
 /// A content search's matches, and the sessions it could not search.
@@ -494,6 +503,33 @@ pub enum GroupAction {
     RemoveMachine(String),
     /// Admit here a group member declined while new devices were refused.
     Admit(String),
+    /// What the whole group calls `machine`, any member's included; `None`
+    /// or blank clears it.
+    SetLabel {
+        machine: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    /// Whether this machine takes the threads other members start on it.
+    SetAcceptThreads(bool),
+    /// Whether this machine takes the projects other members move to it.
+    SetAcceptProjects(bool),
+    /// What the group's other devices may do on this machine.
+    SetDeviceAccess(GroupDeviceAccess),
+}
+
+/// What a full-access device may do on a machine of its group. The machine's
+/// own window and space members are unaffected.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupDeviceAccess {
+    /// Everything this machine's own window may do.
+    #[default]
+    Operate,
+    /// Read, and nothing that changes anything.
+    View,
+    /// Not admitted at all.
+    None,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -506,6 +542,10 @@ pub struct GroupInfo {
     /// refused when they arrived.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub declined: Vec<HostedDevice>,
+    /// This machine's own switches.
+    pub accept_threads: bool,
+    pub accept_projects: bool,
+    pub device_access: GroupDeviceAccess,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -514,6 +554,14 @@ pub struct GroupMachineInfo {
     pub name: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub this_machine: bool,
+    /// What the group calls the machine, when anyone gave it a label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// What the machine says it takes; `None` while it has not said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepts_threads: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepts_projects: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -973,7 +973,14 @@ impl AppState {
         principal: &tcode_protocol::Principal,
     ) -> ArchivedSessions {
         match principal {
-            tcode_protocol::Principal::Full => self.archived_sessions(),
+            tcode_protocol::Principal::Full | tcode_protocol::Principal::Viewer { .. } => {
+                self.archived_sessions()
+            }
+            tcode_protocol::Principal::Machine { .. } => ArchivedSessions {
+                sessions: Vec::new(),
+                worktree_shared: HashSet::new(),
+                revision: self.archived_revision,
+            },
             tcode_protocol::Principal::Space {
                 space_id,
                 project_ids,
@@ -1072,7 +1079,10 @@ impl AppState {
 
     fn scope_snapshot(&self, principal: &tcode_protocol::Principal) -> tcode_protocol::Scope {
         match principal {
-            tcode_protocol::Principal::Full => tcode_protocol::Scope::Full,
+            // A machine never subscribes; a viewer sees what a full device sees.
+            tcode_protocol::Principal::Full
+            | tcode_protocol::Principal::Viewer { .. }
+            | tcode_protocol::Principal::Machine { .. } => tcode_protocol::Scope::Full,
             tcode_protocol::Principal::Space {
                 space_id,
                 space_name,
@@ -1180,6 +1190,7 @@ impl AppState {
             Topic::Scope => ServerEvent::ScopeSnapshot {
                 scope: self.scope_snapshot(principal),
                 host_unix_ms: now_ms,
+                view_only: matches!(principal, tcode_protocol::Principal::Viewer { .. }),
             },
             Topic::SpaceIndex { space_id } => {
                 ServerEvent::IndexSnapshot(self.space_index_snapshot(
@@ -1218,6 +1229,7 @@ impl AppState {
                 ServerEvent::StorageMigrationReplaced(self.storage_migration.clone())
             }
             Topic::DiskUsage => ServerEvent::DiskUsageReplaced(self.disk_usage.clone()),
+            Topic::ProjectMoves => ServerEvent::ProjectMovesReplaced(self.project_moves_snapshot()),
             // Retained latest-run status, so a client that subscribes after a
             // fast completion still recovers the outcome. `None` means no run
             // has ever started for this project.

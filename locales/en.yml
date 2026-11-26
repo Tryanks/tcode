@@ -1715,6 +1715,7 @@ remote:
     authentication_rejected: "Access rejected"
     protocol_mismatch: "Protocol mismatch · Update the app"
     host_closed: "The machine closed the connection"
+    closed: "Not open to the group's other devices"
   state:
     connected: "Connected"
     reconnecting: "Reconnecting"
@@ -3430,3 +3431,11 @@ html:
   svg_too_long: "This drawing is too long to draw."
   data_uri_malformed: "This image could not be drawn: its data: address has no content."
   image_too_large: "This image is too large to draw: %{width} × %{height} pixels."
+
+machines:
+  dispatch:
+  move:
+  access:
+  label:
+  moved_in:
+    from: "Moved in from %{machine}"

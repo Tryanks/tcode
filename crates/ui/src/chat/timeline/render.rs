@@ -119,6 +119,19 @@ impl TimelineView {
                         &entry.id, from, to, cx,
                     ));
                 }
+                Segment::ThreadMoved(entry) => {
+                    let EntryContent::ThreadMoved {
+                        from_machine_name, ..
+                    } = &entry.content
+                    else {
+                        unreachable!();
+                    };
+                    column = column.child(components::dividers::thread_moved_divider(
+                        &entry.id,
+                        from_machine_name,
+                        cx,
+                    ));
+                }
                 Segment::Worktree(entry) => {
                     let EntryContent::Worktree { request, answer } = &entry.content else {
                         unreachable!();

@@ -1715,6 +1715,7 @@ remote:
     authentication_rejected: "アクセスが拒否されました"
     protocol_mismatch: "プロトコルが一致しません · アプリを更新してください"
     host_closed: "ホストが接続を閉じました"
+    closed: "グループの他のデバイスを受け付けていません"
   state:
     connected: "接続済み"
     reconnecting: "再接続中"
@@ -3430,3 +3431,11 @@ html:
   svg_too_long: "この図は長すぎて描画できません。"
   data_uri_malformed: "この画像を描画できませんでした：data: アドレスに内容がありません。"
   image_too_large: "この画像は大きすぎて描画できません：%{width} × %{height} ピクセル。"
+
+machines:
+  dispatch:
+  move:
+  access:
+  label:
+  moved_in:
+    from: "%{machine} から移動してきました"

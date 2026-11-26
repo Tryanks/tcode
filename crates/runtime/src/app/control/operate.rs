@@ -139,6 +139,7 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::BrowserHomeUrl(_)
         | SettingsPatch::BrowserAllowEvaluate(_)
         | SettingsPatch::ControlEnabled(_)
+        | SettingsPatch::ControlMachines(_)
         | SettingsPatch::ControlAgents(_)
         | SettingsPatch::VisualizeEnabled(_)
         | SettingsPatch::ModelGuide(_)
@@ -486,6 +487,7 @@ impl AppState {
         meta.started_by = Some(StartedBy {
             thread_id: caller.thread_id.clone(),
             request_id: params.request_id,
+            machine: None,
         });
         Ok(StartPlan::Install {
             meta: Box::new(meta),

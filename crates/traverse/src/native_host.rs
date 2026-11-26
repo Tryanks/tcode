@@ -700,6 +700,7 @@ mod tests {
                 last_connected_unix: None,
                 group_id: None,
                 group_name: None,
+                label: None,
             })
             .unwrap();
         let (locked, received) = std::sync::mpsc::channel();
@@ -843,6 +844,7 @@ mod tests {
             last_connected_unix: None,
             group_id: None,
             group_name: None,
+            label: None,
         };
         assert_eq!(host.remember_host(machine).unwrap_err().file, "hosts.json");
         assert_eq!(host.remove_host(MACHINE_ID).unwrap_err().file, "hosts.json");

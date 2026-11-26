@@ -537,6 +537,7 @@ impl AppState {
             | AgentEvent::ContextCompacted(_)
             | AgentEvent::ContextWindowChanged { .. }
             | AgentEvent::SettingsKept
+            | AgentEvent::ThreadMoved { .. }
             | AgentEvent::WorktreeResolved { .. }
             | AgentEvent::PlanUpdated { .. }
             | AgentEvent::GoalUpdated { .. }

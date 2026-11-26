@@ -271,6 +271,13 @@ pub struct SessionMeta {
     pub started_by: Option<crate::control::StartedBy>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub control_watches: Vec<crate::control::ControlWatch>,
+    /// The thread on another machine that started this one as its subagent. Unlike
+    /// `parent_session_id`, this thread is a root thread here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_parent: Option<crate::control::RemoteParent>,
+    /// The threads this one started on other machines of the group.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_children: Vec<crate::control::RemoteChild>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -487,6 +494,8 @@ impl SessionMeta {
             self_settle: None,
             started_by: None,
             control_watches: Vec::new(),
+            remote_parent: None,
+            remote_children: Vec::new(),
             created_at: now,
             updated_at: now,
         }
@@ -799,11 +808,15 @@ mod tests {
             "id": "legacy", "title": "Legacy", "provider": "codex",
             "cwd": "/work", "forked_from": "source", "created_at": 1, "updated_at": 2,
             "checkpoints": [{"turn": 2, "commit": "deadbeef", "event_offset": 7}],
-            "approval_mode": "read_only"
+            "approval_mode": "read_only",
+            "started_by": {"thread_id": "lead", "request_id": "start-1"}
         });
         let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
         assert_eq!(meta.pending_fork, None);
         assert_eq!(meta.parent_session_id, None);
+        assert_eq!(meta.remote_parent, None);
+        assert!(meta.remote_children.is_empty());
+        assert_eq!(meta.started_by.as_ref().unwrap().machine, None);
         assert_eq!(meta.native_subagent, None);
         assert_eq!(meta.archived_at, None);
         assert_eq!(meta.worktree, None);
@@ -817,6 +830,8 @@ mod tests {
             "native_subagent",
             "archived_at",
             "worktree",
+            "remote_parent",
+            "remote_children",
         ] {
             assert!(json.get(omitted).is_none(), "unexpected field: {omitted}");
         }

@@ -601,6 +601,15 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             from.hash(hash);
             to.hash(hash);
         }
+        EntryContent::ThreadMoved {
+            from_machine,
+            from_machine_name,
+            to_machine,
+        } => {
+            from_machine.hash(hash);
+            from_machine_name.hash(hash);
+            to_machine.hash(hash);
+        }
         EntryContent::Worktree { request, answer } => {
             request.hash(hash);
             answer.hash(hash);

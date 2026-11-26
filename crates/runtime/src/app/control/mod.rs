@@ -461,6 +461,7 @@ impl AppState {
         let action = ControlAction {
             actor_thread_id: caller.thread_id.clone(),
             actor_title,
+            actor_machine: None,
             action: action.to_owned(),
             detail,
         };

@@ -920,7 +920,8 @@ impl AppState {
             .sessions
             .iter()
             .filter(|meta| match &executor.principal {
-                tcode_protocol::Principal::Full => true,
+                tcode_protocol::Principal::Full | tcode_protocol::Principal::Viewer { .. } => true,
+                tcode_protocol::Principal::Machine { .. } => false,
                 tcode_protocol::Principal::Space { project_ids, .. } => meta
                     .project_id
                     .as_ref()
@@ -2307,7 +2308,9 @@ impl AppState {
         cx: &mut HostCx,
     ) -> Result<String, ProtocolError> {
         let device_id = match &cx.principal {
-            tcode_protocol::Principal::Full => None,
+            tcode_protocol::Principal::Full
+            | tcode_protocol::Principal::Machine { .. }
+            | tcode_protocol::Principal::Viewer { .. } => None,
             tcode_protocol::Principal::Space { device_id, .. } => Some(device_id.clone()),
         };
         let standing = self

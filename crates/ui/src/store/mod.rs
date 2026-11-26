@@ -81,6 +81,7 @@ pub enum TopicKind {
     Hosting,
     StorageMigration,
     DiskUsage,
+    ProjectMoves,
 }
 
 impl From<&Topic> for TopicKind {
@@ -105,6 +106,7 @@ impl From<&Topic> for TopicKind {
             Topic::Hosting => Self::Hosting,
             Topic::StorageMigration => Self::StorageMigration,
             Topic::DiskUsage => Self::DiskUsage,
+            Topic::ProjectMoves => Self::ProjectMoves,
         }
     }
 }

@@ -610,6 +610,7 @@ fn the_activity_list_pages_and_filters_through_the_host(cx: &mut TestAppContext)
             action: agent::ControlAction {
                 actor_thread_id: "actor".into(),
                 actor_title: "Actor".into(),
+                actor_machine: None,
                 action: "send_message".into(),
                 detail: None,
             },

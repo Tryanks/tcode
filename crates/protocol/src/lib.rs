@@ -8,6 +8,11 @@ mod command;
 mod event;
 mod index;
 pub use index::index_fingerprint;
+mod machine;
+pub use machine::{
+    MachineCaller, MachineRequest, MachineRequestKind, MachineResponse, MoveBlocker, MovePart,
+    MovePhase, MoveState, ProjectMovePreview, ProjectMoveStatus,
+};
 mod original;
 pub use original::{OriginalMetadata, OriginalReply, OriginalRequest, OriginalTarget};
 mod preview;
@@ -57,12 +62,12 @@ pub use event::{
 pub use query::{
     AgentAccess, AgentGrant, AgentScope, ControlActivityFilter, ControlActivityPage,
     ControlActivityThread, DeviceAccess, DirectoryListing, ExternalHistory, ExternalThread,
-    GitDiffResult, GitDiffScope, GitFileText, GroupAction, GroupInfo, GroupMachineInfo,
-    HostedDevice, HostingAction, HostingState, IconImageEntry, MAX_STORED_OUTPUT_COLS,
-    MAX_THREAD_EXPORT_BYTES, ModelGrant, OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo, PathKind,
-    Query, QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES,
-    STORED_OUTPUT_ROWS, SessionContentHits, SessionSearchHit, SourceTool, SpaceAction,
-    SpaceApproval, SpaceInfo, SpacePolicy, TraverseLookupState, TraverseLookupStatus,
+    GitDiffResult, GitDiffScope, GitFileText, GroupAction, GroupDeviceAccess, GroupInfo,
+    GroupMachineInfo, HostedDevice, HostingAction, HostingState, IconImageEntry,
+    MAX_STORED_OUTPUT_COLS, MAX_THREAD_EXPORT_BYTES, ModelGrant, OUTPUT_PREVIEW_BYTES, PathEntry,
+    PathInfo, PathKind, Query, QueryResponse, RecentDir, SESSION_HISTORY_RECORDS,
+    SESSION_WINDOW_BYTES, STORED_OUTPUT_ROWS, SessionContentHits, SessionSearchHit, SourceTool,
+    SpaceAction, SpaceApproval, SpaceInfo, SpacePolicy, TraverseLookupState, TraverseLookupStatus,
     TraverseManifestState, TraverseManifestStatus, TraverseRelayStatus, TraverseSourceStatus,
     WorkspaceListing,
 };
@@ -408,6 +413,23 @@ pub use wire::{
 // user through the thread; the agent event stream's user_input_requested and
 // PendingUserInput gain parent_item_id. Settings loses sidebar_provider_marks,
 // and SettingsPatch its sidebar_provider_marks patch.
+//
+// Unreleased: the machines of a group talk over `tcode/1`: Principal gains
+// Machine (another machine of the group, which may send only Query::Machine
+// with its MachineRequest and MachineResponse) and Viewer (a full device
+// while the machine's group devices may only view); GroupAction gains
+// SetLabel, SetAcceptThreads, SetAcceptProjects and SetDeviceAccess
+// (GroupDeviceAccess), GroupInfo carries accept_threads, accept_projects and
+// device_access, and GroupMachineInfo label, accepts_threads and
+// accepts_projects. Project moves: the MoveProject and CancelProjectMove
+// commands, the ProjectMovePreview query, and the ProjectMoves topic with
+// ProjectMovesReplaced. ScopeSnapshot carries view_only. Thread metadata
+// carries remote_parent and remote_children, started_by its machine, and a
+// ControlAction its actor_machine; Settings' control carries machines, with
+// the ControlMachines patch. The agent event stream and the timeline gain
+// thread_moved. The native transport gains the machine stream (the machine
+// line and its machine_reply), the closed hello rejection and close code 5,
+// access changed.
 pub const PROTOCOL_VERSION: u32 = 33;
 
 #[cfg(test)]

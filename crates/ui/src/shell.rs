@@ -1266,7 +1266,7 @@ pub(crate) fn request_host(request: HostRequest, window: &mut Window, cx: &mut A
         shell.update(cx, |shell, cx| match request {
             HostRequest::Open(target) => shell.open_host(target, window, cx),
             HostRequest::OpenGroup(group_id) => shell.open_group(group_id, None, window, cx),
-            HostRequest::Paired(host) => shell.open_paired(host, window, cx),
+            HostRequest::Paired(host) => shell.open_paired(*host, window, cx),
             HostRequest::IncludeInGroup { group_id, host_id } => {
                 shell.include_in_group(group_id, host_id, window, cx)
             }

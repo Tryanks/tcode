@@ -3,6 +3,7 @@
 pub mod attachment;
 pub mod heartbeat;
 pub mod host;
+pub mod machines;
 pub mod original;
 pub mod outbox;
 pub use original::OriginalTransfer;
@@ -60,11 +61,20 @@ pub enum ConnectionFailure {
     AuthenticationRejected,
     ProtocolMismatch,
     HostClosed,
+    /// The device is still paired, but the machine admits none of its
+    /// group's other devices now.
+    AccessClosed,
 }
 
 impl ConnectionFailure {
+    /// Whether dialling again cannot help until something changes on either
+    /// side. A machine closed to its group's devices stays closed until its
+    /// user opens it.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::AuthenticationRejected | Self::ProtocolMismatch)
+        matches!(
+            self,
+            Self::AuthenticationRejected | Self::ProtocolMismatch | Self::AccessClosed
+        )
     }
 
     /// Older hosts did not send machine-readable rejection reasons.

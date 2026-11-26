@@ -9,6 +9,11 @@
 //! admission, and a removed device returns only through a new pairing, which
 //! writes the next counter.
 //!
+//! A machine's label, what the whole group calls it, is merged apart from
+//! its entry: any member may set it for any machine, and the higher
+//! `(counter, by)` of the label wins, so a state that carries no label (an
+//! older build's) never takes one away.
+//!
 //! Inside a group there is one way in: a member's one-time invitation, which
 //! then names the group. A device pairing with it joins the group, and so
 //! does a machine presenting it over `tcode/group/1`. Every full-access
@@ -64,6 +69,37 @@ pub struct GroupMachine {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub addrs: Vec<String>,
     pub entry: Entry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<MachineLabel>,
+    /// What the machine takes from the others, as it reports itself with
+    /// its name and hints; `None` from a build that does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepts: Option<MachineAccepts>,
+}
+
+/// What the group calls one machine. A cleared label stays as `text: None`,
+/// so the clearing outranks the label it cleared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineLabel {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    pub counter: u64,
+    /// The machine that set it.
+    pub by: String,
+}
+
+impl MachineLabel {
+    fn rank(&self) -> (u64, &str) {
+        (self.counter, &self.by)
+    }
+}
+
+/// Whether a machine takes the threads and the projects the other members
+/// send it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineAccepts {
+    pub threads: bool,
+    pub projects: bool,
 }
 
 impl GroupMachine {
@@ -82,6 +118,8 @@ impl GroupMachine {
             traverse,
             relay,
             addrs,
+            label: None,
+            accepts: None,
             entry: Entry {
                 state: Membership::Member,
                 counter: 0,
@@ -140,6 +178,9 @@ pub struct RosterMachine {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub addrs: Vec<String>,
     pub member: bool,
+    /// What the group calls the machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// The group's machines, sent to a full device with `paired` and `hello_ok`.
@@ -300,7 +341,7 @@ impl GroupState {
     }
 
     /// Record a change to a machine's place in the group, made by `by`,
-    /// with the routing hints it has now.
+    /// with the routing hints it has now. Its label stays as it is.
     pub fn set_machine(&mut self, machine: GroupMachine, state: Membership, by: &str) {
         match self
             .machines
@@ -309,7 +350,12 @@ impl GroupState {
         {
             Some(known) => {
                 let entry = Self::next_entry(Some(&known.entry), state, by);
-                *known = GroupMachine { entry, ..machine };
+                let label = known.label.take();
+                *known = GroupMachine {
+                    entry,
+                    label,
+                    ..machine
+                };
             }
             None => self.machines.push(GroupMachine {
                 entry: Self::next_entry(None, state, by),
@@ -318,19 +364,45 @@ impl GroupState {
         }
     }
 
-    /// Take every entry of `other` that outranks this state's. Returns
-    /// whether anything changed.
+    /// Label `id` for the whole group, as `by`; `None` clears it. Returns
+    /// whether the group has that machine.
+    pub fn set_label(&mut self, id: &str, text: Option<String>, by: &str) -> bool {
+        let Some(machine) = self.machines.iter_mut().find(|machine| machine.id == id) else {
+            return false;
+        };
+        machine.label = Some(MachineLabel {
+            text,
+            counter: machine.label.as_ref().map_or(1, |label| label.counter + 1),
+            by: by.to_owned(),
+        });
+        true
+    }
+
+    /// Take every entry and label of `other` that outranks this state's.
+    /// Returns whether anything changed.
     pub fn merge(&mut self, other: GroupState) -> bool {
         let mut changed = false;
-        for machine in other.machines {
+        for mut machine in other.machines {
             match self
                 .machines
                 .iter()
                 .position(|known| known.id == machine.id)
             {
                 Some(index) => {
-                    if machine.entry.rank() > self.machines[index].entry.rank() {
-                        self.machines[index] = machine;
+                    let known = &mut self.machines[index];
+                    let label = machine.label.take();
+                    if machine.entry.rank() > known.entry.rank() {
+                        machine.label = known.label.take();
+                        *known = machine;
+                        changed = true;
+                    }
+                    if let Some(label) = label
+                        && known
+                            .label
+                            .as_ref()
+                            .is_none_or(|ours| label.rank() > ours.rank())
+                    {
+                        known.label = Some(label);
                         changed = true;
                     }
                 }
@@ -391,6 +463,7 @@ impl GroupState {
                     relay: machine.relay.clone(),
                     addrs: machine.addrs.clone(),
                     member: machine.entry.is_member(),
+                    label: machine.label.as_ref().and_then(|label| label.text.clone()),
                 })
                 .collect(),
         }
@@ -434,5 +507,85 @@ mod tests {
         a_then_b.set_device(PHONE, "Phone", None, Membership::Member, A);
         assert!(b_then_a.merge(a_then_b.clone()));
         assert!(b_then_a.device(PHONE).unwrap().entry.is_member());
+    }
+
+    fn with_machines() -> GroupState {
+        let mut state = state();
+        for id in [A, B] {
+            state.set_machine(
+                GroupMachine::new(id.into(), "Machine".into(), Vec::new(), None, Vec::new()),
+                Membership::Member,
+                id,
+            );
+        }
+        state
+    }
+
+    /// Two members label the same machine without hearing of each other:
+    /// whichever order the states meet in, both keep the same label, and a
+    /// clearing written after it outranks it everywhere.
+    #[test]
+    fn concurrent_labels_converge_and_a_later_clearing_wins() {
+        let origin = with_machines();
+        let mut on_a = origin.clone();
+        let mut on_b = origin.clone();
+        assert!(on_a.set_label(A, Some("NAS".into()), A));
+        assert!(on_b.set_label(A, Some("Attic".into()), B));
+
+        let mut a_then_b = on_a.clone();
+        a_then_b.merge(on_b.clone());
+        let mut b_then_a = on_b.clone();
+        b_then_a.merge(on_a.clone());
+        assert_eq!(a_then_b, b_then_a);
+
+        a_then_b.set_label(A, None, A);
+        assert!(b_then_a.merge(a_then_b.clone()));
+        assert_eq!(a_then_b, b_then_a);
+        assert_eq!(
+            b_then_a.machine(A).unwrap().label.as_ref().unwrap().text,
+            None
+        );
+    }
+
+    /// An older build's state names no labels and may carry a newer entry
+    /// for the machine (it moved, or was renamed). The entry is taken and
+    /// the label stays, as it does when the machine refreshes its own entry.
+    #[test]
+    fn a_label_outlives_a_state_and_an_entry_that_lack_it() {
+        let mut ours = with_machines();
+        ours.set_label(B, Some("Laptop".into()), A);
+        let older: GroupState = serde_json::from_value(serde_json::json!({
+            "id": "AAAAAAAAAAAAAAAAAAAAAA",
+            "name": "Home",
+            "machines": [{
+                "id": B,
+                "name": "Renamed",
+                "relay": "https://relay.example/",
+                "entry": {"state": "member", "counter": 7, "by": B, "changed_unix": 1}
+            }],
+            "devices": []
+        }))
+        .unwrap();
+        assert_eq!(older.machine(B).unwrap().accepts, None);
+
+        assert!(ours.merge(older));
+        let machine = ours.machine(B).unwrap();
+        assert_eq!(
+            (machine.name.as_str(), machine.entry.counter),
+            ("Renamed", 7)
+        );
+        assert_eq!(
+            machine.label.as_ref().unwrap().text.as_deref(),
+            Some("Laptop")
+        );
+
+        ours.set_machine(
+            GroupMachine::new(B.into(), "Laptop B".into(), Vec::new(), None, Vec::new()),
+            Membership::Member,
+            B,
+        );
+        let roster = ours.roster();
+        let listed = roster.machines.iter().find(|machine| machine.id == B);
+        assert_eq!(listed.unwrap().label.as_deref(), Some("Laptop"));
     }
 }

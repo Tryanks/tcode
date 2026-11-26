@@ -1333,6 +1333,7 @@ mod tests {
                                 event: ServerEvent::ScopeSnapshot {
                                     scope: tcode_protocol::Scope::Full,
                                     host_unix_ms: crate::time::now_millis(cx),
+                                    view_only: false,
                                 },
                             },
                             cx,

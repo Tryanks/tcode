@@ -125,8 +125,9 @@ joins. Existing members keep access until the owner removes them, deletes the
 space or revokes their device. A removed member can join again with the old
 link if it remains enabled and valid.
 
-`traverse.json` is written as version 5. Versions 3 (spaces and device
-access) and 4 (the group), written by earlier releases, are read as they are;
+`traverse.json` is written as version 6. Versions 3 (spaces and device
+access), 4 (the group) and 5 (space policies), written by earlier releases,
+are read as they are;
 an older build reads only the versions it knows, so it refuses a file this
 build wrote. Loading a version 2 file migrates existing paired devices to
 explicit full access and starts with no spaces. Existing devices do not become
@@ -198,6 +199,28 @@ Members reach each other over `tcode/group/1` on their own UDP port: at the
 relay and addresses each reports for itself and the ones a connection last
 used, and through the lookups of the Traverse instances the dialling machine
 publishes to. They exchange the group when it changes and every five minutes.
+
+### Between machines
+
+The members of a group also connect to each other over `tcode/1`, each under
+its own machine key, to ask each other for work: a machine admits such a
+connection only from another member, serves it nothing a device opens, and
+refuses a device's connection that asks as a machine. Each machine decides
+for itself, in its group section, whether it takes the threads the others
+start on it (on until switched off) and the projects they move to it (off
+until switched on). An answer to something a machine itself sent out comes
+back whatever those switches say.
+
+Any member can give any machine a label, which the whole group and its
+devices show for it; clearing it brings back the machine's own name.
+
+**Group devices** sets what the group's full-access devices may do on this
+machine: operate it as its own window does, only view it (read threads,
+projects and settings, change nothing, open no terminal, tunnel or editor),
+or not connect at all, which a device shows as **Not open to the group's
+other devices**. A change closes those devices' connections and they
+reconnect under it. While it is below operate, the machine takes no threads
+or projects from the other machines either. Space members are not affected.
 
 ## Use the desktop app as the machine
 
@@ -936,9 +959,10 @@ access:** whoever holds the key can connect to every machine that lists the
 device until the device is removed on each machine, or once on any member of a
 group. **A stolen `traverse.json` is the machine's identity:** its holder can
 run a machine that paired devices would trust and, in a group, admit devices
-into every member. There are no per-device project permissions or read-only
-device roles; a paired device has the same access as the machine's own window,
-including Preview tunnels to the machine's loopback and network.
+into every member. There are no per-device project permissions; a paired
+device has the same access as the machine's own window, including Preview
+tunnels to the machine's loopback and network, unless the machine lets its
+group's devices only view it (see [Between machines](#between-machines)).
 
 ### Revocation
 
