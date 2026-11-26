@@ -270,7 +270,8 @@ and covers every other device of the group, your own phone included.
 On a machine that only lets a device view it, the device's heading for the
 machine says **View only**, its composer is disabled with **‹machine› only
 lets other devices view.**, and approvals and questions show but cannot be
-answered.
+answered, no rewind, fork, retry or plan option is offered, nor any action on
+a subagent, and the checkout row shows the branch as text.
 
 The machine's own window is not affected: it operates the machine as before
 and can still open the group's other machines. Space members are not
@@ -350,25 +351,38 @@ sent when it can. The starting thread's card names the machine, and shows:
 - **Its machine left the group** once the thread's machine is no longer a
   member.
 
+A subagent started on another machine is a row in the **Subagents** view of
+its starter, which opens the thread on its machine and offers what a local
+subagent's row does, by its state: **Stop subagent** while it runs, **Settle
+subagent** once it reported or failed, and **Cancel subagent** (which asks
+**Cancel this subagent?** first) while it runs or waits to be settled. A full
+device alone can send them. When the machine cannot be reached the action is
+kept, the row says it will be done when the machine is back, and it is not
+offered again; nothing is offered once a cancel is waiting.
+
 A machine learns that another has left the group when that machine refuses it
 as a non-member, and checks the group every ten minutes. When the machine that
 started a thread leaves or is removed from the group, the thread carries on
 there as an ordinary thread and owes no report.
 
-A thread on another machine may ask this machine only for the following:
+A thread on another machine reaches this machine's projects, providers and
+models, and of its threads only those its own machine started here. Every
+other thread is not listed and is refused as unknown. On the threads its
+machine started here it may ask only for the following:
 
-- read threads and projects, and the providers it may start;
-- start a thread, and send a message to a thread;
+- read them, and search inside them;
+- send a message to one;
 - interrupt, cancel, steer a queued message or drop one;
-- watch threads, and cancel a watch;
-- answer a pending question of a thread, and answer an approval or settle a
-  subagent that thread started here.
+- watch them, and cancel a watch;
+- answer a pending question of one.
 
-It may not delete or rewind threads, use Git, pull requests or terminals,
-change settings, create or move projects, search across threads, or start
-threads from here on a third machine. A message from another machine is never
-the user's consent: what it does here is done as an agent's, and it answers no
-approval except its own subagent's.
+Beyond those it may start a thread here, and answer an approval or settle a
+subagent that its own thread started here. It may not delete or rewind
+threads, use Git, pull requests or terminals, change settings, create or move
+projects, search across threads, or start threads from here on a third
+machine. A message from another machine is never the user's consent: what it
+does here is done as an agent's, and it answers no approval except its own
+subagent's.
 
 A space member's turn reaches no other machine: `list_machines` and
 `start_thread_on_machine` are refused in it.
@@ -437,11 +451,15 @@ removed, the other machine discards what it received, and the project is as it
 was. If the other machine cannot be told then, it is told when it can be
 reached.
 
-A move **Paused** waits. When the other machine could not be reached or does
-not take projects at the moment, the move tries again by itself, after five
-seconds at first and up to every two minutes. When something else stopped it,
-the line says why (**Paused: ‹reason›**) and the move waits for **Try again**
-or **Cancel move**.
+A move **Paused** waits, and the line says why. Three reasons continue by
+themselves, trying again after five seconds at first and then at longer
+intervals up to two minutes: **‹machine› cannot be reached; the move continues
+when it can**, **‹machine› no longer accepts projects; the move continues once
+it does** and **This machine reaches no group now; the move continues when it
+does**. Three wait for you: **Paused: ‹machine› runs a different Tcode
+version**, **Paused: ‹machine› is no longer in this machine's group** and
+**Paused: ‹reason›** for any other failure. Press **Try again**, or **Cancel
+move**.
 
 When the other machine was told to finish and has not answered, the move reads
 **‹machine› was told to finish and has not answered. This project stays
@@ -1232,9 +1250,13 @@ member, and the threads run there under the accounts, Harnesses and
 permissions of that machine's user, whenever that machine has **Accept threads
 other machines start here** on, which it has by default. Group only machines
 you would let act for each other. A thread started that way is held to no more
-permissive a permission mode than the thread that started it, and what a
-thread on another machine may ask of a machine is a short list (see
-[Start a thread on another machine](#start-a-thread-on-another-machine)); a
+permissive a permission mode than the thread that started it. On a machine that
+accepts threads, another member's threads can start threads, read and use the
+projects, providers and models, and read, message, interrupt, cancel, watch and
+answer questions only for threads their own machine started there. Every other
+thread is not listed and is refused as unknown; they cannot delete or rewind
+threads, run Git, pull requests or terminals, or change settings (see
+[Start a thread on another machine](#start-a-thread-on-another-machine)). A
 message from another machine is never the user's consent, and a space member's
 turn reaches no other machine.
 
@@ -1304,7 +1326,7 @@ list in memory and writes it back.
 | **View only** beside a machine, and its composer reads **‹machine› only lets other devices view.** | That machine's **Other devices of the group** is **May only view**: you can read it and change nothing. Set it to **May operate this machine** on that machine. Its own window, a space member and a headless machine's browser login are not affected. |
 | A thread card reads **Cannot be reached** | The machine the thread was started on did not answer, and the thread was running when it was last heard from; it may still be running. A cancel, interrupt or settle waits (**Will be cancelled when ‹machine› is back**) and is sent when the machine can be reached. **Its machine left the group** means the machine is no longer a member. |
 | A thread is not offered the tools to start a thread on another machine, or the other machine refuses it | Check that this machine is in a group and that **Let threads use tcode_control** and **Let threads start threads on other machines of the group** are on in **Settings → Control**. On the other machine check that **Accept threads other machines start here** is on, **Other devices of the group** is **May operate this machine** and **Let threads use tcode_control** is on. |
-| A move stays **Paused** | A move that could not reach the other machine tries again by itself, up to every two minutes. Otherwise the line says why (**Paused: ‹reason›**): fix that and press **Try again** in **Show move…**, or **Cancel move**. The project stays read-only meanwhile. |
+| A move stays **Paused** | The line says why. **‹machine› cannot be reached; the move continues when it can**, **‹machine› no longer accepts projects; the move continues once it does** and **This machine reaches no group now; the move continues when it does** continue by themselves, trying again up to every two minutes. **Paused: ‹machine› runs a different Tcode version**, **Paused: ‹machine› is no longer in this machine's group** and **Paused: ‹reason›** wait: fix the cause and press **Try again** in **Show move…**, or **Cancel move**. The project stays read-only meanwhile. |
 | A project's composer reads **This project is moving to ‹machine›.** | The project is moving and stays read-only until the move ends or is cancelled. **Show move…** in the project's menu opens it. If it reads **‹machine› was told to finish and has not answered**, wait for the machine, or use **Continue here anyway** knowing the project may then exist on both. |
 | A machine cannot be chosen in **Move to machine…** | It reads **Has not turned on Accept projects other machines move here**: switch that on on that machine, in **Settings → Remote → Machine group**. Under **Cannot move now** the dialog names anything else in the way. |
 | A machine reads **Has not said what it takes; it may run an older Tcode** | It has not reported its two switches, which an older Tcode does not report. Until it does, it cannot be chosen in **Move to machine…**. |
