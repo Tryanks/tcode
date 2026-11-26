@@ -214,6 +214,30 @@ back whatever those switches say.
 Any member can give any machine a label, which the whole group and its
 devices show for it; clearing it brings back the machine's own name.
 
+A thread can start a thread on another machine of its group through
+`tcode_control`: `list_machines` lists the group's machines, and
+`start_thread_on_machine` starts the thread in a project that machine already
+has. Nothing goes with it but its first message: it runs on that machine's
+code as it is there, carries no files or attachments, and that machine's
+harnesses, models, permission defaults and **Settings → Control** apply. The
+tools that read threads and projects, send messages, drive a run, watch threads
+and answer a subagent's questions and approvals take the machine too, and a
+thread elsewhere is linked as `tcode-thread://<thread_id>@<machine_id>`.
+Started as a subagent, the thread is an ordinary thread on its machine; its
+report, approvals and questions come back to the thread that started it, and
+a report made while the starting machine is off is kept until that machine
+returns and its thread has taken it. A cancel that cannot reach a machine is
+sent when it can. **Let threads start threads on other machines of the
+group** in **Settings → Control** decides whether this machine's threads are
+offered those tools at all; **Accept threads other machines start here**
+decides whether this machine takes what the others' threads ask. A thread
+started from another machine never runs under a more permissive mode than the
+thread that started it. A thread on another machine may read, start, message,
+interrupt, cancel and watch threads here, and answer its own subagent; it may
+not delete or rewind threads, use git, pull requests or terminals, change
+settings, create or move projects, or start threads from here on a third
+machine. A space member's turn reaches no other machine.
+
 **Group devices** sets what the group's full-access devices may do on this
 machine: operate it as its own window does, only view it (read threads,
 projects and settings, change nothing, open no terminal, tunnel or editor),

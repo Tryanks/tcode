@@ -4,115 +4,16 @@
 use std::path::{Path, PathBuf};
 
 use agent::{AgentEvent, ProviderKind, TurnStatus};
-use tcode_client::HostLink;
-use tcode_client::machines::MachineLink;
 use tcode_core::project::{Project, SessionMeta, WorktreeInfo};
 use tcode_protocol::{
-    Command, CommandResponse, EventEnvelope, GroupAction, HostingAction, MachineRequest,
-    MachineResponse, MovePart, MovePhase, ProjectMoveStatus, ProtocolError, Query, QueryResponse,
-    ServerEvent, Subscription, Topic,
+    Command, CommandResponse, GroupAction, MachineRequest, MachineResponse, MovePart, MovePhase,
+    ProjectMoveStatus, ProtocolError, Query, QueryResponse, ServerEvent, Subscription, Topic,
 };
 use tcode_services::store::SessionStore;
-use tcode_traverse::{HostConfig, HostMux, TraverseHost};
 
-use crate::pipe::{HostServices, SpawnedHost, spawn_host};
-
-struct TestDir(PathBuf);
-
-impl TestDir {
-    fn new(tag: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("tcode-move-{tag}-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// A machine as the binaries compose it: its host, the mux in front of it,
-/// the endpoint, and a client of its own.
-struct Machine {
-    endpoint: Option<TraverseHost>,
-    runtime: Option<SpawnedHost>,
-    mux: HostMux,
-    dir: PathBuf,
-    name: String,
-    client: HostLink,
-    events: async_channel::Receiver<EventEnvelope>,
-    link: MachineLink,
-    store: SessionStore,
-}
+use super::real_group::{Machine, TestDir};
 
 impl Machine {
-    fn start(dir: &Path, name: &str) -> Self {
-        let link = MachineLink::new();
-        let store = SessionStore::open_at(dir.join("store")).unwrap();
-        let runtime = spawn_host(
-            store.clone(),
-            HostServices {
-                machines: Some(link.clone()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let mux = HostMux::new(runtime.attachments.clone(), runtime.from_host.clone())
-            .with_machine_link(link.clone());
-        let endpoint = TraverseHost::start(mux.clone(), config(dir, name)).unwrap();
-        let connection = mux.attach(
-            tcode_protocol::Principal::Full,
-            tcode_client::attachment::AttachmentPolicy::LOCAL,
-        );
-        let client = HostLink::new(connection.to_host, connection.from_host);
-        let pump = client.clone();
-        smol::spawn(async move { pump.pump().await }).detach();
-        let events = client.events();
-        Self {
-            endpoint: Some(endpoint),
-            runtime: Some(runtime),
-            mux,
-            dir: dir.to_path_buf(),
-            name: name.into(),
-            client,
-            events,
-            link,
-            store,
-        }
-    }
-
-    fn id(&self) -> String {
-        self.endpoint.as_ref().unwrap().endpoint_id()
-    }
-
-    fn group(&self, action: GroupAction) {
-        self.endpoint
-            .as_ref()
-            .unwrap()
-            .hosting(HostingAction::Group(action))
-            .unwrap();
-    }
-
-    fn command(&self, command: Command) -> Result<CommandResponse, ProtocolError> {
-        self.client.command_blocking(command)
-    }
-
-    fn query(&self, query: Query) -> Result<QueryResponse, ProtocolError> {
-        smol::block_on(self.client.query(query))
-    }
-
-    fn subscribe(&self, topic: Topic) {
-        self.client
-            .subscribe(Subscription {
-                known_index: None,
-                topic,
-                after: None,
-            })
-            .unwrap();
-    }
-
     /// The next list of moving projects this machine publishes that `wanted`
     /// takes.
     fn moves_until(&self, wanted: impl Fn(&[ProjectMoveStatus]) -> bool) -> Vec<ProjectMoveStatus> {
@@ -152,41 +53,6 @@ impl Machine {
         let mut sessions = index.sessions;
         sessions.extend(archived.sessions);
         (index.projects, sessions)
-    }
-
-    fn stop_hosting(&mut self) {
-        if let Some(endpoint) = self.endpoint.take() {
-            endpoint.shutdown();
-        }
-    }
-
-    fn start_hosting(&mut self) {
-        self.endpoint =
-            Some(TraverseHost::start(self.mux.clone(), config(&self.dir, &self.name)).unwrap());
-    }
-}
-
-impl Drop for Machine {
-    fn drop(&mut self) {
-        self.stop_hosting();
-        if let Some(runtime) = self.runtime.take() {
-            smol::block_on(async {
-                let _ = self.client.shutdown().await;
-                runtime.to_host.close();
-                let _ = runtime.stopped.recv().await;
-                self.client.close();
-            });
-        }
-    }
-}
-
-fn config(dir: &Path, name: &str) -> HostConfig {
-    HostConfig {
-        host_name: name.into(),
-        data_dir: dir.to_path_buf(),
-        traverse: Vec::new(),
-        pairing_enabled: true,
-        bind_port: None,
     }
 }
 

@@ -126,13 +126,18 @@ impl Group {
 
 /// What the client showing a host's index sees of its threads.
 struct Index {
+    link: tcode_client::HostLink,
     events: smol::channel::Receiver<EventEnvelope>,
     threads: HashMap<String, SessionMeta>,
 }
 
 impl Index {
     fn open(host: &SpawnedHost) -> Self {
-        let link = host.link();
+        Self::of(host.link())
+    }
+
+    /// What client `link` shows of its host's index.
+    fn of(link: tcode_client::HostLink) -> Self {
         let events = link.events();
         link.subscribe(Subscription {
             known_index: None,
@@ -141,6 +146,7 @@ impl Index {
         })
         .unwrap();
         Self {
+            link,
             events,
             threads: HashMap::new(),
         }
@@ -153,8 +159,7 @@ impl Index {
     }
 
     /// Show thread `id`, as a client that selects it does, once its log has come.
-    fn show(&mut self, host: &SpawnedHost, id: &str) {
-        let link = host.link();
+    fn show(&mut self, id: &str) {
         for topic in [
             Topic::SessionStatus {
                 session_id: id.into(),
@@ -163,12 +168,13 @@ impl Index {
                 session_id: id.into(),
             },
         ] {
-            link.subscribe(Subscription {
-                known_index: None,
-                topic,
-                after: None,
-            })
-            .unwrap();
+            self.link
+                .subscribe(Subscription {
+                    known_index: None,
+                    topic,
+                    after: None,
+                })
+                .unwrap();
         }
         loop {
             let envelope = self.events.recv_blocking().expect("the host stopped");
@@ -445,8 +451,7 @@ fn scene(tag: &str) -> Scene {
     let desk = Machine::boot(&group, DESK, "Desk", desk_store.root());
     let laptop = Machine::boot(&group, LAPTOP, "Laptop", laptop_store.root());
     let mut desk = desk;
-    let host = desk.host.clone();
-    desk.index.show(&host, "lead");
+    desk.index.show("lead");
     desk.command(Command::SendTurn {
         session_id: "lead".into(),
         text: "Work with the laptop".into(),
@@ -766,4 +771,140 @@ fn a_thread_started_from_another_machine_runs_no_more_permissively_than_its_star
     assert!(
         agent::session_approval_class(ProviderKind::Codex, &there.option_selections) <= lead_class
     );
+}
+
+/// A machine of a real group over loopback, its host given `tcode_control` and a played
+/// harness, and what its client shows of its index.
+fn real_machine(
+    dir: &super::real_group::TestDir,
+    name: &str,
+) -> (super::real_group::Machine, ScriptedProvider, Index) {
+    let provider = scripted_provider(ProviderKind::Codex);
+    let mut services = HostServices {
+        provider_launcher: provider.launcher.clone(),
+        ..Default::default()
+    };
+    services.start_mcp_servers(false);
+    let machine = super::real_group::Machine::start_with(&dir.0, name, services);
+    let index = Index::of(machine.client.clone());
+    (machine, provider, index)
+}
+
+/// A project `project` on the store a machine in `dir` opens, with thread `thread` in it
+/// when one is named.
+fn seed_real(dir: &super::real_group::TestDir, project: &str, thread: Option<&str>) {
+    let store = tcode_services::store::SessionStore::open_at(dir.0.join("store")).unwrap();
+    let root = dir.0.join(project);
+    std::fs::create_dir_all(&root).unwrap();
+    let mut seeded = Project::from_root(root.clone());
+    seeded.id = project.into();
+    store.upsert_project(&seeded).unwrap();
+    if let Some(thread) = thread {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, root, None);
+        meta.id = thread.into();
+        meta.title = "Lead".into();
+        meta.project_id = Some(project.into());
+        store.upsert_meta(&meta).unwrap();
+    }
+}
+
+/// Over the group's real transport, a thread starts its subagent on another machine, whose
+/// allow-list refuses a machine what is not a machine's to ask and which takes no thread
+/// while Accept threads is off; the subagent's report reaches the lead, and the lead taking
+/// it is what that machine hears.
+#[test]
+fn a_subagent_on_another_machine_reports_to_its_lead_over_the_group_s_transport() {
+    use tcode_protocol::GroupAction;
+    let desk_dir = super::real_group::TestDir::new("threads-desk");
+    let laptop_dir = super::real_group::TestDir::new("threads-laptop");
+    seed_real(&desk_dir, "desk-project", Some("lead"));
+    seed_real(&laptop_dir, LAPTOP_PROJECT, None);
+    let (desk, desk_harness, mut desk_index) = real_machine(&desk_dir, "Desk");
+    let (laptop, laptop_harness, mut laptop_index) = real_machine(&laptop_dir, "Laptop");
+    desk.group(GroupAction::Create {
+        name: "Home".into(),
+    });
+    laptop.group(GroupAction::Join {
+        link: desk.endpoint.as_ref().unwrap().new_invitation().url(),
+        address: Some("127.0.0.1".into()),
+    });
+    let laptop_id = laptop.id();
+
+    desk_index.show("lead");
+    desk.command(Command::SendTurn {
+        session_id: "lead".into(),
+        text: "Work with the laptop".into(),
+        attachment_paths: Vec::new(),
+    })
+    .unwrap();
+    let tools = Tools::connect(&desk_harness.launches.recv_blocking().unwrap());
+    begin_turn(&desk_harness, "lead-1");
+    play(&desk_harness, [completed("lead-1")]);
+
+    let refused = smol::block_on(desk.link.call(
+        &laptop_id,
+        MachineRequest::Control {
+            caller: MachineCaller {
+                thread_id: "lead".into(),
+                title: "Lead".into(),
+                permission_mode: None,
+                request_id: None,
+            },
+            tool: "delete_threads".into(),
+            args: serde_json::json!({ "thread_ids": ["anything"] }),
+        },
+    ));
+    assert_eq!(
+        refused.map_err(|error| error.code),
+        Err("refused".to_owned())
+    );
+
+    let start = |request_id: &str| {
+        tools.call(
+            "start_thread_on_machine",
+            serde_json::json!({
+                "machine": laptop_id,
+                "project_id": LAPTOP_PROJECT,
+                "provider": "codex",
+                "subagent": true,
+                "title": "Check the laptop build",
+                "message": "Build it here and report what fails.",
+                "request_id": request_id,
+            }),
+        )
+    };
+    let started = start("build-1").unwrap();
+    let child = started["thread_id"].as_str().unwrap().to_owned();
+    let there = laptop_index.thread(&child, |_| true);
+    assert_eq!(there.parent_session_id, None);
+    assert_eq!(there.remote_parent.unwrap().machine, desk.id());
+    assert_eq!(there.started_by.unwrap().machine, Some(desk.id()));
+
+    begin_turn(&laptop_harness, "child-1");
+    play(
+        &laptop_harness,
+        [
+            reported("report-1", "Two tests fail on the laptop."),
+            completed("child-1"),
+        ],
+    );
+    let taken = begin_turn(&desk_harness, "lead-2");
+    assert!(taken.contains("Two tests fail on the laptop."), "{taken}");
+    assert!(
+        taken.contains(&format!("thread {child}@{laptop_id} (")),
+        "{taken}"
+    );
+    laptop_index.thread(&child, |meta| {
+        meta.expectation
+            .as_ref()
+            .is_some_and(|expectation| expectation.undelivered.is_none())
+    });
+    play(&desk_harness, [completed("lead-2")]);
+
+    laptop.group(GroupAction::SetAcceptThreads(false));
+    let refusal = start("build-2").unwrap_err();
+    assert!(refusal.contains(MACHINE_REFUSES), "{refusal}");
+    let children = lead_lineage(&tools)["remote_children"].clone();
+    assert_eq!(children.as_array().unwrap().len(), 1);
+    assert_eq!(children[0]["thread_id"], child.as_str());
 }

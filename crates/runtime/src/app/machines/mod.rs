@@ -9,6 +9,8 @@ mod leads;
 #[cfg(test)]
 mod move_tests;
 pub(crate) mod moves;
+#[cfg(test)]
+mod real_group;
 mod remote;
 #[cfg(test)]
 mod tests;

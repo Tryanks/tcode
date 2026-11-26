@@ -42,10 +42,11 @@ fn machine_named(info: &MachineInfo) -> String {
 /// The other machine's refusal or failure, as the calling thread reads it.
 fn from_machine(info: &MachineInfo, error: ProtocolError) -> String {
     format!(
-        "machine \"{}\" ({}): {}",
+        "machine \"{}\" ({}): {} ({})",
         machine_named(info),
         info.id,
-        error.message
+        error.message,
+        error.code
     )
 }
 
