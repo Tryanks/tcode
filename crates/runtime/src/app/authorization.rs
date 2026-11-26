@@ -492,8 +492,10 @@ impl AppState {
                         .ok_or_else(|| refusal("project"))
                 }
                 // Read marks are the host owner's, kept in their settings like the sidebar
-                // and favourite marks below.
+                // and favourite marks below. A turn in a space reaches no other machine, and
+                // neither does its member.
                 Command::DeleteSession { .. }
+                | Command::ControlRemoteChild { .. }
                 | Command::RestoreDraft { .. }
                 | Command::MarkSessionRead { .. }
                 | Command::MarkSessionUnread { .. }

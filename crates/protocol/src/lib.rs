@@ -11,7 +11,7 @@ pub use index::index_fingerprint;
 mod machine;
 pub use machine::{
     MachineCaller, MachineRequest, MachineRequestKind, MachineResponse, MoveBlocker, MovePart,
-    MovePhase, MoveState, ProjectMovePreview, ProjectMoveStatus,
+    MovePause, MovePhase, MoveState, ProjectMovePreview, ProjectMoveStatus,
 };
 mod original;
 pub use original::{OriginalMetadata, OriginalReply, OriginalRequest, OriginalTarget};
@@ -432,8 +432,9 @@ pub use wire::{
 // access changed. Moving projects: MachineRequest gains MovePreflight (with
 // MachineResponse::MovePreflight) and MoveBegin carries thread_ids for its
 // thread count; CancelProjectMove carries force; MoveBlocker gains QuickChat
-// and QueuedMessages; ProjectMoveStatus carries move_id and commit_unknown;
-// Query gains MovedThread.
+// and QueuedMessages; ProjectMoveStatus carries move_id, commit_unknown and
+// paused (MovePause); Query gains MovedThread; Command gains
+// ControlRemoteChild.
 // A machine's Callback carries its report's id, the child's
 // state and the watch it fires, and MachineCaller's permission_mode is the
 // class of its thread's mode; thread metadata carries remote_watches, a remote

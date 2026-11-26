@@ -75,7 +75,7 @@ pub enum ItemKind {
 
 const SCOPE: &str = "Which projects the call covers: the caller's own (project), named ones ({\"projects\": [ids]}) or the whole host (host). Omit for the caller's own project.";
 
-const MACHINE: &str = "Another machine of this machine's group, by the id list_machines gives, to run the call there: the thread, project and anchor ids it names are that machine's, and the answer names the machine. Omit for this machine.";
+const MACHINE: &str = "Another machine of this machine's group, by the id list_machines gives, to run the call there: the thread, project and anchor ids it names are that machine's, and the answer names the machine. There you reach its projects and models, and of its threads only those this machine started there. Omit for this machine.";
 
 /// A tool's parameters with the machine of the group the call is for.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

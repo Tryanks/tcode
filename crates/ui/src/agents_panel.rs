@@ -14,6 +14,7 @@ use gpui::{
 };
 use gpui_base::{h_flex, v_flex};
 use serde::Deserialize;
+use tcode_core::control::RemoteChildOp;
 use tcode_core::notice::HostNotice;
 use tcode_core::session::{EntryContent, LatestActivity};
 use tcode_core::settlement::{AgentDelivery, AgentExecution, AgentReport};
@@ -59,6 +60,24 @@ struct AgentCancel(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_agents, no_json)]
 struct AgentStopBackground(String);
+/// Stop, cancel or settle a subagent on another machine of the group, through
+/// its lead's host.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_agents, no_json)]
+struct AgentRemoteOp {
+    machine: String,
+    thread_id: String,
+    op: RemoteChildOp,
+}
+
+/// A subagent on another machine of the group, as its row's actions reach it.
+#[derive(Clone)]
+struct RemoteAgent {
+    machine: String,
+    thread_id: String,
+    /// The op its lead still has to send it.
+    pending: Option<RemoteChildOp>,
+}
 
 #[derive(Clone)]
 struct AgentRow {
@@ -116,6 +135,9 @@ struct AgentRow {
     /// Why a press opens nothing, for an agent on a machine this window is
     /// not linked to.
     closed: Option<SharedString>,
+    /// The agent on another machine of the group its actions reach, where
+    /// this device may operate its lead's machine.
+    remote: Option<RemoteAgent>,
 }
 
 impl AgentRow {
@@ -299,6 +321,7 @@ impl Agents {
                         note: None,
                         elsewhere: None,
                         closed: None,
+                        remote: None,
                     });
                 }
             },
@@ -365,6 +388,7 @@ impl Agents {
                 note: None,
                 elsewhere: None,
                 closed: None,
+                remote: None,
             };
             agents.push(delivery, row);
         }
@@ -373,7 +397,7 @@ impl Agents {
             .flat_map(|parent| parent.remote_children.iter().rev())
             .filter(|child| child.subagent)
         {
-            let (delivery, row) = remote_row(child, cx);
+            let (delivery, row) = remote_row(child, store.may_operate(), cx);
             agents.push(delivery, row);
         }
         agents.settled.extend(settled_native);
@@ -494,6 +518,7 @@ impl Agents {
                     }),
                     elapsed: row.elapsed(),
                     open: row.open.clone(),
+                    elsewhere: row.elsewhere.clone(),
                 }
             })
             .collect()
@@ -566,10 +591,14 @@ impl Agents {
 /// The row of `child`, a subagent its lead started on another machine of the
 /// group, and where it is listed: that machine's thread, read from that
 /// machine's store while this window is linked to it, and otherwise from
-/// what the lead's host keeps of it. Its lead's host forwards no command of
-/// this client's to it, so it offers none.
-fn remote_row(child: &tcode_core::control::RemoteChild, cx: &App) -> (AgentDelivery, AgentRow) {
-    use tcode_core::control::{RemoteChildOp, RemoteChildState};
+/// what the lead's host keeps of it. Its actions go through the lead's host,
+/// where this device may `operate` it.
+fn remote_row(
+    child: &tcode_core::control::RemoteChild,
+    operate: bool,
+    cx: &App,
+) -> (AgentDelivery, AgentRow) {
+    use tcode_core::control::RemoteChildState;
     let machine = crate::machines::machine(&child.machine, cx);
     let standing = crate::machines::standing(child, &machine, cx);
     let there = machine
@@ -651,6 +680,11 @@ fn remote_row(child: &tcode_core::control::RemoteChild, cx: &App) -> (AgentDeliv
         note: (!notes.is_empty()).then(|| notes.join(" · ")),
         elsewhere: open.then(|| (child.machine.clone(), child.thread_id.clone())),
         closed: (!open).then(|| crate::machines::not_open(&machine.name)),
+        remote: operate.then(|| RemoteAgent {
+            machine: child.machine.clone(),
+            thread_id: child.thread_id.clone(),
+            pending: child.pending,
+        }),
     };
     (delivery, row)
 }
@@ -812,6 +846,9 @@ pub(crate) struct AgentLine {
     pub(crate) elapsed: Option<String>,
     /// The thread that shows it.
     pub(crate) open: Option<String>,
+    /// The machine and thread a press opens, for an agent on another machine
+    /// of the group while this window is linked to that machine.
+    pub(crate) elsewhere: Option<(String, String)>,
 }
 
 /// The key the panel's row opening `id` has among the lead's origins.
@@ -879,6 +916,28 @@ pub(crate) fn back_to_lead(
     cx: &mut App,
 ) {
     store.update(cx, |store, cx| store.show_thread_replacing(lead, agent, cx));
+}
+
+/// Ask before cancelling an agent, then `cancel` it.
+fn confirm_cancel(window: &mut Window, cx: &mut App, cancel: impl Fn(&mut App) + 'static) {
+    let cancel = std::rc::Rc::new(cancel);
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let cancel = cancel.clone();
+        alert
+            .title(crate::tr!("agents.cancel_title"))
+            .description(crate::tr!("agents.cancel_description"))
+            .button_props(
+                DialogButtons::default()
+                    .ok_text(crate::tr!("agents.cancel"))
+                    .ok_variant(ButtonVariant::Danger)
+                    .cancel_text(crate::tr!("agents.cancel_keep"))
+                    .show_cancel(true),
+            )
+            .on_ok(move |_, _, cx| {
+                cancel(cx);
+                true
+            })
+    });
 }
 
 #[derive(Clone, Copy)]
@@ -1070,29 +1129,88 @@ impl AgentsPanel {
     fn on_cancel(&mut self, action: &AgentCancel, window: &mut Window, cx: &mut Context<Self>) {
         let store = self.store.clone();
         let id = action.0.clone();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let store = store.clone();
-            let id = id.clone();
-            alert
-                .title(crate::tr!("agents.cancel_title"))
-                .description(crate::tr!("agents.cancel_description"))
-                .button_props(
-                    DialogButtons::default()
-                        .ok_text(crate::tr!("agents.cancel"))
-                        .ok_variant(ButtonVariant::Danger)
-                        .cancel_text(crate::tr!("agents.cancel_keep"))
-                        .show_cancel(true),
-                )
-                .on_ok(move |_, _, cx| {
-                    store.update(cx, |store, _| store.cancel_agent(id.clone()));
-                    true
-                })
+        confirm_cancel(window, cx, move |cx| {
+            store.update(cx, |store, _| store.cancel_agent(id.clone()));
         });
+    }
+
+    fn on_remote_op(
+        &mut self,
+        action: &AgentRemoteOp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(lead) = self.session_id.clone() else {
+            return;
+        };
+        let store = self.store.clone();
+        let action = action.clone();
+        let cancel = action.op == RemoteChildOp::Cancel;
+        let send = move |cx: &mut App| {
+            store.update(cx, |store, _| {
+                store.control_remote_child(
+                    lead.clone(),
+                    action.machine.clone(),
+                    action.thread_id.clone(),
+                    action.op,
+                )
+            });
+        };
+        if cancel {
+            confirm_cancel(window, cx, send);
+        } else {
+            send(cx);
+        }
     }
 
     /// The actions a row offers, with their icons and the action each sends.
     fn row_actions(row: &AgentRow) -> Vec<(IconName, SharedString, Box<dyn Action>)> {
         let mut actions: Vec<(IconName, SharedString, Box<dyn Action>)> = Vec::new();
+        if let Some(remote) = &row.remote {
+            let op = |op| -> Box<dyn Action> {
+                Box::new(AgentRemoteOp {
+                    machine: remote.machine.clone(),
+                    thread_id: remote.thread_id.clone(),
+                    op,
+                })
+            };
+            // What is still to be sent is not offered again, nor anything
+            // else once a cancel is.
+            let offered = |wanted: RemoteChildOp| match remote.pending {
+                Some(RemoteChildOp::Cancel) => false,
+                Some(pending) => pending != wanted,
+                None => true,
+            };
+            match row.delivery {
+                Some(AgentDelivery::Running) => {
+                    if offered(RemoteChildOp::Interrupt) {
+                        actions.push((
+                            IconName::Square,
+                            crate::tr!("agents.stop").into_owned().into(),
+                            op(RemoteChildOp::Interrupt),
+                        ));
+                    }
+                }
+                Some(AgentDelivery::AwaitingSettle) => {
+                    if offered(RemoteChildOp::Settle) {
+                        actions.push((
+                            IconName::CircleCheck,
+                            crate::tr!("agents.settle").into_owned().into(),
+                            op(RemoteChildOp::Settle),
+                        ));
+                    }
+                }
+                _ => return actions,
+            }
+            if offered(RemoteChildOp::Cancel) {
+                actions.push((
+                    IconName::CircleX,
+                    crate::tr!("agents.cancel").into_owned().into(),
+                    op(RemoteChildOp::Cancel),
+                ));
+            }
+            return actions;
+        }
         if let Some(task) = row.stop_task.clone() {
             actions.push((
                 IconName::Square,
@@ -1358,7 +1476,12 @@ impl Entries {
         } else {
             row.title.clone()
         };
-        let actions = AgentsPanel::row_actions(row);
+        // A machine that lets this device only view it takes none of them.
+        let actions = if self.store.read(cx).view_only() {
+            Vec::new()
+        } else {
+            AgentsPanel::row_actions(row)
+        };
         // Hover reveals the actions over the elapsed time; a touch screen has
         // no hover, so there they stand in its place.
         let coarse = crate::window_seam::is_mobile(cx);
@@ -1673,7 +1796,8 @@ impl Render for AgentsPanel {
             .on_action(cx.listener(Self::on_stop))
             .on_action(cx.listener(Self::on_stop_background))
             .on_action(cx.listener(Self::on_settle))
-            .on_action(cx.listener(Self::on_cancel));
+            .on_action(cx.listener(Self::on_cancel))
+            .on_action(cx.listener(Self::on_remote_op));
         // The empty state and the list cross-fade as the first agent starts
         // or the last one goes. The current one stays in flow: the phone
         // sheet is as tall as what it holds, and gives layers that only

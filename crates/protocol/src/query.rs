@@ -570,6 +570,13 @@ pub struct GroupMachineInfo {
     pub accepts_projects: Option<bool>,
 }
 
+impl GroupMachineInfo {
+    /// What the group calls the machine: its label, else its own name.
+    pub fn title(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum SpaceAction {

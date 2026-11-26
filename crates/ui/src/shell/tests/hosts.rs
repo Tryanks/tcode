@@ -1842,7 +1842,7 @@ fn a_moving_projects_thread_cannot_send_and_another_hosts_still_does(cx: &mut Te
                 done: 1,
                 total: 4,
                 commit_unknown: false,
-                error: None,
+                paused: None,
             }]),
         )],
     );

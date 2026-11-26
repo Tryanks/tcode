@@ -1015,6 +1015,17 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             thread_ids,
         } => app.stop_watching_threads(&session_id, &thread_ids, cx),
         Command::CancelAgent { session_id } => app.cancel_child(&session_id, cx),
+        Command::ControlRemoteChild {
+            session_id,
+            machine,
+            thread_id,
+            op,
+        } => {
+            let task = app.control_remote_child(&session_id, &machine, &thread_id, op, cx);
+            return CommandOutcome::Pending(
+                cx.spawn_background(async move { task.await.map(|()| CommandResponse::Unit) }),
+            );
+        }
         Command::SetAutoSettle {
             session_id,
             enabled,

@@ -289,6 +289,22 @@ impl WorkspaceStore {
     pub fn cancel_agent(&mut self, session_id: String) {
         self.dispatch(Command::CancelAgent { session_id });
     }
+    /// `op` for `thread_id`, a subagent `lead` started on machine `machine` of the group,
+    /// through the lead's host.
+    pub(crate) fn control_remote_child(
+        &mut self,
+        lead: String,
+        machine: String,
+        thread_id: String,
+        op: tcode_core::control::RemoteChildOp,
+    ) {
+        self.dispatch(Command::ControlRemoteChild {
+            session_id: lead,
+            machine,
+            thread_id,
+            op,
+        });
+    }
     pub fn interrupt_session(&mut self, session_id: String) {
         self.dispatch(Command::Interrupt { session_id });
     }

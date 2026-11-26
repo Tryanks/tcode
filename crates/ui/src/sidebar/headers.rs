@@ -737,7 +737,9 @@ impl SessionsSidebar {
         status: &tcode_protocol::ProjectMoveStatus,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let machine = crate::move_project_dialog::machine_name(store, &status.machine, cx);
+        let machine =
+            crate::machines::machine_in_groups(std::slice::from_ref(store), &status.machine, cx)
+                .name;
         let line = crate::move_project_dialog::status_line(status, &machine);
         let open = project.clone();
         let selector = format!("project-move-{name_id}");

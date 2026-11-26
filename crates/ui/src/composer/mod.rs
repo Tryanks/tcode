@@ -1763,8 +1763,12 @@ impl Composer {
                 machine = self.workspace_store.read(cx).host_title()
             )
         } else if let Some(machine) = self.moving_to(cx) {
-            let machine =
-                crate::move_project_dialog::machine_name(&self.workspace_store, &machine, cx);
+            let machine = crate::machines::machine_in_groups(
+                std::slice::from_ref(&self.workspace_store),
+                &machine,
+                cx,
+            )
+            .name;
             crate::tr!("machines.move.composer", machine = machine)
         } else if !self.interactive(cx) {
             crate::tr!("mobile.offline_message")
@@ -1777,7 +1781,9 @@ impl Composer {
         let card = self.render_card(subagent, desired_placeholder, control_row, window, cx);
         let panels = self.render_panels(&composer_state, window, cx);
         let checkout = self.render_checkout_foot(&composer_state, subagent, window, cx);
-        let drawer = self.render_settings_drawer(subagent, window, cx);
+        // A viewer's row, like a subagent's, carries the permission and context meter
+        // itself, read-only.
+        let drawer = self.render_settings_drawer(subagent || view_only, window, cx);
 
         // Mirror the chat timeline's centered content column (same page
         // padding, same max width) so the composer lines up with the messages

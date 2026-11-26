@@ -134,6 +134,22 @@ impl AppState {
                     "This thread is not an agent dispatched by another thread.",
                 ));
             }
+            Command::ControlRemoteChild {
+                session_id,
+                machine,
+                thread_id,
+                ..
+            } if !self.find_meta(session_id).is_some_and(|meta| {
+                meta.remote_children
+                    .iter()
+                    .any(|child| &child.machine == machine && &child.thread_id == thread_id)
+            }) =>
+            {
+                return Err(error(
+                    "not_a_remote_child",
+                    "This thread did not start that thread on that machine.",
+                ));
+            }
             Command::ToggleProjectCollapsed { project_id }
             | Command::MoveSession { project_id, .. }
             | Command::SetProjectIcon { project_id, .. }
@@ -298,6 +314,7 @@ impl AppState {
             Command::SettleChildren { .. }
                 | Command::SettleSession { .. }
                 | Command::CancelAgent { .. }
+                | Command::ControlRemoteChild { .. }
                 | Command::UnsettleSession { .. }
                 | Command::SetAutoSettle { .. }
                 | Command::PinSession { .. }

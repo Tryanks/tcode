@@ -84,9 +84,10 @@ impl AppState {
         })
     }
 
-    /// What a thread on another machine may ask of this one: reading threads and projects,
-    /// starting threads, writing to them, and what a lead does for its own subagent. The
-    /// match names every tool, so one added later is refused until it is decided here.
+    /// What a thread on another machine may ask of this one: listing projects and models,
+    /// starting threads, reading and writing to the threads its machine started here
+    /// (`open_to` confines the threads), and what a lead does for its own subagent.
+    /// The match names every tool, so one added later is refused until it is decided here.
     fn machine_may_ask(&self, caller: &Caller, op: ControlOp) -> Result<ControlOp, ProtocolError> {
         let name = op.tool_name();
         let not_for_machines = || {

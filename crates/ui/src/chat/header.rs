@@ -1436,6 +1436,12 @@ impl ChatView {
                 .and_then(|id| self.workspace_store.read(cx).thread_meta(id))
                 .is_some_and(|meta| meta.worktree.is_none())
         };
+        let moving = self.session_id.as_deref().is_some_and(|id| {
+            self.workspace_store
+                .read(cx)
+                .thread_project_move(id, cx)
+                .is_some()
+        });
         move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
             let menu = menu.when_some(title.clone(), |menu, title| {
                 menu.menu(
@@ -1469,10 +1475,19 @@ impl ChatView {
                         Box::new(crate::pull_requests::ShowAgentTools),
                     )
                 });
-            match &cwd {
+            let menu = match &cwd {
                 Some(cwd) => menu.separator().path_items(&cwd.to_string_lossy(), None),
                 None => menu,
-            }
+            };
+            // The host takes no work in a thread whose project is moving.
+            menu.when(moving, |menu| {
+                menu.disable_items_except(|action| {
+                    let action = action.as_any();
+                    !(action.is::<crate::pull_requests::OpenLinkDialog>()
+                        || action.is::<OpenMoveThreadDialog>()
+                        || action.is::<RevokeSelfSettle>())
+                })
+            })
         }
     }
 

@@ -218,8 +218,28 @@ pub struct ProjectMoveStatus {
     /// only be cancelled with `force`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub commit_unknown: bool,
+    /// Why the move waits, while it is paused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub paused: Option<MovePause>,
+}
+
+/// Why a move is paused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum MovePause {
+    /// The other machine cannot be reached; the move tries again by itself.
+    Unreachable,
+    /// The other machine no longer takes projects; the move tries again by
+    /// itself.
+    Refused,
+    /// This machine reaches no group now; the move tries again by itself.
+    NoGroup,
+    /// The other machine runs another protocol version.
+    Version,
+    /// The other machine is no longer in this machine's group.
+    NotMember,
+    /// Something else failed, here or on the other machine, as it said.
+    Failed { message: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

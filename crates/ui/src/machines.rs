@@ -77,9 +77,45 @@ pub(crate) struct Machine {
     pub(crate) last_connected: Option<u64>,
 }
 
+/// The machines of the group `store`'s machine is in, as that machine last
+/// reported them; empty outside a group or where this client may not manage
+/// the machine.
+pub(crate) fn group_machines(
+    store: &Entity<WorkspaceStore>,
+    cx: &mut App,
+) -> Vec<tcode_protocol::GroupMachineInfo> {
+    crate::remote::spaces::for_store(store, cx)
+        .and_then(|spaces| spaces.read(cx).group().map(|group| group.machines.clone()))
+        .unwrap_or_default()
+}
+
 /// Machine `id`, named by the open store for it, else by the machine this
 /// device saved, else by the head of its id.
 pub(crate) fn machine(id: &str, cx: &App) -> Machine {
+    resolve(id, None, cx)
+}
+
+/// Machine `id` as [`machine`] names it, but called first what the group of
+/// any of `hosts`' machines calls it.
+pub(crate) fn machine_in_groups(
+    hosts: &[Entity<WorkspaceStore>],
+    id: &str,
+    cx: &mut App,
+) -> Machine {
+    let mut title = None;
+    for host in hosts {
+        title = group_machines(host, cx)
+            .into_iter()
+            .find(|machine| machine.id == id)
+            .map(|machine| machine.title().to_owned());
+        if title.is_some() {
+            break;
+        }
+    }
+    resolve(id, title, cx)
+}
+
+fn resolve(id: &str, group_title: Option<String>, cx: &App) -> Machine {
     let directory = crate::shell::machine_directory(cx);
     let directory = directory.as_ref().map(|directory| directory.read(cx));
     let store = directory.and_then(|directory| directory.store_of(id));
@@ -91,7 +127,8 @@ pub(crate) fn machine(id: &str, cx: &App) -> Machine {
             HostKey::Remote(_) => store.remote_host_name().map(str::to_owned),
         }
     });
-    let name = open_name
+    let name = group_title
+        .or(open_name)
         .or_else(|| saved.as_ref().map(|saved| saved.title().to_owned()))
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| id.chars().take(8).collect());

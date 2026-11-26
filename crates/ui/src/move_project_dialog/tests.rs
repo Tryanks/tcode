@@ -3,8 +3,9 @@ use std::future::Future as _;
 
 use gpui::{TestAppContext, VisualTestContext};
 use tcode_protocol::{
-    ClientPayload, Command, EventEnvelope, GroupDeviceAccess, GroupInfo, HostMessage, HostingState,
-    MoveBlocker, ProjectMovePreview, Query, QueryResponse, ServerEvent, Topic,
+    ClientPayload, Command, EventEnvelope, GroupDeviceAccess, GroupInfo, GroupMachineInfo,
+    HostMessage, HostingState, MoveBlocker, ProjectMovePreview, Query, QueryResponse, ServerEvent,
+    Topic,
 };
 
 use super::*;

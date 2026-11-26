@@ -38,35 +38,12 @@ impl AppShell {
         stores.into_iter().find_map(|(host, store)| {
             let found = match &host {
                 HostKey::Remote(id) => id == machine,
-                HostKey::Local => crate::move_project_dialog::group_machines(&store, cx)
+                HostKey::Local => crate::machines::group_machines(&store, cx)
                     .iter()
                     .any(|known| known.this_machine && known.id == machine),
             };
             found.then_some(host)
         })
-    }
-
-    /// What the group calls `machine`, as any machine this window shows
-    /// knows it, else as this client saved it.
-    fn machine_title(&self, machine: &str, cx: &mut Context<Self>) -> String {
-        let stores: Vec<_> = self.links.iter().map(|link| link.store.clone()).collect();
-        stores
-            .iter()
-            .find_map(|store| {
-                crate::move_project_dialog::group_machines(store, cx)
-                    .iter()
-                    .find(|known| known.id == machine)
-                    .map(crate::move_project_dialog::machine_title)
-            })
-            .or_else(|| {
-                self.client
-                    .load_hosts()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .find(|saved| saved.host_id == machine && saved.space_id.is_none())
-                    .map(|saved| saved.name)
-            })
-            .unwrap_or_else(|| machine.to_owned())
     }
 
     pub(super) fn present_project_move_ended(
@@ -76,7 +53,9 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let machine = crate::move_project_dialog::machine_name(store, &ended.machine, cx);
+        let machine =
+            crate::machines::machine_in_groups(std::slice::from_ref(store), &ended.machine, cx)
+                .name;
         let id = self.take_toast_id();
         if !ended.moved {
             self.show_toast(
@@ -229,7 +208,8 @@ impl AppShell {
             }
             return;
         }
-        let machine = self.machine_title(&target.machine, cx);
+        let stores: Vec<_> = self.links.iter().map(|link| link.store.clone()).collect();
+        let machine = crate::machines::machine_in_groups(&stores, &target.machine, cx).name;
         let saved = self
             .client
             .load_hosts()

@@ -437,7 +437,8 @@ impl TimelineView {
                                 })),
                             }
                         })
-                        .or(resume);
+                        .or(resume)
+                        .filter(|_| !self.workspace_store.read(cx).view_only());
                     let copy_key = format!("error:{}", entry.id);
                     let copied = self.copied.is(&copy_key);
                     let mark = copy_key;
@@ -868,7 +869,10 @@ impl TimelineView {
         let harness = store.harness_name_for(self.session_id.as_deref(), cx);
         let status = store
             .session_status_for(self.session_id.as_deref(), cx)
-            .and_then(|status| status.rewind.as_ref());
+            .and_then(|status| status.rewind.as_ref())
+            // A machine that lets this device only view it takes no undo from it, and
+            // opens no branch for it.
+            .filter(|_| !store.view_only());
         let checkpoint = rewound.checkpoint_id.clone();
         let this = cx.entity().downgrade();
         let undo = rewound
@@ -906,7 +910,7 @@ impl TimelineView {
                 rewound
                     .branch
                     .as_ref()
-                    .filter(|_| rewound.undo_token.is_none())?;
+                    .filter(|_| rewound.undo_token.is_none() && !store.view_only())?;
                 let absolute = store.absolute_turn_for(self.session_id.as_deref(), turn);
                 let session_id = self.session_id.clone()?;
                 let checkpoint = rewound.checkpoint_id.clone();
@@ -1209,6 +1213,7 @@ impl TimelineView {
         let enabled = request.as_ref().is_some_and(|request| {
             !store.approval_delivery_pending_for(self.session_id.as_deref(), &request.id)
                 && !store.native_subagent_readonly_for(self.session_id.as_deref(), cx)
+                && !store.view_only()
                 && store.connection_state().is_connected()
         });
         let session_id = self.session_id.clone();
@@ -2391,16 +2396,17 @@ impl TimelineView {
     }
 
     /// Whether the thread's harness can move a running call into the
-    /// background.
+    /// background, for a device the machine lets do more than view it.
     fn moves_to_background(&self, cx: &App) -> bool {
-        self.workspace_store
-            .read(cx)
-            .session_status_for(self.session_id.as_deref(), cx)
-            .is_some_and(|status| {
-                status
-                    .background_control
-                    .is_some_and(|control| control.move_running)
-            })
+        let store = self.workspace_store.read(cx);
+        !store.view_only()
+            && store
+                .session_status_for(self.session_id.as_deref(), cx)
+                .is_some_and(|status| {
+                    status
+                        .background_control
+                        .is_some_and(|control| control.move_running)
+                })
     }
 
     /// The way from a call's window to its row among the background work.

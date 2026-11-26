@@ -458,6 +458,15 @@ pub enum Command {
     CancelAgent {
         session_id: String,
     },
+    /// `op` for `thread_id`, a subagent the thread `session_id` started on
+    /// machine `machine` of the group, through this host: sent now, or kept
+    /// and sent once that machine can be reached.
+    ControlRemoteChild {
+        session_id: String,
+        machine: String,
+        thread_id: String,
+        op: tcode_core::control::RemoteChildOp,
+    },
     SetAutoSettle {
         session_id: String,
         enabled: bool,
@@ -841,6 +850,7 @@ impl Command {
             | Self::RevokeSelfSettle { session_id }
             | Self::StopWatchingThreads { session_id, .. }
             | Self::CancelAgent { session_id }
+            | Self::ControlRemoteChild { session_id, .. }
             | Self::UnsettleSession { session_id, .. }
             | Self::PinSession { session_id, .. }
             | Self::UnpinSession { session_id }

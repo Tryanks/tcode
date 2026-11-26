@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 use agent::{ApprovalClass, ItemContent, ItemStatus, SessionCommand, SessionOptions, ThreadItem};
 use tcode_client::machines::{MACHINE_REFUSES, MACHINE_UNREACHABLE, MachineCall, MachineInfo};
+use tcode_core::control::RemoteChildOp;
 use tcode_protocol::{
     Command, EventEnvelope, MachineCaller, MachineRequestKind, ServerEvent, Subscription, Topic,
 };
@@ -706,6 +707,70 @@ fn a_machine_is_refused_what_lies_outside_what_machines_may_ask() {
             "{tool}"
         );
     }
+
+    // Of the laptop's threads the lead reaches only the one its machine started there:
+    // another is answered as no thread at all.
+    let child = start_subagent(&scene.tools, "build-1").unwrap()["thread_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    begin_turn(&scene.laptop.provider, "child-1");
+    let on_laptop = |tool: &str, mut args: serde_json::Value| {
+        args["machine"] = LAPTOP.into();
+        scene.tools.call(tool, args)
+    };
+    let item = |answer: serde_json::Value| {
+        let result = &answer["results"][0];
+        (
+            result["outcome"].as_str().unwrap().to_owned(),
+            result["reason"].as_str().map(str::to_owned),
+        )
+    };
+    for (tool, args) in [
+        (
+            "get_thread",
+            serde_json::json!({ "thread_id": "laptop-own" }),
+        ),
+        ("outline", serde_json::json!({ "thread_id": "laptop-own" })),
+        (
+            "respond_input",
+            serde_json::json!({ "thread_id": "laptop-own", "answers": {} }),
+        ),
+    ] {
+        let refusal = on_laptop(tool, args).unwrap_err();
+        assert!(refusal.contains("unknown thread"), "{tool}: {refusal}");
+    }
+    let message = |thread: &str| serde_json::json!({ "thread_ids": [thread], "text": "Status?", "mode": "queue" });
+    let interrupt = |thread: &str| serde_json::json!({ "changes": [{ "thread_id": thread, "op": "interrupt" }] });
+    for (tool, args) in [
+        ("send_message", message("laptop-own")),
+        ("control_thread", interrupt("laptop-own")),
+    ] {
+        assert_eq!(
+            item(on_laptop(tool, args).unwrap()),
+            ("skipped".to_owned(), Some("unknown_thread".to_owned())),
+            "{tool}"
+        );
+    }
+    let listed: Vec<String> = on_laptop("list_threads", serde_json::json!({ "scope": "host" }))
+        .unwrap()["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|thread| thread["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(listed, std::slice::from_ref(&child));
+
+    on_laptop("get_thread", serde_json::json!({ "thread_id": child })).unwrap();
+    on_laptop("outline", serde_json::json!({ "thread_id": child })).unwrap();
+    assert_eq!(
+        item(on_laptop("send_message", message(&child)).unwrap()).0,
+        "applied"
+    );
+    assert_eq!(
+        item(on_laptop("control_thread", interrupt(&child)).unwrap()).0,
+        "applied"
+    );
 }
 
 /// Cancelling one's subagent on a machine that cannot be reached is kept, and reaches it
@@ -754,6 +819,60 @@ fn a_cancel_issued_while_the_machine_is_unreachable_reaches_it_when_it_returns()
         meta.remote_children
             .iter()
             .any(|kept| kept.state == RemoteChildState::Cancelled && kept.pending.is_none())
+    });
+}
+
+/// A client stops or cancels a lead's subagent on another machine through the lead's
+/// host: sent at once while that machine runs, kept and sent when it returns while it does
+/// not, and refused for a thread the lead did not start there.
+#[test]
+fn a_client_reaches_a_subagent_on_another_machine_through_its_lead_s_host() {
+    let Scene {
+        group,
+        mut desk,
+        laptop,
+        tools,
+        _stores,
+        ..
+    } = scene("client-op");
+    let child = start_subagent(&tools, "build-1").unwrap()["thread_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    begin_turn(&laptop.provider, "child-1");
+    let op = |thread: &str, op| Command::ControlRemoteChild {
+        session_id: "lead".into(),
+        machine: LAPTOP.into(),
+        thread_id: thread.into(),
+        op,
+    };
+    let host = desk.host.link();
+    assert_eq!(
+        host.command_blocking(op("laptop-own", RemoteChildOp::Cancel))
+            .map_err(|error| error.code),
+        Err("not_a_remote_child".to_owned())
+    );
+
+    host.command_blocking(op(&child, RemoteChildOp::Interrupt))
+        .unwrap();
+    while !matches!(next_command(&laptop.provider), SessionCommand::Interrupt) {}
+
+    let laptop_root = laptop.stop(&group);
+    host.command_blocking(op(&child, RemoteChildOp::Cancel))
+        .unwrap();
+    desk.index.thread("lead", |meta| {
+        meta.remote_children
+            .first()
+            .is_some_and(|kept| kept.pending == Some(RemoteChildOp::Cancel))
+    });
+    let mut laptop = Machine::boot(&group, LAPTOP, "Laptop", &laptop_root);
+    laptop
+        .index
+        .thread(&child, |meta| meta.cancelled_at.is_some());
+    desk.index.thread("lead", |meta| {
+        meta.remote_children
+            .first()
+            .is_some_and(|kept| kept.state == RemoteChildState::Cancelled && kept.pending.is_none())
     });
 }
 

@@ -289,13 +289,20 @@ impl AppState {
         }
     }
 
-    /// Whether a call may name `target`: any thread on the host, or, in a member's turn,
-    /// one inside the space.
+    /// Whether a call may name `target`: any thread on the host; in a member's turn, one
+    /// inside the space; for a thread on another machine of the group, one that machine
+    /// started here.
     pub(super) fn open_to(&self, caller: &Caller, target: &SessionMeta) -> bool {
         caller
             .space
             .as_ref()
             .is_none_or(|space| space.holds(target.project_id.as_deref()))
+            && caller.machine.as_ref().is_none_or(|remote| {
+                target
+                    .started_by
+                    .as_ref()
+                    .is_some_and(|started| started.machine.as_ref() == Some(&remote.peer.id))
+            })
     }
 
     /// Whether a listing or search covering `scope` includes `target`.
@@ -435,7 +442,11 @@ impl AppState {
             });
         };
         if !self.open_to(caller, &meta) {
-            return Err(TargetRefusal::OutsideSpace);
+            // Another machine is not told which threads it did not start exist here.
+            return Err(match caller.machine {
+                Some(_) => TargetRefusal::Unknown,
+                None => TargetRefusal::OutsideSpace,
+            });
         }
         Ok(meta)
     }

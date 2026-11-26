@@ -671,6 +671,72 @@ impl AppState {
         }
     }
 
+    /// A client asks for `op` on `lead`'s subagent `thread` on `machine`: it is kept as
+    /// owed and sent now, and answered once it was carried out there, refused there, or
+    /// kept for when that machine can be reached.
+    pub(crate) fn control_remote_child(
+        &mut self,
+        lead: &str,
+        machine: &str,
+        thread: &str,
+        op: RemoteChildOp,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<(), ProtocolError>> {
+        let refused = |message: &str| ProtocolError {
+            code: "remote_child_state".into(),
+            message: message.into(),
+        };
+        let Some(mut child) = self.find_meta(lead).and_then(|meta| {
+            meta.remote_children
+                .into_iter()
+                .find(|child| child.machine == machine && child.thread_id == thread)
+        }) else {
+            let error = refused("This thread did not start that thread on that machine.");
+            return cx.spawn_background(async move { Err(error) });
+        };
+        let open = matches!(
+            child.state,
+            RemoteChildState::Reported | RemoteChildState::Failed
+        );
+        let fits = match op {
+            RemoteChildOp::Interrupt => child.state == RemoteChildState::Running,
+            RemoteChildOp::Cancel => child.state == RemoteChildState::Running || open,
+            RemoteChildOp::Settle => child.subagent && open,
+        };
+        match child.pending {
+            // A cancel stops it anyway: an interrupt asked after it adds nothing.
+            Some(RemoteChildOp::Cancel)
+                if matches!(op, RemoteChildOp::Cancel | RemoteChildOp::Interrupt) =>
+            {
+                return cx.spawn_background(async { Ok(()) });
+            }
+            Some(RemoteChildOp::Cancel) => {
+                let error = refused("A cancel of that thread is still to be sent.");
+                return cx.spawn_background(async move { Err(error) });
+            }
+            _ if !fits => {
+                let error = refused("That thread is not in a state this asks of it.");
+                return cx.spawn_background(async move { Err(error) });
+            }
+            _ => {}
+        }
+        child.pending = Some(op);
+        self.change_meta(lead, cx, |meta| {
+            for kept in &mut meta.remote_children {
+                if kept.machine == machine && kept.thread_id == thread {
+                    kept.pending = Some(op);
+                }
+            }
+        });
+        let (sent, answer) = smol::channel::bounded(1);
+        self.send_remote_child_op(lead, &child, op, cx, move |result| {
+            let _ = sent.try_send(result);
+        });
+        // No answer is a send already under way for this child, which sends what is owed
+        // again once it is answered.
+        cx.spawn_background(async move { answer.recv().await.unwrap_or(Ok(())) })
+    }
+
     /// What this machine's leads still owe their subagents on `machine`, or on every
     /// machine: a cancel, interrupt or settle that could not reach it, and the word that a
     /// report was taken.
@@ -696,7 +762,7 @@ impl AppState {
                 self.send_report_taken(&lead, &child, report, cx);
             }
             if let Some(op) = child.pending {
-                self.send_remote_child_op(&lead, &child, op, cx);
+                self.send_remote_child_op(&lead, &child, op, cx, |_| {});
             }
         }
     }
@@ -740,12 +806,15 @@ impl AppState {
         );
     }
 
+    /// Send `op` for `child` to its machine, and tell `answered` how it went: carried out
+    /// or kept for when that machine can be reached, or refused.
     fn send_remote_child_op(
         &mut self,
         lead: &str,
         child: &RemoteChild,
         op: RemoteChildOp,
         cx: &mut HostCx,
+        answered: impl FnOnce(Result<(), ProtocolError>) + Send + 'static,
     ) {
         let (tool, args) = match op {
             RemoteChildOp::Cancel | RemoteChildOp::Interrupt => (
@@ -778,18 +847,30 @@ impl AppState {
             false,
             cx,
             move |state, answer, cx| {
-                let outcome = answer.as_ref().ok().and_then(|response| match response {
-                    MachineResponse::Control(value) => {
-                        value["results"][0]["outcome"].as_str().map(str::to_owned)
-                    }
+                let result = answer.as_ref().ok().and_then(|response| match response {
+                    MachineResponse::Control(value) => Some(value["results"][0].clone()),
                     _ => None,
                 });
-                match (outcome.as_deref(), &answer) {
-                    (Some("applied"), _) => {
+                let refused = match (result.as_ref(), &answer) {
+                    (Some(result), _) if result["outcome"] == "applied" => {
                         state.remote_child_done(&lead, &machine, &thread, op, cx);
+                        None
                     }
                     // The other machine will not do it, now or later: nothing is kept.
-                    (Some(_), _) => state.change_meta(&lead, cx, |meta| {
+                    (Some(result), _) => Some(ProtocolError {
+                        code: "refused".into(),
+                        message: result["reason"].as_str().unwrap_or_default().to_owned(),
+                    }),
+                    (None, Err(error)) if error.code != MACHINE_UNREACHABLE => Some(error.clone()),
+                    (None, Ok(other)) => Some(ProtocolError {
+                        code: "unexpected_reply".into(),
+                        message: format!("the machine answered {other:?}"),
+                    }),
+                    // Kept, and sent again on the next contact with that machine.
+                    (None, Err(_)) => None,
+                };
+                if refused.is_some() {
+                    state.change_meta(&lead, cx, |meta| {
                         for child in &mut meta.remote_children {
                             if child.machine == machine
                                 && child.thread_id == thread
@@ -798,22 +879,9 @@ impl AppState {
                                 child.pending = None;
                             }
                         }
-                    }),
-                    (None, Err(error)) if error.code != MACHINE_UNREACHABLE => {
-                        state.change_meta(&lead, cx, |meta| {
-                            for child in &mut meta.remote_children {
-                                if child.machine == machine
-                                    && child.thread_id == thread
-                                    && child.pending == Some(op)
-                                {
-                                    child.pending = None;
-                                }
-                            }
-                        });
-                    }
-                    // Kept, and sent again on the next contact with that machine.
-                    (None, _) => {}
+                    });
                 }
+                answered(refused.map_or(Ok(()), Err));
             },
         );
     }

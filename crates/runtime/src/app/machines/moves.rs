@@ -13,11 +13,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tcode_client::machines::{MACHINE_REFUSES, MACHINE_UNREACHABLE, MachineLink, NO_GROUP};
+use tcode_client::machines::{
+    MACHINE_REFUSES, MACHINE_UNREACHABLE, MachineLink, NO_GROUP, NOT_MEMBER, PROTOCOL_MISMATCH,
+};
 use tcode_core::ui::ConversationDestination;
 use tcode_protocol::{
-    Command, MachineRequest, MachineResponse, MoveBlocker, MovePart, MovePhase, MoveState,
-    ProjectMovePreview, ProjectMoveStatus,
+    Command, MachineRequest, MachineResponse, MoveBlocker, MovePart, MovePause, MovePhase,
+    MoveState, ProjectMovePreview, ProjectMoveStatus,
 };
 use tcode_services::project_move as disk;
 use tcode_services::store::Mutation;
@@ -64,7 +66,7 @@ struct Outgoing {
     phase: MovePhase,
     done: u64,
     total: u64,
-    error: Option<String>,
+    paused: Option<MovePause>,
     commit_unknown: bool,
     /// Which driver may act for the move: a cancel moves it on, so a driver
     /// still running stops at its next step.
@@ -122,16 +124,24 @@ enum Stop {
     Superseded,
     /// The other machine could not be reached or does not take projects now:
     /// the move waits and tries again.
-    Unreachable(String),
+    Unreachable(MovePause),
     /// The other machine refused or something failed here: the move waits
     /// for the user to try again or cancel.
-    Failed(String),
+    Failed(MovePause),
+}
+
+fn failed(message: String) -> Stop {
+    Stop::Failed(MovePause::Failed { message })
 }
 
 fn stop_for(error: ProtocolError) -> Stop {
     match error.code.as_str() {
-        MACHINE_UNREACHABLE | NO_GROUP | MACHINE_REFUSES => Stop::Unreachable(error.message),
-        _ => Stop::Failed(format!("{}: {}", error.code, error.message)),
+        MACHINE_UNREACHABLE => Stop::Unreachable(MovePause::Unreachable),
+        NO_GROUP => Stop::Unreachable(MovePause::NoGroup),
+        MACHINE_REFUSES => Stop::Unreachable(MovePause::Refused),
+        PROTOCOL_MISMATCH => Stop::Failed(MovePause::Version),
+        NOT_MEMBER => Stop::Failed(MovePause::NotMember),
+        _ => failed(format!("{}: {}", error.code, error.message)),
     }
 }
 
@@ -191,7 +201,7 @@ impl AppState {
                 phase,
                 done: 0,
                 total: 0,
-                error: None,
+                paused: None,
                 run,
                 driver: None,
                 waits: 0,
@@ -446,13 +456,13 @@ impl AppState {
     fn start_move_driver(&mut self, project_id: &str, cx: &mut HostCx) {
         let Ok(link) = self.machine_link().cloned() else {
             // Nothing reaches the group yet; the wait tries again.
-            self.pause_move(project_id, None, Stop::Unreachable("no group".into()), cx);
+            self.pause_move(project_id, None, Stop::Unreachable(MovePause::NoGroup), cx);
             return;
         };
         let Some(outgoing) = self.moves.outgoing.get_mut(project_id) else {
             return;
         };
-        outgoing.error = None;
+        outgoing.paused = None;
         if outgoing.phase == MovePhase::Paused {
             outgoing.phase = match outgoing.journal.stage {
                 Stage::Sending => MovePhase::Preparing,
@@ -484,12 +494,12 @@ impl AppState {
         outgoing.driver = None;
         let retry = match stop {
             Stop::Superseded => return,
-            Stop::Unreachable(message) => {
-                outgoing.error = Some(message);
+            Stop::Unreachable(pause) => {
+                outgoing.paused = Some(pause);
                 true
             }
-            Stop::Failed(message) => {
-                outgoing.error = Some(message);
+            Stop::Failed(pause) => {
+                outgoing.paused = Some(pause);
                 false
             }
         };
@@ -552,7 +562,7 @@ impl AppState {
         self.moves.next_run += 1;
         outgoing.run = self.moves.next_run;
         outgoing.phase = MovePhase::Cancelling;
-        outgoing.error = None;
+        outgoing.paused = None;
         let driver = outgoing.driver.take();
         let mut journal = outgoing.journal.clone();
         journal.stage = Stage::Aborting;
@@ -748,7 +758,7 @@ impl AppState {
                 phase: outgoing.phase,
                 done: outgoing.done,
                 total: outgoing.total,
-                error: outgoing.error.clone(),
+                paused: outgoing.paused.clone(),
                 commit_unknown: outgoing.commit_unknown,
             })
             .collect()
@@ -1014,7 +1024,7 @@ impl Driver {
         self.host
             .unblock(move || store.apply(&[record]))
             .await
-            .map_err(|error| Stop::Failed(format!("could not record the move: {error}")))?;
+            .map_err(|error| failed(format!("could not record the move: {error}")))?;
         let journal = journal.clone();
         self.update(move |outgoing| outgoing.journal = journal)
             .await
@@ -1051,7 +1061,7 @@ impl Driver {
             )
             .await?;
         let MachineResponse::MoveBegun { received } = begun else {
-            return Err(Stop::Failed(unexpected(&begun).message));
+            return Err(failed(unexpected(&begun).message));
         };
         let held = |name: &str| {
             received
@@ -1085,7 +1095,7 @@ impl Driver {
                     .host
                     .unblock(move || read_at(&path, offset, length as usize))
                     .await
-                    .map_err(|error| Stop::Failed(format!("could not read a part: {error}")))?;
+                    .map_err(|error| failed(format!("could not read a part: {error}")))?;
                 let answer = self
                     .call(
                         &journal,
@@ -1098,7 +1108,7 @@ impl Driver {
                     )
                     .await?;
                 let MachineResponse::MoveProgress { received } = answer else {
-                    return Err(Stop::Failed(unexpected(&answer).message));
+                    return Err(failed(unexpected(&answer).message));
                 };
                 let received = received.min(part.size);
                 done = (done + received).saturating_sub(offset);
@@ -1136,7 +1146,7 @@ impl Driver {
             .map_err(|()| Stop::Superseded)?;
         match barrier.recv().await {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => return Err(Stop::Failed(format!("the store failed: {error}"))),
+            Ok(Err(error)) => return Err(failed(format!("the store failed: {error}"))),
             Err(_) => return Err(Stop::Superseded),
         }
         let store = self.store.clone();
@@ -1156,7 +1166,7 @@ impl Driver {
                 )
             })
             .await
-            .map_err(Stop::Failed)
+            .map_err(failed)
     }
 
     /// Send `MoveCommit`, recorded as sent before it goes, and settle what it
@@ -1189,15 +1199,15 @@ impl Driver {
                 self.record(&journal).await?;
                 self.finish(journal).await
             }
-            Ok(other) => Err(Stop::Failed(unexpected(&other).message)),
+            Ok(other) => Err(failed(unexpected(&other).message)),
             Err(error) => match stop_for(error) {
-                Stop::Failed(message) => {
+                Stop::Failed(pause) => {
                     // The other machine answered: it did not take the project.
                     journal.stage = Stage::Sending;
                     self.record(&journal).await?;
                     self.update(|outgoing| outgoing.commit_unknown = false)
                         .await?;
-                    Err(Stop::Failed(message))
+                    Err(Stop::Failed(pause))
                 }
                 stop => {
                     self.update(|outgoing| outgoing.commit_unknown = true)
@@ -1245,7 +1255,7 @@ impl Driver {
                     .await?;
                 self.send(journal).await
             }
-            other => Err(Stop::Failed(unexpected(&other).message)),
+            other => Err(failed(unexpected(&other).message)),
         }
     }
 
@@ -1260,9 +1270,7 @@ impl Driver {
         self.host
             .unblock(move || store.apply(&redirects))
             .await
-            .map_err(|error| {
-                Stop::Failed(format!("could not record where the threads went: {error}"))
-            })?;
+            .map_err(|error| failed(format!("could not record where the threads went: {error}")))?;
         let let_go = journal.clone();
         self.host
             .enqueue_and_wait(move |app, cx| app.let_moved_project_go(&let_go, cx))

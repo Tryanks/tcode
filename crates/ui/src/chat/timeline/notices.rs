@@ -309,10 +309,11 @@ impl TimelineView {
             });
         // Switching back sets the model the thread's next turn asks for,
         // which is offered after a reroute only while nothing has changed it
-        // since and the thread does not already ask for it.
+        // since and the thread does not already ask for it, to a device the
+        // machine lets do more than view it.
         let back = from
             .clone()
-            .filter(|_| rerouted.is_some())
+            .filter(|_| rerouted.is_some() && !self.workspace_store.read(cx).view_only())
             .zip(meta.filter(|_| latest))
             .filter(|(from, meta)| meta.model.as_deref() != Some(from.as_str()))
             .zip(self.session_id.clone())

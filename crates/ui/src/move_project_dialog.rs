@@ -18,7 +18,7 @@ use gpui::{
 };
 use gpui_base::v_flex;
 use tcode_protocol::{
-    Command, GroupMachineInfo, MoveBlocker, MovePhase, ProjectMovePreview, ProjectMoveStatus,
+    Command, MoveBlocker, MovePause, MovePhase, ProjectMovePreview, ProjectMoveStatus,
     ProtocolError,
 };
 
@@ -34,38 +34,11 @@ const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 /// How many of the ignored files the dialog names before it counts the rest.
 const IGNORED_SHOWN: usize = 6;
 
-/// What a machine of the group is called: the label the group gave it, else
-/// its own name.
-pub(crate) fn machine_title(machine: &GroupMachineInfo) -> String {
-    machine.label.as_deref().unwrap_or(&machine.name).to_owned()
-}
-
-/// The machines of the group `store`'s machine is in, as that machine last
-/// reported them; empty outside a group or where this client may not manage
-/// the machine.
-pub(crate) fn group_machines(
-    store: &Entity<WorkspaceStore>,
-    cx: &mut App,
-) -> Vec<GroupMachineInfo> {
-    crate::remote::spaces::for_store(store, cx)
-        .and_then(|spaces| spaces.read(cx).group().map(|group| group.machines.clone()))
-        .unwrap_or_default()
-}
-
-/// What `store`'s machine calls machine `id` of its group.
-pub(crate) fn machine_name(store: &Entity<WorkspaceStore>, id: &str, cx: &mut App) -> String {
-    group_machines(store, cx)
-        .iter()
-        .find(|machine| machine.id == id)
-        .map(machine_title)
-        .unwrap_or_else(|| id.to_owned())
-}
-
 /// Whether a project of `store`'s machine could be offered a move: a full
 /// device of a machine whose group has another member.
 pub(crate) fn offers_move(store: &Entity<WorkspaceStore>, cx: &mut App) -> bool {
     store.read(cx).scope().is_full()
-        && group_machines(store, cx)
+        && crate::machines::group_machines(store, cx)
             .iter()
             .any(|machine| !machine.this_machine)
 }
@@ -81,8 +54,23 @@ pub(crate) fn status_line(status: &ProjectMoveStatus, machine: &str) -> String {
             percent = percent(status).round() as u32
         ),
         MovePhase::Committing => crate::tr!("machines.move.status_finishing", machine = machine),
-        MovePhase::Paused => match status.error.as_deref() {
-            Some(reason) => crate::tr!("machines.move.status_paused", reason = reason),
+        MovePhase::Paused => match &status.paused {
+            Some(MovePause::Unreachable) => {
+                crate::tr!("machines.move.paused.unreachable", machine = machine)
+            }
+            Some(MovePause::Refused) => {
+                crate::tr!("machines.move.paused.refused", machine = machine)
+            }
+            Some(MovePause::NoGroup) => crate::tr!("machines.move.paused.no_group"),
+            Some(MovePause::Version) => {
+                crate::tr!("machines.move.paused.version", machine = machine)
+            }
+            Some(MovePause::NotMember) => {
+                crate::tr!("machines.move.paused.not_member", machine = machine)
+            }
+            Some(MovePause::Failed { message }) => {
+                crate::tr!("machines.move.paused.failed", reason = message.as_str())
+            }
             None => crate::tr!("machines.move.status_paused_bare"),
         },
         MovePhase::Cancelling => crate::tr!("machines.move.status_cancelling"),
@@ -304,7 +292,12 @@ impl MoveProjectDialog {
                         open_progress(dialog.store.clone(), dialog.project_id.clone(), window, cx);
                     }
                     Err(error) => {
-                        let machine_title = machine_name(&dialog.store, &machine, cx);
+                        let machine_title = crate::machines::machine_in_groups(
+                            std::slice::from_ref(&dialog.store),
+                            &machine,
+                            cx,
+                        )
+                        .name;
                         if error.code == "move_blocked" {
                             dialog.preview = Some(Preview::Loading);
                             dialog.ask_preview(machine.clone(), window, cx);
@@ -320,14 +313,14 @@ impl MoveProjectDialog {
     }
 
     fn render_machines(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let machines: Vec<_> = group_machines(&self.store, cx)
+        let machines: Vec<_> = crate::machines::group_machines(&self.store, cx)
             .into_iter()
             .filter(|machine| !machine.this_machine)
             .collect();
         let rows = machines.into_iter().map(|machine| {
             let selectable = machine.accepts_projects == Some(true);
             let selected = self.selected.as_deref() == Some(machine.id.as_str());
-            let title = machine_title(&machine);
+            let title = machine.title().to_owned();
             let line = match machine.accepts_projects {
                 Some(true) => crate::tr!("machines.move.machine_accepts"),
                 Some(false) => crate::tr!("machines.move.machine_refuses"),
@@ -561,10 +554,9 @@ impl MoveProjectDialog {
 impl Render for MoveProjectDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let machines = self.render_machines(window, cx);
-        let machine = self
-            .selected
-            .clone()
-            .map(|id| machine_name(&self.store, &id, cx));
+        let machine = self.selected.clone().map(|id| {
+            crate::machines::machine_in_groups(std::slice::from_ref(&self.store), &id, cx).name
+        });
         let lower = match (&self.preview, &machine) {
             (Some(Preview::Ready(preview)), Some(machine)) => {
                 let preview = preview.clone();
@@ -783,7 +775,12 @@ impl MoveProgress {
         let Some(status) = self.status(cx) else {
             return;
         };
-        let machine = machine_name(&self.store, &status.machine, cx);
+        let machine = crate::machines::machine_in_groups(
+            std::slice::from_ref(&self.store),
+            &status.machine,
+            cx,
+        )
+        .name;
         let (title, description, ok, variant) = if force {
             (
                 crate::tr!(
@@ -874,7 +871,12 @@ impl Render for MoveProgress {
                 .child(crate::tr!("machines.move.ended"))
                 .into_any_element();
         };
-        let machine = machine_name(&self.store, &status.machine, cx);
+        let machine = crate::machines::machine_in_groups(
+            std::slice::from_ref(&self.store),
+            &status.machine,
+            cx,
+        )
+        .name;
         let bytes = (status.total > 0).then(|| {
             crate::tr!(
                 "machines.move.bytes",

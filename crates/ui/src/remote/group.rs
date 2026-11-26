@@ -42,11 +42,6 @@ pub(crate) struct GroupSection {
     motion: crate::motion::owned::Owned,
 }
 
-/// What the group calls `machine`: its label, else its own name.
-pub(crate) fn machine_title(machine: &GroupMachineInfo) -> &str {
-    machine.label.as_deref().unwrap_or(&machine.name)
-}
-
 /// How much of this machine the group's other devices reach.
 fn reach(access: GroupDeviceAccess) -> u8 {
     match access {
@@ -130,7 +125,7 @@ impl GroupSection {
         };
         let id = machine.id.clone();
         super::confirm_destructive(
-            crate::tr!("group.machines.remove_title", name = machine_title(machine)).into_owned(),
+            crate::tr!("group.machines.remove_title", name = machine.title()).into_owned(),
             crate::tr!("group.machines.remove_description").into_owned(),
             crate::tr!("group.machines.remove").into_owned(),
             move |window, cx| {
@@ -384,9 +379,11 @@ impl GroupSection {
                                 .flex_1()
                                 .min_w_0()
                                 .gap(cx.theme().tokens.spacing.xxs)
-                                .child(div().text_body(compact, cx).overflow_hidden().child(
-                                    crate::widgets::fade_text(machine_title(machine).to_owned()),
-                                ))
+                                .child(
+                                    div().text_body(compact, cx).overflow_hidden().child(
+                                        crate::widgets::fade_text(machine.title().to_owned()),
+                                    ),
+                                )
                                 .when(machine.label.is_some(), |column| {
                                     column.child(secondary(
                                         crate::tr!(
@@ -876,7 +873,7 @@ pub(crate) fn open_label(
             true
         }
     });
-    let title = crate::tr!("machines.label.title", name = machine_title(machine)).into_owned();
+    let title = crate::tr!("machines.label.title", name = machine.title()).into_owned();
     let input = field.clone();
     window.open_dialog(cx, move |dialog, _, _| {
         let input = input.clone();
