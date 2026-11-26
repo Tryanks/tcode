@@ -3279,6 +3279,10 @@ tools:
       running: "查看中"
       done: "已查看"
       asked: "查看"
+    list_machines:
+      running: "列出主机中"
+      done: "已列出主机"
+      asked: "列出主机"
     list_threads:
       running: "列出线程中"
       done: "已列出线程"
@@ -3441,6 +3445,18 @@ html:
 
 machines:
   dispatch:
+    on_machine: "%{machine} 上的 %{actor}"
+    unreachable: "联系不上"
+    unreachable_since: "%{machine} 自%{ago}起联系不上，线程可能仍在运行"
+    unreachable_now: "联系不上 %{machine}，线程可能仍在运行"
+    machine_left: "所在主机已离组"
+    pending_cancel: "将在 %{machine} 上线后取消"
+    pending_interrupt: "将在 %{machine} 上线后中断"
+    pending_settle: "将在 %{machine} 上线后收尾"
+    not_open: "此窗口未打开 %{machine}"
+    answer_there: "在 %{machine} 上的线程里回答"
+    machines_one: "1 台主机"
+    machines: "%{count} 台主机"
   move:
     menu_item: "移到主机…"
     show_move: "查看迁移…"

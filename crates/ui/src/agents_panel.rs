@@ -101,6 +101,21 @@ struct AgentRow {
     /// When the latest run started and, once it has, ended (unix ms).
     started_at: Option<u64>,
     ended_at: Option<u64>,
+    /// The name of the machine of the group it runs on, when it is not its
+    /// lead's.
+    machine: Option<String>,
+    /// How it stands where its run says nothing: out of reach, or its
+    /// machine gone from the group.
+    standing: Option<AgentState>,
+    /// What its lead still has to tell its machine, or why it may not be
+    /// heard from, in place of what it is doing.
+    note: Option<String>,
+    /// The machine and thread a press opens, for an agent on another
+    /// machine of the group while this window is linked to that machine.
+    elsewhere: Option<(String, String)>,
+    /// Why a press opens nothing, for an agent on a machine this window is
+    /// not linked to.
+    closed: Option<SharedString>,
 }
 
 impl AgentRow {
@@ -108,6 +123,7 @@ impl AgentRow {
     /// caption its list sits under.
     fn detail(&self) -> String {
         [
+            self.machine.as_deref(),
             self.provider
                 .filter(|_| self.managed_by.is_none())
                 .map(|provider| provider.display_name()),
@@ -129,7 +145,7 @@ impl AgentRow {
     fn state(&self) -> Option<AgentState> {
         match self.attention {
             Some(attention) => Some(AgentState::Attention(attention)),
-            None => self.execution.map(AgentState::Execution),
+            None => self.standing.or(self.execution.map(AgentState::Execution)),
         }
     }
 
@@ -278,6 +294,11 @@ impl Agents {
                         // A native subagent's end is not reported, only its start.
                         started_at: entry.ts.filter(|_| execution.running()),
                         ended_at: None,
+                        machine: None,
+                        standing: None,
+                        note: None,
+                        elsewhere: None,
+                        closed: None,
                     });
                 }
             },
@@ -339,16 +360,33 @@ impl Agents {
                 agent_type: None,
                 started_at: status.and_then(|status| status.run_started_at),
                 ended_at: status.and_then(|status| status.run_completed_at),
+                machine: None,
+                standing: None,
+                note: None,
+                elsewhere: None,
+                closed: None,
             };
-            match delivery {
-                AgentDelivery::AwaitingSettle => agents.needs_settle.push(row),
-                AgentDelivery::Running => agents.running.push(row),
-                AgentDelivery::NotDelivered => agents.done.push(row),
-                AgentDelivery::Settled => agents.settled.push(row),
-            }
+            agents.push(delivery, row);
+        }
+        for child in parent
+            .into_iter()
+            .flat_map(|parent| parent.remote_children.iter().rev())
+            .filter(|child| child.subagent)
+        {
+            let (delivery, row) = remote_row(child, cx);
+            agents.push(delivery, row);
         }
         agents.settled.extend(settled_native);
         agents
+    }
+
+    fn push(&mut self, delivery: AgentDelivery, row: AgentRow) {
+        match delivery {
+            AgentDelivery::AwaitingSettle => self.needs_settle.push(row),
+            AgentDelivery::Running => self.running.push(row),
+            AgentDelivery::NotDelivered => self.done.push(row),
+            AgentDelivery::Settled => self.settled.push(row),
+        }
     }
 
     /// Add each dispatched agent's result: the report its latest callback
@@ -525,6 +563,98 @@ impl Agents {
     }
 }
 
+/// The row of `child`, a subagent its lead started on another machine of the
+/// group, and where it is listed: that machine's thread, read from that
+/// machine's store while this window is linked to it, and otherwise from
+/// what the lead's host keeps of it. Its lead's host forwards no command of
+/// this client's to it, so it offers none.
+fn remote_row(child: &tcode_core::control::RemoteChild, cx: &App) -> (AgentDelivery, AgentRow) {
+    use tcode_core::control::{RemoteChildOp, RemoteChildState};
+    let machine = crate::machines::machine(&child.machine, cx);
+    let standing = crate::machines::standing(child, &machine, cx);
+    let there = machine
+        .store
+        .as_ref()
+        .map(|store| store.read(cx))
+        .filter(|_| machine.connected);
+    let meta = there.and_then(|store| store.thread_meta(&child.thread_id));
+    let execution = match standing {
+        crate::machines::Standing::Execution(execution) => Some(execution),
+        _ => None,
+    };
+    let delivery = match child.state {
+        RemoteChildState::Running => AgentDelivery::Running,
+        // Its lead settled it, and its machine is yet to hear so.
+        RemoteChildState::Reported | RemoteChildState::Failed
+            if child.pending == Some(RemoteChildOp::Settle) =>
+        {
+            AgentDelivery::Settled
+        }
+        RemoteChildState::Reported | RemoteChildState::Failed => AgentDelivery::AwaitingSettle,
+        RemoteChildState::Settled => AgentDelivery::Settled,
+        RemoteChildState::Cancelled | RemoteChildState::MachineLeft => AgentDelivery::NotDelivered,
+    };
+    let attention = there.and_then(|store| {
+        if store.pending_approval_for(&child.thread_id) {
+            Some(Attention::Approval)
+        } else if store.pending_user_input_for(&child.thread_id) {
+            Some(Attention::Answer)
+        } else {
+            None
+        }
+    });
+    let notes = crate::machines::notes(child, standing, &machine, cx);
+    let open = machine.store.is_some();
+    let row = AgentRow {
+        key: format!("{}@{}", child.thread_id, child.machine),
+        title: meta
+            .map(|meta| meta.title.clone())
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| child.title.clone()),
+        provider: meta.map(|meta| meta.provider),
+        // Its profiles are its machine's, which the lead's store does not
+        // hold.
+        profile_id: None,
+        model: meta.and_then(|meta| meta.model.clone()),
+        effort: None,
+        execution,
+        attention,
+        branch: meta
+            .and_then(|meta| meta.worktree.as_ref())
+            .map(|worktree| worktree.branch.clone()),
+        delivery: Some(delivery),
+        report: if child.report_taken.is_some() {
+            AgentReport::Reported
+        } else if child.state == RemoteChildState::Failed {
+            AgentReport::Failed
+        } else {
+            AgentReport::None
+        },
+        archived: false,
+        activity: there
+            .filter(|_| execution.is_some_and(AgentExecution::running) && notes.is_empty())
+            .and_then(|store| store.latest_activity(&child.thread_id)),
+        preview: None,
+        open: None,
+        agent: None,
+        stop_task: None,
+        managed_by: None,
+        agent_type: None,
+        started_at: None,
+        ended_at: None,
+        machine: Some(machine.name.clone()),
+        standing: match standing {
+            crate::machines::Standing::Unreachable => Some(AgentState::Unreachable),
+            crate::machines::Standing::MachineLeft => Some(AgentState::MachineLeft),
+            crate::machines::Standing::Execution(_) => None,
+        },
+        note: (!notes.is_empty()).then(|| notes.join(" · ")),
+        elsewhere: open.then(|| (child.machine.clone(), child.thread_id.clone())),
+        closed: (!open).then(|| crate::machines::not_open(&machine.name)),
+    };
+    (delivery, row)
+}
+
 /// What an agent's row says of it, for a surface that heads its thread.
 pub(crate) struct AgentHeading {
     /// The row's key, which its status mark's motion is kept under.
@@ -625,6 +755,10 @@ pub(crate) enum AgentState {
     /// Finished, and its result not yet settled into its lead.
     AwaitingSettle,
     Execution(AgentExecution),
+    /// Running as last heard, on a machine out of this window's reach.
+    Unreachable,
+    /// Its machine left the group.
+    MachineLeft,
 }
 
 impl AgentState {
@@ -636,6 +770,12 @@ impl AgentState {
             Self::Attention(Attention::Answer) => crate::tr!("mobile.answer").into_owned().into(),
             Self::AwaitingSettle => crate::tr!("agents.delivery_awaiting").into_owned().into(),
             Self::Execution(execution) => execution_label(execution),
+            Self::Unreachable => crate::tr!("machines.dispatch.unreachable")
+                .into_owned()
+                .into(),
+            Self::MachineLeft => crate::tr!("machines.dispatch.machine_left")
+                .into_owned()
+                .into(),
         }
     }
 
@@ -644,6 +784,8 @@ impl AgentState {
             Self::Attention(Attention::Approval) | Self::AwaitingSettle => cx.theme().warning,
             Self::Attention(Attention::Answer) => cx.theme().primary,
             Self::Execution(execution) => execution_color(execution, cx),
+            // Out of reach is not failed: the agent may still be running.
+            Self::Unreachable | Self::MachineLeft => cx.theme().muted_foreground,
         }
     }
 }
@@ -826,6 +968,8 @@ pub struct AgentsPanel {
     /// What the entries that left the list showed, as they fold away.
     left: Rc<RefCell<crate::scroll::LeftRows<Entry>>>,
     focus: Rc<RefCell<ActionFocus>>,
+    /// The stores of the machines the lead started agents on.
+    machines: crate::machines::Followed,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -852,6 +996,7 @@ impl AgentsPanel {
             sheet: None,
             left: Rc::new(RefCell::new(crate::scroll::LeftRows::over(ROWS))),
             focus: Default::default(),
+            machines: Default::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -1374,6 +1519,16 @@ impl Entries {
                 )
             });
         let activity = activity_line("agent", &row.key, row.activity.clone(), window, cx);
+        let note = row.note.clone().map(|note| {
+            let key = row.key.clone();
+            div()
+                .debug_selector(move || format!("agent-note-{key}"))
+                .w_full()
+                .pt_0p5()
+                .text_secondary(false, cx)
+                .text_color(muted)
+                .child(crate::widgets::fade_text(note))
+        });
         // The result's preview folds in under the row as it arrives.
         let failed = row.execution == Some(AgentExecution::Failed);
         let preview = crate::motion::shown(
@@ -1402,6 +1557,7 @@ impl Entries {
             .child(line_one)
             .child(line_two.pt_0p5())
             .children(activity)
+            .children(note)
             .children(preview);
         let label = SharedString::from(title);
         let open = row.open.clone();
@@ -1464,6 +1620,14 @@ impl Entries {
                     window.dispatch_action(Box::new(AgentOpen(id.clone())), cx);
                 })
             })
+            .when_some(row.elsewhere.clone(), |row_el, (machine, thread)| {
+                row_el.cursor_pointer().on_click(move |_, _, cx| {
+                    crate::machines::open_thread(&machine, &thread, None, cx);
+                })
+            })
+            .when_some(row.closed.clone(), |row_el, closed| {
+                row_el.with_tooltip(move |_, _| Tooltip::new(closed.to_string()))
+            })
             .when_some(readonly, |row_el, text| {
                 row_el.with_tooltip(move |_, _| Tooltip::new(text.clone()))
             })
@@ -1480,6 +1644,20 @@ impl Entries {
 impl Render for AgentsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let compact = crate::window_seam::window_is_compact(window, cx);
+        let machines: Vec<String> = self
+            .session_id
+            .as_deref()
+            .and_then(|id| self.store.read(cx).thread_meta(id))
+            .map(|meta| {
+                meta.remote_children
+                    .iter()
+                    .map(|child| child.machine.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut followed = std::mem::take(&mut self.machines);
+        followed.follow(machines, |_, cx| cx.notify(), cx);
+        self.machines = followed;
         let agents = {
             let store = self.store.read(cx);
             self.session_id

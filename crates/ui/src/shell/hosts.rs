@@ -335,6 +335,9 @@ impl AppShell {
     /// members. On a desktop viewing this machine alone, newly joining a group
     /// upgrades the view to that group once.
     pub(super) fn on_saved_hosts_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        self.machines
+            .update(cx, |machines, _| machines.reread(client.as_ref()));
         if let Ok(saved) = self.client.load_hosts() {
             for link in &self.links {
                 let Some(host) = link
@@ -931,6 +934,13 @@ impl AppShell {
     /// it is linked to now.
     pub(super) fn sync_hosts(&self, cx: &mut Context<Self>) {
         let stores: Vec<_> = self.links.iter().map(|link| link.store.clone()).collect();
+        let keyed = self
+            .links
+            .iter()
+            .map(|link| (link.key(), link.store.clone()))
+            .collect();
+        self.machines
+            .update(cx, |machines, _| machines.set_stores(keyed));
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.set_hosts(stores.clone(), cx));
         self.palette

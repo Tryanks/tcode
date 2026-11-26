@@ -34,6 +34,7 @@ mod image_viewer;
 /// actually has one; other attachments query the host for read-only status.
 #[cfg(all(feature = "local-permissions", target_os = "macos"))]
 mod local_permissions;
+mod machines;
 pub mod markdown;
 // Shared material helpers are also used by the phone shell.
 #[cfg(target_os = "macos")]

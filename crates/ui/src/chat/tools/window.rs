@@ -54,6 +54,9 @@ pub(in crate::chat) struct Argument {
     pub(in crate::chat) markers: Vec<Range<usize>>,
     /// Muted context after the argument: where a search looked.
     pub(in crate::chat) detail: Option<String>,
+    /// The machine of the group the call ran on, by id, which leads the
+    /// detail by its name.
+    pub(in crate::chat) machine: Option<String>,
 }
 
 impl Argument {
@@ -74,6 +77,11 @@ impl Argument {
 
     pub(in crate::chat) fn detail(mut self, detail: Option<String>) -> Self {
         self.detail = detail.filter(|detail| !detail.is_empty());
+        self
+    }
+
+    pub(in crate::chat) fn machine(mut self, machine: &str) -> Self {
+        self.machine = Some(machine.to_owned());
         self
     }
 }
@@ -549,7 +557,20 @@ fn header_row(
                         mono: monospace,
                         markers,
                         detail,
+                        machine,
                     } = argument;
+                    let machine = machine.map(|id| crate::machines::machine(&id, cx).name);
+                    let (text, detail) = match machine {
+                        Some(name) if text.is_empty() => (name, detail),
+                        Some(name) => (
+                            text,
+                            Some(match detail {
+                                Some(detail) => format!("{name} · {detail}"),
+                                None => name,
+                            }),
+                        ),
+                        None => (text, detail),
+                    };
                     let faint = HighlightStyle {
                         color: Some(muted.opacity(0.45)),
                         ..Default::default()

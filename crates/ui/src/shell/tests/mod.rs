@@ -2518,6 +2518,7 @@ mod drafts;
 mod hosts;
 mod keyboard;
 mod launch;
+mod machines;
 mod navigation;
 mod panes;
 mod right_panel;

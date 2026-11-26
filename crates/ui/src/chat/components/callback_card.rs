@@ -65,6 +65,9 @@ pub(crate) enum CallbackRequest {
     Settled(Vec<String>),
     /// No longer pending, and the lead's log does not say how it went.
     Gone,
+    /// The child waits on it in its own thread on another machine of the
+    /// group, where it is answered; why, in words.
+    Elsewhere(SharedString),
 }
 
 /// A step the reader takes in a [`QuestionForm`].
@@ -285,6 +288,17 @@ pub(crate) fn callback_card(
             Some(CallbackRequest::Settled(lines)) => {
                 Some(event_card::section(cx).child(settled(&key, lines, cx)))
             }
+            Some(CallbackRequest::Elsewhere(note)) => Some(
+                event_card::section(cx).child(
+                    div()
+                        .debug_selector({
+                            let selector = format!("callback-card-elsewhere-{key}");
+                            move || selector
+                        })
+                        .text_secondary(false, cx)
+                        .child(note),
+                ),
+            ),
             Some(CallbackRequest::Gone) => Some(
                 event_card::section(cx).child(
                     div()

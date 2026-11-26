@@ -427,6 +427,7 @@ fn continues_control_run(
         return false;
     };
     first.actor_thread_id == action.actor_thread_id
+        && first.actor_machine == action.actor_machine
         && entries[range.end..index].iter().all(|between| {
             matches!(&between.content, EntryContent::ControlAction(skipped)
                 if !super::tools::pull_request::told_by_card(skipped, entries))

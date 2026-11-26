@@ -22,6 +22,7 @@ use crate::chat::model::one_line;
 use crate::icon::IconName;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
+use crate::widgets::TooltipTrigger as _;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 
 const CONTROL: &[&str] = &["tcode_control"];
@@ -35,6 +36,7 @@ enum Kind {
     SearchInItem,
     GetThread,
     ListThreads,
+    ListMachines,
     Message,
     StartThread,
     Update,
@@ -58,9 +60,11 @@ pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView
         Kind::GetThread
     } else if control(&["list_threads"]) {
         Kind::ListThreads
+    } else if control(&["list_machines"]) {
+        Kind::ListMachines
     } else if control(&["send_message"]) {
         Kind::Message
-    } else if control(&["start_thread"]) {
+    } else if control(&["start_thread", "start_thread_on_machine"]) {
         Kind::StartThread
     } else if control(&["update_threads", "control_thread"]) {
         Kind::Update
@@ -100,14 +104,20 @@ pub(in crate::chat) struct Start<'a> {
     pub(in crate::chat) branch: Option<String>,
     pub(in crate::chat) running: bool,
     pub(in crate::chat) output: Option<&'a str>,
+    /// The machine of the group it was started on, by id, when that is not
+    /// the calling thread's.
+    pub(in crate::chat) machine: Option<&'a str>,
+    /// The link the answer gives it.
+    pub(in crate::chat) link: Option<String>,
 }
 
-/// The thread `entry` starts: a `start_thread` call still running or
-/// completed. One that failed, was declined or was interrupted started
-/// nothing to show, and stays a tool row that shows what it reported.
+/// The thread `entry` starts: a `start_thread` or `start_thread_on_machine`
+/// call still running or completed. One that failed, was declined or was
+/// interrupted started nothing to show, and stays a tool row that shows what
+/// it reported.
 pub(in crate::chat) fn start(entry: &TimelineEntry) -> Option<Start<'_>> {
     let call = Call::of(entry)?;
-    if !call.served(CONTROL, &["start_thread"])
+    if !call.served(CONTROL, &["start_thread", "start_thread_on_machine"])
         || !matches!(call.status, ItemStatus::InProgress | ItemStatus::Completed)
     {
         return None;
@@ -136,6 +146,8 @@ pub(in crate::chat) fn start(entry: &TimelineEntry) -> Option<Start<'_>> {
         branch: answered("worktree_branch"),
         running: call.status == ItemStatus::InProgress,
         output: call.output,
+        machine: string(input, "machine"),
+        link: answered("link"),
     })
 }
 
@@ -357,6 +369,7 @@ impl Threads {
             Kind::Search | Kind::SearchInItem => "search",
             Kind::GetThread => "look_up",
             Kind::ListThreads => "list_threads",
+            Kind::ListMachines => "list_machines",
             Kind::Message => "message",
             Kind::StartThread => "start_thread",
             Kind::Update => "update_threads",
@@ -367,7 +380,17 @@ impl Threads {
         })
     }
 
+    /// What the call acted on, and the machine of the group it ran on when
+    /// it names one.
     fn argument(&self, call: &Call<'_>, named: &Named) -> Option<Argument> {
+        let argument = self.acted_on(call, named);
+        match string(call.input, "machine") {
+            Some(machine) => Some(argument.unwrap_or_default().machine(machine)),
+            None => argument,
+        }
+    }
+
+    fn acted_on(&self, call: &Call<'_>, named: &Named) -> Option<Argument> {
         let input = call.input;
         let threads = || named.threads(&targets(input));
         let entry = || {
@@ -416,6 +439,7 @@ impl Threads {
                 Argument::plain(string(input, "query").map(one_line).unwrap_or_default())
                     .map(|argument| argument.detail(entry().map(|anchor| named.label(anchor))))
             }
+            Kind::ListMachines => None,
             Kind::ListThreads => Argument::plain(
                 string(input, "title_query")
                     .or_else(|| string(input, "scope"))
@@ -474,6 +498,13 @@ impl Threads {
     /// The count a search or a listing reports.
     fn count(&self, call: &Call<'_>) -> Option<Chip> {
         let output = serde_json::from_str::<Value>(call.output?.trim()).ok()?;
+        if self.kind == Kind::ListMachines {
+            let machines = output.get("machines")?.as_array()?.len();
+            return Some(Chip::Count(super::counted(
+                "machines.dispatch.machines",
+                machines,
+            )));
+        }
         let total = output.get("total")?.as_u64()? as usize;
         let key = match self.kind {
             Kind::Search => "tools.hits",
@@ -489,6 +520,7 @@ impl ToolView for Threads {
         let named = Named::of(call);
         let icon = match self.kind {
             Kind::Search | Kind::SearchInItem | Kind::ListThreads => IconName::Search,
+            Kind::ListMachines => IconName::Network,
             Kind::StartThread => IconName::Bot,
             Kind::Report => IconName::FileText,
             Kind::NotifyWhen => IconName::Bell,
@@ -501,10 +533,18 @@ impl ToolView for Threads {
 
     fn body(&self, call: &Call<'_>, ctx: &mut ToolCtx<'_, '_>) -> AnyElement {
         let named = Named::of(call);
+        let machine = string(call.input, "machine");
         let links = (!named.anchors.is_empty()).then(|| {
             let cx = ctx.app();
             let links = named.anchors.iter().enumerate().map(|(index, anchor)| {
-                thread_link(call.id(), index, named.label(anchor), anchor.clone(), cx)
+                thread_link(
+                    call.id(),
+                    index,
+                    named.label(anchor),
+                    anchor.clone(),
+                    machine,
+                    cx,
+                )
             });
             section(
                 &crate::tr!("tools.threads_caption"),
@@ -543,23 +583,37 @@ impl ToolView for Threads {
 }
 
 /// A thread or entry the call named, as a link that opens it where the
-/// app opens a cited anchor.
+/// app opens a cited anchor, or, for a call that ran on another machine of
+/// the group (`machine`), where that machine's store places its threads.
 fn thread_link(
     call_id: &str,
     index: usize,
     label: String,
     anchor: Anchor,
+    machine: Option<&str>,
     cx: &gpui::App,
 ) -> AnyElement {
     let theme = cx.theme();
     let selector = format!("tool-thread-{call_id}-{index}");
-    let open = crate::markdown::OpenThreadAnchor {
-        thread_id: anchor.thread_id,
-        position: anchor.position,
+    let url = match (machine, anchor.position) {
+        (Some(machine), Some(position)) => {
+            format!("tcode-thread://{}@{machine}#{position}", anchor.thread_id)
+        }
+        (Some(machine), None) => format!("tcode-thread://{}@{machine}", anchor.thread_id),
+        (None, position) => crate::markdown::OpenThreadAnchor {
+            thread_id: anchor.thread_id.clone(),
+            position,
+        }
+        .url(),
     };
-    let url = open.url();
+    // A thread on a machine this window is not linked to opens nowhere.
+    let closed = machine
+        .map(|machine| crate::machines::machine(machine, cx))
+        .filter(|machine| machine.store.is_none())
+        .map(|machine| crate::machines::not_open(&machine.name));
+    let machine = machine.map(str::to_owned);
     let accent = theme.accent;
-    div()
+    let link = div()
         .id(SharedString::from(selector.clone()))
         .debug_selector(move || selector.clone())
         .flex_none()
@@ -567,19 +621,34 @@ fn thread_link(
         .overflow_hidden()
         .px_1()
         .rounded(crate::material::radius_chip(cx))
-        .cursor_pointer()
-        .hover(move |link| link.bg(accent))
         .text_secondary(false, cx)
-        .text_color(theme.link)
-        .child(crate::widgets::fade_text(label))
-        .on_click(move |_, window, cx| {
-            window.dispatch_action(Box::new(open.clone()), cx);
-        })
-        .context_menu(move |menu, _, _| {
-            menu.menu(
-                crate::tr!("tools.copy_link").into_owned(),
-                Box::new(CopyText(url.clone())),
-            )
-        })
-        .into_any_element()
+        .child(crate::widgets::fade_text(label));
+    let link = match closed {
+        Some(closed) => link
+            .text_color(theme.muted_foreground)
+            .with_tooltip(move |_, _| crate::widgets::tooltip::Tooltip::new(closed.to_string())),
+        None => link
+            .cursor_pointer()
+            .hover(move |link| link.bg(accent))
+            .text_color(theme.link)
+            .on_click(move |_, window, cx| match &machine {
+                Some(machine) => {
+                    crate::machines::open_thread(machine, &anchor.thread_id, anchor.position, cx);
+                }
+                None => window.dispatch_action(
+                    Box::new(crate::markdown::OpenThreadAnchor {
+                        thread_id: anchor.thread_id.clone(),
+                        position: anchor.position,
+                    }),
+                    cx,
+                ),
+            }),
+    };
+    link.context_menu(move |menu, _, _| {
+        menu.menu(
+            crate::tr!("tools.copy_link").into_owned(),
+            Box::new(CopyText(url.clone())),
+        )
+    })
+    .into_any_element()
 }

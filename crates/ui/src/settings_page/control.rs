@@ -1251,16 +1251,15 @@ fn activity_row(
     first = first.child(div().flex_none().text_secondary(compact, cx).child(
         crate::widgets::fade_text(humanize_ago(now_secs.saturating_sub(entry.at / 1000))),
     ));
+    let actor = crate::machines::actor_label(
+        &entry.action.actor_title,
+        entry.action.actor_machine.as_deref(),
+        cx,
+    );
     let by = if own {
-        crate::tr!(
-            "control.settings.activity_self",
-            actor = entry.action.actor_title.as_str()
-        )
+        crate::tr!("control.settings.activity_self", actor = actor.as_str())
     } else {
-        crate::tr!(
-            "control.settings.activity_by",
-            actor = entry.action.actor_title.as_str()
-        )
+        crate::tr!("control.settings.activity_by", actor = actor.as_str())
     }
     .into_owned();
     let detail = entry

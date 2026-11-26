@@ -1190,9 +1190,22 @@ fn session_flags(sessions: &[SessionMeta], store: &WorkspaceStore) -> HashMap<St
                     working: store.turn_running_for(&meta.id),
                     settle_blocked: store.settle_blocked_for(&meta.id),
                     failed: store.failed_for(&meta.id),
-                    background: store.activity(&meta.id).map_or((0, 0), |activity| {
-                        (activity.background.tasks, activity.background.agents)
-                    }),
+                    background: {
+                        let (tasks, agents) = store.activity(&meta.id).map_or((0, 0), |activity| {
+                            (activity.background.tasks, activity.background.agents)
+                        });
+                        // Its host counts the agents it runs; those it started on
+                        // other machines of the group run as it last heard.
+                        let elsewhere = meta
+                            .remote_children
+                            .iter()
+                            .filter(|child| {
+                                child.subagent
+                                    && child.state == tcode_core::control::RemoteChildState::Running
+                            })
+                            .count() as u32;
+                        (tasks, agents + elsewhere)
+                    },
                     wakes: store
                         .activity(&meta.id)
                         .map(|activity| activity.wakes.clone())

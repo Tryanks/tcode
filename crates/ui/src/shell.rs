@@ -544,6 +544,12 @@ pub(crate) fn store_of_host(host: &HostKey, cx: &App) -> Option<Entity<Workspace
     Some(current_shell(cx)?.read(cx).link_of(host)?.store.clone())
 }
 
+/// The machines of the group this window names and reaches. Readable while
+/// the shell itself is being drawn.
+pub(crate) fn machine_directory(cx: &App) -> Option<Entity<crate::machines::Directory>> {
+    cx.try_global::<ShellBackTarget>()?.machines.upgrade()
+}
+
 /// Whether the window is over several hosts, so what acts on one names it.
 pub(crate) fn several_hosts(cx: &App) -> bool {
     current_shell(cx).is_some_and(|shell| shell.read(cx).links.len() > 1)
@@ -716,6 +722,8 @@ pub struct AppShell {
     /// The machine group this process's own host belonged to when the shell
     /// last checked, so joining or leaving a group updates the window.
     known_local_group: Option<String>,
+    /// The machines of the group this window names and reaches.
+    machines: Entity<crate::machines::Directory>,
     /// The threads of every host in `links`, wide beside the chat and as
     /// the compact threads page.
     sidebar: Entity<SessionsSidebar>,
@@ -970,12 +978,14 @@ impl AppShell {
             .ok()
             .flatten()
             .map(|(id, _)| id);
+        let machines = cx.new(|_| crate::machines::Directory::read(client.as_ref()));
         let mut shell = Self {
             window_state,
             client,
             links: Vec::new(),
             column: None,
             known_local_group,
+            machines,
             sidebar,
             palette,
             hosts,
@@ -1125,14 +1135,17 @@ impl AppShell {
 struct ShellBackTarget {
     window: AnyWindowHandle,
     shell: WeakEntity<AppShell>,
+    machines: WeakEntity<crate::machines::Directory>,
 }
 
 impl Global for ShellBackTarget {}
 
 pub(crate) fn set_back_target(window: AnyWindowHandle, shell: &Entity<AppShell>, cx: &mut App) {
+    let machines = shell.read(cx).machines.downgrade();
     cx.set_global(ShellBackTarget {
         window,
         shell: shell.downgrade(),
+        machines,
     });
 }
 

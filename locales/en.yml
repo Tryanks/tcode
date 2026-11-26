@@ -3286,6 +3286,10 @@ tools:
       running: "Looking up"
       done: "Looked up"
       asked: "Look up"
+    list_machines:
+      running: "Listing machines"
+      done: "Listed machines"
+      asked: "List machines"
     list_threads:
       running: "Listing threads"
       done: "Listed threads"
@@ -3448,6 +3452,18 @@ html:
 
 machines:
   dispatch:
+    on_machine: "%{actor} on %{machine}"
+    unreachable: "Cannot be reached"
+    unreachable_since: "%{machine} has been out of reach since %{ago}; the thread may still be running"
+    unreachable_now: "%{machine} cannot be reached; the thread may still be running"
+    machine_left: "Its machine left the group"
+    pending_cancel: "Will be cancelled when %{machine} is back"
+    pending_interrupt: "Will be interrupted when %{machine} is back"
+    pending_settle: "Will be settled when %{machine} is back"
+    not_open: "%{machine} is not open in this window"
+    answer_there: "Answer it in its thread on %{machine}"
+    machines_one: "1 machine"
+    machines: "%{count} machines"
   move:
     menu_item: "Move to machine…"
     show_move: "Show move…"

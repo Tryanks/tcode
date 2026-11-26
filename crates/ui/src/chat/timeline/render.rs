@@ -1363,23 +1363,33 @@ impl TimelineView {
     ) -> AnyElement {
         let request = self.callback_request(turn, &key, callback, window, cx);
         let expanded = self.expanded.contains(&key);
-        let child_id = callback.child_id.clone();
+        let (child_id, machine) = crate::machines::elsewhere(&callback.child_id);
+        let child_id = child_id.to_owned();
+        // A child on another machine of the group is that machine's thread,
+        // known here while this window is linked to that machine.
+        let machine = machine.map(|machine| crate::machines::machine(machine, cx));
+        let child_store = match &machine {
+            Some(machine) => machine.store.clone(),
+            None => Some(self.workspace_store.clone()),
+        };
         let (glyph, detail) = {
-            let store = self.workspace_store.read(cx);
-            let meta = store.thread_meta(&child_id).or_else(|| {
-                store
-                    .archived_sessions()
-                    .iter()
-                    .find(|meta| meta.id == child_id)
+            let store = child_store.as_ref().map(|store| store.read(cx));
+            let meta = store.and_then(|store| {
+                store.thread_meta(&child_id).or_else(|| {
+                    store
+                        .archived_sessions()
+                        .iter()
+                        .find(|meta| meta.id == child_id)
+                })
             });
-            let glyph = meta.map(|meta| {
+            let glyph = store.zip(meta).map(|(store, meta)| {
                 crate::provider_card::profile_glyph(
                     store,
                     meta.provider,
                     meta.profile_id.as_deref(),
                 )
             });
-            let detail = meta.map(|meta| {
+            let detail = store.zip(meta).map(|(store, meta)| {
                 std::iter::once(meta.provider.display_name().to_owned())
                     .chain(meta.model.as_deref().map(|model| {
                         store
@@ -1389,6 +1399,11 @@ impl TimelineView {
                     .collect::<Vec<_>>()
                     .join(" · ")
             });
+            let detail = match (&machine, detail) {
+                (Some(machine), Some(detail)) => Some(format!("{} · {detail}", machine.name)),
+                (Some(machine), None) => Some(machine.name.clone()),
+                (None, detail) => detail,
+            };
             (glyph, detail)
         };
         let exists = glyph.is_some();
@@ -1396,18 +1411,25 @@ impl TimelineView {
         let host = self.agent_host(cx);
         // The agent opens out of the card that opens it.
         let origin = SharedString::from(format!("callback-{key}"));
+        let beside = machine.is_none();
         let on_open = exists.then(|| {
             let origin = origin.clone();
-            Box::new(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                crate::agents_panel::open_agent(
-                    &store,
-                    child_id.clone(),
-                    host.clone(),
-                    Some(origin.clone()),
-                    window,
-                    cx,
-                );
-            }) as components::changed_files::ClickHandler
+            let machine = machine.as_ref().map(|machine| machine.id.clone());
+            Box::new(
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| match &machine {
+                    Some(machine) => {
+                        crate::machines::open_thread(machine, &child_id, None, cx);
+                    }
+                    None => crate::agents_panel::open_agent(
+                        &store,
+                        child_id.clone(),
+                        host.clone(),
+                        Some(origin.clone()),
+                        window,
+                        cx,
+                    ),
+                },
+            ) as components::changed_files::ClickHandler
         });
         let toggle_key = key.clone();
         let card = components::callback_card::callback_card(
@@ -1427,7 +1449,7 @@ impl TimelineView {
             self.hover.clone(),
             &self.motion,
         );
-        if exists {
+        if exists && beside {
             self.side_origins
                 .mark(origin, px(crate::material::event_card::RADIUS), card)
                 .into_any_element()
@@ -1468,6 +1490,33 @@ impl TimelineView {
             return Some(CallbackRequest::Settled(
                 components::callback_card::settled_lines(&answer, callback),
             ));
+        }
+        // A child on another machine of the group waits there, and no host
+        // takes the answer for it from the lead's: it is answered in its own
+        // thread. Its machine's store says whether it still waits.
+        if let (thread, Some(machine)) = crate::machines::elsewhere(&child_id) {
+            let machine = crate::machines::machine(machine, cx);
+            let waits = machine
+                .store
+                .as_ref()
+                .map(|store| store.read(cx))
+                .filter(|_| machine.connected)
+                .filter(|store| store.thread_meta(thread).is_some())
+                .map(|store| match callback.event {
+                    CallbackEvent::Approval => store.pending_approval_for(thread),
+                    _ => store.pending_user_input_for(thread),
+                });
+            return Some(match waits {
+                Some(false) => CallbackRequest::Gone,
+                _ => CallbackRequest::Elsewhere(
+                    crate::tr!(
+                        "machines.dispatch.answer_there",
+                        machine = machine.name.as_str()
+                    )
+                    .into_owned()
+                    .into(),
+                ),
+            });
         }
         let Some(status) = store.session_status_for(self.session_id.as_deref(), cx) else {
             return Some(CallbackRequest::Unknown);

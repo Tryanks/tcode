@@ -193,7 +193,33 @@ pub(crate) enum Sender {
     /// Tcode itself.
     Tcode,
     /// Threads, by title, each opening that thread where it is known here.
-    Threads(Vec<(SharedString, Option<ClickHandler>)>),
+    Threads(Vec<SenderThread>),
+}
+
+/// A thread a message the host wrote came from.
+pub(crate) struct SenderThread {
+    pub(crate) title: SharedString,
+    /// The name of the machine of the group it is on, when it is another
+    /// machine's.
+    pub(crate) machine: Option<String>,
+    pub(crate) on_open: Option<ClickHandler>,
+}
+
+/// `link`, a thread's title drawn as a link, in `row`, on the machine named
+/// `machine` when it is another machine's, in the order the locale puts the
+/// two.
+fn on_machine(row: gpui::Div, link: AnyElement, machine: Option<&str>) -> gpui::Div {
+    let Some(machine) = machine else {
+        return row.child(link);
+    };
+    let (before, after) = crate::machines::on_machine_parts(machine);
+    row.when(!before.trim().is_empty(), |row| {
+        row.child(before.trim_end().to_owned())
+    })
+    .child(link)
+    .when(!after.trim().is_empty(), |row| {
+        row.child(after.trim_start().to_owned())
+    })
 }
 
 /// A message that came in rather than one the user wrote: who sent it as
@@ -250,16 +276,17 @@ pub(crate) fn incoming(message: Incoming<'_>, window: &mut Window, cx: &App) -> 
                 .when(!before.trim().is_empty(), |caption| {
                     caption.child(before.trim_end().to_owned())
                 });
-            for (index, (title, on_open)) in threads.into_iter().enumerate() {
+            for (index, thread) in threads.into_iter().enumerate() {
                 if index > 0 {
                     caption = caption.child("·");
                 }
-                caption = caption.child(thread_link(
+                let link = thread_link(
                     format!("incoming-open-{id}-{index}"),
-                    title,
-                    on_open,
+                    thread.title,
+                    thread.on_open,
                     cx,
-                ));
+                );
+                caption = on_machine(caption, link, thread.machine.as_deref());
             }
             caption.when(!after.trim().is_empty(), |caption| {
                 caption.child(after.trim_start().to_owned())
@@ -796,11 +823,13 @@ pub(crate) fn expandable_alert(
 }
 
 /// A consecutive run of what one other thread did to this thread's run:
-/// its title, which opens it, then what it did.
+/// its title, which opens it where it can, on the machine named `machine`
+/// when it is another machine's, then what it did.
 pub(crate) fn control_actions_line(
     id: &str,
     actor_title: &str,
-    on_open: ClickHandler,
+    machine: Option<&str>,
+    on_open: Option<ClickHandler>,
     actions: String,
     details: Vec<String>,
     cx: &App,
@@ -808,9 +837,10 @@ pub(crate) fn control_actions_line(
     let link = thread_link(
         format!("control-actor-{id}"),
         crate::chat::model::one_line(actor_title).into(),
-        Some(on_open),
+        on_open,
         cx,
     );
+    let actor = on_machine(h_flex().min_w_0().gap_1p5().items_center(), link, machine);
     h_flex()
         .id(SharedString::from(format!("control-actions-{id}")))
         .debug_selector(selector(format!("control-actions-{id}")))
@@ -820,7 +850,7 @@ pub(crate) fn control_actions_line(
         .items_center()
         .text_token(&cx.theme().tokens.typography.xs)
         .text_color(cx.theme().muted_foreground)
-        .child(link)
+        .child(actor)
         .child(
             div()
                 .id(SharedString::from(format!("control-actions-label-{id}")))

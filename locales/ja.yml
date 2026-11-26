@@ -3286,6 +3286,10 @@ tools:
       running: "参照中"
       done: "参照済み"
       asked: "参照"
+    list_machines:
+      running: "マシン一覧を取得中"
+      done: "マシン一覧を取得済み"
+      asked: "マシン一覧を取得"
     list_threads:
       running: "スレッド一覧を取得中"
       done: "スレッド一覧を取得済み"
@@ -3448,6 +3452,18 @@ html:
 
 machines:
   dispatch:
+    on_machine: "%{machine} の %{actor}"
+    unreachable: "連絡が取れません"
+    unreachable_since: "%{machine} とは%{ago}から連絡が取れていません。スレッドはまだ実行中の可能性があります"
+    unreachable_now: "%{machine} と連絡が取れません。スレッドはまだ実行中の可能性があります"
+    machine_left: "所属マシンがグループを離れました"
+    pending_cancel: "%{machine} に再びつながったらキャンセルします"
+    pending_interrupt: "%{machine} に再びつながったら中断します"
+    pending_settle: "%{machine} に再びつながったら完了処理します"
+    not_open: "%{machine} はこのウィンドウで開いていません"
+    answer_there: "%{machine} 上のスレッドで回答してください"
+    machines_one: "1 台のマシン"
+    machines: "%{count} 台のマシン"
   move:
     menu_item: "マシンへ移動…"
     show_move: "移動を表示…"
