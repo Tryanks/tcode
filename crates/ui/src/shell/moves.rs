@@ -53,6 +53,10 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The open progress of the move says how it ended.
+        if ended.watched {
+            return;
+        }
         let machine =
             crate::machines::machine_in_groups(std::slice::from_ref(store), &ended.machine, cx)
                 .name;

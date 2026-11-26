@@ -25,6 +25,10 @@ pub(super) struct ProjectMoves {
     /// Threads that went with a move that ended here, and the machine each
     /// went to.
     moved_threads: HashMap<String, String>,
+    /// Projects whose move a view of this window shows, and how many do.
+    watched: HashMap<String, usize>,
+    /// How the watched moves that ended did, for the views showing them.
+    outcomes: HashMap<String, ProjectMoveEnded>,
 }
 
 struct Departing {
@@ -34,7 +38,8 @@ struct Departing {
 }
 
 /// A move the host listed has ended: the project is on `machine` now, or the
-/// move was cancelled by someone other than this client.
+/// move was cancelled by someone other than this client or while a view of
+/// this window showed it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProjectMoveEnded {
     pub project_name: String,
@@ -42,6 +47,11 @@ pub(crate) struct ProjectMoveEnded {
     /// The threads that went with it, which keep their ids there.
     pub thread_ids: Vec<String>,
     pub moved: bool,
+    /// Cancelled once the other machine may already have committed it, so
+    /// the project may be on both machines.
+    pub forced: bool,
+    /// A view of this window shows the move, and says how it ended.
+    pub watched: bool,
 }
 
 impl WorkspaceStore {
@@ -99,6 +109,32 @@ impl WorkspaceStore {
                     })
                     .map(|status| status.machine.as_str())
             })
+    }
+
+    /// A view shows `project_id`'s move from now on, and is told how it ends.
+    pub(crate) fn watch_project_move(&mut self, project_id: &str) {
+        *self
+            .project_moves
+            .watched
+            .entry(project_id.to_owned())
+            .or_default() += 1;
+    }
+
+    /// A view that showed `project_id`'s move is gone.
+    pub(crate) fn unwatch_project_move(&mut self, project_id: &str) {
+        let moves = &mut self.project_moves;
+        if let Some(count) = moves.watched.get_mut(project_id) {
+            *count -= 1;
+            if *count == 0 {
+                moves.watched.remove(project_id);
+                moves.outcomes.remove(project_id);
+            }
+        }
+    }
+
+    /// How `project_id`'s move ended, while a view that showed it is open.
+    pub(crate) fn project_move_outcome(&self, project_id: &str) -> Option<&ProjectMoveEnded> {
+        self.project_moves.outcomes.get(project_id)
     }
 
     /// What moving `project_id` to `machine` would take.
@@ -226,12 +262,20 @@ impl WorkspaceStore {
                         machine: departing.status.machine.clone(),
                         thread_ids: departing.thread_ids.clone(),
                         moved,
+                        forced: cancelled && departing.status.commit_unknown,
+                        watched: false,
                     },
                 ));
             }
             !(cancelled || moved)
         });
-        for (project_id, event) in ended {
+        for (project_id, mut event) in ended {
+            event.watched = self.project_moves.watched.contains_key(&project_id);
+            if event.watched {
+                self.project_moves
+                    .outcomes
+                    .insert(project_id.clone(), event.clone());
+            }
             if event.moved {
                 for id in &event.thread_ids {
                     self.project_moves
@@ -240,7 +284,7 @@ impl WorkspaceStore {
                 }
             }
             let asked_here = self.project_moves.cancelled_here.remove(&project_id);
-            if event.moved || !asked_here {
+            if event.moved || !asked_here || event.watched {
                 cx.emit(event);
             }
         }

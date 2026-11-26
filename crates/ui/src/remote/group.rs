@@ -164,20 +164,22 @@ impl GroupSection {
         let Some(spaces) = self.spaces(cx) else {
             return;
         };
-        let (title, description) = match next {
+        let (title, description, ok) = match next {
             GroupDeviceAccess::View => (
                 "machines.access.confirm_view_title",
                 "machines.access.confirm_view",
+                "machines.access.confirm_view_ok",
             ),
             _ => (
                 "machines.access.confirm_none_title",
                 "machines.access.confirm_none",
+                "machines.access.confirm_none_ok",
             ),
         };
         super::confirm_destructive(
             crate::tr!(title).into_owned(),
             crate::tr!(description).into_owned(),
-            crate::tr!(access_key(next)).into_owned(),
+            crate::tr!(ok).into_owned(),
             move |window, cx| {
                 let task = spaces.update(cx, |spaces, cx| {
                     spaces.act_group(GroupAction::SetDeviceAccess(next), cx)

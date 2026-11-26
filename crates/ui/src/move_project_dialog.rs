@@ -22,7 +22,7 @@ use tcode_protocol::{
     ProtocolError,
 };
 
-use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
+use crate::store::{ProjectMoveEnded, TopicKind, WorkspaceStore, observe_store_topics};
 use crate::thread_export::format_size;
 
 /// How long a value drawn here takes to glide to a new one.
@@ -103,6 +103,13 @@ pub(crate) fn status_bar(
         .when(status.phase == MovePhase::Paused, |bar| {
             bar.color(cx.theme().muted_foreground)
         })
+}
+
+/// A section's heading, flush with what it heads.
+fn heading(label: impl Into<SharedString>, cx: &App) -> gpui::Div {
+    div()
+        .text_caption(cx)
+        .child(crate::widgets::fade_text(label.into()))
 }
 
 /// The answer to the preview asked for the chosen machine.
@@ -414,10 +421,7 @@ impl MoveProjectDialog {
     ) -> AnyElement {
         let muted = |text: String| div().text_secondary(false, cx).child(text);
         let section = |caption: SharedString, body: AnyElement| {
-            v_flex()
-                .gap_1()
-                .child(crate::material::group_caption(caption, cx))
-                .child(body)
+            v_flex().gap_1().child(heading(caption, cx)).child(body)
         };
         let placeholder = if preview.default_root.is_empty() {
             crate::tr!("machines.move.root_needed", machine = machine)
@@ -438,25 +442,34 @@ impl MoveProjectDialog {
                 crate::tr!("machines.move.root_hint", machine = machine).into_owned(),
             ));
         let size = format_size(preview.bytes);
-        let code = if preview.git {
-            let mut line = crate::tr!(
-                "machines.move.code_git",
-                branches = preview.branches,
-                size = size
-            )
+        let code = if preview.blockers.contains(&MoveBlocker::InsideRepository) {
+            crate::tr!("machines.move.code_inside_repository").into_owned()
+        } else if preview.git {
+            let mut line = if preview.branches == 1 {
+                crate::tr!("machines.move.code_git_one", size = size)
+            } else {
+                crate::tr!(
+                    "machines.move.code_git",
+                    branches = preview.branches,
+                    size = size
+                )
+            }
             .into_owned();
-            if preview.dirty_checkouts > 0 {
-                line.push_str(&crate::tr!(
-                    "machines.move.code_dirty",
-                    count = preview.dirty_checkouts
-                ));
+            match preview.dirty_checkouts {
+                0 => {}
+                1 => line.push_str(&crate::tr!("machines.move.code_dirty_one")),
+                count => line.push_str(&crate::tr!("machines.move.code_dirty", count = count)),
             }
             line
         } else {
             crate::tr!("machines.move.code_folder", size = size).into_owned()
         };
-        let mut threads =
-            crate::tr!("machines.move.threads_count", count = preview.threads).into_owned();
+        let mut threads = if preview.threads == 1 {
+            crate::tr!("machines.move.threads_count_one")
+        } else {
+            crate::tr!("machines.move.threads_count", count = preview.threads)
+        }
+        .into_owned();
         if preview.archived_threads > 0 {
             threads.push_str(&crate::tr!(
                 "machines.move.threads_archived",
@@ -476,8 +489,12 @@ impl MoveProjectDialog {
                                 .checked(self.include_ignored)
                                 .disabled(self.busy)
                                 .label(
-                                    crate::tr!("machines.move.ignored_include", count = count)
-                                        .into_owned(),
+                                    if count == 1 {
+                                        crate::tr!("machines.move.ignored_include_one")
+                                    } else {
+                                        crate::tr!("machines.move.ignored_include", count = count)
+                                    }
+                                    .into_owned(),
                                 )
                                 .on_click(cx.listener(|dialog, checked: &bool, _, cx| {
                                     dialog.include_ignored = *checked;
@@ -582,16 +599,16 @@ impl Render for MoveProjectDialog {
         };
         v_flex()
             .gap_3()
-            .child(crate::material::group_caption(
-                crate::tr!("machines.move.machines"),
-                cx,
-            ))
+            .child(heading(crate::tr!("machines.move.machines"), cx))
             .child(machines)
             .children(lower)
             .children(machine.map(|machine| {
-                div()
-                    .text_secondary(false, cx)
-                    .child(crate::tr!("machines.move.note", machine = machine))
+                let folder = self.ready().is_some_and(|preview| !preview.git);
+                div().text_secondary(false, cx).child(if folder {
+                    crate::tr!("machines.move.note_folder", machine = machine)
+                } else {
+                    crate::tr!("machines.move.note", machine = machine)
+                })
             }))
             .children(
                 crate::motion::shown(
@@ -650,18 +667,10 @@ fn blocker_sentence(blocker: &MoveBlocker, machine: &str) -> String {
     match blocker {
         MoveBlocker::QuickChat => crate::tr!("machines.move.blocker.quick_chat"),
         MoveBlocker::InsideRepository => crate::tr!("machines.move.blocker.inside_repository"),
-        MoveBlocker::ThreadsRunning(count) => {
-            crate::tr!("machines.move.blocker.running", count = count)
-        }
-        MoveBlocker::PendingApprovals(count) => {
-            crate::tr!("machines.move.blocker.approvals", count = count)
-        }
-        MoveBlocker::QueuedMessages(count) => {
-            crate::tr!("machines.move.blocker.queued", count = count)
-        }
-        MoveBlocker::TerminalsOpen(count) => {
-            crate::tr!("machines.move.blocker.terminals", count = count)
-        }
+        MoveBlocker::ThreadsRunning(count) => counted("machines.move.blocker.running", *count),
+        MoveBlocker::PendingApprovals(count) => counted("machines.move.blocker.approvals", *count),
+        MoveBlocker::QueuedMessages(count) => counted("machines.move.blocker.queued", *count),
+        MoveBlocker::TerminalsOpen(count) => counted("machines.move.blocker.terminals", *count),
         MoveBlocker::MergeInProgress { path } => {
             crate::tr!("machines.move.blocker.merge", path = path)
         }
@@ -676,6 +685,15 @@ fn blocker_sentence(blocker: &MoveBlocker, machine: &str) -> String {
         }
     }
     .into_owned()
+}
+
+/// `key`'s sentence for `count`, its `_one` form for one.
+fn counted(key: &str, count: u32) -> std::borrow::Cow<'static, str> {
+    if count == 1 {
+        crate::tr!(&format!("{key}_one"))
+    } else {
+        crate::tr!(key, count = count)
+    }
 }
 
 /// A refused Move, in a sentence for its code; the host's own words for a
@@ -707,10 +725,13 @@ struct MoveProgress {
     store: Entity<WorkspaceStore>,
     project_id: String,
     project_name: String,
-    /// The last of the move this view saw, so it can close as the move ends.
+    /// The last of the move this view saw, shown until the store knows how
+    /// it ended.
     last: Option<ProjectMoveStatus>,
+    /// Whether the move had ended when this view last drew.
+    ended: bool,
     error: Option<String>,
-    _subscription: gpui::Subscription,
+    _subscriptions: [gpui::Subscription; 2],
 }
 
 /// Show the move of `project_id` on `store`'s machine.
@@ -728,13 +749,26 @@ pub(crate) fn open_progress(
         project = project_name.clone()
     )
     .into_owned();
-    let progress = cx.new(|cx| MoveProgress {
-        _subscription: observe_store_topics(&store, &[TopicKind::ProjectMoves], cx),
-        last: store.read(cx).project_move(&project_id).cloned(),
-        store,
-        project_id,
-        project_name,
-        error: None,
+    let progress = cx.new(|cx| {
+        store.update(cx, |store, _| store.watch_project_move(&project_id));
+        cx.on_release(|progress: &mut MoveProgress, cx| {
+            progress.store.update(cx, |store, _| {
+                store.unwatch_project_move(&progress.project_id)
+            });
+        })
+        .detach();
+        MoveProgress {
+            _subscriptions: [
+                observe_store_topics(&store, &[TopicKind::ProjectMoves], cx),
+                cx.subscribe(&store, |_, _, _: &ProjectMoveEnded, cx| cx.notify()),
+            ],
+            last: store.read(cx).project_move(&project_id).cloned(),
+            ended: false,
+            store,
+            project_id,
+            project_name,
+            error: None,
+        }
     });
     window.open_dialog(cx, move |builder, _, cx| {
         let content = progress.clone();
@@ -858,18 +892,44 @@ impl MoveProgress {
 impl Render for MoveProgress {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let status = self.status(cx);
-        if status != self.last {
+        let ended = status.is_none();
+        if (status.is_some() && status != self.last) || ended != self.ended {
             // The footer's actions are drawn by the dialog frame.
             window.refresh();
         }
-        self.last.clone_from(&status);
-        let Some(status) = status else {
-            // The window's notice says how it ended.
+        self.ended = ended;
+        if let Some(outcome) = self
+            .store
+            .read(cx)
+            .project_move_outcome(&self.project_id)
+            .cloned()
+        {
+            let machine = crate::machines::machine_in_groups(
+                std::slice::from_ref(&self.store),
+                &outcome.machine,
+                cx,
+            )
+            .name;
+            let line = if outcome.moved {
+                crate::tr!("machines.move.ended_moved", machine = machine)
+            } else if outcome.forced {
+                crate::tr!("machines.move.ended_forced", machine = machine)
+            } else {
+                crate::tr!("machines.move.ended_cancelled")
+            };
             return div()
                 .py_2()
-                .text_secondary(false, cx)
-                .child(crate::tr!("machines.move.ended"))
+                .text_body(false, cx)
+                .debug_selector(|| "move-project-status".into())
+                .child(line)
                 .into_any_element();
+        }
+        if status.is_some() {
+            self.last.clone_from(&status);
+        }
+        // Until the store knows how it ended, the move reads as it last did.
+        let Some(status) = status.or_else(|| self.last.clone()) else {
+            return div().into_any_element();
         };
         let machine = crate::machines::machine_in_groups(
             std::slice::from_ref(&self.store),
