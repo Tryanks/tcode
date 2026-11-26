@@ -716,13 +716,14 @@ fn authorize_viewer(payload: &ClientPayload) -> Result<(), ProtocolError> {
             | Topic::CommandOutput { .. }
             | Topic::PreviewSession { .. }
             | Topic::DevServers { .. }
-            | Topic::ExternalImport { .. }
             | Topic::StorageMigration
-            | Topic::DiskUsage
             | Topic::ProjectMoves => Ok(()),
-            // A preview client answers the agents' requests, and the hosting topic is the
-            // transport's, for full devices.
+            // A preview client answers the agents' requests, the hosting topic is the
+            // transport's, for full devices, and the last two follow work a viewer cannot
+            // start: an import, and a measurement that the first subscription starts.
             Topic::Terminal { .. }
+            | Topic::ExternalImport { .. }
+            | Topic::DiskUsage
             | Topic::Preview { .. }
             | Topic::SpaceIndex { .. }
             | Topic::Hosting => Err(view_only("this subscription")),
@@ -732,10 +733,7 @@ fn authorize_viewer(payload: &ClientPayload) -> Result<(), ProtocolError> {
             | Query::ComputerUsePermissions
             | Query::SessionHistoryPage { .. }
             | Query::ListActiveWorkspace { .. }
-            | Query::ScanExternalHistory
             | Query::LoadGitDiff { .. }
-            | Query::BrowseIconImages { .. }
-            | Query::BrowseDirectories { .. }
             | Query::ReadIconImage { .. }
             | Query::ReadImagePreview { .. }
             | Query::ReadProjectIcon { .. }
@@ -753,8 +751,12 @@ fn authorize_viewer(payload: &ClientPayload) -> Result<(), ProtocolError> {
             | Query::CollaborationTemplates
             | Query::NativeMcpServers { .. }
             | Query::PullRequest { .. } => Ok(()),
-            // Each of these writes, runs a model, or is another principal's.
+            // Each of these writes, runs a model, is another principal's, or walks the
+            // machine's folders for a dialog that adds or changes something.
             Query::Hosting { .. }
+            | Query::ScanExternalHistory
+            | Query::BrowseIconImages { .. }
+            | Query::BrowseDirectories { .. }
             | Query::GenerateCommitMessage { .. }
             | Query::SaveAttachment { .. }
             | Query::RemoveUserFile { .. }
