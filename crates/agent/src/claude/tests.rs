@@ -766,8 +766,80 @@ fn model_refusal_fallback_publishes_served_model_before_completion() {
         [AgentEvent::ServedModel {
             model: "claude-opus-4-8".into(),
             from: Some("claude-fable-5".into()),
-            reason: None,
+            reason: Some("Safeguards flagged this message. Switched models.".into()),
         }]
+    );
+}
+
+/// Frames in the shape of the `informational` and `notification` entries of
+/// Claude Code 2.1.332's SDK system-message schema; a prompt its
+/// UserPromptSubmit hook blocks produces the first.
+#[test]
+fn claude_codes_own_lines_for_the_user_are_shown_as_written() {
+    let mut mapper = Mapper::new();
+    mapper.start_turn();
+
+    let banner = feed(
+        &mut mapper,
+        r#"{"type":"system","subtype":"informational","content":"UserPromptSubmit operation blocked by hook:\n[check]: no deploys on Friday","level":"warning","prevent_continuation":true,"uuid":"system-1","session_id":"session-1"}"#,
+    );
+    assert_eq!(
+        banner,
+        [AgentEvent::Warning {
+            message: "UserPromptSubmit operation blocked by hook:\n[check]: no deploys on Friday"
+                .into(),
+        }]
+    );
+
+    let queued = feed(
+        &mut mapper,
+        r#"{"type":"system","subtype":"notification","key":"error-compacting-conversation","text":"Error compacting conversation","priority":"immediate","color":"error","uuid":"system-2","session_id":"session-1"}"#,
+    );
+    assert_eq!(
+        queued,
+        [AgentEvent::Warning {
+            message: "Error compacting conversation".into(),
+        }]
+    );
+}
+
+/// A `commands_changed` frame as Claude Code 2.1.332 builds it: the whole
+/// list, each command an object, a skill not marked as one.
+#[test]
+fn pushed_command_list_replaces_inits_and_keeps_its_skills() {
+    let mut mapper = Mapper::new();
+    feed(
+        &mut mapper,
+        r#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-4-8","slash_commands":["plan","dataviz"],"skills":["dataviz"]}"#,
+    );
+
+    let events = feed(
+        &mut mapper,
+        r#"{"type":"system","subtype":"commands_changed","commands":[{"name":"plan","description":"Plan the work","argumentHint":""},{"name":"dataviz","description":"Draw a chart","argumentHint":""},{"name":"deploy","description":"","argumentHint":"<env>","aliases":["ops:deploy"]}],"uuid":"system-1","session_id":"s1"}"#,
+    );
+
+    let [AgentEvent::ProviderCommands { commands }] = events.as_slice() else {
+        panic!("a pushed list publishes the commands and nothing else: {events:?}");
+    };
+    assert_eq!(
+        commands
+            .iter()
+            .map(|command| (
+                command.name.as_str(),
+                command.description.as_deref(),
+                command.kind
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("plan", Some("Plan the work"), ProviderCommandKind::Command),
+            (
+                "dataviz",
+                Some("Draw a chart"),
+                ProviderCommandKind::Command
+            ),
+            ("deploy", None, ProviderCommandKind::Command),
+            ("dataviz", Some("Draw a chart"), ProviderCommandKind::Skill),
+        ]
     );
 }
 
