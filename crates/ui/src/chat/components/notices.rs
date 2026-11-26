@@ -29,10 +29,6 @@ use super::changed_files::ClickHandler;
 /// How long what is drawn here only some of the time takes to come in or go.
 const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// How long a reason may run and still be told in the working line itself;
-/// a longer one is told on hover and in the Work Log.
-const RETRY_REASON_CHARS: usize = 48;
-
 /// The tallest an opened line's texts stand before they scroll.
 const BODY_MAX_HEIGHT: f32 = 320.;
 
@@ -535,56 +531,6 @@ pub(crate) fn rewind_failure(key: &str, label: String, cx: &App) -> AnyElement {
         .text_color(cx.theme().warning)
         .child(crate::widgets::fade_text(label))
         .with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
-        .into_any_element()
-}
-
-/// A request the harness tries again, as the working line tells it while
-/// the turn runs: the attempt's number, and the harness's words when short.
-pub(crate) fn retry_clause(turn: usize, attempt: usize, message: &str, cx: &App) -> AnyElement {
-    let mut label = crate::tr!("chat.request_retrying", count = attempt).into_owned();
-    let message = super::super::model::one_line(message);
-    if message.chars().count() <= RETRY_REASON_CHARS && !message.is_empty() {
-        label.push_str(" · ");
-        label.push_str(&message);
-    }
-    h_flex()
-        .id(SharedString::from(format!("working-retry-{turn}")))
-        .debug_selector(selector(format!("working-retry-{turn}")))
-        .min_w_0()
-        .gap_2()
-        .items_center()
-        .text_color(cx.theme().warning)
-        .child(div().text_color(cx.theme().muted_foreground).child("·"))
-        .child(div().min_w_0().child(crate::widgets::fade_text(label)))
-        .with_tooltip(move |_, _| Tooltip::new(message.clone()))
-        .into_any_element()
-}
-
-/// One retry in an expanded Work Log, in the harness's words.
-pub(crate) fn retry_row(entry_id: &str, message: &str, cx: &App) -> AnyElement {
-    h_flex()
-        .id(SharedString::from(format!("retry-row-{entry_id}")))
-        .debug_selector(selector(format!("retry-row-{entry_id}")))
-        .w_full()
-        .px_1()
-        .gap_1p5()
-        .items_start()
-        .text_body(false, cx)
-        .text_color(cx.theme().warning)
-        .child(
-            div()
-                .flex_none()
-                .h(cx.theme().tokens.typography.sm.line_height)
-                .flex()
-                .items_center()
-                .child(Icon::new(IconName::RefreshCw).small()),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .child(crate::tr!("chat.request_retry_row", message = message).into_owned()),
-        )
         .into_any_element()
 }
 

@@ -55,6 +55,9 @@ pub(crate) enum Segment<'a> {
     /// A subagent, or a thread a call started.
     ThreadCard(&'a TimelineEntry),
     Error(&'a TimelineEntry),
+    /// A request the harness tries again, in its words for the latest
+    /// attempt.
+    RequestRetry(&'a TimelineEntry),
     /// The turn's warnings of the harness, at the first; the rest are in no
     /// segment's range.
     Warnings(Vec<&'a TimelineEntry>),
@@ -364,12 +367,8 @@ pub(crate) fn segment_entries<'a>(
             EntryContent::Withheld { .. } => {
                 single(&mut segments, &mut ranges, Segment::Withheld(entry));
             }
-            // While the turn runs, the working line tells the retry; once it
-            // ended, its Work Log keeps it.
-            EntryContent::RequestRetry { .. } if turn_running => {}
             EntryContent::RequestRetry { .. } => {
-                run_start.get_or_insert(index);
-                activities.push(entry);
+                single(&mut segments, &mut ranges, Segment::RequestRetry(entry));
             }
             EntryContent::Warning { .. } => {
                 flush_activities(
@@ -441,28 +440,6 @@ pub(crate) fn message_tags(range: &[Arc<TimelineEntry>]) -> Vec<MessageTag> {
         .collect()
 }
 
-/// The request the harness is trying again at the end of a running turn's
-/// `entries`: how many attempts it has made, and its words for the latest.
-/// Steers waiting to be taken stand after it without ending it.
-pub(crate) fn live_retry(entries: &[Arc<TimelineEntry>]) -> Option<(usize, String)> {
-    let mut attempts = 0;
-    let mut latest = None;
-    for entry in entries.iter().rev() {
-        match &entry.content {
-            EntryContent::Steer {
-                status: SteeringStatus::Pending,
-                ..
-            } => {}
-            EntryContent::RequestRetry { message } => {
-                attempts += 1;
-                latest.get_or_insert_with(|| message.clone());
-            }
-            _ => break,
-        }
-    }
-    latest.map(|message| (attempts, message))
-}
-
 /// The rewind to `checkpoint_id`, or with `undo` its undo, that the harness
 /// last failed to make, while no message was sent since.
 pub(crate) fn standing_rewind_failure<'a>(
@@ -509,8 +486,6 @@ pub(crate) struct WorkLogCounts {
     pub(crate) searches: usize,
     pub(crate) computer: usize,
     pub(crate) tools: usize,
-    /// Attempts the harness made again at a failed request.
-    pub(crate) retries: usize,
 }
 
 /// What a run of activities did, each counted by the window it shows as.
@@ -526,9 +501,6 @@ pub(crate) fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
             Some(Family::Search) => counts.searches += 1,
             Some(Family::Computer) => counts.computer += 1,
             Some(Family::Tool) => counts.tools += 1,
-            None if matches!(entry.content, EntryContent::RequestRetry { .. }) => {
-                counts.retries += 1;
-            }
             None => {}
         }
     }
@@ -588,15 +560,6 @@ pub(crate) fn work_log_capsule_label(counts: &WorkLogCounts, activity_count: usi
         });
     }
     clauses.join(" · ")
-}
-
-/// The retries a Work Log's header tells apart from its other counts.
-pub(crate) fn work_log_retries_label(counts: &WorkLogCounts) -> Option<String> {
-    match counts.retries {
-        0 => None,
-        1 => Some(crate::tr!("chat.work_log_retry_one").into_owned()),
-        count => Some(crate::tr!("chat.work_log_retries", count = count).into_owned()),
-    }
 }
 
 /// How long a run of activities took: from the first start seen to the
@@ -1359,40 +1322,38 @@ pub(in crate::chat) mod tests {
                 MessageTag::ContextWindow(1_000_000)
             ]
         );
-        // A turn's warnings are one line where the first stands; a retry is
-        // the working line's while the turn runs, then its Work Log's.
+        // A turn's warnings are one line where the first stands; a retried
+        // request is a line of its own where it happened, while the turn
+        // runs and after, never an activity of a Work Log.
         let warning = |id: &str| entry(id, EntryContent::Warning { message: id.into() });
-        let retry = |id: &str| entry(id, EntryContent::RequestRetry { message: id.into() });
         let entries = [
             warning("first"),
-            retry("retry-1"),
-            retry("retry-2"),
+            entry(
+                "retry",
+                EntryContent::RequestRetry {
+                    message: "retry 2/10".into(),
+                },
+            ),
             command("cmd"),
             warning("second"),
             entry("reply", assistant("done")),
         ];
-        let settled = segment_entries(&entries, false);
-        assert!(matches!(
-            settled.flow.as_slice(),
-            [Segment::Warnings(warnings), Segment::ActivityRun(run), Segment::Assistant(_)]
-                if warnings.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
+        for running in [false, true] {
+            let segmented = segment_entries(&entries, running);
+            assert!(matches!(
+                segmented.flow.as_slice(),
+                [
+                    Segment::Warnings(warnings),
+                    Segment::RequestRetry(retry),
+                    Segment::ActivityRun(run),
+                    Segment::Assistant(_)
+                ] if warnings.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
                     == ["first", "second"]
-                && run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
-                    == ["retry-1", "retry-2", "cmd"]
-        ));
-        assert_eq!(settled.ranges, vec![0..1, 1..4, 5..6]);
-        let Segment::ActivityRun(run) = &settled.flow[1] else {
-            unreachable!();
-        };
-        assert_eq!(work_log_counts(run).retries, 2);
-        let running = segment_entries(&entries, true);
-        assert!(matches!(
-            running.flow.as_slice(),
-            [Segment::Warnings(_), Segment::ActivityRun(run), Segment::Assistant(_)]
-                if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>() == ["cmd"]
-        ));
-        assert_eq!(live_retry(&entries[..3]), Some((2, "retry-2".to_owned())));
-        assert_eq!(live_retry(&entries[..4]), None);
+                    && retry.id == "retry"
+                    && run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>() == ["cmd"]
+            ));
+            assert_eq!(segmented.ranges, vec![0..1, 1..2, 2..3, 4..5]);
+        }
         let image = |id: &str| {
             entry(
                 id,
@@ -1669,7 +1630,6 @@ pub(in crate::chat) mod tests {
             searches: 2,
             computer: 4,
             tools: 1,
-            retries: 0,
         };
         let tools = WorkLogCounts {
             tools: 2,

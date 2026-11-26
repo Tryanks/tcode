@@ -115,6 +115,24 @@ pub(crate) fn context_compacted_divider(
     )
 }
 
+/// A request the harness tries again, in its own words: one line where it
+/// happened, which each further attempt at that request rewrites.
+pub(crate) fn request_retry_divider(
+    id: &str,
+    message: &str,
+    motion: &crate::motion::owned::Owned,
+    cx: &App,
+) -> AnyElement {
+    divider_in(
+        SharedString::from(format!("request-retry-{id}")),
+        message.to_owned(),
+        cx.theme().muted_foreground,
+        Some(IconName::RefreshCw),
+        Some(motion),
+        cx,
+    )
+}
+
 pub(crate) fn session_moved_divider(
     id: &str,
     from: &std::path::Path,

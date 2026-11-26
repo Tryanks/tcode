@@ -211,15 +211,12 @@ pub(crate) fn turn_working_indicator(
     started_at: Option<u64>,
     stopping: bool,
     served_model: Option<String>,
-    retry: Option<(usize, String)>,
     motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
-    let warning = cx.theme().warning;
-    let retry_motion = motion.clone();
     let motion = motion.clone();
+    let warning = cx.theme().warning;
     h_flex()
-        .min_w_0()
         .gap_2()
         .items_center()
         .text_body(false, cx)
@@ -229,19 +226,6 @@ pub(crate) fn turn_working_indicator(
             started_at,
             stopping,
         })
-        // The request the harness tries again, told in place as each
-        // attempt comes.
-        .child(crate::motion::Sampled::new(move |window, cx| {
-            let id = SharedString::from(format!("working-retry-{turn}"));
-            match retry_motion.shown(id, retry, SHOW, window, cx) {
-                Some(retry) => {
-                    let (attempt, message) = &retry.value;
-                    let clause = super::notices::retry_clause(turn, *attempt, message, cx);
-                    retry.fade(div().min_w_0().child(clause))
-                }
-                None => div().into_any_element(),
-            }
-        }))
         .child(crate::motion::Sampled::new(move |window, cx| {
             let id = SharedString::from(format!("served-model-{turn}"));
             match motion.shown(id.clone(), served_model, SHOW, window, cx) {
