@@ -139,10 +139,11 @@ impl AppState {
                             !parked.queue.is_empty()
                         });
                         self.repair_orphaned_turn(session_id, cx);
-                        let is_child = self
-                            .sessions
-                            .iter()
-                            .any(|meta| meta.id == session_id && meta.parent_session_id.is_some());
+                        let is_child = self.sessions.iter().any(|meta| {
+                            meta.id == session_id
+                                && (meta.parent_session_id.is_some()
+                                    || meta.remote_parent.is_some())
+                        });
                         if is_child && !has_queued {
                             self.fail_child_expectation(
                                 session_id,
@@ -714,6 +715,7 @@ impl AppState {
             }
             self.adopt_meta(meta, cx);
         }
+        self.reports_taken(reports, cx);
     }
 
     pub(super) fn record_event_at(

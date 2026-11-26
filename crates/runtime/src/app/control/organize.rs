@@ -506,7 +506,7 @@ impl AppState {
 
     /// Apply `change` to a stored thread's meta and persist it when it changed anything;
     /// persisting re-evaluates the thread's settlement.
-    pub(super) fn change_meta(
+    pub(in crate::app) fn change_meta(
         &mut self,
         session_id: &str,
         cx: &mut HostCx,

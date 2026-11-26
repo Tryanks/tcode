@@ -265,7 +265,10 @@ impl AppState {
                     || session.timeline.turn_running
             }),
             background_work: resident.is_some_and(|session| session.background_task_count > 0),
-            unsettled_children: projection.children_hold(&meta.id),
+            unsettled_children: projection.children_hold(&meta.id)
+                || super::machines::running_remote_children(meta)
+                    .next()
+                    .is_some(),
             pull_request_watches: !meta.pull_request_watches_paused
                 && tcode_core::pull_request::watched(&meta.pull_requests)
                     .next()

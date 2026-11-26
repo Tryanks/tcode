@@ -102,6 +102,9 @@ impl AppState {
         if params.events.is_empty() {
             return Err("notify_when needs at least one event".into());
         }
+        if let Some(remote) = &caller.machine {
+            return Ok(self.watch_for_machine(caller, &remote.peer.id, params, cx));
+        }
         let mut meta = self.find_meta(&caller.thread_id).ok_or("unknown thread")?;
         // A retried call finds the watch its first attempt stored under the same key.
         if let Some(watch) = params.request_id.as_deref().and_then(|request_id| {
@@ -137,6 +140,7 @@ impl AppState {
             thread_ids,
             events: params.events.into_iter().collect(),
             space: cx.space.clone(),
+            machine: None,
         };
         let answer = serde_json::json!(WatchAnswer {
             skipped,
@@ -158,21 +162,139 @@ impl AppState {
         Ok(answer)
     }
 
+    /// `notify_when` for a thread on another machine: each watched thread here keeps the
+    /// watch, which a restart keeps, and its firing goes back to that machine.
+    fn watch_for_machine(
+        &mut self,
+        caller: &Caller,
+        machine: &str,
+        params: NotifyWhenParams,
+        cx: &mut HostCx,
+    ) -> serde_json::Value {
+        let id = params
+            .request_id
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let mut thread_ids = params.thread_ids;
+        thread_ids.sort();
+        thread_ids.dedup();
+        let events: BTreeSet<WatchEvent> = params.events.into_iter().collect();
+        let mut skipped = Vec::new();
+        let mut watched = Vec::new();
+        for target in thread_ids {
+            let mut meta = match self.batch_target(caller, &target) {
+                Ok(meta) => meta,
+                Err(reason) => {
+                    skipped.push(BatchResult {
+                        target,
+                        outcome: Outcome::Skipped,
+                        reason: Some(reason),
+                        side_effects: None,
+                    });
+                    continue;
+                }
+            };
+            // A retried call finds the watch its first attempt stored under the same key.
+            let held = meta.remote_watches.iter().any(|watch| {
+                watch.id == id && watch.machine == machine && watch.thread_id == caller.thread_id
+            });
+            if !held {
+                meta.remote_watches.push(tcode_core::control::RemoteWatch {
+                    id: id.clone(),
+                    machine: machine.to_owned(),
+                    thread_id: caller.thread_id.clone(),
+                    events: events.clone(),
+                    fired: None,
+                });
+                self.store_meta(meta, cx);
+                self.audit(caller, &target, action::NOTIFY_WHEN, Some(id.clone()), cx);
+            }
+            watched.push(target);
+        }
+        if watched.is_empty() {
+            return serde_json::json!({ "skipped": skipped });
+        }
+        serde_json::json!(WatchAnswer {
+            id: &id,
+            thread_ids: &watched,
+            events: &events,
+            skipped,
+        })
+    }
+
+    /// `cancel_notify` for a thread on another machine: the watches it keeps here go.
+    fn unwatch_for_machine(
+        &mut self,
+        caller: &Caller,
+        machine: &str,
+        ids: Vec<String>,
+        cx: &mut HostCx,
+    ) -> serde_json::Value {
+        let ours = |watch: &tcode_core::control::RemoteWatch| {
+            watch.machine == machine && watch.thread_id == caller.thread_id
+        };
+        let held: Vec<SessionMeta> = self
+            .sessions
+            .iter()
+            .filter(|meta| {
+                meta.remote_watches
+                    .iter()
+                    .any(|watch| ours(watch) && ids.contains(&watch.id))
+            })
+            .cloned()
+            .collect();
+        let mut removed = BTreeSet::new();
+        for mut meta in held {
+            let mut here = Vec::new();
+            meta.remote_watches.retain(|watch| {
+                let gone = ours(watch) && ids.contains(&watch.id);
+                if gone {
+                    here.push(watch.id.clone());
+                }
+                !gone
+            });
+            let target = meta.id.clone();
+            self.store_meta(meta, cx);
+            self.audit(
+                caller,
+                &target,
+                action::CANCEL_NOTIFY,
+                Some(here.join(", ")),
+                cx,
+            );
+            removed.extend(here);
+        }
+        let (removed, unknown): (Vec<String>, Vec<String>) =
+            ids.into_iter().partition(|id| removed.contains(id));
+        serde_json::json!(CancelNotifyAnswer { removed, unknown })
+    }
+
     pub(super) fn op_cancel_notify(
         &mut self,
         caller: &Caller,
         params: CancelNotifyParams,
         cx: &mut HostCx,
     ) -> Result<serde_json::Value, String> {
+        if let Some(remote) = &caller.machine {
+            return Ok(self.unwatch_for_machine(caller, &remote.peer.id.clone(), params.ids, cx));
+        }
         let mut meta = self.find_meta(&caller.thread_id).ok_or("unknown thread")?;
         let (removed, unknown): (Vec<String>, Vec<String>) = params
             .ids
             .into_iter()
             .partition(|id| meta.control_watches.iter().any(|watch| &watch.id == id));
         if !removed.is_empty() {
+            let elsewhere: Vec<ControlWatch> = meta
+                .control_watches
+                .iter()
+                .filter(|watch| watch.machine.is_some() && removed.contains(&watch.id))
+                .cloned()
+                .collect();
             meta.control_watches
                 .retain(|watch| !removed.contains(&watch.id));
             self.store_meta(meta, cx);
+            for watch in elsewhere {
+                self.unwatch_on_machine(&caller.thread_id, watch, cx);
+            }
             let detail = removed.join(", ");
             self.audit(
                 caller,
@@ -200,7 +322,9 @@ impl AppState {
             return;
         }
         let fires = |watch: &ControlWatch| {
-            watch.events.contains(&event) && watch.thread_ids.iter().any(|id| id == target_id)
+            watch.machine.is_none()
+                && watch.events.contains(&event)
+                && watch.thread_ids.iter().any(|id| id == target_id)
         };
         let watchers: Vec<String> = self
             .sessions
@@ -208,18 +332,31 @@ impl AppState {
             .filter(|meta| meta.control_watches.iter().any(fires))
             .map(|meta| meta.id.clone())
             .collect();
-        if watchers.is_empty() {
-            return;
-        }
-        let Some(target) = self.find_meta(target_id) else {
+        let Some(mut target) = self.find_meta(target_id) else {
             return;
         };
+        let remote = target
+            .remote_watches
+            .iter()
+            .any(|watch| watch.fired.is_none() && watch.events.contains(&event));
+        if watchers.is_empty() && !remote {
+            return;
+        }
         let text = format!(
             "{CONTROL_CALLBACK_PREFIX}{} {}{}",
             control_header(target_id, &target.title),
             wire_name(event),
             self.watch_event_detail(&target, event)
         );
+        if remote {
+            for watch in &mut target.remote_watches {
+                if watch.fired.is_none() && watch.events.contains(&event) {
+                    watch.fired = Some(text.clone());
+                }
+            }
+            self.store_meta(target.clone(), cx);
+            self.send_watch_firings(Some(target_id), cx);
+        }
         for watcher in watchers {
             let Some(mut meta) = self.find_meta(&watcher) else {
                 continue;

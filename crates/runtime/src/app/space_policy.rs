@@ -394,6 +394,15 @@ impl AppState {
 /// A value of `provider`'s permission control that `policy` allows: its
 /// recommended value, then its default, then the first it lists.
 fn allowed_permission(policy: &SpacePolicy, provider: ProviderKind) -> Option<OptionSelection> {
+    permission_within(provider, |class| policy.allows_class(class))
+}
+
+/// A value of `provider`'s permission control whose class `allows`: its
+/// recommended value, then its default, then the first it lists.
+pub(super) fn permission_within(
+    provider: ProviderKind,
+    allows: impl Fn(agent::ApprovalClass) -> bool,
+) -> Option<OptionSelection> {
     let agent::OptionDescriptor::Select {
         id,
         options,
@@ -408,10 +417,7 @@ fn allowed_permission(policy: &SpacePolicy, provider: ProviderKind) -> Option<Op
         .into_iter()
         .chain(default_value)
         .chain(options.into_iter().map(|option| option.value))
-        .find(|value| {
-            agent::approval_class(provider, &id, value)
-                .is_some_and(|class| policy.allows_class(class))
-        })?;
+        .find(|value| agent::approval_class(provider, &id, value).is_some_and(&allows))?;
     Some(OptionSelection {
         id,
         value: serde_json::Value::String(value),

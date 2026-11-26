@@ -1583,6 +1583,7 @@ impl AppState {
         for id in &ids {
             self.close_orchestrator_children(id, cx);
         }
+        self.remote_children_gone(ids.iter().map(|id| &**id), cx);
         let changed: Vec<_> = self
             .sessions
             .iter()
@@ -1673,6 +1674,7 @@ impl AppState {
             .filter(|meta| deleted.contains(meta.id.as_str()))
             .cloned()
             .collect();
+        self.remote_children_gone(ids.iter().map(String::as_str), cx);
         for id in ids {
             if let Some(draft) = self.resident(id).filter(|active| active.holds_draft_text()) {
                 self.deleted_drafts.push(draft.meta.clone());

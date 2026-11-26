@@ -278,6 +278,9 @@ pub struct SessionMeta {
     /// The threads this one started on other machines of the group.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remote_children: Vec<crate::control::RemoteChild>,
+    /// What threads on other machines of the group asked to hear of this thread.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_watches: Vec<crate::control::RemoteWatch>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -300,6 +303,10 @@ pub struct ChildExpectation {
     /// outlive the host, and the next start sends it again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undelivered: Option<String>,
+    /// The id a lead on another machine of the group names `undelivered` by when its
+    /// harness has taken it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undelivered_id: Option<String>,
 }
 
 impl ChildExpectation {
@@ -310,6 +317,7 @@ impl ChildExpectation {
             delivered_item: None,
             reminded: false,
             undelivered: None,
+            undelivered_id: None,
         }
     }
 }
@@ -407,6 +415,12 @@ impl SessionMeta {
         self.parent_session_id.is_some() && self.native_subagent.is_none()
     }
 
+    /// A subagent its lead started, here or on another machine of the group: it owes that
+    /// lead its report.
+    pub fn has_lead(&self) -> bool {
+        self.is_dispatched() || self.remote_parent.is_some()
+    }
+
     pub fn migrate_lifecycle(&mut self) {
         if self.settled_override.is_none() && self.settled_at.is_some() {
             self.settled_override = Some(SettledOverride::Settled);
@@ -496,6 +510,7 @@ impl SessionMeta {
             control_watches: Vec::new(),
             remote_parent: None,
             remote_children: Vec::new(),
+            remote_watches: Vec::new(),
             created_at: now,
             updated_at: now,
         }

@@ -413,6 +413,7 @@ pub struct AppState {
     machine_link: Option<tcode_client::machines::MachineLink>,
     /// Projects moving to and from the other machines of the group.
     moves: machines::moves::Moves,
+    machine_work: machines::MachineWork,
     space_archives_revision: Option<u64>,
     space_archives: HashMap<String, ArchivedSessions>,
     // Archive replies remain ordered after the last subscriber releases a projection.
@@ -703,6 +704,7 @@ impl AppState {
             space_policy_revisions: HashMap::new(),
             machine_link: None,
             moves: Default::default(),
+            machine_work: Default::default(),
             space_archives_revision: None,
             space_archives: HashMap::new(),
             space_archive_revisions: HashMap::new(),

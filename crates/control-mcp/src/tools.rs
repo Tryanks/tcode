@@ -18,12 +18,20 @@ const INSTRUCTIONS: &str = "tcode_control lets you observe and operate Tcode: it
 /// What a subagent's connection adds to [`INSTRUCTIONS`].
 const SUBAGENT_INSTRUCTIONS: &str = "Another thread started you as its subagent: report this thread's final result to it with report_result; besides that it sees only your approval requests and questions, and your final message if you never report.";
 
+/// What a connection of a thread that may reach the other machines of its group adds to
+/// [`INSTRUCTIONS`].
+const MACHINES_INSTRUCTIONS: &str = "This machine is one of a group of machines: list_machines lists the others. A tool that takes machine runs on that machine when you pass its id: the thread, project and anchor ids in the call and in its answer are that machine's, and the answer names it. Cite an anchor from another machine as tcode-thread://<thread_id>@<machine_id>#<position> and a thread as tcode-thread://<thread_id>@<machine_id>; the form without @<machine_id> is always this machine's, and a link with one in a message from the user names a thread on that machine. start_thread_on_machine starts a thread there; it leaves this machine and is the user's to ask for.";
+
 /// The `instructions` a thread's connection reads.
-pub fn instructions(subagent: bool) -> String {
+pub fn instructions(subagent: bool, machines: bool) -> String {
     let mut text = format!(
         "{INSTRUCTIONS} Pass \"{}\" as the thread id wherever a tool asks about your own thread; get_thread on it answers with its id.",
         crate::OWN_THREAD
     );
+    if machines {
+        text.push(' ');
+        text.push_str(MACHINES_INSTRUCTIONS);
+    }
     if subagent {
         text.push(' ');
         text.push_str(SUBAGENT_INSTRUCTIONS);
@@ -36,6 +44,7 @@ pub struct ControlTools {
     broker: Broker,
     thread_id: String,
     subagent: bool,
+    machines: bool,
     tool_router: ToolRouter<Self>,
 }
 
@@ -57,6 +66,7 @@ impl ControlTools {
             broker,
             thread_id,
             subagent: access.subagent,
+            machines: access.machines,
             tool_router,
         }
     }
@@ -66,13 +76,26 @@ impl ControlTools {
         described(self.tool_router.list_all())
     }
 
-    /// Route one op through the broker. A call the harness cancels drops its
-    /// request, and the host stops working on it.
-    async fn run(&self, ct: &CancellationToken, mut op: ControlOp) -> CallToolResult {
-        op.name_caller(&self.thread_id);
+    async fn run(&self, ct: &CancellationToken, op: ControlOp) -> CallToolResult {
+        self.run_on(ct, None, op).await
+    }
+
+    /// Route one op, for `machine` of the group or this one, through the broker. A call the
+    /// harness cancels drops its request, and the host stops working on it.
+    async fn run_on(
+        &self,
+        ct: &CancellationToken,
+        machine: Option<String>,
+        mut op: ControlOp,
+    ) -> CallToolResult {
+        // "self" names this thread, which is on no other machine.
+        if machine.is_none() {
+            op.name_caller(&self.thread_id);
+        }
         let reply = ct.run_until_cancelled(self.broker.invoke(|reply| crate::BrokerRequest {
             thread_id: self.thread_id.clone(),
             op,
+            machine,
             reply,
         }));
         match reply.await {
@@ -88,9 +111,9 @@ impl ControlTools {
     async fn list_projects(
         &self,
         ct: CancellationToken,
-        Parameters(p): Parameters<ListProjectsParams>,
+        Parameters(OnMachine { machine, params: p }): Parameters<OnMachine<ListProjectsParams>>,
     ) -> CallToolResult {
-        self.run(&ct, ControlOp::ListProjects(p)).await
+        self.run_on(&ct, machine, ControlOp::ListProjects(p)).await
     }
 
     #[tool(
@@ -99,9 +122,9 @@ impl ControlTools {
     async fn list_threads(
         &self,
         ct: CancellationToken,
-        Parameters(p): Parameters<ListThreadsParams>,
+        Parameters(OnMachine { machine, params: p }): Parameters<OnMachine<ListThreadsParams>>,
     ) -> CallToolResult {
-        self.run(&ct, ControlOp::ListThreads(p)).await
+        self.run_on(&ct, machine, ControlOp::ListThreads(p)).await
     }
 
     #[tool(
@@ -110,9 +133,9 @@ impl ControlTools {
     async fn get_thread(
         &self,
         ct: CancellationToken,
-        Parameters(p): Parameters<GetThreadParams>,
+        Parameters(OnMachine { machine, params: p }): Parameters<OnMachine<GetThreadParams>>,
     ) -> CallToolResult {
-        self.run(&ct, ControlOp::GetThread(p)).await
+        self.run_on(&ct, machine, ControlOp::GetThread(p)).await
     }
 
     #[tool(
@@ -132,9 +155,9 @@ impl ControlTools {
     async fn outline(
         &self,
         ct: CancellationToken,
-        Parameters(p): Parameters<OutlineParams>,
+        Parameters(OnMachine { machine, params: p }): Parameters<OnMachine<OutlineParams>>,
     ) -> CallToolResult {
-        self.run(&ct, ControlOp::Outline(p)).await
+        self.run_on(&ct, machine, ControlOp::Outline(p)).await
     }
 
     #[tool(
@@ -143,9 +166,9 @@ impl ControlTools {
     async fn read(
         &self,
         ct: CancellationToken,
-        Parameters(p): Parameters<ReadParams>,
+        Parameters(OnMachine { machine, params: p }): Parameters<OnMachine<ReadParams>>,
     ) -> CallToolResult {
-        self.run(&ct, ControlOp::Read(p)).await
+        self.run_on(&ct, machine, ControlOp::Read(p)).await
     }
 
     #[tool(
@@ -154,9 +177,9 @@ impl ControlTools {
     async fn search_in_item(
         &self,
         ct: CancellationToken,
-        Parameters(p): Parameters<SearchInItemParams>,
+        Parameters(OnMachine { machine, params: p }): Parameters<OnMachine<SearchInItemParams>>,
     ) -> CallToolResult {
-        self.run(&ct, ControlOp::SearchInItem(p)).await
+        self.run_on(&ct, machine, ControlOp::SearchInItem(p)).await
     }
 
     #[tool(
@@ -198,9 +221,9 @@ impl ControlTools {
     async fn list_providers(
         &self,
         ct: CancellationToken,
-        Parameters(p): Parameters<ListProvidersParams>,
+        Parameters(OnMachine { machine, params: p }): Parameters<OnMachine<ListProvidersParams>>,
     ) -> CallToolResult {
-        self.run(&ct, ControlOp::ListProviders(p)).await
+        self.run_on(&ct, machine, ControlOp::ListProviders(p)).await
     }
 
     #[tool(
@@ -273,9 +296,9 @@ impl ControlTools {
     async fn send_message(
         &self,
         ct: CancellationToken,
-        Parameters(p): Parameters<SendMessageParams>,
+        Parameters(OnMachine { machine, params: p }): Parameters<OnMachine<SendMessageParams>>,
     ) -> CallToolResult {
-        self.run(&ct, ControlOp::SendMessage(p)).await
+        self.run_on(&ct, machine, ControlOp::SendMessage(p)).await
     }
 
     #[tool(
@@ -284,9 +307,9 @@ impl ControlTools {
     async fn control_thread(
         &self,
         ct: CancellationToken,
-        Parameters(p): Parameters<ControlThreadParams>,
+        Parameters(OnMachine { machine, params: p }): Parameters<OnMachine<ControlThreadParams>>,
     ) -> CallToolResult {
-        self.run(&ct, ControlOp::ControlThread(p)).await
+        self.run_on(&ct, machine, ControlOp::ControlThread(p)).await
     }
 
     #[tool(
@@ -339,18 +362,18 @@ impl ControlTools {
     async fn notify_when(
         &self,
         ct: CancellationToken,
-        Parameters(p): Parameters<NotifyWhenParams>,
+        Parameters(OnMachine { machine, params: p }): Parameters<OnMachine<NotifyWhenParams>>,
     ) -> CallToolResult {
-        self.run(&ct, ControlOp::NotifyWhen(p)).await
+        self.run_on(&ct, machine, ControlOp::NotifyWhen(p)).await
     }
 
     #[tool(description = "Remove watches notify_when registered, by id.")]
     async fn cancel_notify(
         &self,
         ct: CancellationToken,
-        Parameters(p): Parameters<CancelNotifyParams>,
+        Parameters(OnMachine { machine, params: p }): Parameters<OnMachine<CancelNotifyParams>>,
     ) -> CallToolResult {
-        self.run(&ct, ControlOp::CancelNotify(p)).await
+        self.run_on(&ct, machine, ControlOp::CancelNotify(p)).await
     }
 
     #[tool(
@@ -359,9 +382,9 @@ impl ControlTools {
     async fn respond_input(
         &self,
         ct: CancellationToken,
-        Parameters(p): Parameters<RespondInputParams>,
+        Parameters(OnMachine { machine, params: p }): Parameters<OnMachine<RespondInputParams>>,
     ) -> CallToolResult {
-        self.run(&ct, ControlOp::RespondInput(p)).await
+        self.run_on(&ct, machine, ControlOp::RespondInput(p)).await
     }
 
     #[tool(
@@ -370,9 +393,10 @@ impl ControlTools {
     async fn respond_approval(
         &self,
         ct: CancellationToken,
-        Parameters(p): Parameters<RespondApprovalParams>,
+        Parameters(OnMachine { machine, params: p }): Parameters<OnMachine<RespondApprovalParams>>,
     ) -> CallToolResult {
-        self.run(&ct, ControlOp::RespondApproval(p)).await
+        self.run_on(&ct, machine, ControlOp::RespondApproval(p))
+            .await
     }
 
     #[tool(
@@ -440,6 +464,28 @@ impl ControlTools {
     ) -> CallToolResult {
         self.run(&ct, ControlOp::SetModelGuide(p)).await
     }
+
+    #[tool(
+        description = "The machines of this machine's group, asked just now: each with its id (pass it as machine), name (the group's label for it, else its own name), host_name, whether it answered (reachable), whether it takes threads (accepts_threads) and projects (accepts_projects) from the group's machines, and whether it runs this machine's protocol (same_version). This machine is listed with this_machine. Reads only."
+    )]
+    async fn list_machines(
+        &self,
+        ct: CancellationToken,
+        Parameters(p): Parameters<ListMachinesParams>,
+    ) -> CallToolResult {
+        self.run(&ct, ControlOp::ListMachines(p)).await
+    }
+
+    #[tool(
+        description = "Start a new thread with a first message on another machine of this machine's group, recorded as started by this thread and never blocking you. It leaves this machine: the message goes to that machine, the thread runs on that machine's code as it is there and carries no files from here, and that machine's harnesses, models, permission defaults and Settings → Control apply, never more permissive than this thread's own permission mode. It is the user's to ask for: where their wish to run work on that machine is unclear, ask before you call. Find the machine with list_machines, its project with list_projects and what it may start with list_providers, each passing machine; the parameters are start_thread's, about that machine. By default it is an ordinary thread on that machine. With subagent: true it is this thread's subagent: an ordinary thread there, whose report_result reaches you here as a message when its turn ends, as do its approval requests and questions, which you answer with respond_approval or respond_input passing machine. Cancel or interrupt it with control_thread passing machine; while the machine cannot be reached that is kept and sent when it can. A thread running under a collaboration starts no subagent on another machine: a collaboration's members are on one machine. Attachments do not go with it. The answer names the thread, its machine and its link, tcode-thread://<thread_id>@<machine_id>. request_id makes a retry, after a failure or a restart of either machine, return the same thread."
+    )]
+    async fn start_thread_on_machine(
+        &self,
+        ct: CancellationToken,
+        Parameters(p): Parameters<StartThreadOnMachineParams>,
+    ) -> CallToolResult {
+        self.run(&ct, ControlOp::StartThreadOnMachine(p)).await
+    }
 }
 
 /// Every tool `access` offers, with the description its model reads, in name order.
@@ -471,7 +517,7 @@ impl ServerHandler for ControlTools {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::from_build_env())
-            .with_instructions(instructions(self.subagent))
+            .with_instructions(instructions(self.subagent, self.machines))
     }
 }
 

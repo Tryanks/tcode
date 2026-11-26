@@ -21,7 +21,16 @@ pub enum MachineRequest {
         from_thread_id: String,
         from_title: String,
         text: String,
-        report: bool,
+        /// The id of the report the text carries, by which a report sent again is known;
+        /// `None` for a question, an approval or a watch firing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        report: Option<String>,
+        /// What became of the subagent, when the text says it finished.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<tcode_core::control::RemoteChildState>,
+        /// The id of the watch the text is the firing of.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        watch: Option<String>,
     },
     /// The calling machine's lead took the report of this machine's child.
     ReportTaken {
@@ -99,7 +108,10 @@ impl MachineRequest {
 pub struct MachineCaller {
     pub thread_id: String,
     pub title: String,
-    /// The caller thread's permission mode as its harness reports it; opaque here.
+    /// The class of the caller thread's permission mode, as an [`agent::ApprovalClass`]
+    /// names it (`manual`, `reviewed`, `unrestricted`); `None` where the calling machine
+    /// cannot tell, as for an ACP agent's mode. A thread it starts here never runs under a
+    /// more permissive one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

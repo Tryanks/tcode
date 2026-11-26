@@ -434,6 +434,11 @@ pub use wire::{
 // thread count; CancelProjectMove carries force; MoveBlocker gains QuickChat
 // and QueuedMessages; ProjectMoveStatus carries move_id and commit_unknown;
 // Query gains MovedThread.
+// A machine's Callback carries its report's id, the child's
+// state and the watch it fires, and MachineCaller's permission_mode is the
+// class of its thread's mode; thread metadata carries remote_watches, a remote
+// child its taken report and the settled state, and a ControlWatch its
+// machine.
 pub const PROTOCOL_VERSION: u32 = 33;
 
 #[cfg(test)]

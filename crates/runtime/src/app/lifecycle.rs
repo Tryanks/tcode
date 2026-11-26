@@ -350,7 +350,7 @@ impl AppState {
                             };
                             state.record_event(&session_id, &error_event, cx);
                             let is_child = state.sessions.iter().any(|meta| {
-                                meta.id == session_id && meta.parent_session_id.is_some()
+                                meta.id == session_id && (meta.parent_session_id.is_some() || meta.remote_parent.is_some())
                             });
                             if is_child {
                                 if let Some(child) = state.resident_mut(&session_id) {

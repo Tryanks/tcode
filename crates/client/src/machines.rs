@@ -43,6 +43,7 @@ pub enum MachineCall {
 #[derive(Clone, Default)]
 pub struct MachineLink {
     serving: Arc<Mutex<Option<async_channel::Sender<MachineCall>>>>,
+    served: Arc<Mutex<Vec<async_channel::Sender<()>>>>,
 }
 
 impl MachineLink {
@@ -56,6 +57,29 @@ impl MachineLink {
     pub fn serve(&self) -> async_channel::Receiver<MachineCall> {
         let (sender, receiver) = async_channel::unbounded();
         *self.serving.lock().unwrap() = Some(sender);
+        self.served
+            .lock()
+            .unwrap()
+            .retain(|served| served.try_send(()).is_ok() || !served.is_closed());
+        receiver
+    }
+
+    /// Hears once each time something starts serving this link, and at once
+    /// when something serves it now: when what this machine could not send
+    /// its group may go.
+    pub fn serves(&self) -> async_channel::Receiver<()> {
+        let (sender, receiver) = async_channel::unbounded();
+        let mut served = self.served.lock().unwrap();
+        if self
+            .serving
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|serving| !serving.is_closed())
+        {
+            let _ = sender.try_send(());
+        }
+        served.push(sender);
         receiver
     }
 

@@ -807,7 +807,7 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
     let op = |state: &TestEntity, cx: &mut TestAppContext, op| {
         let (reply, response) = smol::channel::bounded(1);
         state.update(cx, |state, cx| {
-            state.handle_control_op("lead".into(), op, reply, cx)
+            state.handle_control_call("lead".into(), op, None, reply, cx)
         });
         cx.run_until_recv(&response)
     };

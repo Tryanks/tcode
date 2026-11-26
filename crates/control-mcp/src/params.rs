@@ -75,6 +75,21 @@ pub enum ItemKind {
 
 const SCOPE: &str = "Which projects the call covers: the caller's own (project), named ones ({\"projects\": [ids]}) or the whole host (host). Omit for the caller's own project.";
 
+const MACHINE: &str = "Another machine of this machine's group, by the id list_machines gives, to run the call there: the thread, project and anchor ids it names are that machine's, and the answer names the machine. Omit for this machine.";
+
+/// A tool's parameters with the machine of the group the call is for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct OnMachine<P> {
+    #[serde(default)]
+    #[schemars(description = MACHINE)]
+    pub machine: Option<String>,
+    #[serde(flatten)]
+    pub params: P,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ListMachinesParams {}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ListProjectsParams {}
 
@@ -399,6 +414,85 @@ pub struct StartThreadParams {
         description = "Idempotency key, stored on the thread: a retry after a failure or restart returns the same thread."
     )]
     pub request_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct StartThreadOnMachineParams {
+    #[schemars(
+        description = "The machine of the group to start it on, by the id list_machines gives."
+    )]
+    pub machine: String,
+    #[schemars(
+        description = "A project on that machine, as list_projects with that machine lists it."
+    )]
+    pub project_id: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Working directory relative to the project root on that machine, inside it; default the root."
+    )]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "local (the checkout) or worktree, as for start_thread: worktree only for a subagent; omitted, a subagent follows that machine's subagent worktree isolation."
+    )]
+    pub workspace: Option<Workspace>,
+    #[serde(default)]
+    #[schemars(
+        description = "Start the thread as this thread's subagent (default false): its report_result, approval requests and questions reach you as messages here; it is an ordinary thread on that machine."
+    )]
+    pub subagent: Option<bool>,
+    #[schemars(
+        description = "Provider name as list_providers with that machine lists it, for example claude, codex or acp."
+    )]
+    pub provider: String,
+    #[serde(default)]
+    #[schemars(description = "Installed ACP agent id on that machine; only when provider is acp.")]
+    pub acp_agent: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Model id from list_providers with that machine; omit for the provider's default. Refused when provider is acp."
+    )]
+    pub model: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Provider profile id from list_providers with that machine.")]
+    pub profile: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Provider option id → value, as list_providers with that machine describes them; never the permission mode."
+    )]
+    pub options: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default)]
+    #[schemars(description = "Thread title; omit to let that machine title it.")]
+    pub title: Option<String>,
+    #[schemars(
+        description = "The first message of the thread, sent as from this thread (origin agent)."
+    )]
+    pub message: String,
+    #[schemars(
+        description = "Idempotency key: a retry with the same key returns the same thread and starts nothing."
+    )]
+    pub request_id: String,
+}
+
+impl StartThreadOnMachineParams {
+    /// What the other machine's `start_thread` is asked.
+    pub fn start_thread(self) -> StartThreadParams {
+        StartThreadParams {
+            project_id: Some(self.project_id),
+            cwd: self.cwd,
+            workspace: self.workspace,
+            subagent: self.subagent,
+            provider: self.provider,
+            acp_agent: self.acp_agent,
+            model: self.model,
+            profile: self.profile,
+            options: self.options,
+            title: self.title,
+            message: self.message,
+            attachments: None,
+            request_id: self.request_id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

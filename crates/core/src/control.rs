@@ -219,6 +219,14 @@ pub struct RemoteChild {
     /// What this machine still has to tell the other one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<RemoteChildOp>,
+    /// The id of the child's report the lead's harness took last, so the same report sent
+    /// again is known as taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_taken: Option<String>,
+    /// The other machine has not yet heard that `report_taken` was taken, and keeps the
+    /// report until it does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub report_taken_unsent: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,6 +236,8 @@ pub enum RemoteChildState {
     Reported,
     Failed,
     Cancelled,
+    /// Its lead settled it.
+    Settled,
     /// The machine left the group.
     MachineLeft,
 }
@@ -235,8 +245,23 @@ pub enum RemoteChildState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteChildOp {
+    Interrupt,
     Cancel,
     Settle,
+}
+
+/// A wake a thread on another machine of the group asked for on this thread's events, kept
+/// on this thread. It fires once, and its firing is kept until that machine has it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteWatch {
+    pub id: String,
+    pub machine: String,
+    /// The watching thread, on `machine`.
+    pub thread_id: String,
+    pub events: BTreeSet<WatchEvent>,
+    /// The message its firing sends, until `machine` has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fired: Option<String>,
 }
 
 #[derive(
@@ -273,6 +298,9 @@ pub struct ControlWatch {
     /// that space's policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space: Option<String>,
+    /// The machine of the group `thread_ids` are on, when it is not this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
 }
 
 /// The semantic keys a [`ControlAction`] records, shared by the host that writes them and the

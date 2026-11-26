@@ -47,11 +47,13 @@ pub struct QueuedMessage {
 
 /// A child's report callback on its way to the lead: the child's
 /// [`tcode_core::project::ChildExpectation::undelivered`] clears once the lead's
-/// provider takes this text.
+/// provider takes this text. A child on another machine of the group hears of it there.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ReportHandover {
     pub(super) child: String,
     pub(super) text: String,
+    /// The child's machine and the report's id, for a child on another machine.
+    pub(super) remote: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
