@@ -272,8 +272,15 @@ impl TimelineView {
                         cx,
                     ));
                 }
-                Segment::Warnings(warnings) => {
-                    column = column.child(self.compose_warnings(index, warnings[0], cx));
+                Segment::Warning(entry) => {
+                    let EntryContent::Warning { message } = &entry.content else {
+                        unreachable!();
+                    };
+                    column = column.child(components::notices::alert_line(
+                        format!("warning-{}", entry.id),
+                        message.clone(),
+                        cx,
+                    ));
                 }
                 Segment::Error(entry) => {
                     let harness = self

@@ -561,16 +561,14 @@ fn alert_mark(cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// A line that opens on the full text it summarizes: the turn's warnings,
-/// or the thread's unreadable records.
+/// A line that opens on the full text it summarizes: the thread's
+/// unreadable records.
 pub(crate) struct Expandable<'a> {
     pub(crate) key: &'a str,
     pub(crate) label: String,
     /// Each text the line opens on, as given.
     pub(crate) texts: Vec<String>,
     pub(crate) expanded: bool,
-    /// Drawn as a banner across the column rather than a bare line.
-    pub(crate) banner: bool,
 }
 
 /// An [`Expandable`] in amber, led by the warning mark.
@@ -584,7 +582,6 @@ pub(crate) fn expandable_alert(
         label,
         texts,
         expanded,
-        banner,
     } = line;
     let key = key.to_owned();
     let motion = motion.clone();
@@ -607,12 +604,10 @@ pub(crate) fn expandable_alert(
         .cursor_pointer()
         .text_token(&cx.theme().tokens.typography.xs)
         .text_color(warning)
-        .when(banner, |row| {
-            row.px(px(11.))
-                .py(px(7.))
-                .rounded(radius)
-                .bg(warning.opacity(0.09))
-        })
+        .px(px(11.))
+        .py(px(7.))
+        .rounded(radius)
+        .bg(warning.opacity(0.09))
         .on_click(on_toggle)
         .child(Icon::new(IconName::TriangleAlert).xsmall())
         .child(
@@ -647,7 +642,7 @@ pub(crate) fn expandable_alert(
                             v_flex()
                                 .w_full()
                                 .gap_1()
-                                .pl(px(if banner { 31. } else { 20. }))
+                                .pl(px(31.))
                                 .text_token(&cx.theme().tokens.typography.xs)
                                 .text_color(cx.theme().muted_foreground)
                                 .children(

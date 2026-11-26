@@ -1,8 +1,8 @@
 //! The notices the timeline draws from more than the row they stand in: a
 //! change of model, a handoff to another harness, what Tcode or another
-//! thread sent this thread's model, the turn's warnings, other threads'
-//! actions, the thread's unreadable records, a message's settings, and the
-//! rewind of a message that failed.
+//! thread sent this thread's model, other threads' actions, the thread's
+//! unreadable records, a message's settings, and the rewind of a message
+//! that failed.
 use super::*;
 use crate::chat::components::notices::{self, Capsule, Expandable, MessageTag, Sender};
 use crate::chat::model::{message_tags, one_line, standing_rewind_failure};
@@ -118,55 +118,6 @@ impl TimelineView {
             .flatten()
     }
 
-    /// The turn's warnings as one amber line, drawn where the first stands,
-    /// opening on each in full.
-    pub(super) fn compose_warnings(
-        &self,
-        turn: usize,
-        first: &TimelineEntry,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let messages = self
-            .turn_entries(
-                turn,
-                |entries| {
-                    entries
-                        .iter()
-                        .filter_map(|entry| match &entry.content {
-                            EntryContent::Warning { message } => Some(message.clone()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                },
-                cx,
-            )
-            .unwrap_or_default();
-        let said = messages
-            .iter()
-            .map(|message| one_line(message))
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let label = if messages.len() == 1 {
-            crate::tr!("chat.warning_one", warnings = said)
-        } else {
-            crate::tr!("chat.warnings", count = messages.len(), warnings = said)
-        }
-        .into_owned();
-        let key = format!("warnings-{}", first.id);
-        let toggle_key = key.clone();
-        notices::expandable_alert(
-            Expandable {
-                key: &key,
-                label,
-                texts: messages,
-                expanded: self.expanded.contains(&key),
-                banner: false,
-            },
-            cx.listener(move |this, _, _, cx| this.toggle_expanded(turn, &toggle_key, cx)),
-            &self.motion,
-        )
-    }
-
     /// A run of one other thread's actions on this thread's run: who, which
     /// opens it, and what it did, each action told once with how often.
     pub(super) fn compose_control_actions(
@@ -251,7 +202,6 @@ impl TimelineView {
                 .into_owned(),
                 texts: lines,
                 expanded: self.expanded.contains(UNREADABLE_KEY),
-                banner: true,
             },
             cx.listener(move |this, _, _, cx| this.toggle_expanded(turn, UNREADABLE_KEY, cx)),
             &self.motion,

@@ -380,12 +380,6 @@ fn index_rows_from(
                         expanded.contains(&key).hash(&mut content);
                     }
                 }
-                // The turn's first warning draws every warning of the turn.
-                if let Some(Segment::Warnings(warnings)) = segmented.flow.get(segment) {
-                    for warning in warnings {
-                        hash_entry_shape(&warning.content, &mut content);
-                    }
-                }
                 if shape_range.is_empty() {
                     // An empty turn's only row has no entry to be known by.
                     ("empty-turn", index).hash(&mut identity);

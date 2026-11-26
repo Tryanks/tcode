@@ -58,9 +58,8 @@ pub(crate) enum Segment<'a> {
     /// A request the harness tries again, in its words for the latest
     /// attempt.
     RequestRetry(&'a TimelineEntry),
-    /// The turn's warnings of the harness, at the first; the rest are in no
-    /// segment's range.
-    Warnings(Vec<&'a TimelineEntry>),
+    /// A warning of the harness, in its words.
+    Warning(&'a TimelineEntry),
     /// A record too large to send here, kept on the host.
     Withheld(&'a TimelineEntry),
 }
@@ -371,24 +370,7 @@ pub(crate) fn segment_entries<'a>(
                 single(&mut segments, &mut ranges, Segment::RequestRetry(entry));
             }
             EntryContent::Warning { .. } => {
-                flush_activities(
-                    &mut segments,
-                    &mut ranges,
-                    &mut activities,
-                    &mut run_start,
-                    index,
-                );
-                // A later warning joins the turn's first, out of every range:
-                // a row re-segmenting its own entries never meets it alone.
-                if let Some(Segment::Warnings(warnings)) = segments
-                    .iter_mut()
-                    .find(|segment| matches!(segment, Segment::Warnings(_)))
-                {
-                    warnings.push(entry);
-                } else {
-                    segments.push(Segment::Warnings(vec![entry]));
-                    ranges.push(index..index + 1);
-                }
+                single(&mut segments, &mut ranges, Segment::Warning(entry));
             }
             // The thread's banner tells them, once.
             EntryContent::Unreadable { .. } => {}
@@ -1322,9 +1304,10 @@ pub(in crate::chat) mod tests {
                 MessageTag::ContextWindow(1_000_000)
             ]
         );
-        // A turn's warnings are one line where the first stands; a retried
-        // request is a line of its own where it happened, while the turn
-        // runs and after, never an activity of a Work Log.
+        // What the harness says of the thread as it goes, a warning or a
+        // request it tries again, is a line of its own where it was said,
+        // while the turn runs and after: never joined to another's place,
+        // never an activity of a Work Log.
         let warning = |id: &str| entry(id, EntryContent::Warning { message: id.into() });
         let entries = [
             warning("first"),
@@ -1343,16 +1326,17 @@ pub(in crate::chat) mod tests {
             assert!(matches!(
                 segmented.flow.as_slice(),
                 [
-                    Segment::Warnings(warnings),
+                    Segment::Warning(first),
                     Segment::RequestRetry(retry),
                     Segment::ActivityRun(run),
+                    Segment::Warning(second),
                     Segment::Assistant(_)
-                ] if warnings.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
-                    == ["first", "second"]
+                ] if first.id == "first"
                     && retry.id == "retry"
                     && run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>() == ["cmd"]
+                    && second.id == "second"
             ));
-            assert_eq!(segmented.ranges, vec![0..1, 1..2, 2..3, 4..5]);
+            assert_eq!(segmented.ranges, vec![0..1, 1..2, 2..3, 3..4, 4..5]);
         }
         let image = |id: &str| {
             entry(
