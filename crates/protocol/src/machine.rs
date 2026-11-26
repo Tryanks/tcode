@@ -173,6 +173,9 @@ pub struct ProjectMovePreview {
 pub enum MoveBlocker {
     /// The project holds the quick chats, which stay with their machine.
     QuickChat,
+    /// The project's folder lies inside a larger repository: its history and its threads'
+    /// worktrees belong to that repository, which is not this project's to move.
+    InsideRepository,
     ThreadsRunning(u32),
     /// Approvals and questions waiting for an answer.
     PendingApprovals(u32),
