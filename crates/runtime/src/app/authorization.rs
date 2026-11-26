@@ -616,6 +616,7 @@ impl AppState {
                 | Query::ScanExternalHistory
                 | Query::Machine(_)
                 | Query::ProjectMovePreview { .. }
+                | Query::MovedThread { .. }
                 | Query::BrowseDirectories { .. } => Err(refusal("query")),
             },
         }
@@ -750,6 +751,7 @@ fn authorize_viewer(payload: &ClientPayload) -> Result<(), ProtocolError> {
             | Query::ControlActivity { .. }
             | Query::CollaborationTemplates
             | Query::NativeMcpServers { .. }
+            | Query::MovedThread { .. }
             | Query::PullRequest { .. } => Ok(()),
             // Each of these writes, runs a model, is another principal's, or walks the
             // machine's folders for a dialog that adds or changes something.

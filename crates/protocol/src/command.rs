@@ -533,8 +533,12 @@ pub enum Command {
         include_ignored: bool,
     },
     /// Stop a project's move before it is committed on the other machine.
+    /// With `force` the move ends here whatever the other machine did with
+    /// it, which may then hold the project too.
     CancelProjectMove {
         project_id: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
     },
     MarkSessionUnread {
         session_id: String,

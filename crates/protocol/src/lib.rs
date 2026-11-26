@@ -429,7 +429,11 @@ pub use wire::{
 // the ControlMachines patch. The agent event stream and the timeline gain
 // thread_moved. The native transport gains the machine stream (the machine
 // line and its machine_reply), the closed hello rejection and close code 5,
-// access changed.
+// access changed. Moving projects: MachineRequest gains MovePreflight (with
+// MachineResponse::MovePreflight) and MoveBegin carries thread_ids for its
+// thread count; CancelProjectMove carries force; MoveBlocker gains QuickChat
+// and QueuedMessages; ProjectMoveStatus carries move_id and commit_unknown;
+// Query gains MovedThread.
 pub const PROTOCOL_VERSION: u32 = 33;
 
 #[cfg(test)]

@@ -30,6 +30,10 @@ impl AppState {
 
     /// Spawn a provider for either the foreground session or a parked child.
     pub(super) fn ensure_session_started(&mut self, session_id: &str, cx: &mut HostCx) {
+        // Nothing works in a thread whose project is moving away.
+        if self.thread_moving(session_id) {
+            return;
+        }
         let idle = self
             .residents
             .live

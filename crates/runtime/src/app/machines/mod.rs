@@ -4,7 +4,10 @@
 //! the machine is a member and that this machine's switches take the kind of
 //! request; requests go out through the [`MachineLink`] the composition root
 //! gave the host.
-mod moves;
+mod arrivals;
+#[cfg(test)]
+mod move_tests;
+pub(crate) mod moves;
 mod threads;
 
 use tcode_client::machines::{MachineLink, NO_GROUP};
@@ -51,7 +54,8 @@ impl AppState {
             request @ (MachineRequest::Callback { .. } | MachineRequest::ReportTaken { .. }) => {
                 self.machine_reply(peer, request, cx)
             }
-            request @ (MachineRequest::MoveBegin { .. }
+            request @ (MachineRequest::MovePreflight { .. }
+            | MachineRequest::MoveBegin { .. }
             | MachineRequest::MoveChunk { .. }
             | MachineRequest::MoveCommit { .. }
             | MachineRequest::MoveAbort { .. }

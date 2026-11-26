@@ -27,12 +27,24 @@ pub enum MachineRequest {
     ReportTaken {
         child_thread_id: String,
     },
+    /// Whether a project called `project_name` with these threads could
+    /// move here, to `root` when one is given; answered with
+    /// [`MachineResponse::MovePreflight`], or refused as `MoveBegin` would
+    /// refuse it.
+    MovePreflight {
+        project_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        thread_ids: Vec<String>,
+    },
+    /// Stage a move here: the threads it brings, by id, so one this machine
+    /// already has is refused before any bytes, and the parts it sends.
     MoveBegin {
         move_id: String,
         project_name: String,
         root: String,
         git: bool,
-        threads: u32,
+        thread_ids: Vec<String>,
         parts: Vec<MovePart>,
     },
     MoveChunk {
@@ -72,7 +84,8 @@ impl MachineRequest {
             Self::Ping => MachineRequestKind::Ping,
             Self::Control { .. } => MachineRequestKind::Thread,
             Self::Callback { .. } | Self::ReportTaken { .. } => MachineRequestKind::Reply,
-            Self::MoveBegin { .. }
+            Self::MovePreflight { .. }
+            | Self::MoveBegin { .. }
             | Self::MoveChunk { .. }
             | Self::MoveCommit { .. }
             | Self::MoveAbort { .. }
@@ -109,6 +122,11 @@ pub enum MachineResponse {
     },
     Control(serde_json::Value),
     Done,
+    MovePreflight {
+        /// Where the project would go here: this machine's folder for new
+        /// projects joined with the project's name, made unique.
+        default_root: String,
+    },
     /// The bytes already staged of each part, for a move that resumes.
     MoveBegun {
         received: Vec<(String, u64)>,
@@ -153,10 +171,17 @@ pub struct ProjectMovePreview {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum MoveBlocker {
+    /// The project holds the quick chats, which stay with their machine.
+    QuickChat,
     ThreadsRunning(u32),
+    /// Approvals and questions waiting for an answer.
     PendingApprovals(u32),
+    /// Threads with messages queued.
+    QueuedMessages(u32),
     TerminalsOpen(u32),
-    MergeInProgress { path: String },
+    MergeInProgress {
+        path: String,
+    },
     TargetRefuses,
     TargetUnreachable,
     TargetVersion,
@@ -166,11 +191,18 @@ pub enum MoveBlocker {
 /// [`crate::Topic::ProjectMoves`] lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectMoveStatus {
+    pub move_id: String,
     pub project_id: String,
     pub machine: String,
     pub phase: MovePhase,
+    /// Bytes the other machine holds of all the parts, and their sum; both 0
+    /// while the parts are being built.
     pub done: u64,
     pub total: u64,
+    /// The commit was sent and its outcome is not known yet: the move can
+    /// only be cancelled with `force`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub commit_unknown: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

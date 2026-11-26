@@ -383,7 +383,10 @@ impl AppState {
     /// Why `target` is closed to `caller`, or its meta when it is open.
     fn check_target(&self, caller: &Caller, target: &str) -> Result<SessionMeta, TargetRefusal> {
         let Some(meta) = self.find_meta(target) else {
-            return Err(TargetRefusal::Unknown);
+            return Err(match self.moved_thread_machine(target) {
+                Some(machine) => TargetRefusal::Moved(machine.to_owned()),
+                None => TargetRefusal::Unknown,
+            });
         };
         if !self.open_to(caller, &meta) {
             return Err(TargetRefusal::OutsideSpace);
@@ -540,12 +543,17 @@ impl AppState {
 enum TargetRefusal {
     Unknown,
     OutsideSpace,
+    /// The thread moved with its project to this machine of the group.
+    Moved(String),
 }
 
 impl TargetRefusal {
     fn whole_call(&self, target: &str) -> String {
         match self {
             Self::Unknown => format!("unknown thread: {target}"),
+            Self::Moved(machine) => {
+                format!("thread {target} moved to machine {machine} of the group")
+            }
             Self::OutsideSpace => {
                 format!("refused: thread {target} is outside the space this turn runs in")
             }
@@ -555,6 +563,7 @@ impl TargetRefusal {
     fn per_item(&self) -> String {
         match self {
             Self::Unknown => "unknown_thread".to_owned(),
+            Self::Moved(machine) => format!("thread_moved: to machine {machine}"),
             Self::OutsideSpace => "outside_space: this turn runs in a space".to_owned(),
         }
     }

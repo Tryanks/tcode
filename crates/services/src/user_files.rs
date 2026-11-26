@@ -26,6 +26,13 @@ pub fn attachment_dir(data_root: &Path, session_id: &str) -> PathBuf {
     attachments_root(data_root).join(session_id)
 }
 
+/// Where a thread's record of what its sessions wrote, as their agent
+/// reported it, is kept ([`agent::write_journal`]): in Tcode's data, never the
+/// workspace.
+pub fn write_journal_dir(data_root: &Path, session_id: &str) -> PathBuf {
+    data_root.join("write-journals").join(session_id)
+}
+
 /// The directory every session's attachment directory lives under; a client
 /// may only save attachments below it.
 pub fn attachments_root(data_root: &Path) -> PathBuf {

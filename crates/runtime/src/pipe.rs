@@ -296,6 +296,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             state.set_provider_launcher(services.provider_launcher);
             state.attach_machine_link(services.machines.take());
             let mut cx = HostCx::new(mailbox_tx, event_tx, services.clock.clone());
+            state.resume_project_moves(&mut cx);
             state.pump_pull_request_requests(services.pull_requests.take(), &mut cx);
             state.start_pull_request_workers(&mut cx);
             state.pump_control_requests(&mut cx);
@@ -1087,15 +1088,16 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             root,
             include_ignored,
         } => {
-            if let Err(error) = app.move_project(&project_id, &machine, &root, include_ignored, cx)
-            {
-                return CommandOutcome::Immediate(Err(error));
-            }
+            let task = app.move_project(&project_id, &machine, &root, include_ignored, cx);
+            return CommandOutcome::Pending(
+                cx.spawn_background(async move { task.await.map(|()| CommandResponse::Unit) }),
+            );
         }
-        Command::CancelProjectMove { project_id } => {
-            if let Err(error) = app.cancel_project_move(&project_id, cx) {
-                return CommandOutcome::Immediate(Err(error));
-            }
+        Command::CancelProjectMove { project_id, force } => {
+            let task = app.cancel_project_move(&project_id, force, cx);
+            return CommandOutcome::Pending(
+                cx.spawn_background(async move { task.await.map(|()| CommandResponse::Unit) }),
+            );
         }
         Command::MarkSessionUnread { session_id } => app.mark_session_unread(&session_id, cx),
         Command::MarkSessionRead {
@@ -1701,6 +1703,10 @@ fn dispatch_query(
         } => {
             let task = app.project_move_preview(&project_id, &machine, cx);
             cx.spawn_background(async move { task.await.map(QueryResponse::ProjectMovePreview) })
+        }
+        Query::MovedThread { thread_id } => {
+            let machine = app.moved_thread_machine(&thread_id).map(str::to_owned);
+            cx.spawn_background(async move { Ok(QueryResponse::MovedThread(machine)) })
         }
     }
 }

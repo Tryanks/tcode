@@ -35,6 +35,7 @@ mod compact;
 mod db;
 mod log_read;
 mod migrate;
+mod moves;
 mod moving;
 mod projection;
 mod relocate;
@@ -302,6 +303,22 @@ enum Op {
     RemoveSession(String),
     RemoveProject(String),
     KeepWorktree(PathBuf),
+    /// A thread's log replaced by the lines of a staged file.
+    ImportEventLog {
+        session_id: String,
+        path: PathBuf,
+    },
+    Move(MoveOp),
+}
+
+/// A change to what the store keeps of moving projects ([`moves`]).
+#[derive(Debug, Clone)]
+enum MoveOp {
+    PutRecord { id: String, body: Vec<u8> },
+    RemoveRecord(String),
+    Arrived { id: String, project_id: String },
+    Redirect { id: String, machine: String },
+    ClearRedirect(String),
 }
 
 impl Mutation {
@@ -404,6 +421,50 @@ impl Mutation {
         Self(Op::KeepWorktree(path.to_owned()))
     }
 
+    /// Replace a session's whole event log with the lines of the file at
+    /// `path`, kept exactly and read as the transaction commits.
+    pub fn import_event_log(session_id: &str, path: &Path) -> Self {
+        Self(Op::ImportEventLog {
+            session_id: session_id.to_owned(),
+            path: path.to_owned(),
+        })
+    }
+
+    /// Keep `body` as the journal record of the move `id` leaving this machine.
+    pub fn put_move_record(id: &str, body: Vec<u8>) -> Self {
+        Self(Op::Move(MoveOp::PutRecord {
+            id: id.to_owned(),
+            body,
+        }))
+    }
+
+    /// The move `id` leaving this machine has ended.
+    pub fn remove_move_record(id: &str) -> Self {
+        Self(Op::Move(MoveOp::RemoveRecord(id.to_owned())))
+    }
+
+    /// The move `id` arrived here as `project_id`; a second arrival of it fails
+    /// the transaction.
+    pub fn record_move_in(id: &str, project_id: &str) -> Self {
+        Self(Op::Move(MoveOp::Arrived {
+            id: id.to_owned(),
+            project_id: project_id.to_owned(),
+        }))
+    }
+
+    /// The thread `id` moved to `machine`.
+    pub fn redirect_thread(id: &str, machine: &str) -> Self {
+        Self(Op::Move(MoveOp::Redirect {
+            id: id.to_owned(),
+            machine: machine.to_owned(),
+        }))
+    }
+
+    /// The thread `id` is here again.
+    pub fn clear_redirect(id: &str) -> Self {
+        Self(Op::Move(MoveOp::ClearRedirect(id.to_owned())))
+    }
+
     /// Approximate bytes this change writes, for bounding a batch.
     pub fn payload_len(&self) -> usize {
         match &self.0 {
@@ -418,15 +479,16 @@ impl Mutation {
     /// The session whose event log this change rewrites, if any.
     fn event_log(&self) -> Option<&str> {
         match &self.0 {
-            Op::AppendEvent { session_id, .. } | Op::ReplaceEventLog { session_id, .. } => {
-                Some(session_id)
-            }
+            Op::AppendEvent { session_id, .. }
+            | Op::ReplaceEventLog { session_id, .. }
+            | Op::ImportEventLog { session_id, .. } => Some(session_id),
             Op::CloneEvents { dst, .. } => Some(dst),
             Op::RemoveSession(id) => Some(id),
             Op::UpsertMeta(_)
             | Op::UpsertProject(_)
             | Op::RemoveProject(_)
-            | Op::KeepWorktree(_) => None,
+            | Op::KeepWorktree(_)
+            | Op::Move(_) => None,
         }
     }
 }
@@ -1206,6 +1268,7 @@ fn open_live(root: &Path, previous: Option<&Path>, ownership: File) -> io::Resul
         turn_index::create_tables(db, connection)?;
         search::create_tables(db, connection)?;
         activity::create_table(db, connection)?;
+        moves::create_tables(db, connection)?;
         projection::create_cache(db, connection)
     })?;
     let codec = moving::load_codec(&db)?;
@@ -1535,6 +1598,10 @@ fn apply_op(
                 (path.to_string_lossy().as_ref(),),
             )?;
         }
+        Op::ImportEventLog { session_id, path } => {
+            moves::import_event_log(st, connection, encoder, session_id, path)?;
+        }
+        Op::Move(op) => moves::apply(st, connection, op)?,
     }
     Ok(())
 }

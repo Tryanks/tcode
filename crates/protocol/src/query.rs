@@ -215,6 +215,11 @@ pub enum Query {
         project_id: String,
         machine: String,
     },
+    /// The machine of the group a thread that was here moved to, with its
+    /// project; `None` for a thread that never moved away.
+    MovedThread {
+        thread_id: String,
+    },
 }
 
 /// The widest the host renders command output: a client asks for any width up
@@ -293,6 +298,7 @@ pub enum QueryResponse {
     },
     Machine(crate::MachineResponse),
     ProjectMovePreview(crate::ProjectMovePreview),
+    MovedThread(Option<String>),
 }
 
 /// A content search's matches, and the sessions it could not search.

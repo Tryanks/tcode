@@ -35,6 +35,9 @@ impl AppState {
             code: code.into(),
             message: message.into(),
         };
+        if let Some(refused) = self.move_refusal(command) {
+            return Err(refused);
+        }
         self.validate_plugin_command(command)?;
         if let Command::RegenerateSessionTitle { session_id } = command
             && let Some(thread) = self.sessions.iter().find(|meta| &meta.id == session_id)
