@@ -382,8 +382,7 @@ impl AppState {
             let (link, project, threads) = prepared?;
             let checkouts = {
                 let (root, threads) = (project.root.clone(), threads.clone());
-                host.unblock(move || interrupted_checkouts(&root, &threads))
-                    .await
+                host.unblock(move || code_blockers(&root, &threads)).await
             };
             blocked(checkouts)?;
             let thread_ids: Vec<String> = threads.iter().map(|meta| meta.id.clone()).collect();
@@ -829,9 +828,13 @@ fn blocked(blockers: Vec<MoveBlocker>) -> Result<(), ProtocolError> {
     ))
 }
 
-/// The checkouts of the project that are mid-merge or mid-rebase, or have
-/// unmerged entries.
-fn interrupted_checkouts(root: &std::path::Path, threads: &[SessionMeta]) -> Vec<MoveBlocker> {
+/// What stands in the way of moving the code at `root`: a root inside a
+/// larger repository, or checkouts of the project that are mid-merge or
+/// mid-rebase, or have unmerged entries.
+fn code_blockers(root: &std::path::Path, threads: &[SessionMeta]) -> Vec<MoveBlocker> {
+    if disk::inside_larger_repository(root) {
+        return vec![MoveBlocker::InsideRepository];
+    }
     if !disk::is_git_project(root) {
         return Vec::new();
     }
@@ -861,6 +864,7 @@ fn code_preview(root: &std::path::Path, threads: &[SessionMeta]) -> Result<CodeP
     if !disk::is_git_project(root) {
         return Ok(CodePreview {
             bytes: directory_bytes(root),
+            blockers: code_blockers(root, threads),
             ..CodePreview::default()
         });
     }
@@ -869,7 +873,7 @@ fn code_preview(root: &std::path::Path, threads: &[SessionMeta]) -> Result<CodeP
         git: true,
         branches: disk::git::branch_count(root)?,
         bytes: disk::git::object_bytes(root)?,
-        blockers: interrupted_checkouts(root, threads),
+        blockers: code_blockers(root, threads),
         ..CodePreview::default()
     };
     for (_, path) in &checkouts {

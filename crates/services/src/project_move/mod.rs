@@ -212,6 +212,13 @@ pub fn is_git_project(root: &Path) -> bool {
     git::is_checkout_root(root)
 }
 
+/// Whether `root` lies inside a Git work tree without being its top level:
+/// its history and its threads' worktrees belong to a repository larger than
+/// the project, which a move does not take.
+pub fn inside_larger_repository(root: &Path) -> bool {
+    crate::git::is_git_repo(root).unwrap_or(false) && !git::is_checkout_root(root)
+}
+
 /// The files `.worktreeinclude` selects in each checkout, by checkout.
 pub fn ignored_files(
     checkouts: &[(CheckoutKind, PathBuf)],
