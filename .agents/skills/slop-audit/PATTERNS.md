@@ -341,6 +341,46 @@ the windows that draw its calls):
   lead and so itself; what a rule incidentally holds up is found before it
   goes.
 
+From the round over machine groups (#1199, the pull request's diff only):
+
+- **A host's verdict rebuilt for a thread elsewhere**: the host gave no agent
+  status for a thread another machine started, so the window rebuilt the
+  host's precedence from activity flags; the copy had already lost
+  *Interrupted*. The host now reports it.
+- **An outcome inferred from a disappearance**: how a move ended was worked
+  out from an entry leaving a list, the index and the last phase seen. A move
+  that ended while the client was away stayed "departing" for good. The host
+  says how each move ended.
+- **A command overloaded, with made-up arguments**: starting a move was reused
+  to resume one, so Try again sent an empty path and a `false` the host
+  ignored. Resuming is its own command.
+- **A fallback that moves the work**: a thread whose worktree was not carried
+  arrived at the project's root and continued there. It is a reason the move
+  cannot start.
+- **A field written and never read**, filled by a lookup ending in
+  `unwrap_or_default()`, so a thread's stored log could name an empty machine.
+- **Closing whatever is on top**: a dialog closed "the topmost dialog" when
+  its move ended, trusting a mark cleared by `on_close`, which the alert's
+  footer Cancel never calls. The question is asked inside the view now.
+- **A copy of a switch's effective value**: the settings page drew
+  `operate && switch`, the rule the host applies to what it announces. The
+  host reports what is in effect.
+- **Text the host wrote, split again by the window**: `thread@machine` was
+  rewritten into a callback header by one crate and cut apart by another. The
+  module that owns the header format writes and reads it.
+- **A router standing in for the transport** while the same file's last test
+  already ran two real hosts over real endpoints. The tests moved to the real
+  peer; one now waits out the transport's 20-second dial to a stopped machine,
+  the only real proof that a kept cancel reaches it later.
+- **A race turned into a step the test decides**: a 48 MB transfer the test
+  had to interrupt in time became a commit the target refuses (a folder
+  planted where an attachment lands) and a staged file cut to half, which is
+  what an interrupted send leaves. Each test went from 6–17 s to about 2.
+- **A permission ceiling of Tcode's own between machines**: a thread started
+  from another machine was held to its starter's permission class. Deleted
+  under the `tcode_control` ruling below; admission between machines stays
+  (Principle 5).
+
 ## What the audit did wrong
 
 - **It added tests by symptom before finding the contract's owner** (#1096).
@@ -428,6 +468,18 @@ the windows that draw its calls):
   judged and brought to the bar, and what it meets beyond the diff is listed
   for a later round, not changed.
 
+- **Two lanes shared a test harness, and one pruned what the other used.**
+  The move lane deleted the stop and restart of a machine's endpoint once its
+  own tests no longer needed them; the dispatch lane had just started using
+  them. Taking the lanes in one by one with the workspace built after each
+  caught it. A shared test file belongs to one lane, and the others list what
+  they need from it.
+- **A lane's change failed a test elsewhere, and the cause was the change.**
+  A query failure now raised a warning; on a cold start a dropped link failed
+  that query, so the user would be warned about a thread they never asked
+  for. The test's window had no root for the warning, which is how it showed.
+  It was not the driver.
+
 ## Families beyond the defence
 
 Named by the maintainer, not yet inventoried:
@@ -473,6 +525,25 @@ What is known without an inventory:
   recorded consent, and such an account's config directory is one the user
   never opened interactively. Kept; the maintainer was unsure, and a run
   comparing both seeds has not been done.
+
+- **Admission between the machines of a group**: a member is admitted on
+  `tcode/1` under its machine key; every request passes the protocol version
+  and this machine's switches by kind; on the target a machine reaches only
+  the threads its own machine started there; the allow-list of tools is an
+  exhaustive match. Principle 5 and the maintainer's word.
+- **Hand-written peers in admission tests**: an endpoint speaking the wire by
+  hand to prove a device opens no machine stream, or a removed member is
+  refused. Only a test can be the hostile peer for a security check; this is
+  not the misbehaving peer only a test can be.
+- **A move's retry, 5 seconds doubling to 2 minutes**: a move is long and its
+  link drops; the retry only continues what the user started, who can press
+  Try again or cancel. No maintainer word on the numbers.
+- **1 MiB chunks of a moved project**: the protocol line limit is 16 MiB and
+  a chunk goes as base64 on one line.
+- **The machine probe's 5 seconds**: the listing waits on it and the user has
+  no cancel for it. It stays until one exists.
+- **A fixed identity on snapshot commits**: `commit-tree` fails on a machine
+  with no git identity.
 
 ## Where the inventory was wrong
 
@@ -623,6 +694,18 @@ On checks before a push:
 
 > Add Clippy to your own checks. — the maintainer, and then: there is no
 > need to run all three platforms here; this machine runs its own.
+
+On what the group's other devices may do on a machine, when a single switch
+was proposed:
+
+> Split it into whether they can look and, on top of looking, whether they
+> can operate. That is necessary: if a bug left it so that a device cannot
+> look but can still operate, say a conversation left open from before, that
+> is a problem. — the maintainer
+
+So the level is one choice of three that has no state for "cannot look, can
+operate", the host decides it on every request, and a change closes the
+connections it affects.
 
 ## Defects met on the way
 

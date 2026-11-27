@@ -20,10 +20,18 @@ is derived from it. **Process** is how to build, check and submit work.
    (Principle 3) whose only protocol is standard ACP, which today is
    Antigravity alone. For such a harness Tcode synthesizes the features it
    lacks instead of staying a thin wrapper. An agent that merely connects
-   over ACP gets none of this.
+   over ACP gets none of this. Hosts, projects and threads are Tcode's own:
+   operating them, on one host or between the hosts of a group, is not a
+   harness capability, even where a harness has something similar between its
+   own sessions.
 
 2. **Host and client.** A Tcode host owns all of its state: providers, threads,
-   terminals, projects. Every client — the desktop window, a phone, a tablet, a
+   terminals, projects. A thread belongs to exactly one host at a time. The
+   hosts of a group work with each other directly: a thread on one may start a
+   thread on another and hear back from it, and a host may hand a project and
+   its threads over to another, after which they are that host's. What a host
+   keeps of another host's thread is a reference and its last known status,
+   never its content. Every client — the desktop window, a phone, a tablet, a
    browser tab — is a screen for one or more hosts and speaks the same protocol
    to each, whether it runs on the same machine or across a network; it shows
    their state side by side and never merges it. Layers depend strictly
@@ -48,7 +56,14 @@ is derived from it. **Process** is how to build, check and submit work.
    machine and does not use iroh. There is no automatic discovery: a device's
    first contact with a machine, or with a group of machines, is always an
    invitation, scanned or pasted; a machine admits only devices it paired or
-   that a machine in its group admitted. An official service, **Traverse**,
+   that a machine in its group admitted. The machines of a group reach each
+   other over the same transport, each under its own key. A machine's user
+   decides, by a switch for each, whether its threads may start threads on the
+   machines of its group, whether it takes the threads they start on it, and
+   whether it takes the projects they move to it; the last is off until
+   switched on. What a machine itself sent out comes back to it whatever those
+   switches say.
+   An official service, **Traverse**,
    provides lookup and relay fallback: no accounts, on by default,
    self-hostable, sees only ciphertext, and never required — on a LAN, direct
    connections give the full product without it. Abuse is limited without

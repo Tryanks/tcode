@@ -266,8 +266,11 @@ pub(crate) fn host_down(store: &WorkspaceStore) -> bool {
 struct HostProjects {
     host: HostKey,
     title: SharedString,
-    /// Whether it holds its projects, not only a space.
+    /// Whether it holds its projects, not only a space, and may change them.
     full: bool,
+    /// Whether new threads start on it: not on a machine that lets this
+    /// device only view.
+    starts: bool,
     projects: Vec<(ProjectKey, tcode_core::project::Project)>,
 }
 
@@ -707,6 +710,11 @@ struct ChangeProjectRoot(ProjectKey);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_project, no_json)]
 struct ProjectReveal(ProjectKey);
+/// Move a project to another machine of its group, or show its move while
+/// one runs.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_project, no_json)]
+struct MoveProjectToMachine(ProjectKey);
 
 /// Ask before removing a project and its threads from Tcode.
 pub(super) fn confirm_remove_project(
@@ -839,6 +847,8 @@ struct HostHeadingParts {
     dot: gpui::Hsla,
     status: Option<gpui::AnyElement>,
     pair: Option<gpui::AnyElement>,
+    /// That the host lets this device only view it, beside its name.
+    mark: Option<gpui::AnyElement>,
     menu: gpui::AnyElement,
 }
 
@@ -1180,9 +1190,22 @@ fn session_flags(sessions: &[SessionMeta], store: &WorkspaceStore) -> HashMap<St
                     working: store.turn_running_for(&meta.id),
                     settle_blocked: store.settle_blocked_for(&meta.id),
                     failed: store.failed_for(&meta.id),
-                    background: store.activity(&meta.id).map_or((0, 0), |activity| {
-                        (activity.background.tasks, activity.background.agents)
-                    }),
+                    background: {
+                        let (tasks, agents) = store.activity(&meta.id).map_or((0, 0), |activity| {
+                            (activity.background.tasks, activity.background.agents)
+                        });
+                        // Its host counts the agents it runs; those it started on
+                        // other machines of the group run as it last heard.
+                        let elsewhere = meta
+                            .remote_children
+                            .iter()
+                            .filter(|child| {
+                                child.subagent
+                                    && child.state == tcode_core::control::RemoteChildState::Running
+                            })
+                            .count() as u32;
+                        (tasks, agents + elsewhere)
+                    },
                     wakes: store
                         .activity(&meta.id)
                         .map(|activity| activity.wakes.clone())
@@ -1288,7 +1311,10 @@ impl SessionsSidebar {
                         _subscription: cx.subscribe(&store, |this, _, change: &StoreChange, cx| {
                             if matches!(
                                 change.topic,
-                                TopicKind::Index | TopicKind::Settings | TopicKind::SessionStatus
+                                TopicKind::Index
+                                    | TopicKind::Settings
+                                    | TopicKind::SessionStatus
+                                    | TopicKind::ProjectMoves
                             ) {
                                 this.compact_model_dirty = true;
                                 cx.notify();
@@ -1686,6 +1712,7 @@ impl Render for SessionsSidebar {
         .on_action(cx.listener(Self::on_change_project_icon))
         .on_action(cx.listener(Self::on_change_project_root))
         .on_action(cx.listener(Self::on_project_reveal))
+        .on_action(cx.listener(Self::on_move_project_to_machine))
         .on_action(cx.listener(Self::on_filter_project))
         .on_action(cx.listener(Self::on_add_project))
         .on_action(cx.listener(Self::on_sort_projects))

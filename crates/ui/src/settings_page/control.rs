@@ -331,6 +331,23 @@ impl SettingsPage {
             WorkspaceStore::set_control_enabled,
         );
 
+        let machines_reset = crate::settings_rows::reset_action(
+            "reset-control-machines",
+            !control.machines,
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_control_machines(true), cx)
+            }),
+        );
+        let machines = self.toggle_row(
+            "control-machines",
+            crate::tr!("control.settings.machines"),
+            crate::tr!("control.settings.machines_description"),
+            control.machines,
+            machines_reset,
+            cx,
+            WorkspaceStore::set_control_machines,
+        );
+
         let visualize_reset = crate::settings_rows::reset_action(
             "reset-visualize-enabled",
             !settings.visualize.enabled,
@@ -369,7 +386,12 @@ impl SettingsPage {
 
         v_flex()
             .gap(crate::material::section_gap(cx))
-            .child(crate::material::group(cx).child(enabled).child(visualize))
+            .child(
+                crate::material::group(cx)
+                    .child(enabled)
+                    .child(div().opacity(dim).child(machines))
+                    .child(visualize),
+            )
             .child(below.opacity(dim))
     }
 
@@ -1229,16 +1251,15 @@ fn activity_row(
     first = first.child(div().flex_none().text_secondary(compact, cx).child(
         crate::widgets::fade_text(humanize_ago(now_secs.saturating_sub(entry.at / 1000))),
     ));
+    let actor = crate::machines::actor_label(
+        &entry.action.actor_title,
+        entry.action.actor_machine.as_deref(),
+        cx,
+    );
     let by = if own {
-        crate::tr!(
-            "control.settings.activity_self",
-            actor = entry.action.actor_title.as_str()
-        )
+        crate::tr!("control.settings.activity_self", actor = actor.as_str())
     } else {
-        crate::tr!(
-            "control.settings.activity_by",
-            actor = entry.action.actor_title.as_str()
-        )
+        crate::tr!("control.settings.activity_by", actor = actor.as_str())
     }
     .into_owned();
     let detail = entry

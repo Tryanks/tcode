@@ -336,6 +336,13 @@ impl TestHost {
         attachment: crate::store::WorkspaceAttachment,
         threads: &[(&str, u64)],
     ) -> Self {
+        let (host, root) = Self::host(name, threads);
+        let driver = crate::store::tests::LocalHostDriver::new(&host);
+        Self::attach(cx, host, driver, attachment, root)
+    }
+
+    /// A host holding one project with `threads` in it.
+    fn host(name: &str, threads: &[(&str, u64)]) -> (tcode_runtime::pipe::SpawnedHost, PathBuf) {
         let root = crate::store::tests::scratch_root(name);
         let session_store = SessionStore::open_at(root.clone()).unwrap();
         let project = Project::from_root(root.clone());
@@ -357,7 +364,16 @@ impl TestHost {
         }
         let host =
             spawn_host(session_store, HostServices::default()).expect("spawn sidebar test host");
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        (host, root)
+    }
+
+    fn attach(
+        cx: &mut TestAppContext,
+        host: tcode_runtime::pipe::SpawnedHost,
+        mut driver: crate::store::tests::LocalHostDriver,
+        attachment: crate::store::WorkspaceAttachment,
+        root: PathBuf,
+    ) -> Self {
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(driver.link.clone(), attachment, None, None, cx)
         });
@@ -379,6 +395,31 @@ impl TestHost {
             host_name: format!("{host_id} name"),
         };
         Self::spawn(cx, &format!("sidebar-{host_id}"), attachment, threads)
+    }
+
+    /// Machine `host_id`, reached as a device of its group while it lets
+    /// those devices only view it: attached through the machine's mux as
+    /// such a device is.
+    fn viewed(cx: &mut TestAppContext, host_id: &str, threads: &[(&str, u64)]) -> Self {
+        let (host, root) = Self::host(&format!("sidebar-{host_id}"), threads);
+        let mux =
+            tcode_traverse::mux::HostMux::new(host.attachments.clone(), host.from_host.clone());
+        let connection = mux.attach(
+            tcode_protocol::Principal::Viewer {
+                device_id: "phone".into(),
+                device_name: "Phone".into(),
+            },
+            tcode_client::attachment::AttachmentPolicy::network(),
+        );
+        let driver = crate::store::tests::LocalHostDriver::from_link(tcode_client::HostLink::new(
+            connection.to_host,
+            connection.from_host,
+        ));
+        let attachment = crate::store::WorkspaceAttachment::Remote {
+            host_id: host_id.into(),
+            host_name: format!("{host_id} name"),
+        };
+        Self::attach(cx, host, driver, attachment, root)
     }
 
     /// Session ids in the order the host lists them.
@@ -2429,6 +2470,51 @@ fn pinned_rows_lead_and_a_drag_or_undo_writes_their_keys(cx: &mut TestAppContext
         ]
     );
     driver.link.close();
+}
+
+/// A machine that lets this device only view it says so beside its name
+/// and its project offers no new thread; the other machine in the same
+/// list keeps its own.
+#[gpui::test]
+fn a_machine_that_lets_this_device_only_view_it_starts_no_thread(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+    cx.update(crate::test_client::init);
+    cx.update(|cx| DevicePreferences::set_sidebar_layout(SidebarLayout::Grouped, cx));
+    let (a, b) = (
+        TestHost::viewed(cx, "host-a", &[("a-thread", 2)]),
+        TestHost::remote(cx, "host-b", &[("b-thread", 1)]),
+    );
+    let window_state = cx.new(|_| WindowState::default());
+    let stores = vec![a.store.clone(), b.store.clone()];
+    let sidebar = cx.new(|cx| SessionsSidebar::new(stores, window_state, cx));
+    let (_, cx) =
+        cx.add_window_view(|window, cx| gpui_base::Root::new(sidebar.clone(), window, cx));
+    cx.simulate_resize(size(px(320.), px(800.)));
+    crate::test_frames::draw_settled(cx);
+    let project = |host: &TestHost, cx: &mut VisualTestContext| {
+        host.store
+            .read_with(cx, |store, _| store.projects()[0].id.clone())
+    };
+    let (project_a, project_b) = (project(&a, cx), project(&b, cx));
+    let drawn =
+        |selector: String, cx: &mut VisualTestContext| cx.debug_bounds(selector.leak()).is_some();
+    assert!(drawn(format!("project-header-host-a/{project_a}"), cx));
+    assert!(
+        !drawn(format!("new-thread-host-a/{project_a}"), cx),
+        "no thread starts on the machine that lets this device only view it"
+    );
+    assert!(drawn("host-view-only-host-a".into(), cx));
+    assert!(
+        drawn(format!("new-thread-host-b/{project_b}"), cx),
+        "the other machine keeps its own"
+    );
+    assert!(!drawn("host-view-only-host-b".into(), cx));
+    b.shutdown(cx);
+    // The viewer may not stop its machine: the host goes with its channels.
+    a.driver.link.close();
+    a.host.to_host.close();
+    let _ = std::fs::remove_dir_all(a.root);
 }
 
 /// Over two machines the project view lists each under its heading,

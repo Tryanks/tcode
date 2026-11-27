@@ -710,7 +710,16 @@ impl AppShell {
                 None => match store.remote_host_name().filter(|_| self.links.len() == 1) {
                     Some(_) => (
                         store.machine_label().into(),
-                        Some(crate::remote::connection_label(&store.connection_state()).into()),
+                        Some(if store.view_only() {
+                            format!(
+                                "{} · {}",
+                                crate::remote::connection_label(&store.connection_state()),
+                                crate::tr!("machines.access.mark")
+                            )
+                            .into()
+                        } else {
+                            crate::remote::connection_label(&store.connection_state()).into()
+                        }),
                     ),
                     None => (crate::tr!("mobile.threads").into_owned().into(), None),
                 },
@@ -743,9 +752,15 @@ impl AppShell {
                 }))
                 .into_any_element()
         };
-        let actions = vec![
-            new_thread,
-            nav_icon_button(
+        // No thread starts on a machine that lets this device only view it.
+        let starts = self
+            .links
+            .iter()
+            .any(|link| !link.store.read(cx).view_only());
+        let actions = starts
+            .then_some(new_thread)
+            .into_iter()
+            .chain([nav_icon_button(
                 "compact-settings",
                 compact_label("settings"),
                 IconName::Settings,
@@ -754,8 +769,8 @@ impl AppShell {
                 this.window_state
                     .update(cx, |state, cx| state.open_settings(cx));
             }))
-            .into_any_element(),
-        ];
+            .into_any_element()])
+            .collect();
         page_surface(window, cx)
             .debug_selector(|| "compact-threads-page".into())
             .child(nav_bar(
@@ -1599,6 +1614,7 @@ impl AppShell {
             .key_context("TcodeShell")
             .on_action(cx.listener(Self::on_thread_undo))
             .on_action(cx.listener(Self::on_open_thread_anchor))
+            .on_action(cx.listener(Self::on_open_machine_thread_anchor))
             .on_action(cx.listener(Self::on_start_draft_for_project))
             .on_action(cx.listener(Self::on_quick_chat))
             // Every compact page, settings included, is one entry of the same

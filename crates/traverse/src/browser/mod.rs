@@ -7,10 +7,10 @@
 //! `{"mode":"password","configured":bool}`; `POST /auth/setup` takes JSON
 //! `{password}` and `POST /auth/login` takes `{password, device_id,
 //! device_name}` and answers `{host_id, host_name, token}`; `/ws` opens
-//! with `{"type":"hello","protocol_version":5,"token":…,"device":{name,
+//! with `{"type":"hello","protocol_version":…,"token":…,"device":{name,
 //! platform?}}` and is answered by `hello_ok` or `hello_rejected` with a
-//! `reason` of `token` or `protocol`. Only the current protocol version is
-//! accepted; the bundle and the listener ship together.
+//! `reason` of `token` or `protocol`. Only `PROTOCOL_VERSION` is accepted;
+//! the bundle and the listener ship together.
 mod auth;
 mod original;
 

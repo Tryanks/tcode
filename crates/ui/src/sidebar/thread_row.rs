@@ -437,7 +437,8 @@ impl SessionsSidebar {
             return row.into_any_element();
         };
         let share = self.share_target(&state.thread.host, meta.project_id.as_deref(), cx);
-        let scope = store.read(cx).scope().clone();
+        let full = store.read(cx).may_operate();
+        let view_only = store.read(cx).view_only();
         let sidebar = cx.entity().downgrade();
         let thread = state.thread.clone();
         let can_fork = state.menu_can_fork;
@@ -465,7 +466,7 @@ impl SessionsSidebar {
                                 enabled,
                             )
                         })
-                        .when(scope.is_full(), |menu| {
+                        .when(full, |menu| {
                             menu.menu_element(Box::new(ThreadDelete(id.clone())), |_, cx| {
                                 div().text_color(cx.theme().danger).child(
                                     crate::widgets::fade_text(crate::tr!("sidebar.ctx_delete")),
@@ -473,10 +474,42 @@ impl SessionsSidebar {
                             })
                         });
                 }
+                // A machine that lets this device only view keeps what reads
+                // the thread, and nothing that changes it.
+                if view_only {
+                    let open_beside = crate::shell::pane_controls(window, cx)
+                        .map(|panes| panes.split_right || crate::shell::shown_in_pane(&id, cx));
+                    return menu
+                        .when_some(open_beside, |menu, enabled| {
+                            menu.menu_with_enable(
+                                crate::tr!("panes.open_beside").into_owned(),
+                                Box::new(crate::panes::OpenInNewPane(id.clone())),
+                                enabled,
+                            )
+                            .separator()
+                        })
+                        .menu(
+                            crate::tr!("sidebar.ctx_copy_path").into_owned(),
+                            Box::new(ThreadCopyPath(id.clone())),
+                        )
+                        .menu(
+                            crate::tr!("sidebar.ctx_copy_id").into_owned(),
+                            Box::new(ThreadCopyId(id.clone())),
+                        )
+                        .separator()
+                        .menu(
+                            crate::tr!("sidebar.ctx_export_jsonl").into_owned(),
+                            Box::new(ThreadExportJsonl(id.clone())),
+                        )
+                        .menu(
+                            crate::tr!("sidebar.ctx_export_markdown").into_owned(),
+                            Box::new(ThreadExportMarkdown(id)),
+                        );
+                }
                 // Move up / Move down stay within the section the list shows.
                 let moves = sidebar
                     .upgrade()
-                    .filter(|_| !settled && scope.is_full())
+                    .filter(|_| !settled && full)
                     .and_then(|sidebar| sidebar.read(cx).move_bounds(&id, cx));
                 let open_beside = crate::shell::pane_controls(window, cx)
                     .map(|panes| panes.split_right || crate::shell::shown_in_pane(&thread, cx));
@@ -635,7 +668,7 @@ impl SessionsSidebar {
                     Box::new(ThreadArchive(id.clone())),
                     !running,
                 )
-                .when(scope.is_full(), |menu| {
+                .when(full, |menu| {
                     menu.menu_element(Box::new(ThreadDelete(id.clone())), |_, cx| {
                         div()
                             .text_color(cx.theme().danger)
@@ -794,7 +827,12 @@ impl SessionsSidebar {
             .store_of(&state.thread.host)
             .map(|store| humanize_ago(store.read(cx).host_now_secs(cx).saturating_sub(timestamp)));
         let discards = state.draft_kept;
-        let action_on_hover = discards || (!state.draft && (settled || offers_settle));
+        // A machine that lets this device only view it settles and discards nothing.
+        let view_only = self
+            .store_of(&state.thread.host)
+            .is_some_and(|store| store.read(cx).view_only());
+        let action_on_hover =
+            !view_only && (discards || (!state.draft && (settled || offers_settle)));
         let label = if discards {
             crate::tr!("sidebar.delete_draft_tooltip")
         } else if settled {

@@ -378,13 +378,14 @@ fn a_control_rewind_answers_with_the_harness_outcome() {
         caller.id = "caller".into();
         caller.project_id = Some("project".into());
         state.sessions.push(caller);
-        state.handle_control_op(
+        state.handle_control_call(
             "caller".into(),
             control_mcp::ControlOp::Rewind(control_mcp::RewindParams {
                 thread_id: "rewound-thread".into(),
                 turn: 1,
                 mode: control_mcp::RewindScope::Conversation,
             }),
+            None,
             reply,
             cx,
         );

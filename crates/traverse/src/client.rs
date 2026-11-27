@@ -1071,6 +1071,9 @@ async fn establish(
             HostLine::HelloRejected {
                 reason: HelloRejection::Unpaired,
             } => Err(ConnectionFailure::AuthenticationRejected),
+            HostLine::HelloRejected {
+                reason: HelloRejection::Closed,
+            } => Err(ConnectionFailure::AccessClosed),
             other => Err(ConnectionFailure::Unreachable(Some(format!(
                 "unexpected reply {other:?}"
             )))),

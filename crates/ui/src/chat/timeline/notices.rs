@@ -4,7 +4,9 @@
 //! unreadable records, a message's settings, and the rewind of a message
 //! that failed.
 use super::*;
-use crate::chat::components::notices::{self, Capsule, Expandable, MessageTag, Sender};
+use crate::chat::components::notices::{
+    self, Capsule, Expandable, MessageTag, Sender, SenderThread,
+};
 use crate::chat::model::{message_tags, one_line, standing_rewind_failure};
 use crate::provider_card::{profile_glyph, provider_glyph};
 use agent::ProviderKind;
@@ -48,6 +50,14 @@ fn open_thread(thread_id: String) -> components::changed_files::ClickHandler {
             }),
             cx,
         );
+    })
+}
+
+/// Opens thread `thread_id` on machine `machine` of the group, where that
+/// machine's store places its threads.
+fn open_elsewhere(machine: String, thread_id: String) -> components::changed_files::ClickHandler {
+    Box::new(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+        crate::machines::open_thread(&machine, &thread_id, None, cx);
     })
 }
 
@@ -152,10 +162,22 @@ impl TimelineView {
                 label
             }
         }));
+        let (machine, on_open) = match latest.actor_machine.as_deref() {
+            Some(machine) => {
+                let machine = crate::machines::machine(machine, cx);
+                let on_open = machine
+                    .store
+                    .is_some()
+                    .then(|| open_elsewhere(machine.id.clone(), latest.actor_thread_id.clone()));
+                (Some(machine.name), on_open)
+            }
+            None => (None, Some(open_thread(latest.actor_thread_id.clone()))),
+        };
         notices::control_actions_line(
             &run[0].id,
             &latest.actor_title,
-            open_thread(latest.actor_thread_id.clone()),
+            machine.as_deref(),
+            on_open,
             said,
             details,
             cx,
@@ -287,10 +309,11 @@ impl TimelineView {
             });
         // Switching back sets the model the thread's next turn asks for,
         // which is offered after a reroute only while nothing has changed it
-        // since and the thread does not already ask for it.
+        // since and the thread does not already ask for it, to a device the
+        // machine lets do more than view it.
         let back = from
             .clone()
-            .filter(|_| rerouted.is_some())
+            .filter(|_| rerouted.is_some() && !self.workspace_store.read(cx).view_only())
             .zip(meta.filter(|_| latest))
             .filter(|(from, meta)| meta.model.as_deref() != Some(from.as_str()))
             .zip(self.session_id.clone())
@@ -397,26 +420,54 @@ impl TimelineView {
         let sender = match notice {
             HostNotice::Control(messages) => {
                 let store = self.workspace_store.read(cx);
-                let mut threads: Vec<(String, String)> = Vec::new();
-                for (thread_id, title) in messages
+                let mut threads: Vec<(String, Option<String>, String)> = Vec::new();
+                for thread in messages
                     .iter()
                     .filter_map(|message| control_thread(message))
                 {
-                    if !threads.iter().any(|(id, _)| id == thread_id) {
-                        threads.push((thread_id.to_owned(), title));
+                    if !threads.iter().any(|(id, machine, _)| {
+                        id == thread.thread_id && machine.as_deref() == thread.machine
+                    }) {
+                        threads.push((
+                            thread.thread_id.to_owned(),
+                            thread.machine.map(str::to_owned),
+                            thread.title,
+                        ));
                     }
                 }
                 Sender::Threads(
                     threads
                         .into_iter()
-                        .map(|(thread_id, title)| {
-                            let known = store.thread_meta(&thread_id).is_some()
-                                || store
-                                    .archived_sessions()
-                                    .iter()
-                                    .any(|meta| meta.id == thread_id);
-                            let on_open = known.then(|| open_thread(thread_id));
-                            (one_line(&title).into(), on_open)
+                        .map(|(thread_id, machine, title)| {
+                            let title = one_line(&title).into();
+                            match machine {
+                                // Another machine's thread opens there, while
+                                // this window is linked to that machine.
+                                Some(machine) => {
+                                    let machine = crate::machines::machine(&machine, cx);
+                                    let on_open = machine
+                                        .store
+                                        .is_some()
+                                        .then(|| open_elsewhere(machine.id.clone(), thread_id));
+                                    SenderThread {
+                                        title,
+                                        machine: Some(machine.name),
+                                        on_open,
+                                    }
+                                }
+                                None => {
+                                    let known = store.thread_meta(&thread_id).is_some()
+                                        || store
+                                            .archived_sessions()
+                                            .iter()
+                                            .any(|meta| meta.id == thread_id);
+                                    SenderThread {
+                                        title,
+                                        machine: None,
+                                        on_open: known.then(|| open_thread(thread_id)),
+                                    }
+                                }
+                            }
                         })
                         .collect(),
                 )

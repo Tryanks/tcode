@@ -192,7 +192,7 @@ impl Composer {
         let collaborations = &store.settings_ref().collaborations;
         // The collaborations have a rail where there is one to list, and where this
         // window may write one.
-        let collaborations_rail = !collaborations.is_empty() || store.scope().is_full();
+        let collaborations_rail = !collaborations.is_empty() || store.may_operate();
         let acp_rail_agents: Vec<(String, String)> = store
             .settings_installed_acp_agents()
             .into_iter()
@@ -1071,7 +1071,7 @@ fn render_model_pane(
     let show_source = rail == PickerRail::Favorites;
     let lists_collaborations = rail == PickerRail::Collaborations;
     // A window on the whole host writes collaborations; a space's member only runs them.
-    let writes_collaborations = lists_collaborations && store_entity.read(cx).scope().is_full();
+    let writes_collaborations = lists_collaborations && store_entity.read(cx).may_operate();
     let rail = div()
         .id("model-provider-rail")
         .flex_none()
@@ -1480,7 +1480,7 @@ fn render_model_row(
     // A window on the whole host writes collaborations; a space's member only runs them.
     let edited = fav_collaboration
         .clone()
-        .filter(|_| store_entity.read(cx).scope().is_full());
+        .filter(|_| store_entity.read(cx).may_operate());
     let store_edit = store_entity.clone();
     let popover_edit = popover.clone();
     let selection = row.clone();

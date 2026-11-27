@@ -920,7 +920,8 @@ impl AppState {
             .sessions
             .iter()
             .filter(|meta| match &executor.principal {
-                tcode_protocol::Principal::Full => true,
+                tcode_protocol::Principal::Full | tcode_protocol::Principal::Viewer { .. } => true,
+                tcode_protocol::Principal::Machine { .. } => false,
                 tcode_protocol::Principal::Space { project_ids, .. } => meta
                     .project_id
                     .as_ref()
@@ -1582,6 +1583,7 @@ impl AppState {
         for id in &ids {
             self.close_orchestrator_children(id, cx);
         }
+        self.remote_children_gone(ids.iter().map(|id| &**id), cx);
         let changed: Vec<_> = self
             .sessions
             .iter()
@@ -1672,6 +1674,7 @@ impl AppState {
             .filter(|meta| deleted.contains(meta.id.as_str()))
             .cloned()
             .collect();
+        self.remote_children_gone(ids.iter().map(String::as_str), cx);
         for id in ids {
             if let Some(draft) = self.resident(id).filter(|active| active.holds_draft_text()) {
                 self.deleted_drafts.push(draft.meta.clone());
@@ -1822,6 +1825,18 @@ impl AppState {
             .filter(|meta| meta.project_id.as_deref() == Some(project_id))
             .map(|meta| meta.id.clone())
             .collect();
+        self.remove_project_and_threads(project_id, &session_ids, false, cx)
+    }
+
+    /// Remove a project, its drafts and the threads `session_ids` with every
+    /// thread under them; with `remove_worktrees`, their worktrees too.
+    pub(super) fn remove_project_and_threads(
+        &mut self,
+        project_id: &str,
+        session_ids: &[String],
+        remove_worktrees: bool,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<(), ProtocolError>> {
         let drafts: Vec<_> = self
             .residents
             .live
@@ -1849,16 +1864,16 @@ impl AppState {
         let mut ids = Vec::new();
         let mut seen = HashSet::new();
         for session_id in session_ids {
-            if seen.contains(&session_id) {
+            if seen.contains(session_id) {
                 continue;
             }
-            for id in descendant_session_ids(&self.sessions, &session_id) {
+            for id in descendant_session_ids(&self.sessions, session_id) {
                 if seen.insert(id.clone()) {
                     ids.push(id);
                 }
             }
         }
-        let uploads = self.delete_session_ids(&ids, false, cx);
+        let uploads = self.delete_session_ids(&ids, remove_worktrees, cx);
         self.enqueue_store_write(StoreWrite::RemoveProject(project_id.to_string()), cx);
         self.settings
             .collapsed_projects
@@ -2307,7 +2322,9 @@ impl AppState {
         cx: &mut HostCx,
     ) -> Result<String, ProtocolError> {
         let device_id = match &cx.principal {
-            tcode_protocol::Principal::Full => None,
+            tcode_protocol::Principal::Full
+            | tcode_protocol::Principal::Machine { .. }
+            | tcode_protocol::Principal::Viewer { .. } => None,
             tcode_protocol::Principal::Space { device_id, .. } => Some(device_id.clone()),
         };
         let standing = self

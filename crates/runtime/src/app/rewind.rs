@@ -275,10 +275,8 @@ impl AppState {
         }
     }
 
-    /// Where the thread's record of what its sessions wrote, as their agent reported it, is
-    /// kept ([`agent::write_journal`]): in Tcode's data, never the workspace.
     pub(super) fn write_journal_dir(&self, session_id: &str) -> PathBuf {
-        self.store.root().join("write-journals").join(session_id)
+        tcode_services::user_files::write_journal_dir(self.store.root(), session_id)
     }
 
     /// The restore points of turn `turn` and every turn after it, whose

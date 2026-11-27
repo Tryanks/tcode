@@ -206,9 +206,9 @@ impl PairForm {
 }
 
 pub fn joined_message(host: &PairedHost) -> Option<String> {
-    host.space_name
-        .as_ref()
-        .map(|space| crate::tr!("member.joined", space = space, machine = &host.name).into_owned())
+    host.space_name.as_ref().map(|space| {
+        crate::tr!("member.joined", space = space, machine = host.title()).into_owned()
+    })
 }
 
 /// A pairing failure in the user's language, with what to do about it. A

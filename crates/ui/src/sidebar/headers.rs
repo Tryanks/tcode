@@ -101,23 +101,31 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = self.window_state.read(cx).route() == Route::Hosts;
+        let (title, own_name) = if self.sectioned() {
+            (None, None)
+        } else {
+            (
+                Some(crate::machines::host_title(lead, cx)),
+                crate::machines::own_name(lead, cx),
+            )
+        };
         let store = lead.read(cx);
         let connection_state = store.connection_state();
+        let view_only = !self.sectioned() && store.view_only();
 
         // Local, the control says "This machine" and the tooltip its name;
         // remote, the control names the machine and the tooltip the link.
-        let (name, detail): (SharedString, Option<SharedString>) = if self.sectioned() {
-            (crate::tr!("hosts.title").into_owned().into(), None)
-        } else {
-            (
-                store.host_title(),
+        let (name, detail): (SharedString, Option<SharedString>) = match title {
+            None => (crate::tr!("hosts.title").into_owned().into(), None),
+            Some(title) => (
+                title,
                 match store.host_key() {
                     HostKey::Remote(_) => {
                         Some(crate::remote::connection_label(&connection_state).into())
                     }
-                    HostKey::Local => crate::remote::local_machine_name(cx).map(SharedString::from),
+                    HostKey::Local => own_name.map(SharedString::from),
                 },
-            )
+            ),
         };
         let dot = (!self.sectioned()).then(|| {
             transition(
@@ -161,6 +169,9 @@ impl SessionsSidebar {
                             .overflow_hidden()
                             .child(crate::widgets::fade_text(name)),
                     )
+                    .when(view_only, |row| {
+                        row.child(view_only_mark("sidebar-hosts-view-only".into(), false, cx))
+                    })
                     .child(
                         Icon::new(IconName::ChevronRight)
                             .flex_none()
@@ -256,7 +267,7 @@ impl SessionsSidebar {
                         )
                     })
                     .child(self.render_layout_toggle(SidebarLayout::Grouped, cx))
-                    .when(one_host && lead.read(cx).scope().is_full(), |row| {
+                    .when(one_host && lead.read(cx).may_operate(), |row| {
                         let quick_chat = lead.clone();
                         row.child(
                             Button::new("quick-chat-grouped")
@@ -301,7 +312,8 @@ impl SessionsSidebar {
                     Some(HostProjects {
                         host: host.key.clone(),
                         title: store.host_title(),
-                        full: store.scope().is_full(),
+                        full: store.may_operate(),
+                        starts: !store.view_only(),
                         projects,
                     })
                 })
@@ -321,20 +333,24 @@ impl SessionsSidebar {
         let sectioned = self.sectioned();
         trigger
             .dropdown_menu(move |menu, _, _| {
-                hosts.iter().fold(menu, |menu, host| {
-                    let menu = host_section(menu, sectioned, &host.title).when(host.full, |menu| {
-                        menu.menu(
-                            crate::tr!("sidebar.quick_chat"),
-                            Box::new(QuickChat(host.host.clone())),
-                        )
-                    });
-                    host.projects.iter().fold(menu, |menu, (key, project)| {
-                        menu.menu(
-                            project.name.clone(),
-                            Box::new(StartDraftForProject(key.clone())),
-                        )
+                hosts
+                    .iter()
+                    .filter(|host| host.starts)
+                    .fold(menu, |menu, host| {
+                        let menu =
+                            host_section(menu, sectioned, &host.title).when(host.full, |menu| {
+                                menu.menu(
+                                    crate::tr!("sidebar.quick_chat"),
+                                    Box::new(QuickChat(host.host.clone())),
+                                )
+                            });
+                        host.projects.iter().fold(menu, |menu, (key, project)| {
+                            menu.menu(
+                                project.name.clone(),
+                                Box::new(StartDraftForProject(key.clone())),
+                            )
+                        })
                     })
-                })
             })
             .touch(touch)
     }
@@ -388,7 +404,10 @@ impl SessionsSidebar {
                 menu
             });
 
-        let mut projects = hosts.iter().flat_map(|host| &host.projects);
+        let mut projects = hosts
+            .iter()
+            .filter(|host| host.starts)
+            .flat_map(|host| &host.projects);
         let draft_project = match &active_filter {
             Some(filter) => projects.find(|(key, _)| key == filter),
             // Over several hosts every other host's quick thread is a choice
@@ -402,7 +421,9 @@ impl SessionsSidebar {
             .xsmall()
             .compact()
             .icon(IconName::Plus);
-        let new_thread = if let Some((key, project)) = draft_project {
+        let new_thread = if !hosts.iter().any(|host| host.starts) {
+            None
+        } else if let Some((key, project)) = draft_project {
             let tooltip = hosts
                 .iter()
                 .find(|host| host.host == key.host)
@@ -421,13 +442,16 @@ impl SessionsSidebar {
                     }
                 }))
                 .into_any_element()
+                .into()
         } else {
-            self.new_thread_chooser(
-                new_thread.tooltip(crate::tr!("sidebar.create_thread")),
-                false,
-                cx,
+            Some(
+                self.new_thread_chooser(
+                    new_thread.tooltip(crate::tr!("sidebar.create_thread")),
+                    false,
+                    cx,
+                )
+                .into_any_element(),
             )
-            .into_any_element()
         };
 
         let full: Vec<(HostKey, SharedString)> = hosts
@@ -467,7 +491,7 @@ impl SessionsSidebar {
                     .gap(cx.theme().tokens.spacing.xxs)
                     .child(filter_button)
                     .child(self.render_layout_toggle(SidebarLayout::Flat, cx))
-                    .child(new_thread)
+                    .children(new_thread)
                     .children(add_project),
             )
     }
@@ -500,6 +524,9 @@ impl SessionsSidebar {
         let plus_cwd = group.project.root.clone();
         let plus_project_id = project.project_id.clone();
         let menu_project = project.clone();
+        // A machine that lets this device only view starts and changes
+        // nothing of its projects.
+        let view_only = store.read(cx).view_only();
         let can_archive = group
             .sessions
             .iter()
@@ -587,42 +614,56 @@ impl SessionsSidebar {
         .children(self.shared_badge(&project, window, cx))
         // Unread dot when any child thread is unread.
         .children(unread_dot)
-        .child({
+        .when(!view_only, |header| {
             let store = store.clone();
-            Button::new(plus_id)
-                .track_focus(&plus_focus)
-                .ghost()
-                .xsmall()
-                .icon(Icon::new(IconName::Plus).text_color(cx.theme().muted_foreground))
-                .aria_label(new_thread_label.clone())
-                .tooltip(new_thread_label)
-                // Opacity keeps the button a tab stop, as the settle button does.
-                .opacity(hover)
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    let cwd = plus_cwd.clone();
-                    let project_id = plus_project_id.clone();
-                    store.update(cx, |store, cx| {
-                        if quick_chat {
-                            store.start_scratch_draft(cx);
-                        } else {
-                            store.start_draft(project_id, cwd, cx);
-                        }
-                    });
-                })
+            let selector = format!("new-thread-{name_id}");
+            header.child(
+                Button::new(plus_id)
+                    .debug_selector(move || selector.clone())
+                    .track_focus(&plus_focus)
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(IconName::Plus).text_color(cx.theme().muted_foreground))
+                    .aria_label(new_thread_label.clone())
+                    .tooltip(new_thread_label)
+                    // Opacity keeps the button a tab stop, as the settle button does.
+                    .opacity(hover)
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        let cwd = plus_cwd.clone();
+                        let project_id = plus_project_id.clone();
+                        store.update(cx, |store, cx| {
+                            if quick_chat {
+                                store.start_scratch_draft(cx);
+                            } else {
+                                store.start_draft(project_id, cwd, cx);
+                            }
+                        });
+                    }),
+            )
         });
         let header = self.track_hover(header, &group_key);
         if quick_chat {
             return header.into_any_element();
         }
-        let scope = store.read(cx).scope().clone();
+        let full = store.read(cx).may_operate();
         // Another machine's project is not on this client to reveal.
         let local = !store.read(cx).is_remote();
-        header
+        let moving = store.read(cx).project_move(&project.project_id).cloned();
+        let move_item = if moving.is_some() {
+            Some(crate::tr!("machines.move.show_move"))
+        } else if crate::move_project_dialog::offers_move(&store, cx) {
+            Some(crate::tr!("machines.move.menu_item"))
+        } else {
+            None
+        };
+        let move_line =
+            moving.map(|status| self.render_project_move(&store, &project, &name_id, &status, cx));
+        let header = header
             .context_menu(move |menu, _window, cx| {
                 let id = menu_project.clone();
                 let delete_label = crate::tr!("sidebar.remove_project").into_owned();
-                menu.when(scope.is_full(), |menu| {
+                menu.when(full, |menu| {
                     menu.menu(
                         crate::tr!("project_icon.title"),
                         Box::new(ChangeProjectIcon(id.clone())),
@@ -631,19 +672,24 @@ impl SessionsSidebar {
                         crate::tr!("sidebar.change_project_root"),
                         Box::new(ChangeProjectRoot(id.clone())),
                     )
+                    .when_some(move_item.clone(), |menu, label| {
+                        menu.menu(label, Box::new(MoveProjectToMachine(id.clone())))
+                    })
                 })
-                .when(scope.is_full(), |menu| {
+                .when(full, |menu| {
                     menu.menu(
                         crate::tr!("sidebar.project_thread_rules"),
                         Box::new(ProjectThreadRules(id.clone())),
                     )
                 })
-                .menu_with_enable(
-                    crate::tr!("sidebar.archive_all").into_owned(),
-                    Box::new(ProjectArchiveAll(id.clone())),
-                    can_archive,
-                )
-                .when(scope.is_full(), |menu| {
+                .when(!view_only, |menu| {
+                    menu.menu_with_enable(
+                        crate::tr!("sidebar.archive_all").into_owned(),
+                        Box::new(ProjectArchiveAll(id.clone())),
+                        can_archive,
+                    )
+                })
+                .when(full, |menu| {
                     menu.menu_element(Box::new(ProjectDelete(id.clone())), move |_window, cx| {
                         div()
                             .flex_1()
@@ -663,6 +709,71 @@ impl SessionsSidebar {
             })
             .touch(false)
             .reveals(&self.hover, group_key)
+            .into_any_element();
+        match move_line {
+            Some(line) => v_flex()
+                .w_full()
+                .child(header)
+                .child(line)
+                .into_any_element(),
+            None => header,
+        }
+    }
+
+    /// The line under a moving project: how far the move is, and its bar,
+    /// which open the move's progress.
+    pub(super) fn render_project_move(
+        &self,
+        store: &Entity<WorkspaceStore>,
+        project: &ProjectKey,
+        name_id: &str,
+        status: &tcode_protocol::ProjectMoveStatus,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let machine =
+            crate::machines::machine_in_groups(std::slice::from_ref(store), &status.machine, cx)
+                .name;
+        let line = crate::move_project_dialog::status_line(
+            status,
+            &machine,
+            crate::move_project_dialog::LineForm::Row,
+        );
+        let open = project.clone();
+        let selector = format!("project-move-{name_id}");
+        v_flex()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
+            .role(Role::Button)
+            .aria_label(line.clone())
+            .w_full()
+            .pl(px(THREAD_INDENT))
+            .pr_2()
+            .pb_1()
+            .gap_1()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if let Some(store) = this.store_of(&open.host) {
+                    crate::move_project_dialog::open_progress(
+                        store,
+                        open.project_id.clone(),
+                        window,
+                        cx,
+                    );
+                }
+            }))
+            .child(
+                div()
+                    .text_secondary(false, cx)
+                    .child(crate::widgets::fade_text(line)),
+            )
+            .child(
+                crate::move_project_dialog::status_bar(
+                    SharedString::from(format!("project-move-bar-{name_id}")),
+                    status,
+                    cx,
+                )
+                .xsmall(),
+            )
             .into_any_element()
     }
 
@@ -677,14 +788,14 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> Option<HostHeadingParts> {
         let store = self.store_of(host)?;
+        let title = crate::machines::host_title(&store, cx);
         let store = store.read(cx);
         let state = store.connection_state();
         let failure = crate::remote::connection_failure(state.clone());
         let up = failure.is_none();
-        let title = store.host_title();
         let menu = HostMenu {
             host: host.clone(),
-            projects: (up && store.scope().is_full()).then(|| {
+            projects: (up && store.may_operate()).then(|| {
                 store
                     .projects()
                     .into_iter()
@@ -706,6 +817,7 @@ impl SessionsSidebar {
         ))
         .then(|| crate::remote::connection_label_beside_pair_again(&state));
         let refused = failure == Some(tcode_client::ConnectionFailure::AuthenticationRejected);
+        let view_only = up && store.view_only();
         let id = host.name();
         let part = |part: &str| SharedString::from(format!("host-{part}-{id}"));
         let dot = transition(
@@ -764,11 +876,15 @@ impl SessionsSidebar {
             .opacity(reveal)
             .dropdown_menu(move |popup, _, _| menu.build(popup))
             .touch(compact);
+        let mark_id = part("view-only");
+        let mark = crate::motion::shown(mark_id.clone(), view_only.then_some(()), SHOW, window, cx)
+            .map(|shown| shown.fade(view_only_mark(mark_id, compact, cx)));
         Some(HostHeadingParts {
             title,
             dot,
             status,
             pair,
+            mark,
             // The heading must not arm its own press before the menu opens.
             menu: div()
                 .flex_none()
@@ -826,6 +942,7 @@ impl SessionsSidebar {
                 .font_semibold()
                 .text_color(cx.theme().sidebar_foreground),
         )
+        .children(parts.mark)
         .children(parts.pair)
         .child(parts.menu);
         v_flex()
@@ -982,4 +1099,15 @@ impl SessionsSidebar {
                 .is_some_and(|text| !text.is_empty()),
         }
     }
+}
+
+/// The muted words beside a machine's name that say it lets this device only
+/// view it, so the reason is seen before a thread is opened.
+pub(super) fn view_only_mark(id: SharedString, compact: bool, cx: &App) -> gpui::AnyElement {
+    div()
+        .flex_none()
+        .debug_selector(move || id.to_string())
+        .text_secondary(compact, cx)
+        .child(crate::tr!("machines.access.mark"))
+        .into_any_element()
 }

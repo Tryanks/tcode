@@ -484,7 +484,7 @@ impl CommandPalette {
             let store = host.store.read(cx);
             let key = store.host_key();
             let named = on_host(store);
-            if store.scope().is_full() {
+            if store.may_operate() {
                 push_action(
                     match &named {
                         Some(host) => crate::tr!("palette.quick_chat_on", host = host.clone()),
@@ -495,7 +495,7 @@ impl CommandPalette {
                     Action::QuickChat(key.clone()),
                 );
             }
-            for project in store.projects() {
+            for project in store.projects().into_iter().filter(|_| !store.view_only()) {
                 push_action(
                     match &named {
                         Some(host) => crate::tr!(
@@ -645,7 +645,7 @@ impl CommandPalette {
         }
         for host in &hosts {
             let store = host.store.read(cx);
-            if store.scope().is_full() {
+            if store.may_operate() {
                 push_action(
                     match on_host(store) {
                         Some(host) => crate::tr!("palette.check_updates_on", host = host),
@@ -822,7 +822,7 @@ impl CommandPalette {
         let mut items: Vec<Item> = Vec::new();
         for host in &self.hosts {
             let store = host.store.read(cx);
-            if !store.scope().is_full() || (several && crate::sidebar::host_down(store)) {
+            if !store.may_operate() || (several && crate::sidebar::host_down(store)) {
                 continue;
             }
             let key = store.host_key();

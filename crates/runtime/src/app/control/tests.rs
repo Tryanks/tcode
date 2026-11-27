@@ -29,12 +29,14 @@ fn stored(store: &TestStore, threads: &[(&str, &str)]) {
     }
 }
 
-/// Every `tcode_control` tool but the subagent's `report_result`, in name order.
+/// Every `tcode_control` tool but the subagent's `report_result` and those about a group's
+/// machines, which a host without a way to them does not offer, in name order.
 fn every_tool() -> Vec<String> {
     control_mcp::tool_descriptions(&control_mcp::ThreadAccess {
         enabled: true,
         subagent: false,
         model_guide: false,
+        machines: false,
     })
     .into_iter()
     .map(|(name, _)| name)
@@ -144,6 +146,7 @@ fn activity_filters_by_thread_or_kind_and_offers_the_whole_log() {
         action: ControlAction {
             actor_thread_id: actor.into(),
             actor_title: actor.to_uppercase(),
+            actor_machine: None,
             action: action.into(),
             detail: None,
         },
@@ -199,7 +202,7 @@ fn call(
     cx: &mut HostCx,
 ) -> Result<serde_json::Value, String> {
     let (reply, response) = smol::channel::bounded(1);
-    state.handle_control_op(thread_id.into(), op, reply, cx);
+    state.handle_control_call(thread_id.into(), op, None, reply, cx);
     response.try_recv().unwrap()
 }
 
@@ -711,7 +714,7 @@ fn delete_threads_previews_then_deletes_the_tree() {
     cx.run_until_parked();
     assert_eq!(cx.seen().sessions().count(), 3, "a preview deletes nothing");
     state.update(cx, |state, cx| {
-        state.handle_control_op("caller".into(), delete, reply, cx)
+        state.handle_control_call("caller".into(), delete, None, reply, cx)
     });
     // The answer waits for the deleted threads' uploads to be removed.
     let deleted = cx.run_until_recv(&response).unwrap();

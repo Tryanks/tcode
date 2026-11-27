@@ -27,6 +27,18 @@ pub(crate) fn seed_full_scope_reply(
     deferred: Vec<String>,
     cx: &mut TestAppContext,
 ) {
+    seed_scope_reply(store, incoming, request_id, deferred, false, cx);
+}
+
+/// The whole machine, as it answers a device it lets `view_only`.
+pub(crate) fn seed_scope_reply(
+    store: &gpui::Entity<WorkspaceStore>,
+    incoming: &async_channel::Sender<String>,
+    request_id: u64,
+    deferred: Vec<String>,
+    view_only: bool,
+    cx: &mut TestAppContext,
+) {
     incoming
         .try_send(
             tcode_protocol::encode_line(&tcode_protocol::HostMessage::Event(EventEnvelope {
@@ -35,6 +47,7 @@ pub(crate) fn seed_full_scope_reply(
                 event: ServerEvent::ScopeSnapshot {
                     scope: tcode_protocol::Scope::Full,
                     host_unix_ms: 0,
+                    view_only,
                 },
             }))
             .unwrap(),
@@ -108,6 +121,7 @@ impl ScriptedSpace {
                                 (Topic::Scope, _) => ServerEvent::ScopeSnapshot {
                                     scope: scope.clone(),
                                     host_unix_ms: 0,
+                                    view_only: false,
                                 },
                                 (
                                     Topic::SpaceIndex { space_id },
@@ -748,6 +762,7 @@ fn member_scope_seeds_only_the_space_index_and_reseeds_on_reconnect(cx: &mut Tes
                 event: ServerEvent::ScopeSnapshot {
                     scope: tcode_protocol::Scope::Full,
                     host_unix_ms: crate::time::now_millis(cx),
+                    view_only: false,
                 },
             },
             cx,
@@ -785,6 +800,7 @@ fn member_scope_seeds_only_the_space_index_and_reseeds_on_reconnect(cx: &mut Tes
                 event: ServerEvent::ScopeSnapshot {
                     scope: tcode_protocol::Scope::Full,
                     host_unix_ms: crate::time::now_millis(cx),
+                    view_only: false,
                 },
             },
             cx,
@@ -865,6 +881,7 @@ fn preview_reads_the_attachment_route_when_saved_hosts_are_stale(cx: &mut TestAp
         last_connected_unix: None,
         group_id: None,
         group_name: None,
+        label: None,
         space_id: None,
         space_name: None,
     };
@@ -2917,6 +2934,7 @@ fn reconnect_replays_current_index_fingerprint_and_retains_replicas_until_baseli
                 event: ServerEvent::ScopeSnapshot {
                     scope: tcode_protocol::Scope::Full,
                     host_unix_ms: crate::time::now_millis(cx),
+                    view_only: false,
                 },
             },
             cx,

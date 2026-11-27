@@ -32,8 +32,11 @@ impl WorkspaceStore {
         }
     }
 
+    /// How the reader arranges and has read the machine's threads stays on
+    /// this device for a space member, and for a device that may only view,
+    /// whose commands the machine refuses, for as long as it is connected.
     pub(super) fn dispatch(&mut self, command: Command) {
-        if !self.scope.is_full() {
+        if !self.scope.is_full() || self.view_only {
             match &command {
                 Command::ToggleProjectCollapsed { project_id } => {
                     if self
@@ -83,7 +86,9 @@ impl WorkspaceStore {
                 }
             }
             self.thread_list_revision += 1;
-            self.save_member_settings();
+            if !self.scope.is_full() {
+                self.save_member_settings();
+            }
             return;
         }
         self.send(command);
@@ -136,7 +141,7 @@ impl WorkspaceStore {
 
 impl WorkspaceStore {
     fn patch_settings(&mut self, patch: SettingsPatch) {
-        if !self.scope.is_full() {
+        if !self.scope.is_full() || self.view_only {
             match patch {
                 SettingsPatch::LastProject(id) => self.settings_replica.last_project_id = id,
                 SettingsPatch::WordWrapDiffs(value) => {
@@ -157,7 +162,9 @@ impl WorkspaceStore {
                 _ => return,
             }
             self.thread_list_revision += 1;
-            self.save_member_settings();
+            if !self.scope.is_full() {
+                self.save_member_settings();
+            }
             return;
         }
         self.dispatch(Command::PatchSettings { patch });
@@ -282,6 +289,22 @@ impl WorkspaceStore {
     pub fn cancel_agent(&mut self, session_id: String) {
         self.dispatch(Command::CancelAgent { session_id });
     }
+    /// `op` for `thread_id`, a subagent `lead` started on machine `machine` of the group,
+    /// through the lead's host.
+    pub(crate) fn control_remote_child(
+        &mut self,
+        lead: String,
+        machine: String,
+        thread_id: String,
+        op: tcode_core::control::RemoteChildOp,
+    ) {
+        self.dispatch(Command::ControlRemoteChild {
+            session_id: lead,
+            machine,
+            thread_id,
+            op,
+        });
+    }
     pub fn interrupt_session(&mut self, session_id: String) {
         self.dispatch(Command::Interrupt { session_id });
     }
@@ -334,6 +357,9 @@ impl WorkspaceStore {
     }
     pub fn set_control_enabled(&mut self, enabled: bool) {
         self.patch_settings(SettingsPatch::ControlEnabled(enabled));
+    }
+    pub fn set_control_machines(&mut self, enabled: bool) {
+        self.patch_settings(SettingsPatch::ControlMachines(enabled));
     }
     pub fn set_control_agents(&mut self, agents: tcode_core::control::AgentScope) {
         self.patch_settings(SettingsPatch::ControlAgents(agents));

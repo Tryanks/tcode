@@ -44,6 +44,17 @@ pub struct PairedHost {
     /// The group's name as that machine last reported it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_name: Option<String>,
+    /// What the machine's group calls it, as a machine of the group last
+    /// told this device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl PairedHost {
+    /// What to call the machine: its group's label for it, else its name.
+    pub fn title(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// `traverse` as a list, or as the single optional value older records
@@ -166,6 +177,7 @@ impl PairInvite {
             last_connected_unix: None,
             group_id: None,
             group_name: None,
+            label: None,
         }
     }
 }
@@ -333,6 +345,7 @@ mod tests {
             last_connected_unix: None,
             group_id: None,
             group_name: None,
+            label: None,
         };
         let mut hosts = vec![host("desk", "first"), host("laptop", "laptop")];
         remember_host(&mut hosts, host("desk", "second"));

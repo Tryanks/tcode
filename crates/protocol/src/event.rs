@@ -81,6 +81,10 @@ pub enum Topic {
     /// device: answered on subscribe with the last measurement, and pushed
     /// when one starts or ends. The first subscription measures.
     DiskUsage,
+    /// The projects moving from this machine to another, and how each move
+    /// that ended in the host's run ended: answered on subscribe and pushed
+    /// after every change.
+    ProjectMoves,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -212,6 +216,9 @@ pub enum ServerEvent {
         scope: Scope,
         /// Unix milliseconds.
         host_unix_ms: u64,
+        /// The subscriber may read and change nothing.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        view_only: bool,
     },
     SettingsSnapshot(Settings),
     /// The current (or latest) external-import run for one project. `None`
@@ -229,6 +236,8 @@ pub enum ServerEvent {
     /// A [`Topic::DiskUsage`]'s state: the answer to subscribing, and a push
     /// when a measurement starts or ends.
     DiskUsageReplaced(DiskUsageState),
+    /// A [`Topic::ProjectMoves`]'s whole state.
+    ProjectMovesReplaced(crate::ProjectMovesState),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1438,6 +1447,13 @@ pub enum RuntimeError {
     /// Abandoned worktrees the start's sweep could not judge or remove.
     OrphansLeft {
         left: Vec<LeftOrphan>,
+    },
+    /// What a project move left that could not be removed: its parts and
+    /// snapshot refs on the machine the project left, or its staging on the
+    /// machine it came to. `error` says what is left where, in the words of the
+    /// system or of git.
+    MoveLeftBehind {
+        error: String,
     },
     DeleteSession {
         error: String,

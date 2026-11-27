@@ -346,7 +346,7 @@ impl SessionsSidebar {
     }
 
     /// The payload a row starts a drag with, or `None` while the row is
-    /// being renamed.
+    /// being renamed or its machine lets this device only view it.
     pub(super) fn dragged_thread(
         &self,
         meta: &SessionMeta,
@@ -355,10 +355,10 @@ impl SessionsSidebar {
     ) -> Option<DraggedThread> {
         let store = self.store_of(&state.thread.host)?;
         let store = store.read(cx);
-        state.renaming.is_none().then(|| DraggedThread {
+        (state.renaming.is_none() && !store.view_only()).then(|| DraggedThread {
             thread: state.thread.clone(),
             name: state.name.clone(),
-            arranges: store.scope().is_full() && !self.in_project_view(cx),
+            arranges: store.may_operate() && !self.in_project_view(cx),
             from: thread_section(meta),
             scope: self.list_scope(cx),
             title: meta.title.clone().into(),

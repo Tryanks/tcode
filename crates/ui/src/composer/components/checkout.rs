@@ -44,7 +44,18 @@ pub(crate) fn checkout_row(
     }
     .into_owned();
 
-    let right: AnyElement = if checkout_blocked {
+    // A machine that lets this device only view it shows the branch, and
+    // switches none.
+    let right: AnyElement = if store.read(cx).view_only() {
+        h_flex()
+            .min_w_0()
+            .gap_1p5()
+            .items_center()
+            .text_color(muted)
+            .child(Icon::empty().path("icons/git-branch.svg"))
+            .child(fading(picker_current.clone()))
+            .into_any_element()
+    } else if checkout_blocked {
         Button::new("branch-picker")
             .ghost()
             .outline()

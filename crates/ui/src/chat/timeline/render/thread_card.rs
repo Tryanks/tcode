@@ -42,6 +42,10 @@ pub(in crate::chat) enum Standing {
     Declined,
     /// A thread of its own: started, and none of this thread's to follow.
     Started,
+    /// Running as last heard, on a machine out of this window's reach.
+    Unreachable,
+    /// Its machine left the group.
+    MachineLeft,
 }
 
 impl Standing {
@@ -67,6 +71,14 @@ impl Standing {
         }
     }
 
+    fn of_machine(standing: crate::machines::Standing) -> Self {
+        match standing {
+            crate::machines::Standing::Execution(execution) => Self::of_execution(execution),
+            crate::machines::Standing::Unreachable => Self::Unreachable,
+            crate::machines::Standing::MachineLeft => Self::MachineLeft,
+        }
+    }
+
     fn label(self) -> SharedString {
         let key = match self {
             Self::Starting => "tools.status.starting",
@@ -79,6 +91,8 @@ impl Standing {
             Self::Cancelled => "agents.state_cancelled",
             Self::Declined => "tools.status.declined",
             Self::Started => "tools.status.started",
+            Self::Unreachable => "machines.dispatch.unreachable",
+            Self::MachineLeft => "machines.dispatch.machine_left",
         };
         crate::tr!(key).into_owned().into()
     }
@@ -101,6 +115,9 @@ impl Standing {
             Self::Interrupted => (icon(IconName::CircleAlert), theme.warning),
             Self::Cancelled | Self::Declined => (icon(IconName::Ban), theme.muted_foreground),
             Self::Started => (None, theme.muted_foreground),
+            // Out of reach is not failed: the thread may still be running.
+            Self::Unreachable => (icon(IconName::Unlink), theme.muted_foreground),
+            Self::MachineLeft => (icon(IconName::CircleDashed), theme.muted_foreground),
         };
         event_card::status(glyph, self.label(), color, cx).into_any_element()
     }
@@ -113,6 +130,9 @@ pub(in crate::chat) enum Opens {
     Agent(String),
     /// A thread of its own.
     Thread(String),
+    /// A thread on another machine of the group, where that machine's
+    /// store places it.
+    Elsewhere { machine: String, thread: String },
 }
 
 /// The glyph the card's tile shows.
@@ -142,7 +162,13 @@ pub(in crate::chat) struct ThreadCard {
     pub(in crate::chat) failure: Option<String>,
     /// The first message a thread of its own was started with.
     pub(in crate::chat) message: Option<String>,
+    /// Muted lines on a thread elsewhere: what is still to be told its
+    /// machine, and why it may not be heard from.
+    pub(in crate::chat) notes: Vec<String>,
     pub(in crate::chat) opens: Option<Opens>,
+    /// Why the card opens nothing, for a thread on a machine this window is
+    /// not linked to.
+    pub(in crate::chat) closed: Option<SharedString>,
     copy: Vec<(String, String)>,
 }
 
@@ -204,10 +230,13 @@ impl TimelineView {
                         .filter(|_| status == ItemStatus::Failed)
                         .and_then(tools::window::first_line),
                     message: None,
+                    notes: Vec::new(),
                     opens: tools::subagent::child_thread(self, entry, cx).map(Opens::Agent),
+                    closed: None,
                     copy,
                 }
             }
+            Started::Thread(start) if start.machine.is_some() => self.machine_card(start, cx)?,
             Started::Thread(start) => {
                 let store = self.workspace_store.read(cx);
                 let meta = start
@@ -287,14 +316,116 @@ impl TimelineView {
                     standing,
                     failure: None,
                     message: start.message.filter(|_| !start.subagent).map(one_line),
+                    notes: Vec::new(),
                     opens: start.thread_id.clone().map(if start.subagent {
                         Opens::Agent
                     } else {
                         Opens::Thread
                     }),
+                    closed: None,
                     copy,
                 }
             }
+        })
+    }
+
+    /// The card of a thread started on another machine of the group: that
+    /// machine's thread, read from that machine's store while this window
+    /// is linked to it, and otherwise from what this thread's host keeps of
+    /// it.
+    fn machine_card(&self, start: tools::threads::Start<'_>, cx: &App) -> Option<ThreadCard> {
+        let mut copy = Vec::new();
+        let machine = crate::machines::machine(start.machine?, cx);
+        let there = machine.store.as_ref().map(|store| store.read(cx));
+        let meta = there.and_then(|store| store.thread_meta(start.thread_id.as_deref()?));
+        let requested = start.provider.and_then(provider_named);
+        let mark = match (meta, requested) {
+            (Some(meta), _) => Mark::Profile(meta.provider, meta.profile_id.clone()),
+            (None, Some(provider)) => Mark::Provider(provider),
+            (None, None) => Mark::Bot,
+        };
+        let harness = match (there.zip(meta), requested) {
+            (Some((store, meta)), _) => Some(store.harness_name_of(meta)),
+            (None, provider) => provider.map(|provider| provider.display_name().into()),
+        };
+        let model = match there.zip(meta.and_then(|meta| Some((meta, meta.model.as_deref()?)))) {
+            Some((store, (meta, model))) => Some(
+                store
+                    .thread_model_name(&meta.id, model)
+                    .unwrap_or_else(|| model.to_owned()),
+            ),
+            None => start.model.map(str::to_owned),
+        };
+        let title = meta
+            .map(|meta| one_line(&meta.title))
+            .filter(|title| !title.is_empty())
+            .or(start.title.clone())
+            .or_else(|| start.message.map(one_line))
+            .unwrap_or_default();
+        // What this thread's host keeps of the thread it started there.
+        let record = start.thread_id.as_deref().and_then(|thread| {
+            let lead = self.session_id.as_deref()?;
+            self.workspace_store
+                .read(cx)
+                .thread_meta(lead)?
+                .remote_children
+                .iter()
+                .find(|child| child.machine == machine.id && child.thread_id == thread)
+                .cloned()
+        });
+        let (standing, notes) = match (&start.thread_id, start.subagent) {
+            _ if start.running => (Standing::Starting, Vec::new()),
+            (_, false) => (Standing::Started, Vec::new()),
+            (Some(_), true) => match &record {
+                Some(child) => {
+                    let standing = crate::machines::standing(child, &machine, cx);
+                    (
+                        Standing::of_machine(standing),
+                        crate::machines::notes(child, standing, &machine, cx),
+                    )
+                }
+                // Answered, and not yet kept by the host.
+                None => (Standing::Working, Vec::new()),
+            },
+            (None, true) => (Standing::Finished, Vec::new()),
+        };
+        if let Some(message) = start.message {
+            tools::copy(&mut copy, "chat.copy_text", message);
+        }
+        tools::copy(
+            &mut copy,
+            "chat.copy_output",
+            start.output.unwrap_or_default(),
+        );
+        if let Some(link) = &start.link {
+            tools::copy(&mut copy, "tools.copy_link", link);
+        }
+        let open = machine.store.is_some();
+        Some(ThreadCard {
+            badge: start.subagent && mark != Mark::Bot,
+            mark,
+            title,
+            subtitle: joined([
+                Some(machine.name.as_str()),
+                harness.as_deref(),
+                model.as_deref(),
+                start.branch.as_deref(),
+            ]),
+            standing,
+            failure: None,
+            message: start.message.filter(|_| !start.subagent).map(one_line),
+            notes,
+            opens: start
+                .thread_id
+                .clone()
+                .filter(|_| open)
+                .map(|thread| Opens::Elsewhere {
+                    machine: machine.id.clone(),
+                    thread,
+                }),
+            closed: (!open && start.thread_id.is_some())
+                .then(|| crate::machines::not_open(&machine.name)),
+            copy,
         })
     }
 
@@ -389,6 +520,16 @@ impl TimelineView {
                     .child(message),
             )
         });
+        let notes = (!card.notes.is_empty()).then(|| {
+            let id = id.clone();
+            event_card::section(cx).child(
+                div()
+                    .min_w_0()
+                    .text_color(theme.muted_foreground)
+                    .debug_selector(move || format!("thread-card-notes-{id}"))
+                    .children(card.notes.iter().map(|note| div().child(note.clone()))),
+            )
+        });
         let tone = if card.standing == Standing::Failed {
             CardTone::Danger
         } else {
@@ -408,7 +549,8 @@ impl TimelineView {
             })
             .child(header)
             .children(failure)
-            .children(message);
+            .children(message)
+            .children(notes);
         let origin = SharedString::from(format!("thread-card-{id}"));
         let surface = match card.opens.clone() {
             Some(opens) => {
@@ -446,10 +588,22 @@ impl TimelineView {
                         }),
                         cx,
                     ),
+                    Opens::Elsewhere { machine, thread } => {
+                        crate::machines::open_thread(machine, thread, None, cx);
+                    }
                 })
                 .into_any_element()
             }
-            None => surface.debug_selector(selector).into_any_element(),
+            None => match card.closed.clone() {
+                Some(closed) => surface
+                    .id(SharedString::from(format!("thread-card-{id}")))
+                    .debug_selector(selector)
+                    .with_tooltip(move |_, _| {
+                        crate::widgets::tooltip::Tooltip::new(closed.to_string())
+                    })
+                    .into_any_element(),
+                None => surface.debug_selector(selector).into_any_element(),
+            },
         };
         let copy = card.copy;
         let surface = h_flex()

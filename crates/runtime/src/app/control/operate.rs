@@ -46,7 +46,13 @@ fn to_json(value: impl serde::Serialize) -> Result<serde_json::Value, String> {
 }
 
 fn request_key(caller: &Caller, tool: &str, request_id: &str) -> String {
-    format!("{}/{tool}/{request_id}", caller.thread_id)
+    match &caller.machine {
+        Some(remote) => format!(
+            "{}@{}/{tool}/{request_id}",
+            caller.thread_id, remote.peer.id
+        ),
+        None => format!("{}/{tool}/{request_id}", caller.thread_id),
+    }
 }
 
 fn action_now(thread_id: &str, outcome: Outcome, reason: impl Into<String>) -> Answer {
@@ -139,6 +145,7 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::BrowserHomeUrl(_)
         | SettingsPatch::BrowserAllowEvaluate(_)
         | SettingsPatch::ControlEnabled(_)
+        | SettingsPatch::ControlMachines(_)
         | SettingsPatch::ControlAgents(_)
         | SettingsPatch::VisualizeEnabled(_)
         | SettingsPatch::ModelGuide(_)
@@ -327,6 +334,9 @@ impl AppState {
             return Ok(StartPlan::Started(started));
         }
         let subagent = params.subagent.unwrap_or(false);
+        if caller.machine.is_some() && params.attachments.is_some() {
+            return Err("refused: attachments do not go from one machine to another".into());
+        }
         let attachment_paths = self.agent_attachments(caller, params.attachments, cx)?;
         if params.message.trim().is_empty() && attachment_paths.is_empty() {
             return Err("message is empty".into());
@@ -408,7 +418,9 @@ impl AppState {
         }
         let caller_cwd = self
             .find_meta(&caller.thread_id)
-            .filter(|meta| meta.project_id.as_deref() == Some(project.id.as_str()))
+            .filter(|meta| {
+                caller.machine.is_none() && meta.project_id.as_deref() == Some(project.id.as_str())
+            })
             .map(|meta| meta.cwd);
         let cwd = match params.cwd {
             None => caller_cwd
@@ -445,7 +457,7 @@ impl AppState {
             acp_agent_id.as_deref(),
             model.as_deref(),
         )?;
-        if subagent {
+        if subagent && caller.machine.is_none() {
             self.collaboration_allows_collaborator(
                 caller,
                 provider,
@@ -470,7 +482,17 @@ impl AppState {
             .map(|(id, value)| OptionSelection { id, value })
             .collect();
         if subagent {
-            meta.parent_session_id = Some(caller.thread_id.clone());
+            match &caller.machine {
+                // An ordinary root thread here: only its report goes back.
+                Some(remote) => {
+                    meta.remote_parent = Some(tcode_core::control::RemoteParent {
+                        machine: remote.peer.id.clone(),
+                        thread_id: caller.thread_id.clone(),
+                        title: remote.title.clone(),
+                    });
+                }
+                None => meta.parent_session_id = Some(caller.thread_id.clone()),
+            }
             meta.option_selections.extend(resolve_child_permission(
                 permission_control(provider),
                 self.settings.subagents.child_approval,
@@ -486,6 +508,7 @@ impl AppState {
         meta.started_by = Some(StartedBy {
             thread_id: caller.thread_id.clone(),
             request_id: params.request_id,
+            machine: caller.machine.as_ref().map(|remote| remote.peer.id.clone()),
         });
         Ok(StartPlan::Install {
             meta: Box::new(meta),
@@ -568,17 +591,20 @@ impl AppState {
 
     /// The thread an earlier `start_thread` call with this `request_id` started.
     fn started_by_request(&self, caller: &Caller, request_id: &str) -> Option<StartThreadResponse> {
+        let machine = caller.machine.as_ref().map(|remote| &remote.peer.id);
         let meta = self.sessions.iter().find(|meta| {
-            meta.started_by
-                .as_ref()
-                .is_some_and(|by| by.thread_id == caller.thread_id && by.request_id == request_id)
+            meta.started_by.as_ref().is_some_and(|by| {
+                by.thread_id == caller.thread_id
+                    && by.request_id == request_id
+                    && by.machine.as_ref() == machine
+            })
         })?;
         Some(StartThreadResponse {
             thread_id: meta.id.clone(),
             created: false,
             title: meta.title.clone(),
             cwd: meta.cwd.display().to_string(),
-            subagent: meta.is_dispatched(),
+            subagent: meta.has_lead(),
             worktree_branch: meta
                 .worktree
                 .as_ref()
@@ -601,9 +627,10 @@ impl AppState {
         {
             return to_json(started);
         }
-        if !self
-            .find_meta(&caller.thread_id)
-            .is_some_and(|meta| meta.archived_at.is_none())
+        if caller.machine.is_none()
+            && !self
+                .find_meta(&caller.thread_id)
+                .is_some_and(|meta| meta.archived_at.is_none())
         {
             return Err("this thread was archived before its subagent could start".into());
         }
@@ -612,13 +639,13 @@ impl AppState {
             created: true,
             title: meta.title.clone(),
             cwd: meta.cwd.display().to_string(),
-            subagent: meta.is_dispatched(),
+            subagent: meta.has_lead(),
             worktree_branch: meta
                 .worktree
                 .as_ref()
                 .map(|worktree| worktree.branch.clone()),
         };
-        let id = if meta.is_dispatched() {
+        let id = if meta.has_lead() {
             self.install_subagent(meta, message, attachments, cx)
         } else {
             self.install_background_thread(meta, message, attachments, cx)
@@ -896,8 +923,11 @@ impl AppState {
                     "not your subagent: cancel stops only your own".into(),
                 ));
             }
-            self.validate_command_target(&Command::CancelAgent { session_id })
-                .map_err(|error| skipped(error.message))?;
+            // A thread another machine's thread started is no agent of a thread here.
+            if caller.machine.is_none() {
+                self.validate_command_target(&Command::CancelAgent { session_id })
+                    .map_err(|error| skipped(error.message))?;
+            }
             self.cancel_child(target, cx);
             self.audit(caller, target, action::CANCEL, None, cx);
             return Ok(("cancelled; its result is not delivered", None));

@@ -3157,6 +3157,12 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_item_id: Option<String>,
     },
+    /// The thread came to this machine with its project from the machine of the
+    /// group called `from_machine_name`. Never emitted by an adapter; the runtime
+    /// records it when the move is committed here.
+    ThreadMoved {
+        from_machine_name: String,
+    },
     /// The harness waits for the host to create or remove a git worktree, as
     /// Claude Code does through its `WorktreeCreate` and `WorktreeRemove` hooks
     /// for every worktree it works in. Answered by
@@ -3998,6 +4004,9 @@ pub enum ChildRequestAnswer {
 pub struct ControlAction {
     pub actor_thread_id: String,
     pub actor_title: String,
+    /// The machine of the group the actor thread is on, when it is not this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_machine: Option<String>,
     /// A semantic key from `tcode_core::control::action`, which clients put in words.
     pub action: String,
     /// Data only (a title, an id, a name, a count, someone's own words), never a sentence.

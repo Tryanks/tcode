@@ -325,7 +325,7 @@ impl Composer {
                 card.child(
                     event_card::section(cx)
                         .text_secondary(self.compact, cx)
-                        .child(crate::tr!("approval.space_reviewed_only")),
+                        .child(not_answerable(&self.workspace_store, cx)),
                 )
             })
             .when(answerable, |card| {
@@ -421,11 +421,26 @@ impl Composer {
 
 /// Whether this client's user may answer `request`. In a space that leaves
 /// approvals to the agent's harness, a member answers none but a plan: theirs
-/// are declined at once, and the owner's are the owner's.
+/// are declined at once, and the owner's are the owner's. A machine that
+/// lets this device only view it takes no answer from it.
 pub(crate) fn approval_answerable(request: &ApprovalRequest, store: &WorkspaceStore) -> bool {
-    matches!(request.kind, ApprovalKind::Plan { .. })
-        || store
-            .space_allows(|policy| policy.approval != tcode_protocol::SpaceApproval::ReviewedOnly)
+    !store.view_only()
+        && (matches!(request.kind, ApprovalKind::Plan { .. })
+            || store.space_allows(|policy| {
+                policy.approval != tcode_protocol::SpaceApproval::ReviewedOnly
+            }))
+}
+
+/// Why a request [`approval_answerable`] refuses cannot be answered here.
+pub(crate) fn not_answerable(store: &Entity<WorkspaceStore>, cx: &App) -> gpui::SharedString {
+    let store = store.read(cx);
+    if store.view_only() {
+        crate::tr!("machines.access.composer", machine = store.host_title())
+    } else {
+        crate::tr!("approval.space_reviewed_only")
+    }
+    .into_owned()
+    .into()
 }
 
 /// Sends a decision on the approval with the given id.

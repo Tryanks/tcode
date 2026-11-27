@@ -29,6 +29,13 @@
 //! and listens on no port. The machine answers `connected` before the first
 //! SSH byte, or `refused` when the device may not open one. These streams
 //! share the tunnel bound.
+//!
+//! Another machine of the machine's group connects on `tcode/1` too, under
+//! its own key, and opens only streams that start with
+//! `{"type":"machine","protocol_version":..}`: one line follows with a
+//! `MachineRequest` of at most [`MAX_LINE`] bytes, the machine answers with
+//! one `machine_reply` line, and the stream ends. A device's connection may
+//! not open one, and a machine's connection may open nothing else.
 use std::{io, time::Duration};
 
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress};
@@ -121,6 +128,8 @@ pub enum ClientLine {
     Original {
         target: tcode_protocol::OriginalTarget,
     },
+    /// A machine of the group's request; see the module documentation.
+    Machine { protocol_version: u32 },
 }
 
 /// Whether a `connect` line names something the machine will dial: a host
@@ -152,6 +161,8 @@ pub enum PairRejection {
 pub enum HelloRejection {
     Protocol,
     Unpaired,
+    /// This machine admits none of its group's other devices.
+    Closed,
 }
 
 /// The machine's answer to a [`ClientLine`].
@@ -188,6 +199,10 @@ pub enum HostLine {
     /// A stream whose first line the machine does not serve.
     Refused {
         reason: String,
+    },
+    /// The answer to a machine stream's request.
+    MachineReply {
+        result: Result<tcode_protocol::MachineResponse, tcode_protocol::ProtocolError>,
     },
 }
 
@@ -487,6 +502,27 @@ mod tests {
             })
             .unwrap(),
             serde_json::json!({"type":"connect_failed","reason":"refused"})
+        );
+        assert_eq!(
+            serde_json::from_str::<ClientLine>(r#"{"type":"machine","protocol_version":33}"#)
+                .unwrap(),
+            ClientLine::Machine {
+                protocol_version: 33
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(HostLine::HelloRejected {
+                reason: HelloRejection::Closed
+            })
+            .unwrap(),
+            serde_json::json!({"type":"hello_rejected","reason":"closed"})
+        );
+        assert_eq!(
+            serde_json::to_value(HostLine::MachineReply {
+                result: Ok(tcode_protocol::MachineResponse::Pong)
+            })
+            .unwrap(),
+            serde_json::json!({"type":"machine_reply","result":{"Ok":{"type":"pong"}}})
         );
         assert!(valid_tunnel_target("::1", 80));
         assert!(!valid_tunnel_target("[::1]", 80));

@@ -46,6 +46,9 @@ pub struct HostServices {
     /// How the host starts a provider's adapter: [`agent::start_session`]
     /// unless a test plays the adapter's half of the canonical stream.
     pub provider_launcher: crate::app::ProviderLauncher,
+    /// How the host reaches the other machines of its group: the composition root hands
+    /// the same link to the transport that serves it.
+    pub machines: Option<tcode_client::machines::MachineLink>,
 }
 
 impl HostServices {
@@ -291,7 +294,9 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             state.mcp_unavailable(services.mcp_unavailable.take());
             state.login_shell_unread(services.login_shell_unread.take());
             state.set_provider_launcher(services.provider_launcher);
+            state.attach_machine_link(services.machines.take());
             let mut cx = HostCx::new(mailbox_tx, event_tx, services.clock.clone());
+            state.resume_project_moves(&mut cx);
             state.pump_pull_request_requests(services.pull_requests.take(), &mut cx);
             state.start_pull_request_workers(&mut cx);
             state.pump_control_requests(&mut cx);
@@ -429,12 +434,12 @@ pub(crate) fn handle_client_message(
     } = message;
     cx.principal = principal.unwrap_or(Principal::Full);
     cx.space = match &cx.principal {
-        Principal::Full => None,
+        Principal::Full | Principal::Machine { .. } | Principal::Viewer { .. } => None,
         Principal::Space { space_id, .. } => Some(space_id.clone()),
     };
     cx.origin = Some(tcode_core::session::MessageOrigin::Human);
     cx.author = match &cx.principal {
-        Principal::Full => None,
+        Principal::Full | Principal::Machine { .. } | Principal::Viewer { .. } => None,
         Principal::Space {
             device_id,
             device_name,
@@ -1010,6 +1015,17 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             thread_ids,
         } => app.stop_watching_threads(&session_id, &thread_ids, cx),
         Command::CancelAgent { session_id } => app.cancel_child(&session_id, cx),
+        Command::ControlRemoteChild {
+            session_id,
+            machine,
+            thread_id,
+            op,
+        } => {
+            let task = app.control_remote_child(&session_id, &machine, &thread_id, op, cx);
+            return CommandOutcome::Pending(
+                cx.spawn_background(async move { task.await.map(|()| CommandResponse::Unit) }),
+            );
+        }
         Command::SetAutoSettle {
             session_id,
             enabled,
@@ -1075,6 +1091,29 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             let uploads = app.delete_project(&project_id, cx);
             return CommandOutcome::Pending(
                 cx.spawn_background(async move { uploads.await.map(|()| CommandResponse::Unit) }),
+            );
+        }
+        Command::MoveProject {
+            project_id,
+            machine,
+            root,
+            include_ignored,
+        } => {
+            let task = app.move_project(&project_id, &machine, &root, include_ignored, cx);
+            return CommandOutcome::Pending(
+                cx.spawn_background(async move { task.await.map(|()| CommandResponse::Unit) }),
+            );
+        }
+        Command::ResumeProjectMove { project_id } => {
+            let task = app.resume_project_move(&project_id, cx);
+            return CommandOutcome::Pending(
+                cx.spawn_background(async move { task.await.map(|()| CommandResponse::Unit) }),
+            );
+        }
+        Command::CancelProjectMove { project_id, force } => {
+            let task = app.cancel_project_move(&project_id, force, cx);
+            return CommandOutcome::Pending(
+                cx.spawn_background(async move { task.await.map(|()| CommandResponse::Unit) }),
             );
         }
         Command::MarkSessionUnread { session_id } => app.mark_session_unread(&session_id, cx),
@@ -1655,6 +1694,36 @@ fn dispatch_query(
                         message,
                     })
             })
+        }
+        Query::Machine(request) => {
+            let Principal::Machine {
+                machine_id,
+                machine_name,
+            } = cx.principal.clone()
+            else {
+                return cx.spawn_background(async {
+                    Err(ProtocolError::out_of_scope(
+                        "only another machine of the group sends machine requests",
+                    ))
+                });
+            };
+            let peer = crate::app::machines::MachinePeer {
+                id: machine_id,
+                name: machine_name,
+            };
+            let task = app.handle_machine_request(&peer, request, cx);
+            cx.spawn_background(async move { task.await.map(QueryResponse::Machine) })
+        }
+        Query::ProjectMovePreview {
+            project_id,
+            machine,
+        } => {
+            let task = app.project_move_preview(&project_id, &machine, cx);
+            cx.spawn_background(async move { task.await.map(QueryResponse::ProjectMovePreview) })
+        }
+        Query::MovedThread { thread_id } => {
+            let machine = app.moved_thread_machine(&thread_id).map(str::to_owned);
+            cx.spawn_background(async move { Ok(QueryResponse::MovedThread(machine)) })
         }
     }
 }
@@ -2240,6 +2309,7 @@ mod tests {
                 ServerEvent::ScopeSnapshot {
                     scope: tcode_protocol::Scope::Full,
                     host_unix_ms: 0,
+                    view_only: false,
                 },
             ),
             (

@@ -181,6 +181,7 @@ mod tests {
             EntryContent::ControlAction(agent::ControlAction {
                 actor_thread_id: actor.into(),
                 actor_title: String::new(),
+                actor_machine: None,
                 action: tcode_core::control::action::PR_LINK.into(),
                 detail: Some(detail.into()),
             }),

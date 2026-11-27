@@ -332,6 +332,11 @@ fn row(
                 cx,
             );
         })
+    })
+    .when_some(line.elsewhere.clone(), |row, (machine, thread)| {
+        row.cursor_pointer().on_click(move |_, _, cx| {
+            crate::machines::open_thread(&machine, &thread, None, cx);
+        })
     });
     origins.mark(origin, radius, row).into_any_element()
 }

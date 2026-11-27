@@ -362,6 +362,7 @@ impl TurnBoundaries {
             | AgentEvent::ContextWindowChanged { .. }
             | AgentEvent::SettingsKept
             | AgentEvent::SessionMoved { .. }
+            | AgentEvent::ThreadMoved { .. }
             | AgentEvent::WorktreeResolved { .. }
             | AgentEvent::ControlAction(_)
             | AgentEvent::UnreadableRecord { .. }

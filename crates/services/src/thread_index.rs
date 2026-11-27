@@ -488,6 +488,7 @@ impl Activity {
             | EntryContent::ContextWindowChanged { .. }
             | EntryContent::SettingsKept
             | EntryContent::SessionMoved { .. }
+            | EntryContent::ThreadMoved { .. }
             | EntryContent::Worktree { .. }
             | EntryContent::Unreadable { .. }
             | EntryContent::Withheld { .. } => {}
@@ -1311,6 +1312,9 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
             "session_moved",
             format!("{} → {}", from.display(), to.display()),
         ),
+        EntryContent::ThreadMoved {
+            from_machine_name, ..
+        } => ("thread_moved", from_machine_name.clone()),
         EntryContent::Worktree { request, answer } => (
             "worktree",
             tcode_core::session::worktree_summary(request, answer),

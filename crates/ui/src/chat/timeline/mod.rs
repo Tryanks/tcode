@@ -208,6 +208,10 @@ pub(crate) struct TimelineView {
     /// before the capture moved it. History paging and tail following stay
     /// off until the capture ends so the origin keeps meaning the same pixel.
     pub(in crate::chat) capture: Option<CaptureSession>,
+    /// The stores of the machines this thread started threads on, and how
+    /// the cards of those threads read as of the last change to one.
+    machines: crate::machines::Followed,
+    machine_lines: Vec<(String, crate::machines::Standing, Vec<String>, bool)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -337,6 +341,8 @@ impl TimelineView {
             highlighted_turn: None,
             copied: CopiedMark::default(),
             capture: None,
+            machines: Default::default(),
+            machine_lines: Vec::new(),
             _subscriptions: subscriptions,
         };
         this.sync_markdown_states(cx);
@@ -486,6 +492,7 @@ impl Render for TimelineView {
             self.sync_markdown_states(cx);
         }
         self.sync_callback_requests(cx);
+        self.follow_machines(cx);
         self.land_sent_message(cx);
         self.inline_diffs.sweep();
         self.tool_texts.sweep(&cx.theme().highlight_theme);
@@ -1266,6 +1273,91 @@ impl TimelineView {
     }
 
     /// Invalidate the measured heights of every row of `turn`.
+    /// What this thread keeps of the threads it started on other machines.
+    fn remote_children(&self, cx: &App) -> Vec<tcode_core::control::RemoteChild> {
+        self.session_id
+            .as_deref()
+            .and_then(|id| self.workspace_store.read(cx).thread_meta(id))
+            .map(|meta| meta.remote_children.clone())
+            .unwrap_or_default()
+    }
+
+    /// Follow the stores of the machines this thread started threads on.
+    fn follow_machines(&mut self, cx: &mut Context<Self>) {
+        let machines: Vec<String> = self
+            .remote_children(cx)
+            .into_iter()
+            .map(|child| child.machine)
+            .collect();
+        let mut followed = std::mem::take(&mut self.machines);
+        followed.follow(
+            machines,
+            |this, cx| {
+                if this.remeasure_machine_cards(cx) {
+                    cx.notify();
+                }
+            },
+            cx,
+        );
+        self.machines = followed;
+        // What this thread's host keeps of them changes with its own record.
+        self.remeasure_machine_cards(cx);
+    }
+
+    /// The cards of the threads this thread started on other machines, as
+    /// they read now: when one gained or lost a line, the turns that hold
+    /// them are measured again. Whether any changed.
+    fn remeasure_machine_cards(&mut self, cx: &mut Context<Self>) -> bool {
+        let lines: Vec<_> =
+            self.remote_children(cx)
+                .iter()
+                .map(|child| {
+                    let machine = crate::machines::machine(&child.machine, cx);
+                    let standing = crate::machines::standing(child, &machine, cx);
+                    let notes = crate::machines::notes(child, standing, &machine, cx);
+                    let known = machine.store.as_ref().is_some_and(|store| {
+                        store.read(cx).thread_meta(&child.thread_id).is_some()
+                    });
+                    (child.thread_id.clone(), standing, notes, known)
+                })
+                .collect();
+        if lines == self.machine_lines {
+            return false;
+        }
+        self.machine_lines = lines;
+        let turns: Vec<usize> = self
+            .workspace_store
+            .read(cx)
+            .with_timeline_for(
+                self.session_id.as_deref(),
+                |timeline| {
+                    timeline
+                        .entries
+                        .iter()
+                        .filter(|entry| {
+                            tools::threads::start(entry)
+                                .is_some_and(|start| start.machine.is_some())
+                                || crate::chat::model::user_notice(&entry.content).is_some_and(
+                                    |notice| {
+                                        matches!(notice, HostNotice::Orchestrate(callbacks)
+                                        if callbacks.iter().any(|callback| {
+                                            callback.machine.is_some()
+                                        }))
+                                    },
+                                )
+                        })
+                        .map(|entry| entry.turn)
+                        .collect()
+                },
+                cx,
+            )
+            .unwrap_or_default();
+        for turn in turns {
+            self.remeasure_turn(turn);
+        }
+        true
+    }
+
     fn remeasure_turn(&self, turn: usize) {
         let rows = rows_of_turn(&self.rows, turn);
         if !rows.is_empty() {

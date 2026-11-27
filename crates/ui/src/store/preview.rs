@@ -44,7 +44,7 @@ pub(super) struct PreviewReplica {
     /// How this client names itself on its [`Topic::Preview`].
     client: PreviewClient,
     /// This client subscribed to its [`Topic::Preview`]: it can render.
-    offered: bool,
+    pub(super) offered: bool,
     sessions: HashMap<String, HeldPreview>,
     rendering: HashSet<String>,
     /// Threads this client asked to render, until the host answers: with

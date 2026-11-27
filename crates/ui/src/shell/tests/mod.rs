@@ -170,6 +170,7 @@ fn mount_restored_with_outbox<'a>(
             last_connected_unix: Some(1),
             group_id: None,
             group_name: None,
+            label: None,
             space_id: None,
             space_name: None,
         },
@@ -402,7 +403,26 @@ impl WorkspaceHost {
         last_project_id: Option<&str>,
         cx: &mut VisualTestContext,
     ) {
-        crate::store::tests::seed_full_scope(store, &self.host.incoming, Vec::new(), cx);
+        self.come_up_as(store, projects, last_project_id, false, cx);
+    }
+
+    /// [`Self::come_up`] for a machine that lets this device `view_only`.
+    fn come_up_as(
+        &self,
+        store: &Entity<WorkspaceStore>,
+        projects: Vec<tcode_core::project::Project>,
+        last_project_id: Option<&str>,
+        view_only: bool,
+        cx: &mut VisualTestContext,
+    ) {
+        crate::store::tests::seed_scope_reply(
+            store,
+            &self.host.incoming,
+            1,
+            Vec::new(),
+            view_only,
+            cx,
+        );
         send_events(
             &self.host,
             vec![
@@ -443,6 +463,7 @@ fn saved_machine(host_id: &str, group: bool) -> tcode_client::pairing::PairedHos
         last_connected_unix: None,
         group_id: group.then(|| "group".into()),
         group_name: group.then(|| "Home".into()),
+        label: None,
         space_id: None,
         space_name: None,
     }
@@ -2497,6 +2518,7 @@ mod drafts;
 mod hosts;
 mod keyboard;
 mod launch;
+mod machines;
 mod navigation;
 mod panes;
 mod right_panel;

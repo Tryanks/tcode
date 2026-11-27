@@ -35,6 +35,9 @@ impl AppState {
             code: code.into(),
             message: message.into(),
         };
+        if let Some(refused) = self.move_refusal(command) {
+            return Err(refused);
+        }
         self.validate_plugin_command(command)?;
         if let Command::RegenerateSessionTitle { session_id } = command
             && let Some(thread) = self.sessions.iter().find(|meta| &meta.id == session_id)
@@ -129,6 +132,22 @@ impl AppState {
                 return Err(error(
                     "not_an_agent",
                     "This thread is not an agent dispatched by another thread.",
+                ));
+            }
+            Command::ControlRemoteChild {
+                session_id,
+                machine,
+                thread_id,
+                ..
+            } if !self.find_meta(session_id).is_some_and(|meta| {
+                meta.remote_children
+                    .iter()
+                    .any(|child| &child.machine == machine && &child.thread_id == thread_id)
+            }) =>
+            {
+                return Err(error(
+                    "not_a_remote_child",
+                    "This thread did not start that thread on that machine.",
                 ));
             }
             Command::ToggleProjectCollapsed { project_id }
@@ -295,6 +314,7 @@ impl AppState {
             Command::SettleChildren { .. }
                 | Command::SettleSession { .. }
                 | Command::CancelAgent { .. }
+                | Command::ControlRemoteChild { .. }
                 | Command::UnsettleSession { .. }
                 | Command::SetAutoSettle { .. }
                 | Command::PinSession { .. }

@@ -38,6 +38,7 @@ fn a_fixed_machine_client_has_no_way_to_add_one(cx: &mut TestAppContext) {
                 last_connected_unix: None,
                 group_id: None,
                 group_name: None,
+                label: None,
                 space_id: None,
                 space_name: None,
             }])
@@ -390,6 +391,7 @@ fn superseded_pairing_does_not_overwrite_the_saved_machine(cx: &mut TestAppConte
         last_connected_unix: None,
         group_id: None,
         group_name: None,
+        label: None,
         space_id: None,
         space_name: None,
     };

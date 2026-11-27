@@ -197,16 +197,21 @@ fn start_local(
     store: SessionStore,
     login_shell_unread: Option<String>,
 ) -> std::io::Result<(SpawnedHost, HostMux)> {
+    // The machine this window starts while hosting serves the host's way
+    // to the other machines of its group.
+    let machines = tcode_client::machines::MachineLink::new();
     let mut host_services = HostServices {
         background_startup_probes: true,
         ai_title_generation: true,
         login_shell_unread,
+        machines: Some(machines.clone()),
         ..HostServices::default()
     };
     host_services.start_mcp_servers(true);
     let host = spawn_host(store, host_services)?;
     let mux = HostMux::new(host.attachments.clone(), host.from_host.clone())
-        .with_original_backend(std::sync::Arc::new(host.clone()));
+        .with_original_backend(std::sync::Arc::new(host.clone()))
+        .with_machine_link(machines);
     Ok((host, mux))
 }
 

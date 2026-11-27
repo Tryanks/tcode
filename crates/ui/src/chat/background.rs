@@ -47,6 +47,8 @@ pub(in crate::chat) struct Background {
     pub(in crate::chat) harness: String,
     /// What of it the harness stops.
     stop: BackgroundStop,
+    /// This device may stop it: the machine lets it do more than view.
+    operates: bool,
     pub(in crate::chat) rows: Vec<BackgroundTaskStatus>,
     /// When this client first saw the stop out for each piece, by its task
     /// id and the executor's clock.
@@ -65,6 +67,7 @@ impl Background {
             stop: status
                 .background_control
                 .map_or(BackgroundStop::None, |control| control.stop),
+            operates: !store.view_only(),
             rows: status.background_tasks.clone(),
             stops_seen: status
                 .background_tasks
@@ -114,7 +117,7 @@ impl Background {
 
     /// The pieces a stop reaches now: listed, running, with no stop out.
     fn stoppable(&self) -> Vec<&BackgroundTaskStatus> {
-        if !self.stop.stops() {
+        if !self.stop.stops() || !self.operates {
             return Vec::new();
         }
         self.rows
@@ -452,8 +455,11 @@ pub(in crate::chat) fn controls(
             }
         },
     );
-    let stop =
-        (standing == Standing::Running && row.listed && background.stop.stops()).then(|| {
+    let stop = (standing == Standing::Running
+        && row.listed
+        && background.stop.stops()
+        && background.operates)
+        .then(|| {
             let (store, session_id, task_id) =
                 (place.store.clone(), place.session_id.clone(), id.clone());
             let selector = format!("background-stop-{id}");
@@ -477,7 +483,7 @@ pub(in crate::chat) fn controls(
         });
     // A stop gone unanswered too long takes the stop's place with the one
     // way past it: ending the harness's processes.
-    let force = (standing == Standing::Unanswered).then(|| {
+    let force = (standing == Standing::Unanswered && background.operates).then(|| {
         let (store, session_id, harness) = (
             place.store.clone(),
             place.session_id.clone(),

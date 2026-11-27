@@ -56,7 +56,7 @@ impl ControlState {
 /// A call's answer: ready on the host thread, or computed off it because it runs git, reads
 /// the store or waits for work the call started, which would stall every client if awaited
 /// on the host thread. A `Later` task is dropped once its caller goes.
-pub(super) enum Answer {
+pub(in crate::app) enum Answer {
     Now(Result<serde_json::Value, String>),
     Later(HostTask<Result<serde_json::Value, String>>),
 }
@@ -64,7 +64,7 @@ pub(super) enum Answer {
 /// The part of a call that needs the host state, run on the host thread once the call's
 /// off-thread work has finished; its result is the call's answer. It runs in `call_cx`, the
 /// context the call was given: the host's own carries no author, origin or space.
-async fn finish_on_host(
+pub(in crate::app) async fn finish_on_host(
     call_cx: HostCx,
     finish: impl FnOnce(&mut AppState, &mut HostCx) -> Result<serde_json::Value, String>
     + Send
@@ -87,16 +87,26 @@ fn refusal(error: tcode_protocol::ProtocolError) -> String {
 
 /// The thread behind a `tcode_control` call.
 #[derive(Clone)]
-pub(super) struct Caller {
-    pub(super) thread_id: String,
-    pub(super) project_id: Option<String>,
+pub(in crate::app) struct Caller {
+    /// The calling thread: this machine's, or `machine`'s when that is set, which then
+    /// names no thread here.
+    pub(in crate::app) thread_id: String,
+    pub(in crate::app) project_id: Option<String>,
     /// The space whose member's turn makes the call, which confines it to that space's
     /// projects and policy.
-    pub(super) space: Option<CallerSpace>,
+    pub(in crate::app) space: Option<CallerSpace>,
+    pub(in crate::app) machine: Option<RemoteCaller>,
+}
+
+/// The machine of the group a calling thread is on, when it is not this one.
+#[derive(Clone)]
+pub(in crate::app) struct RemoteCaller {
+    pub(in crate::app) peer: super::machines::MachinePeer,
+    pub(in crate::app) title: String,
 }
 
 #[derive(Clone)]
-pub(super) struct CallerSpace {
+pub(in crate::app) struct CallerSpace {
     pub(super) projects: BTreeSet<String>,
     pub(super) policy: tcode_protocol::SpacePolicy,
 }
@@ -146,27 +156,41 @@ impl AppState {
                 let control_mcp::BrokerRequest {
                     thread_id,
                     op,
+                    machine,
                     reply,
                 } = request;
-                host_cx.enqueue(move |state, cx| state.handle_control_op(thread_id, op, reply, cx));
+                host_cx.enqueue(move |state, cx| {
+                    state.handle_control_call(thread_id, op, machine, reply, cx)
+                });
             }
         });
     }
 
     /// What the control server offers `meta`'s thread: nothing with the feature off,
-    /// otherwise every tool and, for a subagent, `report_result`, and for the thread the
-    /// user opened to research a model's guide, `set_model_guide`.
+    /// otherwise every tool and, for a subagent, `report_result`, for the thread the
+    /// user opened to research a model's guide, `set_model_guide`, and the tools about the
+    /// group's machines where this machine reaches a group and lets its threads do so.
     pub(super) fn control_access(&self, meta: &SessionMeta) -> ThreadAccess {
         ThreadAccess {
             enabled: self.settings.control.enabled,
-            subagent: meta.is_dispatched(),
+            subagent: meta.has_lead(),
             model_guide: meta.guide_for.is_some(),
+            machines: self.settings.control.machines && self.machine_link().is_ok(),
         }
     }
 
-    /// Whether `target` is a subagent `caller` started.
-    pub(super) fn own_subagent(&self, caller: &Caller, target: &SessionMeta) -> bool {
-        target.is_dispatched() && target.parent_session_id.as_deref() == Some(&caller.thread_id)
+    /// Whether `target` is a subagent `caller` started: here, or, for a caller on another
+    /// machine, on this machine for that thread.
+    pub(in crate::app) fn own_subagent(&self, caller: &Caller, target: &SessionMeta) -> bool {
+        match &caller.machine {
+            None => {
+                target.is_dispatched()
+                    && target.parent_session_id.as_deref() == Some(&caller.thread_id)
+            }
+            Some(remote) => target.remote_parent.as_ref().is_some_and(|parent| {
+                parent.machine == remote.peer.id && parent.thread_id == caller.thread_id
+            }),
+        }
     }
 
     /// Whether the thread's provider is given the `tcode_control` server when it starts.
@@ -222,7 +246,7 @@ impl AppState {
     /// Re-read every registered thread's access after the setting changed, so the next
     /// connection lists the right tools; with the feature off a registered thread is offered
     /// none.
-    pub(super) fn refresh_control_access(&mut self) {
+    pub(in crate::app) fn refresh_control_access(&mut self) {
         let registered: Vec<String> = self.mcp.control_registrations.keys().cloned().collect();
         let access: Vec<(String, ThreadAccess)> = registered
             .into_iter()
@@ -260,16 +284,24 @@ impl AppState {
             thread_id: meta.id.clone(),
             project_id: meta.project_id.clone(),
             space,
+            machine: None,
         }
     }
 
-    /// Whether a call may name `target`: any thread on the host, or, in a member's turn,
-    /// one inside the space.
+    /// Whether a call may name `target`: any thread on the host; in a member's turn, one
+    /// inside the space; for a thread on another machine of the group, one that machine
+    /// started here.
     pub(super) fn open_to(&self, caller: &Caller, target: &SessionMeta) -> bool {
         caller
             .space
             .as_ref()
             .is_none_or(|space| space.holds(target.project_id.as_deref()))
+            && caller.machine.as_ref().is_none_or(|remote| {
+                target
+                    .started_by
+                    .as_ref()
+                    .is_some_and(|started| started.machine.as_ref() == Some(&remote.peer.id))
+            })
     }
 
     /// Whether a listing or search covering `scope` includes `target`.
@@ -283,11 +315,13 @@ impl AppState {
             && self.open_to(caller, target)
     }
 
-    /// Resolve one `tcode_control` call on the host thread.
-    pub(crate) fn handle_control_op(
+    /// Resolve one `tcode_control` call on the host thread, for `machine` of the group when
+    /// it names one.
+    pub(crate) fn handle_control_call(
         &mut self,
         thread_id: String,
         op: ControlOp,
+        machine: Option<String>,
         reply: smol::channel::Sender<Result<serde_json::Value, String>>,
         cx: &mut HostCx,
     ) {
@@ -305,13 +339,27 @@ impl AppState {
             }
             Some(meta) => {
                 let caller = self.caller_of(&meta);
-                match self.authorize_control(&caller, &op) {
-                    Ok(()) => self.dispatch_control_op(&caller, op, cx),
-                    Err(refusal) => Answer::Now(Err(refusal)),
+                match machine {
+                    // The ids it names are the other machine's, which this one does not
+                    // check.
+                    Some(machine) => self.forward_control_op(&caller, machine, op, cx),
+                    None => match self.authorize_control(&caller, &op) {
+                        Ok(()) => self.dispatch_control_op(&caller, op, cx),
+                        Err(refusal) => Answer::Now(Err(refusal)),
+                    },
                 }
             }
             None => Answer::Now(Err("unknown thread".into())),
         };
+        self.answer_control_call(answer, reply, cx);
+    }
+
+    pub(in crate::app) fn answer_control_call(
+        &mut self,
+        answer: Answer,
+        reply: smol::channel::Sender<Result<serde_json::Value, String>>,
+        cx: &mut HostCx,
+    ) {
         match answer {
             Answer::Now(result) => {
                 let _ = reply.try_send(result);
@@ -349,7 +397,11 @@ impl AppState {
     /// go: what a space withholds from its members' turns, the settings no agent changes, and
     /// a target that is unknown, the caller's own Orchestrate ancestor or outside its space.
     /// Whether a call that is open should be made is the harness's permission mode to settle.
-    pub(super) fn authorize_control(&self, caller: &Caller, op: &ControlOp) -> Result<(), String> {
+    pub(in crate::app) fn authorize_control(
+        &self,
+        caller: &Caller,
+        op: &ControlOp,
+    ) -> Result<(), String> {
         if let Some(space) = &caller.space {
             self.authorize_space_control(space, op)?;
         }
@@ -383,10 +435,17 @@ impl AppState {
     /// Why `target` is closed to `caller`, or its meta when it is open.
     fn check_target(&self, caller: &Caller, target: &str) -> Result<SessionMeta, TargetRefusal> {
         let Some(meta) = self.find_meta(target) else {
-            return Err(TargetRefusal::Unknown);
+            return Err(match self.moved_thread_machine(target) {
+                Some(machine) => TargetRefusal::Moved(machine.to_owned()),
+                None => TargetRefusal::Unknown,
+            });
         };
         if !self.open_to(caller, &meta) {
-            return Err(TargetRefusal::OutsideSpace);
+            // Another machine is not told which threads it did not start exist here.
+            return Err(match caller.machine {
+                Some(_) => TargetRefusal::Unknown,
+                None => TargetRefusal::OutsideSpace,
+            });
         }
         Ok(meta)
     }
@@ -402,7 +461,12 @@ impl AppState {
             .map_err(|refusal| refusal.per_item())
     }
 
-    fn dispatch_control_op(&mut self, caller: &Caller, op: ControlOp, cx: &mut HostCx) -> Answer {
+    pub(in crate::app) fn dispatch_control_op(
+        &mut self,
+        caller: &Caller,
+        op: ControlOp,
+        cx: &mut HostCx,
+    ) -> Answer {
         let now = match op {
             ControlOp::ListThreads(p) => return self.op_list_threads(caller, p, cx),
             ControlOp::Search(p) => return self.op_search(caller, p, cx),
@@ -437,12 +501,18 @@ impl AppState {
             ControlOp::Rewind(p) => return self.op_rewind(caller, p, cx),
             ControlOp::PatchSettings(p) => self.op_patch_settings(caller, p, cx),
             ControlOp::SetModelGuide(p) => self.op_set_model_guide(caller, p, cx),
+            ControlOp::ListMachines(p) => return self.op_list_machines(caller, p, cx),
+            ControlOp::StartThreadOnMachine(p) => {
+                return self.op_start_thread_on_machine(caller, p, cx);
+            }
         };
         Answer::Now(now)
     }
 
     /// Record a write in the target thread, as the actor's thread, and in the activity list.
-    pub(super) fn audit(
+    /// A caller on another machine is named with its machine here, and its own log is that
+    /// machine's to write.
+    pub(in crate::app) fn audit(
         &mut self,
         caller: &Caller,
         target: &str,
@@ -450,10 +520,13 @@ impl AppState {
         detail: Option<String>,
         cx: &mut HostCx,
     ) {
-        let actor_title = self
-            .find_meta(&caller.thread_id)
-            .map(|meta| meta.title)
-            .unwrap_or_default();
+        let actor_title = match &caller.machine {
+            Some(remote) => remote.title.clone(),
+            None => self
+                .find_meta(&caller.thread_id)
+                .map(|meta| meta.title)
+                .unwrap_or_default(),
+        };
         let target_title = self
             .find_meta(target)
             .map(|meta| meta.title)
@@ -461,12 +534,13 @@ impl AppState {
         let action = ControlAction {
             actor_thread_id: caller.thread_id.clone(),
             actor_title,
+            actor_machine: caller.machine.as_ref().map(|remote| remote.peer.id.clone()),
             action: action.to_owned(),
             detail,
         };
         let at = cx.clock().unix_millis();
         self.record_event(target, &AgentEvent::ControlAction(action.clone()), cx);
-        if target != caller.thread_id {
+        if caller.machine.is_none() && target != caller.thread_id {
             let in_caller = ControlAction {
                 detail: Some(match &action.detail {
                     Some(detail) => format!("{target_title} — {detail}"),
@@ -527,7 +601,7 @@ impl AppState {
     }
 
     /// Write a changed meta through to the resident copy, the index and the store.
-    pub(super) fn store_meta(&mut self, meta: SessionMeta, cx: &mut HostCx) {
+    pub(in crate::app) fn store_meta(&mut self, meta: SessionMeta, cx: &mut HostCx) {
         if let Some(live) = self.meta_mut(&meta.id) {
             *live = meta.clone();
         }
@@ -539,12 +613,17 @@ impl AppState {
 enum TargetRefusal {
     Unknown,
     OutsideSpace,
+    /// The thread moved with its project to this machine of the group.
+    Moved(String),
 }
 
 impl TargetRefusal {
     fn whole_call(&self, target: &str) -> String {
         match self {
             Self::Unknown => format!("unknown thread: {target}"),
+            Self::Moved(machine) => {
+                format!("thread {target} moved to machine {machine} of the group")
+            }
             Self::OutsideSpace => {
                 format!("refused: thread {target} is outside the space this turn runs in")
             }
@@ -554,6 +633,7 @@ impl TargetRefusal {
     fn per_item(&self) -> String {
         match self {
             Self::Unknown => "unknown_thread".to_owned(),
+            Self::Moved(machine) => format!("thread_moved: to machine {machine}"),
             Self::OutsideSpace => "outside_space: this turn runs in a space".to_owned(),
         }
     }
@@ -573,6 +653,10 @@ impl AppState {
             | ControlOp::SetModelGuide(_)
             | ControlOp::CreateProject(_)
             | ControlOp::DeleteThreads(_) => refused("is not available"),
+            // Spaces are this machine's: a member's turn reaches no other machine.
+            ControlOp::ListMachines(_) | ControlOp::StartThreadOnMachine(_) => {
+                refused("reaches no other machine")
+            }
             ControlOp::Terminal(_) | ControlOp::ReadTerminal(_) if !policy.terminals => {
                 refused("needs terminals, which the space does not allow")
             }

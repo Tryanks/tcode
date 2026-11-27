@@ -27,6 +27,8 @@ struct Inner {
     ingress: Sender<Ingress>,
     next_connection: AtomicU64,
     originals: Option<Arc<dyn tcode_client::original::OriginalBackend>>,
+    /// Served by the machine while it hosts; see [`HostMux::with_machine_link`].
+    machines: Option<tcode_client::machines::MachineLink>,
     original_slots: std::sync::Mutex<HashMap<String, usize>>,
     /// Woken whenever an original gives its slot back.
     original_released: tokio::sync::Notify,
@@ -57,6 +59,7 @@ impl HostMux {
                 ingress,
                 next_connection: AtomicU64::new(1),
                 originals: None,
+                machines: None,
                 original_slots: Default::default(),
                 original_released: tokio::sync::Notify::new(),
             }),
@@ -69,6 +72,17 @@ impl HostMux {
     ) -> Self {
         Arc::get_mut(&mut self.inner).unwrap().originals = Some(backend);
         self
+    }
+
+    /// The host's way to the other machines of its group, which the machine
+    /// started on this mux serves for as long as it runs.
+    pub fn with_machine_link(mut self, link: tcode_client::machines::MachineLink) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().machines = Some(link);
+        self
+    }
+
+    pub(crate) fn machine_link(&self) -> Option<&tcode_client::machines::MachineLink> {
+        self.inner.machines.as_ref()
     }
 
     pub(crate) async fn open_original(
@@ -418,6 +432,7 @@ async fn pump(
                                             | "dev_servers_replaced"
                                             | "storage_migration_replaced"
                                             | "disk_usage_replaced"
+                                            | "project_moves_replaced"
                                     )
                                 })
                                 .map(|kind| format!("{kind}:{topic}"));

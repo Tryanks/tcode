@@ -201,6 +201,19 @@ impl PopupMenu {
         });
         self
     }
+    /// Disable every item whose action `keep` does not take.
+    pub fn disable_items_except(mut self, keep: impl Fn(&dyn Action) -> bool) -> Self {
+        for item in &mut self.items {
+            if let MenuItem::Item {
+                action, disabled, ..
+            } = item
+                && !keep(action.as_ref())
+            {
+                *disabled = true;
+            }
+        }
+        self
+    }
     /// Run `then` once a chosen row's action has run and the menu has
     /// handed the focus back to where it opened from.
     pub fn after_choose(mut self, then: impl Fn(&mut Window, &mut App) + 'static) -> Self {

@@ -443,8 +443,10 @@ struct SwipeRow {
     bounds: Bounds<Pixels>,
 }
 
-fn can_swipe(row: &CompactThreadRow, renaming: Option<&ThreadKey>) -> bool {
-    renaming != Some(&row.state.thread)
+/// A row swipes unless it is being renamed or its machine lets this device
+/// only view it.
+fn can_swipe(row: &CompactThreadRow, renaming: Option<&ThreadKey>, view_only: bool) -> bool {
+    !view_only && renaming != Some(&row.state.thread)
 }
 
 /// What the swipe does: settle unless the host refuses to now.
@@ -598,7 +600,10 @@ impl SessionsSidebar {
         let uncovered = Uncovered::of(row, cx);
         let action = action(row);
         let renaming = self.renaming.as_ref().map(|rename| &rename.thread);
-        let can_swipe = can_swipe(row, renaming);
+        let view_only = self
+            .store_of(&thread.host)
+            .is_some_and(|store| store.read(cx).view_only());
+        let can_swipe = can_swipe(row, renaming, view_only);
         let now = cx.background_executor().now();
         let swipe = self.row_swipes.row(&thread);
         let (offset, width) = swipe
@@ -977,7 +982,16 @@ impl SessionsSidebar {
             });
             match row.filter(|_| !loading) {
                 None => swipe.motion = Motion::Home(Flight::resting(px(0.), swipe.width, now)),
-                Some(row) if !can_swipe(row, renaming) => swipe.send_home(now, cx),
+                Some(row)
+                    if !can_swipe(
+                        row,
+                        renaming,
+                        self.store_of(&swipe.thread.host)
+                            .is_some_and(|store| store.read(cx).view_only()),
+                    ) =>
+                {
+                    swipe.send_home(now, cx)
+                }
                 Some(row) => swipe.shows(action(row), now, cx),
             }
             swipe.finger.is_some() || !swipe.at_rest(now)

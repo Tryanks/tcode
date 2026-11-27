@@ -161,9 +161,11 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     }
     // Nothing else starts for a bind the listener would refuse anyway.
     check_bind(browser_listen, &remote_data_dir).map_err(|error| error.to_string())?;
+    let machines = tcode_client::machines::MachineLink::new();
     let mut services = HostServices {
         background_startup_probes: true,
         ai_title_generation: true,
+        machines: Some(machines.clone()),
         ..HostServices::default()
     };
     services.start_mcp_servers(false);
@@ -173,7 +175,8 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     let host =
         spawn_host(store, services).map_err(|error| format!("machine startup failed: {error}"))?;
     let mux = HostMux::new(host.attachments.clone(), host.from_host.clone())
-        .with_original_backend(std::sync::Arc::new(host.clone()));
+        .with_original_backend(std::sync::Arc::new(host.clone()))
+        .with_machine_link(machines);
     let relayed = !traverse.is_empty();
     let traverse_host = Arc::new(
         TraverseHost::start(

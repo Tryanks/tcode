@@ -278,6 +278,16 @@ impl Element for MarkdownView {
                                     crate::tr!("markdown.link_copy_address").into_owned(),
                                     Box::new(CopyText(pending.raw_url.to_string())),
                                 ),
+                            LinkTarget::MachineThread(anchor) => menu
+                                .separator()
+                                .menu(
+                                    crate::tr!("markdown.link_open").into_owned(),
+                                    Box::new(anchor),
+                                )
+                                .menu(
+                                    crate::tr!("markdown.link_copy_address").into_owned(),
+                                    Box::new(CopyText(pending.raw_url.to_string())),
+                                ),
                         },
                         Some(PendingContextTarget::CodeBlock(code)) => menu.separator().menu(
                             crate::tr!("markdown.code_copy").into_owned(),
@@ -323,7 +333,7 @@ impl Element for MarkdownView {
                                 LinkTarget::Local(path) => menu
                                     .separator()
                                     .path_items(&path.to_string_lossy(), base_dir.as_deref()),
-                                LinkTarget::Thread(_) => menu,
+                                LinkTarget::Thread(_) | LinkTarget::MachineThread(_) => menu,
                             }
                         }
                     };

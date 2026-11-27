@@ -114,7 +114,7 @@ impl Attachment {
                 client.connect(host),
                 WorkspaceAttachment::Remote {
                     host_id: host.host_id.clone(),
-                    host_name: host.name.clone(),
+                    host_name: host.title().to_owned(),
                 },
             ),
         };
@@ -296,7 +296,7 @@ pub enum HostRequest {
     OpenGroup(String),
     /// Switch this window to a newly paired machine: its group's multi-host
     /// view when it belongs to one, otherwise that machine alone.
-    Paired(PairedHost),
+    Paired(Box<PairedHost>),
     /// Show a previously hidden member again inside its group's view.
     IncludeInGroup { group_id: String, host_id: String },
     /// Take `host` out of the current view, keeping its saved record.

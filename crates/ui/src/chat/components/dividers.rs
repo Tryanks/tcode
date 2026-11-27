@@ -136,6 +136,19 @@ pub(crate) fn session_moved_divider(
     )
 }
 
+/// The thread came to this machine with its project from `from`, another
+/// machine of the group.
+pub(crate) fn thread_moved_divider(id: &str, from: &str, cx: &App) -> AnyElement {
+    divider_in(
+        SharedString::from(format!("thread-moved-{id}")),
+        crate::tr!("machines.moved_in.from", machine = from).into_owned(),
+        cx.theme().muted_foreground,
+        Some(IconName::ArrowRightLeft),
+        None,
+        cx,
+    )
+}
+
 /// What Tcode did with a worktree the harness asked it for.
 pub(crate) fn worktree_divider(
     id: &str,

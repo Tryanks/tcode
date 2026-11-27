@@ -99,6 +99,10 @@ pub(super) struct SettlementExplanation {
     due_at: Option<u64>,
     /// Every fact that keeps automatic settlement from applying, as `settlement_reason` keys.
     reasons: Vec<&'static str>,
+    /// The subagents on other machines that still run and so hold it, as
+    /// `<thread_id>@<machine_id>`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    running_on_machines: Vec<String>,
     rule: SettlementRuleFacts,
 }
 
@@ -139,6 +143,12 @@ struct Lineage {
     forked_from: Option<String>,
     imported_from: Option<String>,
     native_subagent: bool,
+    /// The thread on another machine that started this one as its subagent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_parent: Option<tcode_core::control::RemoteParent>,
+    /// The threads this one started on other machines, with what it last heard of them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    remote_children: Vec<tcode_core::control::RemoteChild>,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,6 +172,9 @@ struct ThreadDetail {
     /// its delivery is in `activity.agent`.
     #[serde(skip_serializing_if = "Option::is_none")]
     report: Option<tcode_core::settlement::AgentReport>,
+    /// The wakes notify_when registered for this thread, by their ids.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    watches: Vec<tcode_core::control::ControlWatch>,
     terminals: Vec<TerminalRow>,
     omitted: Vec<String>,
 }
@@ -804,6 +817,9 @@ impl AppState {
             would_auto_settle,
             due_at: due.filter(|_| would_auto_settle).map(|due| due.due_at),
             reasons,
+            running_on_machines: crate::app::machines::running_remote_children(meta)
+                .map(|child| format!("{}@{}", child.thread_id, child.machine))
+                .collect(),
             rule: SettlementRuleFacts {
                 after_days: rule.after_days,
                 after_days_source: source(rule.after_days_from_project),
@@ -987,8 +1003,11 @@ impl AppState {
                     .map(|origin| origin.thread_id.clone()),
                 imported_from: meta.imported_from.clone(),
                 native_subagent: meta.native_subagent.is_some(),
+                remote_parent: meta.remote_parent.clone(),
+                remote_children: meta.remote_children.clone(),
             },
-            report: meta.is_dispatched().then(|| meta.report()),
+            report: meta.has_lead().then(|| meta.report()),
+            watches: meta.control_watches.clone(),
             terminals,
             omitted: vec![
                 "worktree.dirty: read it live with get_git or list_threads include_worktree".into(),

@@ -78,7 +78,7 @@ impl SettingsPage {
             .on_click(cx.listener(move |this, _, _, cx| this.select_section(section, cx)))
     }
 
-    pub(super) fn group_caption(&self, group: SectionGroup, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn group_caption(&self, group: SectionGroup, cx: &mut Context<Self>) -> AnyElement {
         let (label, selector) = match group {
             SectionGroup::Device => (
                 crate::tr!("settings.this_device").into_owned(),
@@ -88,16 +88,10 @@ impl SettingsPage {
                 return self.host_selector(cx);
             }
             SectionGroup::Machine => {
-                let store = self.store.read(cx);
-                let name = if store.is_remote() {
-                    store.remote_host_name().map(str::to_owned)
-                } else {
-                    crate::remote::local_machine_name(cx)
-                }
-                .filter(|name| !name.trim().is_empty());
+                let name = crate::machines::own_name(&self.store, cx);
                 // A member manages none of the machine's settings; what this
                 // group holds for it is the space's own threads.
-                let label = store.space_label().unwrap_or_else(|| {
+                let label = self.store.read(cx).space_label().unwrap_or_else(|| {
                     name.map_or_else(
                         || crate::tr!("settings.machine_settings_fallback").into_owned(),
                         |name| crate::tr!("settings.machine_settings", name = name).into_owned(),
@@ -113,17 +107,17 @@ impl SettingsPage {
 
     /// The machine group's caption over several hosts: it names the host
     /// whose settings the group holds and chooses another.
-    pub(super) fn host_selector(&self, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn host_selector(&self, cx: &mut Context<Self>) -> AnyElement {
         let shown = self.store.read(cx).host_key();
         let options = self
             .settings_hosts(cx)
             .into_iter()
             .map(|store| {
-                let store = store.read(cx);
-                let host = store.host_key();
+                let label = crate::machines::host_title(store, cx);
+                let host = store.read(cx).host_key();
                 SelectRowOption {
                     id: format!("settings-host-{}", host.name()).into(),
-                    label: store.host_title(),
+                    label,
                     description: None,
                     selected: host == shown,
                     value: host,
@@ -132,7 +126,7 @@ impl SettingsPage {
             .collect();
         let label = crate::tr!(
             "settings.machine_settings",
-            name = self.store.read(cx).host_title()
+            name = crate::machines::host_title(&self.store, cx)
         );
         let trigger = Button::new("settings-host-selector")
             .debug_selector(|| "settings-host-selector".into())

@@ -640,6 +640,53 @@ fn a_relaunch_returns_to_the_current_panes_host(cx: &mut TestAppContext) {
     assert_eq!(returns_to(cx), Some(key_b), "the thread the pane shows");
 }
 
+/// A thread of a machine that lets this device only view it takes nothing
+/// typed into its composer, while a thread of the other machine beside it
+/// does.
+#[gpui::test]
+fn a_view_only_machines_thread_takes_no_message(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (shell, hosts, _client, cx) = mount_workspace(cx, two_hosts(), Default::default(), 1600.);
+    cx.update(|_, cx| crate::shortcut::init(cx));
+    let (key_a, key_b) = (
+        HostKey::Remote("host-a".into()),
+        HostKey::Remote("host-b".into()),
+    );
+    let (a, b) = (
+        store_on(&shell, "host-a", cx),
+        store_on(&shell, "host-b", cx),
+    );
+    hosts[&key_a].come_up_as(&a, Vec::new(), None, true, cx);
+    hosts[&key_b].come_up(&b, Vec::new(), None, cx);
+    for key in [&key_a, &key_b] {
+        send_events(&hosts[key].host, vec![panes_index(&[])]);
+    }
+    serve_thread(&hosts[&key_a].host, "thread-1");
+    a.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
+    await_restore_update(&shell, cx, |store, cx| {
+        !store.chat_loading_for(Some("thread-1"), cx)
+    });
+    let on_b = b.read_with(cx, |store, _| store.thread_key("thread-1"));
+    cx.update(|window, cx| window.dispatch_action(Box::new(OpenInNewPane(on_b)), cx));
+    serve_thread(&hosts[&key_b].host, "thread-1");
+    await_restore_update(&shell, cx, |store, cx| {
+        !store.chat_loading_for(Some("thread-1"), cx)
+    });
+    crate::test_frames::draw_settled(cx);
+    assert_eq!(pane_hosts(&shell, cx), [key_a.clone(), key_b.clone()]);
+
+    let panes = shell.read_with(cx, |shell, cx| shell.column.as_ref().unwrap().panes(cx));
+    type_into(&panes[0], cx);
+    assert_eq!(
+        typed_reaches(&hosts[&key_a].host, cx),
+        Vec::<String>::new(),
+        "the machine that lets this device only view it is sent nothing"
+    );
+    type_into(&panes[1], cx);
+    assert_eq!(typed_reaches(&hosts[&key_b].host, cx), ["thread-1"]);
+}
+
 /// A row of host B's dropped on the edge of host A's pane opens beside
 /// it, over B, and A's thread stays in its pane.
 #[gpui::test]
@@ -1665,6 +1712,7 @@ fn a_local_host_that_does_not_start_is_shown_and_retried(cx: &mut TestAppContext
         last_connected_unix: None,
         group_id: None,
         group_name: None,
+        label: None,
         space_id: None,
         space_name: None,
     };
@@ -1751,4 +1799,70 @@ fn a_local_host_that_does_not_start_is_shown_and_retried(cx: &mut TestAppContext
     open_machines(cx);
     crate::test_frames::draw_settled(cx);
     assert!(cx.debug_bounds("hosts-local-failure").is_none());
+}
+
+/// While a host moves a project away, its threads take nothing from the
+/// composer, and the same thread id on another host of the window still
+/// sends.
+#[gpui::test]
+fn a_moving_projects_thread_cannot_send_and_another_hosts_still_does(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1600.);
+    threads_in_a_project(&hosts, cx);
+    let b = store_on(&shell, "host-b", cx);
+    let (key_a, key_b) = (
+        HostKey::Remote("host-a".into()),
+        HostKey::Remote("host-b".into()),
+    );
+    let on_b = b.read_with(cx, |store, _| store.thread_key("thread-1"));
+    cx.update(|window, cx| window.dispatch_action(Box::new(OpenInNewPane(on_b)), cx));
+    serve_thread(&hosts[&key_b].host, "thread-1");
+    await_restore_update(&shell, cx, |store, cx| {
+        !store.chat_loading_for(Some("thread-1"), cx)
+    });
+    crate::test_frames::draw_settled(cx);
+    let a = store_on(&shell, "host-a", cx);
+    let project_id = a
+        .read_with(cx, |store, _| {
+            store
+                .thread_meta("thread-1")
+                .and_then(|meta| meta.project_id.clone())
+        })
+        .expect("thread-1 is in a project");
+    send_events(
+        &hosts[&key_a].host,
+        vec![(
+            Topic::ProjectMoves,
+            ServerEvent::ProjectMovesReplaced(tcode_protocol::ProjectMovesState {
+                moving: vec![tcode_protocol::ProjectMoveStatus {
+                    move_id: "move-1".into(),
+                    project_id,
+                    machine: "host-c".into(),
+                    phase: tcode_protocol::MovePhase::SendingCode,
+                    done: 1,
+                    total: 4,
+                    commit_unknown: false,
+                    paused: None,
+                }],
+                ended: Vec::new(),
+            }),
+        )],
+    );
+    draw(cx);
+    let _ = sent(&hosts[&key_a].host);
+    let _ = sent(&hosts[&key_b].host);
+
+    let panes = shell.read_with(cx, |shell, cx| shell.column.as_ref().unwrap().panes(cx));
+    for (pane, text) in panes.iter().zip(["to a", "to b"]) {
+        type_into(pane, cx);
+        cx.simulate_input(text);
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+    }
+    assert_eq!(turns_sent(&hosts[&key_a].host), [], "A's project is moving");
+    assert_eq!(
+        turns_sent(&hosts[&key_b].host),
+        [("thread-1".to_owned(), "to b".to_owned())]
+    );
 }

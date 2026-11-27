@@ -41,7 +41,7 @@ mod view;
 use gpui::{App, KeyBinding};
 use gpui_base::input::SelectAll;
 
-pub use link_target::OpenThreadAnchor;
+pub use link_target::{OpenMachineThreadAnchor, OpenThreadAnchor};
 pub use selection::{SelectionArea, SelectionDocument, SelectionGesture};
 pub use state::{ImageResolver, MarkdownState};
 pub use view::{MarkdownView, MenuExtension};

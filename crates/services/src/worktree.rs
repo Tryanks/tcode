@@ -720,6 +720,12 @@ fn old_enough(modified: SystemTime, now: SystemTime, minimum_age: Duration) -> b
         .is_ok_and(|age| age > minimum_age)
 }
 
+/// The repository-relative files `.worktreeinclude` selects in `checkout`,
+/// as a new worktree is seeded with them.
+pub fn worktree_include_files(checkout: &Path) -> Result<Vec<String>, WorktreeError> {
+    read_seed_plan(checkout).map(|plan| plan.files)
+}
+
 /// The files `.worktreeinclude` selects, read as Claude Code 2.1.322 reads
 /// its file of the same name: gitignore patterns, matched against the
 /// untracked files Git ignores, which is all a new checkout lacks.

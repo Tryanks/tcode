@@ -10,7 +10,9 @@ use std::{
 use iroh::{EndpointId, SecretKey};
 use serde::{Deserialize, Serialize};
 
-use crate::group::{Declined, GroupRecord, Membership};
+use tcode_protocol::GroupDeviceAccess;
+
+use crate::group::{Declined, GroupRecord, MachineAccepts, Membership};
 
 /// One device allowed to open `tcode/1` connections.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +58,14 @@ pub struct HostIdentity {
     pub policy_revision: u64,
     pub pairing_enabled: bool,
     pub group: Option<GroupRecord>,
+    /// Whether this machine takes the threads the group's other machines
+    /// start on it. Read only while in a group, as are the two below.
+    pub accept_threads: bool,
+    /// Whether this machine takes the projects the group's other machines
+    /// move to it.
+    pub accept_projects: bool,
+    /// What the group's full-access devices may do on this machine.
+    pub device_access: GroupDeviceAccess,
     path: PathBuf,
 }
 
@@ -74,12 +84,19 @@ struct HostFile {
     pairing_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     group: Option<GroupRecord>,
+    #[serde(default = "enabled")]
+    accept_threads: bool,
+    #[serde(default)]
+    accept_projects: bool,
+    #[serde(default)]
+    device_access: GroupDeviceAccess,
 }
 
 /// The version this build writes. Releases wrote 2 (migrated on load), 3
-/// (before groups) and 4 (before space policies), which are still read.
-const VERSION: u32 = 5;
-const READ_VERSIONS: [u32; 3] = [3, 4, VERSION];
+/// (before groups), 4 (before space policies) and 5 (before the machines of
+/// a group took threads and projects from each other), which are still read.
+const VERSION: u32 = 6;
+const READ_VERSIONS: [u32; 4] = [3, 4, 5, VERSION];
 
 fn enabled() -> bool {
     true
@@ -124,6 +141,9 @@ impl HostIdentity {
                     policy_revision: file.policy_revision,
                     pairing_enabled: file.pairing_enabled,
                     group: file.group,
+                    accept_threads: file.accept_threads,
+                    accept_projects: file.accept_projects,
+                    device_access: file.device_access,
                     path,
                 };
                 if migrated || identity.host_name != host_name {
@@ -141,6 +161,9 @@ impl HostIdentity {
                     policy_revision: 0,
                     pairing_enabled: true,
                     group: None,
+                    accept_threads: true,
+                    accept_projects: false,
+                    device_access: GroupDeviceAccess::Operate,
                     path,
                 };
                 identity.save()?;
@@ -168,6 +191,9 @@ impl HostIdentity {
             policy_revision: self.policy_revision,
             pairing_enabled: self.pairing_enabled,
             group: self.group.clone(),
+            accept_threads: self.accept_threads,
+            accept_projects: self.accept_projects,
+            device_access: self.device_access,
         };
         write_private(&self.path, &serde_json::to_vec_pretty(&file)?)
     }
@@ -254,6 +280,27 @@ impl HostIdentity {
             })
         });
         removed
+    }
+
+    /// What the group's full-access devices may do here: as this machine's
+    /// own window, unless the group's switch says otherwise.
+    pub fn group_device_access(&self) -> GroupDeviceAccess {
+        if self.group.is_some() {
+            self.device_access
+        } else {
+            GroupDeviceAccess::Operate
+        }
+    }
+
+    /// What this machine takes from the group's other machines now: its
+    /// switches, while the group's devices may operate it. Below that it
+    /// takes nothing, whatever the switches hold.
+    pub fn accepts(&self) -> MachineAccepts {
+        let operate = self.group_device_access() == GroupDeviceAccess::Operate;
+        MachineAccepts {
+            threads: operate && self.accept_threads,
+            projects: operate && self.accept_projects,
+        }
     }
 
     /// Remove a device from the allow list. Returns whether it was listed.
@@ -503,4 +550,59 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
     fs::rename(temporary, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `traverse.json` the previous release wrote, in a group: it loads
+    /// with the machine taking threads, refusing projects and letting the
+    /// group's devices operate it, and is written back as this version.
+    #[test]
+    fn a_version_5_file_loads_with_the_group_switches_at_their_defaults() {
+        let dir = std::env::temp_dir().join(format!(
+            "tcode-identity-v5-{}-{}",
+            std::process::id(),
+            now_unix()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let key = "11".repeat(32);
+        let file = serde_json::json!({
+            "v": 5,
+            "host_name": "Desk",
+            "secret_key": key,
+            "devices": [{"id": "phone", "name": "Phone", "created_unix": 1, "access": {"type": "full"}}],
+            "spaces": [],
+            "policy_revision": 3,
+            "pairing_enabled": true,
+            "group": {
+                "id": "AAAAAAAAAAAAAAAAAAAAAA",
+                "name": "Home",
+                "machines": [{
+                    "id": "aa",
+                    "name": "Desk",
+                    "entry": {"state": "member", "counter": 1, "by": "aa", "changed_unix": 1}
+                }],
+                "devices": []
+            }
+        });
+        fs::write(dir.join(HOST_FILE), file.to_string()).unwrap();
+
+        let identity = HostIdentity::load_or_create(&dir, "Desk").unwrap();
+        assert!(identity.accept_threads);
+        assert!(!identity.accept_projects);
+        assert_eq!(identity.group_device_access(), GroupDeviceAccess::Operate);
+        assert_eq!(
+            identity.group.as_ref().unwrap().state.machines[0].label,
+            None
+        );
+        assert_eq!(identity.devices.len(), 1);
+
+        identity.save().unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(HOST_FILE)).unwrap()).unwrap();
+        assert_eq!(written["v"], 6);
+        let _ = fs::remove_dir_all(dir);
+    }
 }

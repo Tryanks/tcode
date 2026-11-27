@@ -16,7 +16,7 @@ fn call(
 ) -> Result<serde_json::Value, String> {
     let (reply, answer) = smol::channel::bounded(1);
     state.update(cx, |state, cx| {
-        state.handle_control_op(caller.into(), op, reply, cx)
+        state.handle_control_call(caller.into(), op, None, reply, cx)
     });
     cx.run_until_recv(&answer)
 }

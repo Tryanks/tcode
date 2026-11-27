@@ -53,16 +53,20 @@ pub enum ControlOp {
     Rewind(RewindParams),
     PatchSettings(PatchSettingsParams),
     SetModelGuide(SetModelGuideParams),
+    ListMachines(ListMachinesParams),
+    StartThreadOnMachine(StartThreadOnMachineParams),
 }
 
 /// What decides which tools a thread is offered: whether threads are given `tcode_control`
-/// at all, whether another thread started this one as a subagent, and whether the user
-/// opened it to research a model's guide.
+/// at all, whether another thread started this one as a subagent, whether the user opened
+/// it to research a model's guide, and whether its machine lets it start threads on the
+/// other machines of its group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadAccess {
     pub enabled: bool,
     pub subagent: bool,
     pub model_guide: bool,
+    pub machines: bool,
 }
 
 impl ThreadAccess {
@@ -71,16 +75,20 @@ impl ThreadAccess {
             enabled: false,
             subagent: false,
             model_guide: false,
+            machines: false,
         }
     }
 
     /// Every tool, but `report_result` only for a subagent, its one channel to the thread
-    /// that started it, and `set_model_guide` only for the thread that researches a guide.
+    /// that started it, `set_model_guide` only for the thread that researches a guide, and
+    /// the tools about the group's machines only where the machine lets its threads reach
+    /// them.
     pub fn offers(&self, tool: &str) -> bool {
         self.enabled
             && match tool {
                 REPORT_RESULT => self.subagent,
                 SET_MODEL_GUIDE => self.model_guide,
+                LIST_MACHINES | START_THREAD_ON_MACHINE => self.machines,
                 _ => true,
             }
     }
@@ -88,8 +96,97 @@ impl ThreadAccess {
 
 const REPORT_RESULT: &str = "report_result";
 const SET_MODEL_GUIDE: &str = "set_model_guide";
+const LIST_MACHINES: &str = "list_machines";
+const START_THREAD_ON_MACHINE: &str = "start_thread_on_machine";
 
 impl ControlOp {
+    /// The call of `tool` with `args`, read as the server reads a call's arguments.
+    pub fn parse(tool: &str, args: serde_json::Value) -> Result<Self, String> {
+        fn read<P: serde::de::DeserializeOwned>(args: serde_json::Value) -> Result<P, String> {
+            serde_json::from_value(args).map_err(|error| format!("invalid arguments: {error}"))
+        }
+        Ok(match tool {
+            "list_projects" => Self::ListProjects(read(args)?),
+            "list_threads" => Self::ListThreads(read(args)?),
+            "get_thread" => Self::GetThread(read(args)?),
+            "search" => Self::Search(read(args)?),
+            "outline" => Self::Outline(read(args)?),
+            "read" => Self::Read(read(args)?),
+            "search_in_item" => Self::SearchInItem(read(args)?),
+            "file_history" => Self::FileHistory(read(args)?),
+            "get_git" => Self::GetGit(read(args)?),
+            "get_pull_request" => Self::GetPullRequest(read(args)?),
+            "list_providers" => Self::ListProviders(read(args)?),
+            "get_settings" => Self::GetSettings(read(args)?),
+            "read_terminal" => Self::ReadTerminal(read(args)?),
+            "review_candidates" => Self::ReviewCandidates(read(args)?),
+            "update_threads" => Self::UpdateThreads(read(args)?),
+            "settle_self" => Self::SettleSelf(read(args)?),
+            "start_thread" => Self::StartThread(read(args)?),
+            "send_message" => Self::SendMessage(read(args)?),
+            "control_thread" => Self::ControlThread(read(args)?),
+            "pull_request" => Self::PullRequest(read(args)?),
+            "git" => Self::Git(read(args)?),
+            "create_project" => Self::CreateProject(read(args)?),
+            "move_thread" => Self::MoveThread(read(args)?),
+            "notify_when" => Self::NotifyWhen(read(args)?),
+            "cancel_notify" => Self::CancelNotify(read(args)?),
+            "respond_input" => Self::RespondInput(read(args)?),
+            "respond_approval" => Self::RespondApproval(read(args)?),
+            REPORT_RESULT => Self::ReportResult(read(args)?),
+            "terminal" => Self::Terminal(read(args)?),
+            "delete_threads" => Self::DeleteThreads(read(args)?),
+            "rewind" => Self::Rewind(read(args)?),
+            "patch_settings" => Self::PatchSettings(read(args)?),
+            SET_MODEL_GUIDE => Self::SetModelGuide(read(args)?),
+            LIST_MACHINES => Self::ListMachines(read(args)?),
+            START_THREAD_ON_MACHINE => Self::StartThreadOnMachine(read(args)?),
+            other => return Err(format!("unknown tool: {other}")),
+        })
+    }
+
+    /// The call's arguments, as [`Self::parse`] reads them back.
+    pub fn args(&self) -> serde_json::Value {
+        let args = match self {
+            Self::ListProjects(p) => serde_json::to_value(p),
+            Self::ListThreads(p) => serde_json::to_value(p),
+            Self::GetThread(p) => serde_json::to_value(p),
+            Self::Search(p) => serde_json::to_value(p),
+            Self::Outline(p) => serde_json::to_value(p),
+            Self::Read(p) => serde_json::to_value(p),
+            Self::SearchInItem(p) => serde_json::to_value(p),
+            Self::FileHistory(p) => serde_json::to_value(p),
+            Self::GetGit(p) => serde_json::to_value(p),
+            Self::GetPullRequest(p) => serde_json::to_value(p),
+            Self::ListProviders(p) => serde_json::to_value(p),
+            Self::GetSettings(p) => serde_json::to_value(p),
+            Self::ReadTerminal(p) => serde_json::to_value(p),
+            Self::ReviewCandidates(p) => serde_json::to_value(p),
+            Self::UpdateThreads(p) => serde_json::to_value(p),
+            Self::SettleSelf(p) => serde_json::to_value(p),
+            Self::StartThread(p) => serde_json::to_value(p),
+            Self::SendMessage(p) => serde_json::to_value(p),
+            Self::ControlThread(p) => serde_json::to_value(p),
+            Self::PullRequest(p) => serde_json::to_value(p),
+            Self::Git(p) => serde_json::to_value(p),
+            Self::CreateProject(p) => serde_json::to_value(p),
+            Self::MoveThread(p) => serde_json::to_value(p),
+            Self::NotifyWhen(p) => serde_json::to_value(p),
+            Self::CancelNotify(p) => serde_json::to_value(p),
+            Self::RespondInput(p) => serde_json::to_value(p),
+            Self::RespondApproval(p) => serde_json::to_value(p),
+            Self::ReportResult(p) => serde_json::to_value(p),
+            Self::Terminal(p) => serde_json::to_value(p),
+            Self::DeleteThreads(p) => serde_json::to_value(p),
+            Self::Rewind(p) => serde_json::to_value(p),
+            Self::PatchSettings(p) => serde_json::to_value(p),
+            Self::SetModelGuide(p) => serde_json::to_value(p),
+            Self::ListMachines(p) => serde_json::to_value(p),
+            Self::StartThreadOnMachine(p) => serde_json::to_value(p),
+        };
+        args.expect("tool parameters serialize")
+    }
+
     pub fn tool_name(&self) -> &'static str {
         match self {
             Self::ListProjects(_) => "list_projects",
@@ -125,6 +222,8 @@ impl ControlOp {
             Self::Rewind(_) => "rewind",
             Self::PatchSettings(_) => "patch_settings",
             Self::SetModelGuide(_) => SET_MODEL_GUIDE,
+            Self::ListMachines(_) => LIST_MACHINES,
+            Self::StartThreadOnMachine(_) => START_THREAD_ON_MACHINE,
         }
     }
 
@@ -192,7 +291,9 @@ impl ControlOp {
             | Self::CancelNotify(_)
             | Self::PatchSettings(_)
             | Self::SetModelGuide(_)
-            | Self::ReportResult(_) => Vec::new(),
+            | Self::ReportResult(_)
+            | Self::ListMachines(_)
+            | Self::StartThreadOnMachine(_) => Vec::new(),
         }
     }
 
@@ -231,7 +332,9 @@ impl ControlOp {
             | Self::CancelNotify(_)
             | Self::PatchSettings(_)
             | Self::SetModelGuide(_)
-            | Self::ReportResult(_) => Vec::new(),
+            | Self::ReportResult(_)
+            | Self::ListMachines(_)
+            | Self::StartThreadOnMachine(_) => Vec::new(),
         };
         for id in ids {
             if id == OWN_THREAD {
@@ -246,6 +349,8 @@ pub struct BrokerRequest {
     /// The calling thread, baked into its bearer token.
     pub thread_id: String,
     pub op: ControlOp,
+    /// The machine of the group the call is for; `None` for this one.
+    pub machine: Option<String>,
     pub reply: async_channel::Sender<Result<serde_json::Value, String>>,
 }
 

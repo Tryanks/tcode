@@ -458,6 +458,15 @@ pub enum Command {
     CancelAgent {
         session_id: String,
     },
+    /// `op` for `thread_id`, a subagent the thread `session_id` started on
+    /// machine `machine` of the group, through this host: sent now, or kept
+    /// and sent once that machine can be reached.
+    ControlRemoteChild {
+        session_id: String,
+        machine: String,
+        thread_id: String,
+        op: tcode_core::control::RemoteChildOp,
+    },
     SetAutoSettle {
         session_id: String,
         enabled: bool,
@@ -523,6 +532,27 @@ pub enum Command {
     },
     DeleteProject {
         project_id: String,
+    },
+    /// Move the project and all its threads to another machine of the group,
+    /// to `root` there; `include_ignored` takes the files git ignores along.
+    /// Refused while a move of the project is under way.
+    MoveProject {
+        project_id: String,
+        machine: String,
+        root: String,
+        include_ignored: bool,
+    },
+    /// Try a project's paused move again now, where it stopped.
+    ResumeProjectMove {
+        project_id: String,
+    },
+    /// Stop a project's move before it is committed on the other machine.
+    /// With `force` the move ends here whatever the other machine did with
+    /// it, which may then hold the project too.
+    CancelProjectMove {
+        project_id: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
     },
     MarkSessionUnread {
         session_id: String,
@@ -825,6 +855,7 @@ impl Command {
             | Self::RevokeSelfSettle { session_id }
             | Self::StopWatchingThreads { session_id, .. }
             | Self::CancelAgent { session_id }
+            | Self::ControlRemoteChild { session_id, .. }
             | Self::UnsettleSession { session_id, .. }
             | Self::PinSession { session_id, .. }
             | Self::UnpinSession { session_id }

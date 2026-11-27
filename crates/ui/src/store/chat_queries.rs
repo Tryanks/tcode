@@ -256,7 +256,8 @@ impl WorkspaceStore {
 
     /// The rewind the thread's Harness offers to before the prompt that
     /// opened `turn` (local to the held window), or the steer `steer` in it;
-    /// `None` when that message is no target.
+    /// `None` when that message is no target, or the machine lets this device
+    /// only view it.
     pub fn chat_rewind_target_for(
         &self,
         session_id: Option<&str>,
@@ -264,7 +265,9 @@ impl WorkspaceStore {
         steer: Option<&str>,
         cx: &App,
     ) -> Option<RewindTarget> {
-        let status = self.thread_status(session_id, cx)?;
+        let status = self
+            .thread_status(session_id, cx)
+            .filter(|_| !self.view_only)?;
         let mut rewind = status.rewind.clone()?;
         let absolute = self.absolute_turn_for(session_id, turn);
         let (checkpoint_id, later_turns, started, returns) = self.with_timeline_for(
@@ -378,14 +381,17 @@ impl WorkspaceStore {
     }
 
     /// The fork the thread's Harness offers through finished `turn` (local to
-    /// the held window).
+    /// the held window); none where the machine lets this device only view it.
     pub fn chat_fork_target_for(
         &self,
         session_id: Option<&str>,
         turn: usize,
         cx: &App,
     ) -> Option<ForkTarget> {
-        let fork = self.thread_status(session_id, cx)?.fork_at?;
+        let fork = self
+            .thread_status(session_id, cx)
+            .filter(|_| !self.view_only)?
+            .fork_at?;
         let checkpoint_id = self.with_timeline_for(
             session_id,
             |timeline| {
@@ -481,6 +487,9 @@ impl WorkspaceStore {
         session_id: Option<&str>,
         cx: &App,
     ) -> Option<(QuickAction, Vec<MenuItem>)> {
+        if self.view_only() {
+            return None;
+        }
         let git = self.thread_git(session_id, cx)?;
         let remote = self.space_allows(|policy| policy.git_remote);
         git.status.as_ref().map(|status| {

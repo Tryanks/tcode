@@ -14,6 +14,7 @@ use gpui::{
 };
 use gpui_base::{h_flex, v_flex};
 use serde::Deserialize;
+use tcode_core::control::RemoteChildOp;
 use tcode_core::notice::HostNotice;
 use tcode_core::session::{EntryContent, LatestActivity};
 use tcode_core::settlement::{AgentDelivery, AgentExecution, AgentReport};
@@ -59,6 +60,24 @@ struct AgentCancel(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_agents, no_json)]
 struct AgentStopBackground(String);
+/// Stop, cancel or settle a subagent on another machine of the group, through
+/// its lead's host.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_agents, no_json)]
+struct AgentRemoteOp {
+    machine: String,
+    thread_id: String,
+    op: RemoteChildOp,
+}
+
+/// A subagent on another machine of the group, as its row's actions reach it.
+#[derive(Clone)]
+struct RemoteAgent {
+    machine: String,
+    thread_id: String,
+    /// The op its lead still has to send it.
+    pending: Option<RemoteChildOp>,
+}
 
 #[derive(Clone)]
 struct AgentRow {
@@ -101,6 +120,24 @@ struct AgentRow {
     /// When the latest run started and, once it has, ended (unix ms).
     started_at: Option<u64>,
     ended_at: Option<u64>,
+    /// The name of the machine of the group it runs on, when it is not its
+    /// lead's.
+    machine: Option<String>,
+    /// How it stands where its run says nothing: out of reach, or its
+    /// machine gone from the group.
+    standing: Option<AgentState>,
+    /// What its lead still has to tell its machine, or why it may not be
+    /// heard from, in place of what it is doing.
+    note: Option<String>,
+    /// The machine and thread a press opens, for an agent on another
+    /// machine of the group while this window is linked to that machine.
+    elsewhere: Option<(String, String)>,
+    /// Why a press opens nothing, for an agent on a machine this window is
+    /// not linked to.
+    closed: Option<SharedString>,
+    /// The agent on another machine of the group its actions reach, where
+    /// this device may operate its lead's machine.
+    remote: Option<RemoteAgent>,
 }
 
 impl AgentRow {
@@ -108,6 +145,7 @@ impl AgentRow {
     /// caption its list sits under.
     fn detail(&self) -> String {
         [
+            self.machine.as_deref(),
             self.provider
                 .filter(|_| self.managed_by.is_none())
                 .map(|provider| provider.display_name()),
@@ -129,7 +167,7 @@ impl AgentRow {
     fn state(&self) -> Option<AgentState> {
         match self.attention {
             Some(attention) => Some(AgentState::Attention(attention)),
-            None => self.execution.map(AgentState::Execution),
+            None => self.standing.or(self.execution.map(AgentState::Execution)),
         }
     }
 
@@ -278,6 +316,12 @@ impl Agents {
                         // A native subagent's end is not reported, only its start.
                         started_at: entry.ts.filter(|_| execution.running()),
                         ended_at: None,
+                        machine: None,
+                        standing: None,
+                        note: None,
+                        elsewhere: None,
+                        closed: None,
+                        remote: None,
                     });
                 }
             },
@@ -339,16 +383,34 @@ impl Agents {
                 agent_type: None,
                 started_at: status.and_then(|status| status.run_started_at),
                 ended_at: status.and_then(|status| status.run_completed_at),
+                machine: None,
+                standing: None,
+                note: None,
+                elsewhere: None,
+                closed: None,
+                remote: None,
             };
-            match delivery {
-                AgentDelivery::AwaitingSettle => agents.needs_settle.push(row),
-                AgentDelivery::Running => agents.running.push(row),
-                AgentDelivery::NotDelivered => agents.done.push(row),
-                AgentDelivery::Settled => agents.settled.push(row),
-            }
+            agents.push(delivery, row);
+        }
+        for child in parent
+            .into_iter()
+            .flat_map(|parent| parent.remote_children.iter().rev())
+            .filter(|child| child.subagent)
+        {
+            let (delivery, row) = remote_row(child, store.may_operate(), cx);
+            agents.push(delivery, row);
         }
         agents.settled.extend(settled_native);
         agents
+    }
+
+    fn push(&mut self, delivery: AgentDelivery, row: AgentRow) {
+        match delivery {
+            AgentDelivery::AwaitingSettle => self.needs_settle.push(row),
+            AgentDelivery::Running => self.running.push(row),
+            AgentDelivery::NotDelivered => self.done.push(row),
+            AgentDelivery::Settled => self.settled.push(row),
+        }
     }
 
     /// Add each dispatched agent's result: the report its latest callback
@@ -371,7 +433,7 @@ impl Agents {
                     };
                     for callback in callbacks {
                         let report = compact(callback.report().unwrap_or_default());
-                        if !report.is_empty() {
+                        if !report.is_empty() && callback.machine.is_none() {
                             results.insert(callback.child_id, report);
                         }
                     }
@@ -456,6 +518,7 @@ impl Agents {
                     }),
                     elapsed: row.elapsed(),
                     open: row.open.clone(),
+                    elsewhere: row.elsewhere.clone(),
                 }
             })
             .collect()
@@ -523,6 +586,107 @@ impl Agents {
                 execution: row.execution,
             })
     }
+}
+
+/// The row of `child`, a subagent its lead started on another machine of the
+/// group, and where it is listed: that machine's thread, read from that
+/// machine's store while this window is linked to it, and otherwise from
+/// what the lead's host keeps of it. Its actions go through the lead's host,
+/// where this device may `operate` it.
+fn remote_row(
+    child: &tcode_core::control::RemoteChild,
+    operate: bool,
+    cx: &App,
+) -> (AgentDelivery, AgentRow) {
+    use tcode_core::control::RemoteChildState;
+    let machine = crate::machines::machine(&child.machine, cx);
+    let standing = crate::machines::standing(child, &machine, cx);
+    let there = machine
+        .store
+        .as_ref()
+        .map(|store| store.read(cx))
+        .filter(|_| machine.connected);
+    let meta = there.and_then(|store| store.thread_meta(&child.thread_id));
+    let execution = match standing {
+        crate::machines::Standing::Execution(execution) => Some(execution),
+        _ => None,
+    };
+    let delivery = match child.state {
+        RemoteChildState::Running => AgentDelivery::Running,
+        // Its lead settled it, and its machine is yet to hear so.
+        RemoteChildState::Reported | RemoteChildState::Failed
+            if child.pending == Some(RemoteChildOp::Settle) =>
+        {
+            AgentDelivery::Settled
+        }
+        RemoteChildState::Reported | RemoteChildState::Failed => AgentDelivery::AwaitingSettle,
+        RemoteChildState::Settled => AgentDelivery::Settled,
+        RemoteChildState::Cancelled | RemoteChildState::MachineLeft => AgentDelivery::NotDelivered,
+    };
+    let attention = there.and_then(|store| {
+        if store.pending_approval_for(&child.thread_id) {
+            Some(Attention::Approval)
+        } else if store.pending_user_input_for(&child.thread_id) {
+            Some(Attention::Answer)
+        } else {
+            None
+        }
+    });
+    let notes = crate::machines::notes(child, standing, &machine, cx);
+    let open = machine.store.is_some();
+    let row = AgentRow {
+        key: format!("{}@{}", child.thread_id, child.machine),
+        title: meta
+            .map(|meta| meta.title.clone())
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| child.title.clone()),
+        provider: meta.map(|meta| meta.provider),
+        // Its profiles are its machine's, which the lead's store does not
+        // hold.
+        profile_id: None,
+        model: meta.and_then(|meta| meta.model.clone()),
+        effort: None,
+        execution,
+        attention,
+        branch: meta
+            .and_then(|meta| meta.worktree.as_ref())
+            .map(|worktree| worktree.branch.clone()),
+        delivery: Some(delivery),
+        report: if child.report_taken.is_some() {
+            AgentReport::Reported
+        } else if child.state == RemoteChildState::Failed {
+            AgentReport::Failed
+        } else {
+            AgentReport::None
+        },
+        archived: false,
+        activity: there
+            .filter(|_| execution.is_some_and(AgentExecution::running) && notes.is_empty())
+            .and_then(|store| store.latest_activity(&child.thread_id)),
+        preview: None,
+        open: None,
+        agent: None,
+        stop_task: None,
+        managed_by: None,
+        agent_type: None,
+        started_at: None,
+        ended_at: None,
+        machine: Some(machine.name.clone()),
+        standing: match standing {
+            crate::machines::Standing::Unreachable => Some(AgentState::Unreachable),
+            crate::machines::Standing::MachineLeft => Some(AgentState::MachineLeft),
+            crate::machines::Standing::Execution(_) => None,
+        },
+        note: (!notes.is_empty()).then(|| notes.join(" · ")),
+        elsewhere: open.then(|| (child.machine.clone(), child.thread_id.clone())),
+        closed: (!open).then(|| crate::machines::not_open(&machine.name)),
+        remote: operate.then(|| RemoteAgent {
+            machine: child.machine.clone(),
+            thread_id: child.thread_id.clone(),
+            pending: child.pending,
+        }),
+    };
+    (delivery, row)
 }
 
 /// What an agent's row says of it, for a surface that heads its thread.
@@ -625,6 +789,10 @@ pub(crate) enum AgentState {
     /// Finished, and its result not yet settled into its lead.
     AwaitingSettle,
     Execution(AgentExecution),
+    /// Running as last heard, on a machine out of this window's reach.
+    Unreachable,
+    /// Its machine left the group.
+    MachineLeft,
 }
 
 impl AgentState {
@@ -636,6 +804,12 @@ impl AgentState {
             Self::Attention(Attention::Answer) => crate::tr!("mobile.answer").into_owned().into(),
             Self::AwaitingSettle => crate::tr!("agents.delivery_awaiting").into_owned().into(),
             Self::Execution(execution) => execution_label(execution),
+            Self::Unreachable => crate::tr!("machines.dispatch.unreachable")
+                .into_owned()
+                .into(),
+            Self::MachineLeft => crate::tr!("machines.dispatch.machine_left")
+                .into_owned()
+                .into(),
         }
     }
 
@@ -644,6 +818,8 @@ impl AgentState {
             Self::Attention(Attention::Approval) | Self::AwaitingSettle => cx.theme().warning,
             Self::Attention(Attention::Answer) => cx.theme().primary,
             Self::Execution(execution) => execution_color(execution, cx),
+            // Out of reach is not failed: the agent may still be running.
+            Self::Unreachable | Self::MachineLeft => cx.theme().muted_foreground,
         }
     }
 }
@@ -670,6 +846,9 @@ pub(crate) struct AgentLine {
     pub(crate) elapsed: Option<String>,
     /// The thread that shows it.
     pub(crate) open: Option<String>,
+    /// The machine and thread a press opens, for an agent on another machine
+    /// of the group while this window is linked to that machine.
+    pub(crate) elsewhere: Option<(String, String)>,
 }
 
 /// The key the panel's row opening `id` has among the lead's origins.
@@ -737,6 +916,28 @@ pub(crate) fn back_to_lead(
     cx: &mut App,
 ) {
     store.update(cx, |store, cx| store.show_thread_replacing(lead, agent, cx));
+}
+
+/// Ask before cancelling an agent, then `cancel` it.
+fn confirm_cancel(window: &mut Window, cx: &mut App, cancel: impl Fn(&mut App) + 'static) {
+    let cancel = std::rc::Rc::new(cancel);
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let cancel = cancel.clone();
+        alert
+            .title(crate::tr!("agents.cancel_title"))
+            .description(crate::tr!("agents.cancel_description"))
+            .button_props(
+                DialogButtons::default()
+                    .ok_text(crate::tr!("agents.cancel"))
+                    .ok_variant(ButtonVariant::Danger)
+                    .cancel_text(crate::tr!("agents.cancel_keep"))
+                    .show_cancel(true),
+            )
+            .on_ok(move |_, _, cx| {
+                cancel(cx);
+                true
+            })
+    });
 }
 
 #[derive(Clone, Copy)]
@@ -826,6 +1027,8 @@ pub struct AgentsPanel {
     /// What the entries that left the list showed, as they fold away.
     left: Rc<RefCell<crate::scroll::LeftRows<Entry>>>,
     focus: Rc<RefCell<ActionFocus>>,
+    /// The stores of the machines the lead started agents on.
+    machines: crate::machines::Followed,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -852,6 +1055,7 @@ impl AgentsPanel {
             sheet: None,
             left: Rc::new(RefCell::new(crate::scroll::LeftRows::over(ROWS))),
             focus: Default::default(),
+            machines: Default::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -925,29 +1129,88 @@ impl AgentsPanel {
     fn on_cancel(&mut self, action: &AgentCancel, window: &mut Window, cx: &mut Context<Self>) {
         let store = self.store.clone();
         let id = action.0.clone();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let store = store.clone();
-            let id = id.clone();
-            alert
-                .title(crate::tr!("agents.cancel_title"))
-                .description(crate::tr!("agents.cancel_description"))
-                .button_props(
-                    DialogButtons::default()
-                        .ok_text(crate::tr!("agents.cancel"))
-                        .ok_variant(ButtonVariant::Danger)
-                        .cancel_text(crate::tr!("agents.cancel_keep"))
-                        .show_cancel(true),
-                )
-                .on_ok(move |_, _, cx| {
-                    store.update(cx, |store, _| store.cancel_agent(id.clone()));
-                    true
-                })
+        confirm_cancel(window, cx, move |cx| {
+            store.update(cx, |store, _| store.cancel_agent(id.clone()));
         });
+    }
+
+    fn on_remote_op(
+        &mut self,
+        action: &AgentRemoteOp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(lead) = self.session_id.clone() else {
+            return;
+        };
+        let store = self.store.clone();
+        let action = action.clone();
+        let cancel = action.op == RemoteChildOp::Cancel;
+        let send = move |cx: &mut App| {
+            store.update(cx, |store, _| {
+                store.control_remote_child(
+                    lead.clone(),
+                    action.machine.clone(),
+                    action.thread_id.clone(),
+                    action.op,
+                )
+            });
+        };
+        if cancel {
+            confirm_cancel(window, cx, send);
+        } else {
+            send(cx);
+        }
     }
 
     /// The actions a row offers, with their icons and the action each sends.
     fn row_actions(row: &AgentRow) -> Vec<(IconName, SharedString, Box<dyn Action>)> {
         let mut actions: Vec<(IconName, SharedString, Box<dyn Action>)> = Vec::new();
+        if let Some(remote) = &row.remote {
+            let op = |op| -> Box<dyn Action> {
+                Box::new(AgentRemoteOp {
+                    machine: remote.machine.clone(),
+                    thread_id: remote.thread_id.clone(),
+                    op,
+                })
+            };
+            // What is still to be sent is not offered again, nor anything
+            // else once a cancel is.
+            let offered = |wanted: RemoteChildOp| match remote.pending {
+                Some(RemoteChildOp::Cancel) => false,
+                Some(pending) => pending != wanted,
+                None => true,
+            };
+            match row.delivery {
+                Some(AgentDelivery::Running) => {
+                    if offered(RemoteChildOp::Interrupt) {
+                        actions.push((
+                            IconName::Square,
+                            crate::tr!("agents.stop").into_owned().into(),
+                            op(RemoteChildOp::Interrupt),
+                        ));
+                    }
+                }
+                Some(AgentDelivery::AwaitingSettle) => {
+                    if offered(RemoteChildOp::Settle) {
+                        actions.push((
+                            IconName::CircleCheck,
+                            crate::tr!("agents.settle").into_owned().into(),
+                            op(RemoteChildOp::Settle),
+                        ));
+                    }
+                }
+                _ => return actions,
+            }
+            if offered(RemoteChildOp::Cancel) {
+                actions.push((
+                    IconName::CircleX,
+                    crate::tr!("agents.cancel").into_owned().into(),
+                    op(RemoteChildOp::Cancel),
+                ));
+            }
+            return actions;
+        }
         if let Some(task) = row.stop_task.clone() {
             actions.push((
                 IconName::Square,
@@ -1213,7 +1476,12 @@ impl Entries {
         } else {
             row.title.clone()
         };
-        let actions = AgentsPanel::row_actions(row);
+        // A machine that lets this device only view it takes none of them.
+        let actions = if self.store.read(cx).view_only() {
+            Vec::new()
+        } else {
+            AgentsPanel::row_actions(row)
+        };
         // Hover reveals the actions over the elapsed time; a touch screen has
         // no hover, so there they stand in its place.
         let coarse = crate::window_seam::is_mobile(cx);
@@ -1374,6 +1642,16 @@ impl Entries {
                 )
             });
         let activity = activity_line("agent", &row.key, row.activity.clone(), window, cx);
+        let note = row.note.clone().map(|note| {
+            let key = row.key.clone();
+            div()
+                .debug_selector(move || format!("agent-note-{key}"))
+                .w_full()
+                .pt_0p5()
+                .text_secondary(false, cx)
+                .text_color(muted)
+                .child(crate::widgets::fade_text(note))
+        });
         // The result's preview folds in under the row as it arrives.
         let failed = row.execution == Some(AgentExecution::Failed);
         let preview = crate::motion::shown(
@@ -1402,6 +1680,7 @@ impl Entries {
             .child(line_one)
             .child(line_two.pt_0p5())
             .children(activity)
+            .children(note)
             .children(preview);
         let label = SharedString::from(title);
         let open = row.open.clone();
@@ -1464,6 +1743,14 @@ impl Entries {
                     window.dispatch_action(Box::new(AgentOpen(id.clone())), cx);
                 })
             })
+            .when_some(row.elsewhere.clone(), |row_el, (machine, thread)| {
+                row_el.cursor_pointer().on_click(move |_, _, cx| {
+                    crate::machines::open_thread(&machine, &thread, None, cx);
+                })
+            })
+            .when_some(row.closed.clone(), |row_el, closed| {
+                row_el.with_tooltip(move |_, _| Tooltip::new(closed.to_string()))
+            })
             .when_some(readonly, |row_el, text| {
                 row_el.with_tooltip(move |_, _| Tooltip::new(text.clone()))
             })
@@ -1480,6 +1767,20 @@ impl Entries {
 impl Render for AgentsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let compact = crate::window_seam::window_is_compact(window, cx);
+        let machines: Vec<String> = self
+            .session_id
+            .as_deref()
+            .and_then(|id| self.store.read(cx).thread_meta(id))
+            .map(|meta| {
+                meta.remote_children
+                    .iter()
+                    .map(|child| child.machine.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut followed = std::mem::take(&mut self.machines);
+        followed.follow(machines, |_, cx| cx.notify(), cx);
+        self.machines = followed;
         let agents = {
             let store = self.store.read(cx);
             self.session_id
@@ -1495,7 +1796,8 @@ impl Render for AgentsPanel {
             .on_action(cx.listener(Self::on_stop))
             .on_action(cx.listener(Self::on_stop_background))
             .on_action(cx.listener(Self::on_settle))
-            .on_action(cx.listener(Self::on_cancel));
+            .on_action(cx.listener(Self::on_cancel))
+            .on_action(cx.listener(Self::on_remote_op));
         // The empty state and the list cross-fade as the first agent starts
         // or the last one goes. The current one stays in flow: the phone
         // sheet is as tall as what it holds, and gives layers that only

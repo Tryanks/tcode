@@ -114,6 +114,13 @@ pub struct ControlSettings {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "AgentScope::is_every")]
     pub agents: AgentScope,
+    /// Whether this machine's threads may start threads on the other machines of its group.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub machines: bool,
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 const fn default_true() -> bool {
@@ -125,6 +132,7 @@ impl Default for ControlSettings {
         Self {
             enabled: true,
             agents: AgentScope::Every,
+            machines: true,
         }
     }
 }
@@ -181,6 +189,79 @@ pub struct SelfSettleGrant {
 pub struct StartedBy {
     pub thread_id: String,
     pub request_id: String,
+    /// The machine of the group `thread_id` is on, when it is not this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+}
+
+/// The thread on another machine of the group that started this one as its subagent. This
+/// thread is an ordinary root thread here; only its report goes back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteParent {
+    pub machine: String,
+    pub thread_id: String,
+    pub title: String,
+}
+
+/// A thread this thread started on another machine of the group: a reference and its last
+/// known state, never its content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteChild {
+    pub machine: String,
+    pub thread_id: String,
+    pub title: String,
+    pub request_id: String,
+    /// Started as a subagent, which owes a report.
+    pub subagent: bool,
+    pub state: RemoteChildState,
+    /// Unix seconds of the last change to `state`.
+    pub updated_at: u64,
+    /// What this machine still has to tell the other one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<RemoteChildOp>,
+    /// The id of the child's report the lead's harness took last, so the same report sent
+    /// again is known as taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_taken: Option<String>,
+    /// The other machine has not yet heard that `report_taken` was taken, and keeps the
+    /// report until it does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub report_taken_unsent: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteChildState {
+    Running,
+    Reported,
+    Failed,
+    Cancelled,
+    /// Its lead settled it.
+    Settled,
+    /// The machine left the group.
+    MachineLeft,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteChildOp {
+    Interrupt,
+    Cancel,
+    Settle,
+}
+
+/// A wake a thread on another machine of the group asked for on this thread's events, kept
+/// on this thread. It fires once, and its firing is kept until that machine has it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteWatch {
+    pub id: String,
+    pub machine: String,
+    /// The watching thread, on `machine`.
+    pub thread_id: String,
+    pub events: BTreeSet<WatchEvent>,
+    /// The message its firing sends, until `machine` has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fired: Option<String>,
 }
 
 #[derive(
@@ -217,6 +298,9 @@ pub struct ControlWatch {
     /// that space's policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space: Option<String>,
+    /// The machine of the group `thread_ids` are on, when it is not this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
 }
 
 /// The semantic keys a [`ControlAction`] records, shared by the host that writes them and the

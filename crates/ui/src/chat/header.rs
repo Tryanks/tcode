@@ -76,6 +76,15 @@ fn parent_session<'a>(
     store.thread_meta(parent_id)
 }
 
+/// The thread on another machine of the group that started `session_id`'s
+/// as its subagent.
+fn remote_parent<'a>(
+    store: &'a WorkspaceStore,
+    session_id: Option<&str>,
+) -> Option<&'a tcode_core::control::RemoteParent> {
+    store.thread_meta(session_id?)?.remote_parent.as_ref()
+}
+
 /// The header's left inset in place of the bar's own, for a header that is
 /// `under_traffic_lights`: collapsed, the sidebar has zero width and the
 /// header starts at the window's left edge, where the window draws them when
@@ -99,10 +108,12 @@ pub(crate) fn header_extra_width_for(
     under_traffic_lights: bool,
     labelled: bool,
 ) -> f32 {
-    let parent_link = match (parent_session(store, session_id), labelled) {
-        (None, _) => 0.,
-        (Some(_), true) => PARENT_LINK_LABELLED_WIDTH,
-        (Some(_), false) => PARENT_LINK_COMPACT_WIDTH,
+    let parent =
+        parent_session(store, session_id).is_some() || remote_parent(store, session_id).is_some();
+    let parent_link = match (parent, labelled) {
+        (false, _) => 0.,
+        (true, true) => PARENT_LINK_LABELLED_WIDTH,
+        (true, false) => PARENT_LINK_COMPACT_WIDTH,
     };
     traffic_light_clearance(under_traffic_lights) + parent_link
 }
@@ -654,9 +665,13 @@ impl ChatView {
     /// The way back from an agent to the thread it was reached from. Unlabelled,
     /// it is its arrow, named by its tooltip and its accessibility label.
     fn parent_link(&self, labelled: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (parent_id, title) =
-            parent_session(self.workspace_store.read(cx), self.session_id.as_deref())
-                .map(|parent| (parent.id.clone(), parent.title.clone()))?;
+        let store = self.workspace_store.read(cx);
+        let Some((parent_id, title)) = parent_session(store, self.session_id.as_deref())
+            .map(|parent| (parent.id.clone(), parent.title.clone()))
+        else {
+            let parent = remote_parent(store, self.session_id.as_deref())?.clone();
+            return Some(self.remote_parent_link(parent, labelled, cx));
+        };
         let name: SharedString = crate::tr!("agents.back_to_parent", title = title)
             .into_owned()
             .into();
@@ -694,6 +709,51 @@ impl ChatView {
                 })
                 .into_any_element(),
         )
+    }
+
+    /// The way back from a thread a thread on another machine of the group
+    /// started as its subagent: to that thread, on its machine, where that
+    /// machine's store places it; with that machine not open in this window,
+    /// there is nowhere to go, which its tooltip says.
+    fn remote_parent_link(
+        &self,
+        parent: tcode_core::control::RemoteParent,
+        labelled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let machine = crate::machines::machine(&parent.machine, cx);
+        let open = machine.store.is_some();
+        let title = parent.title.clone();
+        let name: SharedString = crate::tr!("agents.back_to_parent", title = title.as_str())
+            .into_owned()
+            .into();
+        let tip: SharedString = if open {
+            name.clone()
+        } else {
+            crate::machines::not_open(&machine.name)
+        };
+        Button::new("agent-parent-link")
+            .motion(&self.motion)
+            .debug_selector(|| "agent-parent-link".into())
+            .on_mouse_down(gpui::MouseButton::Left, stop_press)
+            .ghost()
+            .xsmall()
+            .icon(IconName::ArrowLeft)
+            .disabled(!open)
+            .when(labelled, |link| {
+                link.max_w(px(160.)).child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(SharedString::from(title))),
+                )
+            })
+            .aria_label(name)
+            .tooltip(tip)
+            .on_click(move |_, _, cx| {
+                crate::machines::open_thread(&parent.machine, &parent.thread_id, None, cx);
+            })
+            .into_any_element()
     }
 
     /// The thread this one was forked from, where the rail's Thread card does
@@ -1366,12 +1426,22 @@ impl ChatView {
             .session_status_for(self.session_id.as_deref(), cx)
             .and_then(|status| status.control.as_ref())
             .is_some_and(|control| control.self_settle.is_some());
-        let movable = !is_draft && {
+        // A machine that lets this device only view it keeps what reads the
+        // thread here, and nothing that changes it.
+        let changes = !self.workspace_store.read(cx).view_only();
+        let self_settles = changes && self_settles;
+        let movable = changes && !is_draft && {
             let active = self.session_id.as_deref();
             active
                 .and_then(|id| self.workspace_store.read(cx).thread_meta(id))
                 .is_some_and(|meta| meta.worktree.is_none())
         };
+        let moving = self.session_id.as_deref().is_some_and(|id| {
+            self.workspace_store
+                .read(cx)
+                .thread_project_move(id, cx)
+                .is_some()
+        });
         move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
             let menu = menu.when_some(title.clone(), |menu, title| {
                 menu.menu(
@@ -1381,10 +1451,12 @@ impl ChatView {
             });
             let menu = menu
                 .separator()
-                .menu(
-                    crate::tr!("pull_requests.link_menu").into_owned(),
-                    Box::new(crate::pull_requests::OpenLinkDialog),
-                )
+                .when(changes, |menu| {
+                    menu.menu(
+                        crate::tr!("pull_requests.link_menu").into_owned(),
+                        Box::new(crate::pull_requests::OpenLinkDialog),
+                    )
+                })
                 .when(movable, |menu| {
                     menu.menu(
                         crate::tr!("sidebar.ctx_move_thread").into_owned(),
@@ -1403,10 +1475,19 @@ impl ChatView {
                         Box::new(crate::pull_requests::ShowAgentTools),
                     )
                 });
-            match &cwd {
+            let menu = match &cwd {
                 Some(cwd) => menu.separator().path_items(&cwd.to_string_lossy(), None),
                 None => menu,
-            }
+            };
+            // The host takes no work in a thread whose project is moving.
+            menu.when(moving, |menu| {
+                menu.disable_items_except(|action| {
+                    let action = action.as_any();
+                    !(action.is::<crate::pull_requests::OpenLinkDialog>()
+                        || action.is::<OpenMoveThreadDialog>()
+                        || action.is::<RevokeSelfSettle>())
+                })
+            })
         }
     }
 

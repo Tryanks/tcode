@@ -119,6 +119,19 @@ impl TimelineView {
                         &entry.id, from, to, cx,
                     ));
                 }
+                Segment::ThreadMoved(entry) => {
+                    let EntryContent::ThreadMoved {
+                        from_machine_name, ..
+                    } = &entry.content
+                    else {
+                        unreachable!();
+                    };
+                    column = column.child(components::dividers::thread_moved_divider(
+                        &entry.id,
+                        from_machine_name,
+                        cx,
+                    ));
+                }
                 Segment::Worktree(entry) => {
                     let EntryContent::Worktree { request, answer } = &entry.content else {
                         unreachable!();
@@ -424,7 +437,8 @@ impl TimelineView {
                                 })),
                             }
                         })
-                        .or(resume);
+                        .or(resume)
+                        .filter(|_| !self.workspace_store.read(cx).view_only());
                     let copy_key = format!("error:{}", entry.id);
                     let copied = self.copied.is(&copy_key);
                     let mark = copy_key;
@@ -855,7 +869,10 @@ impl TimelineView {
         let harness = store.harness_name_for(self.session_id.as_deref(), cx);
         let status = store
             .session_status_for(self.session_id.as_deref(), cx)
-            .and_then(|status| status.rewind.as_ref());
+            .and_then(|status| status.rewind.as_ref())
+            // A machine that lets this device only view it takes no undo from it, and
+            // opens no branch for it.
+            .filter(|_| !store.view_only());
         let checkpoint = rewound.checkpoint_id.clone();
         let this = cx.entity().downgrade();
         let undo = rewound
@@ -893,7 +910,7 @@ impl TimelineView {
                 rewound
                     .branch
                     .as_ref()
-                    .filter(|_| rewound.undo_token.is_none())?;
+                    .filter(|_| rewound.undo_token.is_none() && !store.view_only())?;
                 let absolute = store.absolute_turn_for(self.session_id.as_deref(), turn);
                 let session_id = self.session_id.clone()?;
                 let checkpoint = rewound.checkpoint_id.clone();
@@ -1196,6 +1213,7 @@ impl TimelineView {
         let enabled = request.as_ref().is_some_and(|request| {
             !store.approval_delivery_pending_for(self.session_id.as_deref(), &request.id)
                 && !store.native_subagent_readonly_for(self.session_id.as_deref(), cx)
+                && !store.view_only()
                 && store.connection_state().is_connected()
         });
         let session_id = self.session_id.clone();
@@ -1351,22 +1369,34 @@ impl TimelineView {
         let request = self.callback_request(turn, &key, callback, window, cx);
         let expanded = self.expanded.contains(&key);
         let child_id = callback.child_id.clone();
+        // A child on another machine of the group is that machine's thread,
+        // known here while this window is linked to that machine.
+        let machine = callback
+            .machine
+            .as_deref()
+            .map(|machine| crate::machines::machine(machine, cx));
+        let child_store = match &machine {
+            Some(machine) => machine.store.clone(),
+            None => Some(self.workspace_store.clone()),
+        };
         let (glyph, detail) = {
-            let store = self.workspace_store.read(cx);
-            let meta = store.thread_meta(&child_id).or_else(|| {
-                store
-                    .archived_sessions()
-                    .iter()
-                    .find(|meta| meta.id == child_id)
+            let store = child_store.as_ref().map(|store| store.read(cx));
+            let meta = store.and_then(|store| {
+                store.thread_meta(&child_id).or_else(|| {
+                    store
+                        .archived_sessions()
+                        .iter()
+                        .find(|meta| meta.id == child_id)
+                })
             });
-            let glyph = meta.map(|meta| {
+            let glyph = store.zip(meta).map(|(store, meta)| {
                 crate::provider_card::profile_glyph(
                     store,
                     meta.provider,
                     meta.profile_id.as_deref(),
                 )
             });
-            let detail = meta.map(|meta| {
+            let detail = store.zip(meta).map(|(store, meta)| {
                 std::iter::once(meta.provider.display_name().to_owned())
                     .chain(meta.model.as_deref().map(|model| {
                         store
@@ -1376,6 +1406,11 @@ impl TimelineView {
                     .collect::<Vec<_>>()
                     .join(" · ")
             });
+            let detail = match (&machine, detail) {
+                (Some(machine), Some(detail)) => Some(format!("{} · {detail}", machine.name)),
+                (Some(machine), None) => Some(machine.name.clone()),
+                (None, detail) => detail,
+            };
             (glyph, detail)
         };
         let exists = glyph.is_some();
@@ -1383,18 +1418,25 @@ impl TimelineView {
         let host = self.agent_host(cx);
         // The agent opens out of the card that opens it.
         let origin = SharedString::from(format!("callback-{key}"));
+        let beside = machine.is_none();
         let on_open = exists.then(|| {
             let origin = origin.clone();
-            Box::new(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                crate::agents_panel::open_agent(
-                    &store,
-                    child_id.clone(),
-                    host.clone(),
-                    Some(origin.clone()),
-                    window,
-                    cx,
-                );
-            }) as components::changed_files::ClickHandler
+            let machine = machine.as_ref().map(|machine| machine.id.clone());
+            Box::new(
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| match &machine {
+                    Some(machine) => {
+                        crate::machines::open_thread(machine, &child_id, None, cx);
+                    }
+                    None => crate::agents_panel::open_agent(
+                        &store,
+                        child_id.clone(),
+                        host.clone(),
+                        Some(origin.clone()),
+                        window,
+                        cx,
+                    ),
+                },
+            ) as components::changed_files::ClickHandler
         });
         let toggle_key = key.clone();
         let card = components::callback_card::callback_card(
@@ -1414,7 +1456,7 @@ impl TimelineView {
             self.hover.clone(),
             &self.motion,
         );
-        if exists {
+        if exists && beside {
             self.side_origins
                 .mark(origin, px(crate::material::event_card::RADIUS), card)
                 .into_any_element()
@@ -1456,6 +1498,34 @@ impl TimelineView {
                 components::callback_card::settled_lines(&answer, callback),
             ));
         }
+        // A child on another machine of the group waits there, and no host
+        // takes the answer for it from the lead's: it is answered in its own
+        // thread. Its machine's store says whether it still waits.
+        if let Some(machine) = callback.machine.as_deref() {
+            let thread = child_id.as_str();
+            let machine = crate::machines::machine(machine, cx);
+            let waits = machine
+                .store
+                .as_ref()
+                .map(|store| store.read(cx))
+                .filter(|_| machine.connected)
+                .filter(|store| store.thread_meta(thread).is_some())
+                .map(|store| match callback.event {
+                    CallbackEvent::Approval => store.pending_approval_for(thread),
+                    _ => store.pending_user_input_for(thread),
+                });
+            return Some(match waits {
+                Some(false) => CallbackRequest::Gone,
+                _ => CallbackRequest::Elsewhere(
+                    crate::tr!(
+                        "machines.dispatch.answer_there",
+                        machine = machine.name.as_str()
+                    )
+                    .into_owned()
+                    .into(),
+                ),
+            });
+        }
         let Some(status) = store.session_status_for(self.session_id.as_deref(), cx) else {
             return Some(CallbackRequest::Unknown);
         };
@@ -1465,6 +1535,8 @@ impl TimelineView {
             .find(|waiting| waiting.child_id == child_id);
         let online = !matches!(store.connection_state(),
             tcode_client::ConnectionState::Offline { reason } if reason.is_terminal());
+        // A machine that lets this device only view it takes no answer from it.
+        let online = online && !store.view_only();
         Some(match callback.event {
             CallbackEvent::Approval => {
                 let Some(request) = waiting
@@ -1476,10 +1548,12 @@ impl TimelineView {
                 let enabled =
                     online && !store.approval_delivery_pending_for(Some(&child_id), &request.id);
                 let answerable = crate::composer::approval_answerable(&request, store);
+                let refusal = crate::composer::not_answerable(&self.workspace_store, cx);
                 let store = self.workspace_store.clone();
                 CallbackRequest::Approval {
                     request,
                     answerable,
+                    refusal,
                     enabled,
                     decide: Rc::new(move |request_id, decision, _, cx| {
                         store.update(cx, |store, _| {
@@ -2325,16 +2399,17 @@ impl TimelineView {
     }
 
     /// Whether the thread's harness can move a running call into the
-    /// background.
+    /// background, for a device the machine lets do more than view it.
     fn moves_to_background(&self, cx: &App) -> bool {
-        self.workspace_store
-            .read(cx)
-            .session_status_for(self.session_id.as_deref(), cx)
-            .is_some_and(|status| {
-                status
-                    .background_control
-                    .is_some_and(|control| control.move_running)
-            })
+        let store = self.workspace_store.read(cx);
+        !store.view_only()
+            && store
+                .session_status_for(self.session_id.as_deref(), cx)
+                .is_some_and(|status| {
+                    status
+                        .background_control
+                        .is_some_and(|control| control.move_running)
+                })
     }
 
     /// The way from a call's window to its row among the background work.

@@ -336,6 +336,7 @@ mod tests {
             last_connected_unix: None,
             group_id: group.map(str::to_owned),
             group_name: group.map(|g| format!("Group {g}")),
+            label: None,
             space_id: space.then(|| "s".into()),
             space_name: space.then(|| "Shared".into()),
         }

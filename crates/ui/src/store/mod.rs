@@ -54,6 +54,7 @@ pub(crate) use images::{
     pull_request_media, pull_request_media_state, remote_image, retry_failed_pull_request_media,
 };
 use thread::{Part, ThreadReplica};
+mod moves;
 mod snapshots;
 
 pub(crate) use snapshots::PanelState;
@@ -81,6 +82,7 @@ pub enum TopicKind {
     Hosting,
     StorageMigration,
     DiskUsage,
+    ProjectMoves,
 }
 
 impl From<&Topic> for TopicKind {
@@ -105,6 +107,7 @@ impl From<&Topic> for TopicKind {
             Topic::Hosting => Self::Hosting,
             Topic::StorageMigration => Self::StorageMigration,
             Topic::DiskUsage => Self::DiskUsage,
+            Topic::ProjectMoves => Self::ProjectMoves,
         }
     }
 }
@@ -234,6 +237,9 @@ pub struct WorkspaceStore {
     /// What the space this workspace is a member of allows; `None` on a
     /// full workspace, which may do everything.
     space_policy: Option<tcode_protocol::SpacePolicy>,
+    /// The machine lets this device read everything and change nothing: it
+    /// lets the other devices of its group only view it.
+    view_only: bool,
     scoped_providers: Vec<ScopedProviderChoice>,
     attachment: WorkspaceAttachment,
     client_host: Option<Rc<dyn ClientHost>>,
@@ -266,6 +272,11 @@ pub struct WorkspaceStore {
     /// view holds it.
     disk_usage: DiskUsageState,
     disk_usage_holds: usize,
+    /// The host's projects moving to another machine of its group.
+    project_moves: moves::ProjectMoves,
+    /// What the host's group calls its machine, as the hosting state last
+    /// followed said; `None` without a label or before any was followed.
+    group_label: Option<String>,
     connection_state: ConnectionState,
     /// How far the host's wall clock is ahead of this client's, in
     /// milliseconds, as its last scope snapshot said; until one lands, none.
@@ -478,6 +489,7 @@ impl WorkspaceStore {
             host: host.clone(),
             scope: WorkspaceScope::Full,
             space_policy: None,
+            view_only: false,
             scoped_providers: Vec::new(),
             attachment,
             client_host,
@@ -510,6 +522,8 @@ impl WorkspaceStore {
             storage_migration_holds: 0,
             disk_usage: DiskUsageState::default(),
             disk_usage_holds: 0,
+            project_moves: Default::default(),
+            group_label: None,
             removed_session: None,
             settings_replica: Settings::default(),
             member_settings_unreadable: false,
@@ -695,12 +709,31 @@ impl WorkspaceStore {
     }
 
     pub(crate) fn can_manage_host(&self) -> bool {
-        self.scope.is_full() && self.baseline_topics.contains(&Topic::Scope)
+        self.may_operate() && self.baseline_topics.contains(&Topic::Scope)
+    }
+
+    /// Whether this device reaches the whole machine and may change it: not
+    /// a space member, and not a device the machine lets only view.
+    pub fn may_operate(&self) -> bool {
+        self.scope.is_full() && !self.view_only
+    }
+
+    /// Whether the machine lets this device read everything and change
+    /// nothing.
+    pub fn view_only(&self) -> bool {
+        self.view_only
     }
 
     /// Whether this workspace may do what `allowed` asks of its space's
-    /// policy: always on a full workspace.
+    /// policy: always on a full workspace that may operate the machine,
+    /// never on one that may only view it.
     pub fn space_allows(&self, allowed: impl FnOnce(&tcode_protocol::SpacePolicy) -> bool) -> bool {
+        !self.view_only && self.space_reaches(allowed)
+    }
+
+    /// Whether the space's policy lets this workspace read what `allowed`
+    /// covers: a device that may only view reads all of it.
+    fn space_reaches(&self, allowed: impl FnOnce(&tcode_protocol::SpacePolicy) -> bool) -> bool {
         self.space_policy.as_ref().is_none_or(allowed)
     }
 
@@ -717,7 +750,7 @@ impl WorkspaceStore {
     /// embed a browser. A browser tab already reaches the machine by address,
     /// so a dev server listening on the LAN opens in a new tab there instead.
     pub(crate) fn offers_preview(&self) -> bool {
-        self.scope.is_full() && crate::preview_backend()
+        self.may_operate() && crate::preview_backend()
     }
 
     fn index_topic(&self) -> Topic {
@@ -740,7 +773,7 @@ impl WorkspaceStore {
     pub fn machine_label(&self) -> String {
         let machine = self.remote_host_name().unwrap_or_default();
         match &self.scope {
-            WorkspaceScope::Full => machine.to_owned(),
+            WorkspaceScope::Full => self.group_label.as_deref().unwrap_or(machine).to_owned(),
             WorkspaceScope::Space { space_name, .. } => {
                 crate::tr!("member.connection", space = space_name, machine = machine).into_owned()
             }
@@ -778,7 +811,27 @@ impl WorkspaceStore {
         ));
     }
 
-    fn apply_scope(&mut self, scope: &Scope, cx: &mut Context<Self>) {
+    fn apply_scope(&mut self, scope: &Scope, view_only: bool, cx: &mut Context<Self>) {
+        // What the machine lets this device do changes only across a
+        // reconnect. A device that may only view drops what it may not
+        // follow, and one that may operate again takes up what it offers.
+        let access_changed = self.view_only != view_only;
+        self.view_only = view_only;
+        if view_only && access_changed {
+            for subscription in self.host.subscriptions() {
+                if matches!(
+                    subscription.topic,
+                    Topic::Preview { .. }
+                        | Topic::Hosting
+                        | Topic::Terminal { .. }
+                        | Topic::DiskUsage
+                        | Topic::ExternalImport { .. }
+                ) {
+                    let _ = self.host.unsubscribe(subscription);
+                }
+            }
+            self.preview.offered = false;
+        }
         let next = match scope {
             Scope::Full => WorkspaceScope::Full,
             Scope::Space {
@@ -791,7 +844,7 @@ impl WorkspaceStore {
             },
         };
         let changed = self.scope != next;
-        let needs_baseline = changed || self.applied_scope_request.is_none();
+        let needs_baseline = changed || access_changed || self.applied_scope_request.is_none();
         if changed {
             for subscription in self.host.subscriptions() {
                 if subscription.topic != Topic::Scope {
@@ -818,6 +871,7 @@ impl WorkspaceStore {
             self.settings_hydrated = false;
             self.providers_replica = Default::default();
             self.scoped_providers.clear();
+            self.forget_project_moves();
         }
         self.baseline_topics.insert(Topic::Scope);
         self.scope = next;
@@ -841,9 +895,10 @@ impl WorkspaceStore {
                         after: None,
                     });
                 }
+                self.follow_project_moves();
                 // Only a client that can render pages offers to: the host
                 // hands an agent's requests to a client that renders them.
-                if crate::preview_backend() {
+                if crate::preview_backend() && !view_only {
                     self.offer_preview();
                 }
                 for session_id in self.open_threads() {
@@ -928,6 +983,25 @@ impl WorkspaceStore {
         (thread.host == self.host_key()).then_some(thread.session_id)
     }
 
+    /// What to call the attached machine from now on: its group may label it
+    /// after the window attached.
+    pub(crate) fn retitle_host(&mut self, title: &str, cx: &mut Context<Self>) {
+        if let WorkspaceAttachment::Remote { host_name, .. } = &mut self.attachment
+            && host_name != title
+        {
+            *host_name = title.to_owned();
+            // The lists name their hosts: they are drawn again as for a
+            // change of the index.
+            self.thread_list_revision += 1;
+            cx.emit(StoreChange {
+                topic: TopicKind::Index,
+            });
+            cx.notify();
+        }
+    }
+
+    /// What to call the attached machine: its group's label for it, else
+    /// its name.
     pub fn remote_host_name(&self) -> Option<&str> {
         match &self.attachment {
             WorkspaceAttachment::Local => None,
@@ -1502,7 +1576,8 @@ impl WorkspaceStore {
     /// gone falls back to the first listed one, and a host with no project
     /// to the quick thread's draft, which only a full workspace may start.
     pub(crate) fn open_fallback_draft(&mut self, cx: &mut Context<Self>) {
-        if self.draft_fallback_pending {
+        // A machine that lets this device only view starts nothing for it.
+        if self.draft_fallback_pending || self.view_only {
             return;
         }
         let remembered = self.settings_replica.last_project_id.as_deref();
@@ -1635,7 +1710,7 @@ impl WorkspaceStore {
     ) -> &[tcode_core::pull_request::ThreadPullRequestLink] {
         // A member whose space keeps the remote out of reach works with no
         // pull request: reading one goes through the machine's credentials.
-        if !self.space_allows(|policy| policy.git_remote) {
+        if !self.space_reaches(|policy| policy.git_remote) {
             return &[];
         }
         self.thread_meta(session_id)
@@ -2037,7 +2112,8 @@ impl WorkspaceStore {
     }
 
     pub fn session_unread(&self, session_id: &str) -> bool {
-        if !self.scope.is_full() {
+        // A member, and a device the machine lets only view, read on this device.
+        if !self.scope.is_full() || self.view_only {
             return self.thread_meta(session_id).is_some_and(|meta| {
                 !meta.is_settled()
                     && meta.draft_text.is_none()
@@ -2205,7 +2281,7 @@ impl WorkspaceStore {
     /// starting a run: a fast completion is only recoverable through the
     /// subscription snapshot, not through the start reply.
     pub fn watch_external_import(&self, project_id: &str) {
-        if !self.scope.is_full() || !self.baseline_topics.contains(&Topic::Scope) {
+        if !self.may_operate() || !self.baseline_topics.contains(&Topic::Scope) {
             return;
         }
         if let Err(error) = self.host.subscribe(Subscription {
@@ -2354,7 +2430,7 @@ impl WorkspaceStore {
         action: tcode_protocol::HostingAction,
         cx: &mut App,
     ) -> Task<Result<tcode_protocol::HostingState, String>> {
-        if !self.scope.is_full() || !self.baseline_topics.contains(&Topic::Scope) {
+        if !self.may_operate() || !self.baseline_topics.contains(&Topic::Scope) {
             return cx.spawn(async |_| Err(crate::tr!("member.unavailable").into_owned()));
         }
         let host = self.host.clone();
@@ -2542,7 +2618,7 @@ impl WorkspaceStore {
         path: Option<PathBuf>,
         cx: &mut App,
     ) -> Task<Result<tcode_protocol::CommandResponse, ProtocolError>> {
-        if !self.scope.is_full() || !self.baseline_topics.contains(&Topic::Scope) {
+        if !self.may_operate() || !self.baseline_topics.contains(&Topic::Scope) {
             return cx.spawn(async |_| {
                 Err(ProtocolError::out_of_scope(
                     "project icons are managed by the space owner",
@@ -2712,6 +2788,7 @@ pub(crate) fn unexpected_pull_request_response() -> ProtocolError {
 impl EventEmitter<StoreChange> for WorkspaceStore {}
 impl EventEmitter<TerminalChange> for WorkspaceStore {}
 impl EventEmitter<ShowThread> for WorkspaceStore {}
+impl EventEmitter<tcode_protocol::EndedProjectMove> for WorkspaceStore {}
 impl EventEmitter<PreviewReleased> for WorkspaceStore {}
 impl EventEmitter<ConnectionState> for WorkspaceStore {}
 impl EventEmitter<tcode_protocol::HostingState> for WorkspaceStore {}

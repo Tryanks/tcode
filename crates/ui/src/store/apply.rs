@@ -51,7 +51,9 @@ impl WorkspaceStore {
                 self.host_clock_offset_ms =
                     *host_unix_ms as i64 - crate::time::now_millis(cx) as i64;
             }
-            if let ServerEvent::ScopeSnapshot { scope, .. } = &envelope.event
+            if let ServerEvent::ScopeSnapshot {
+                scope, view_only, ..
+            } = &envelope.event
                 && envelope.request_id.is_some()
                 && envelope.request_id != self.applied_scope_request
                 && !matches!(
@@ -60,7 +62,7 @@ impl WorkspaceStore {
                 )
             {
                 self.baseline_topics.clear();
-                self.apply_scope(scope, cx);
+                self.apply_scope(scope, *view_only, cx);
                 self.applied_scope_request = envelope.request_id;
             }
             return Reach::Store;
@@ -82,12 +84,13 @@ impl WorkspaceStore {
                     | Topic::Hosting
                     | Topic::StorageMigration
                     | Topic::DiskUsage
+                    | Topic::ProjectMoves
             )
         {
             return Reach::Store;
         }
         if matches!(envelope.topic, Topic::DevServers { .. })
-            && !self.space_allows(|policy| policy.preview)
+            && !self.space_reaches(|policy| policy.preview)
         {
             return Reach::Store;
         }
@@ -426,11 +429,23 @@ impl WorkspaceStore {
                     self.providers_replica = std::mem::take(status);
                     self.baseline_topics.insert(Topic::Providers);
                 }
-                (Topic::Hosting, ServerEvent::HostingReplaced(state)) => cx.emit((**state).clone()),
+                (Topic::Hosting, ServerEvent::HostingReplaced(state)) => {
+                    self.group_label = state.group.as_ref().and_then(|group| {
+                        group
+                            .machines
+                            .iter()
+                            .find(|machine| machine.this_machine)
+                            .and_then(|machine| machine.label.clone())
+                    });
+                    cx.emit((**state).clone())
+                }
                 (Topic::StorageMigration, ServerEvent::StorageMigrationReplaced(migration))
                     if self.storage_migration_holds > 0 =>
                 {
                     self.storage_migration.clone_from(migration);
+                }
+                (Topic::ProjectMoves, ServerEvent::ProjectMovesReplaced(state)) => {
+                    self.apply_project_moves(state, cx);
                 }
                 (Topic::DiskUsage, ServerEvent::DiskUsageReplaced(usage))
                     if self.disk_usage_holds > 0 =>

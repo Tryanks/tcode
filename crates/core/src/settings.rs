@@ -692,6 +692,8 @@ pub enum SettingsPatch {
     BrowserHomeUrl(Option<String>),
     BrowserAllowEvaluate(bool),
     ControlEnabled(bool),
+    /// Whether this machine's threads may start threads on the other machines of its group.
+    ControlMachines(bool),
     /// The accounts and models a thread `tcode_control` starts may run.
     ControlAgents(crate::control::AgentScope),
     VisualizeEnabled(bool),
@@ -1309,6 +1311,7 @@ impl Settings {
             SettingsPatch::BrowserHomeUrl(value) => self.browser.home_url = value,
             SettingsPatch::BrowserAllowEvaluate(value) => self.browser.allow_evaluate = value,
             SettingsPatch::ControlEnabled(value) => self.control.enabled = value,
+            SettingsPatch::ControlMachines(value) => self.control.machines = value,
             SettingsPatch::ControlAgents(value) => self.control.agents = value,
             SettingsPatch::VisualizeEnabled(value) => self.visualize.enabled = value,
             SettingsPatch::SaveCollaboration(collaboration) => {

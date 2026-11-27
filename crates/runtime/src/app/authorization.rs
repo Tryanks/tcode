@@ -45,7 +45,8 @@ impl AppState {
 
     pub(crate) fn session_in_scope(&self, id: &str, principal: &Principal) -> bool {
         match principal {
-            Principal::Full => true,
+            Principal::Full | Principal::Viewer { .. } => true,
+            Principal::Machine { .. } => false,
             Principal::Space { project_ids, .. } => self.find_meta(id).is_some_and(|meta| {
                 meta.project_id
                     .as_ref()
@@ -96,15 +97,38 @@ impl AppState {
         payload: &ClientPayload,
         cx: &HostCx,
     ) -> Result<(), ProtocolError> {
-        let Principal::Space {
-            project_ids,
-            space_id,
-            policy,
-            ..
-        } = principal
-        else {
-            return Ok(());
-        };
+        match principal {
+            Principal::Full => match payload {
+                ClientPayload::Query(Query::Machine(_)) => Err(ProtocolError::out_of_scope(
+                    "only another machine of the group sends machine requests",
+                )),
+                _ => Ok(()),
+            },
+            Principal::Machine { .. } => match payload {
+                ClientPayload::Query(Query::Machine(_)) => Ok(()),
+                _ => Err(ProtocolError::out_of_scope(
+                    "a machine of the group sends only machine requests",
+                )),
+            },
+            Principal::Viewer { .. } => authorize_viewer(payload),
+            Principal::Space {
+                project_ids,
+                space_id,
+                policy,
+                ..
+            } => self.authorize_space(principal, project_ids, space_id, policy, payload, cx),
+        }
+    }
+
+    fn authorize_space(
+        &self,
+        principal: &Principal,
+        project_ids: &[String],
+        space_id: &str,
+        policy: &tcode_protocol::SpacePolicy,
+        payload: &ClientPayload,
+        cx: &HostCx,
+    ) -> Result<(), ProtocolError> {
         // The newest policy the host has seen: a line from a connection made
         // before a change can still arrive while the machine closes it.
         let policy = self.space_policies.get(space_id).unwrap_or(policy);
@@ -161,6 +185,7 @@ impl AppState {
                 | Topic::Hosting
                 | Topic::StorageMigration
                 | Topic::DiskUsage
+                | Topic::ProjectMoves
                 | Topic::ExternalImport { .. } => Err(refusal("subscription")),
             },
             ClientPayload::Command(command) => match command {
@@ -467,12 +492,17 @@ impl AppState {
                         .ok_or_else(|| refusal("project"))
                 }
                 // Read marks are the host owner's, kept in their settings like the sidebar
-                // and favourite marks below.
+                // and favourite marks below. A turn in a space reaches no other machine, and
+                // neither does its member.
                 Command::DeleteSession { .. }
+                | Command::ControlRemoteChild { .. }
                 | Command::RestoreDraft { .. }
                 | Command::MarkSessionRead { .. }
                 | Command::MarkSessionUnread { .. }
                 | Command::DeleteProject { .. }
+                | Command::MoveProject { .. }
+                | Command::ResumeProjectMove { .. }
+                | Command::CancelProjectMove { .. }
                 | Command::CreateProject { .. }
                 | Command::CreateNewProject { .. }
                 | Command::StartScratchDraft
@@ -587,6 +617,9 @@ impl AppState {
                 | Query::CollaborationTemplates
                 | Query::NativeMcpServers { .. }
                 | Query::ScanExternalHistory
+                | Query::Machine(_)
+                | Query::ProjectMovePreview { .. }
+                | Query::MovedThread { .. }
                 | Query::BrowseDirectories { .. } => Err(refusal("query")),
             },
         }
@@ -658,6 +691,86 @@ impl AppState {
             })
         }));
         allowed.then_some(()).ok_or_else(|| refusal("path"))
+    }
+}
+
+fn view_only(kind: &str) -> ProtocolError {
+    ProtocolError::out_of_scope(format!(
+        "this machine lets the group's devices only view; {kind} is refused"
+    ))
+}
+
+/// What a device may do while this machine lets the group's devices only view: read what
+/// a full device reads, and change nothing. Every variant is decided here, so one added
+/// later is refused until it is listed.
+fn authorize_viewer(payload: &ClientPayload) -> Result<(), ProtocolError> {
+    match payload {
+        ClientPayload::Unsubscribe(_) => Ok(()),
+        ClientPayload::Command(_) => Err(view_only("every command")),
+        ClientPayload::Subscribe(subscription) => match &subscription.topic {
+            Topic::SessionEvents { .. }
+            | Topic::SessionStatus { .. }
+            | Topic::SessionPlan { .. }
+            | Topic::Index
+            | Topic::Scope
+            | Topic::Settings
+            | Topic::Providers
+            | Topic::GitStatus { .. }
+            | Topic::RuntimeEvents
+            | Topic::CommandOutput { .. }
+            | Topic::PreviewSession { .. }
+            | Topic::DevServers { .. }
+            | Topic::StorageMigration
+            | Topic::ProjectMoves => Ok(()),
+            // A preview client answers the agents' requests, the hosting topic is the
+            // transport's, for full devices, and the last two follow work a viewer cannot
+            // start: an import, and a measurement that the first subscription starts.
+            Topic::Terminal { .. }
+            | Topic::ExternalImport { .. }
+            | Topic::DiskUsage
+            | Topic::Preview { .. }
+            | Topic::SpaceIndex { .. }
+            | Topic::Hosting => Err(view_only("this subscription")),
+        },
+        ClientPayload::Query(query) => match query {
+            Query::Ping
+            | Query::ComputerUsePermissions
+            | Query::SessionHistoryPage { .. }
+            | Query::ListActiveWorkspace { .. }
+            | Query::LoadGitDiff { .. }
+            | Query::ReadIconImage { .. }
+            | Query::ReadImagePreview { .. }
+            | Query::ReadProjectIcon { .. }
+            | Query::ReadFileBytes { .. }
+            | Query::ReadFilePreview { .. }
+            | Query::RenderThreadExport { .. }
+            | Query::SearchSessionContent { .. }
+            | Query::ReadItemOutput { .. }
+            | Query::ThreadAnchorTurn { .. }
+            | Query::ThreadTurnMarks { .. }
+            | Query::ReadItemImage { .. }
+            | Query::ReadItemImagePreview { .. }
+            | Query::ArchivedSessions
+            | Query::ControlActivity { .. }
+            | Query::CollaborationTemplates
+            | Query::NativeMcpServers { .. }
+            | Query::MovedThread { .. }
+            | Query::PullRequest { .. } => Ok(()),
+            // Each of these writes, runs a model, is another principal's, or walks the
+            // machine's folders for a dialog that adds or changes something.
+            Query::Hosting { .. }
+            | Query::ScanExternalHistory
+            | Query::BrowseIconImages { .. }
+            | Query::BrowseDirectories { .. }
+            | Query::GenerateCommitMessage { .. }
+            | Query::SaveAttachment { .. }
+            | Query::RemoveUserFile { .. }
+            | Query::BeginUpload { .. }
+            | Query::WriteUpload { .. }
+            | Query::DiscardUpload { .. }
+            | Query::Machine(_)
+            | Query::ProjectMovePreview { .. } => Err(view_only("this query")),
+        },
     }
 }
 

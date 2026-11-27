@@ -6,12 +6,25 @@ pub(super) enum LinkTarget {
     Local(PathBuf),
     /// `tcode-thread://<thread_id>#<position>`: an entry of a Tcode thread.
     Thread(OpenThreadAnchor),
+    /// `tcode-thread://<thread_id>@<machine_id>#<position>`: an entry of a
+    /// thread on that machine of the group.
+    MachineThread(OpenMachineThreadAnchor),
 }
 
 /// Open a thread at the entry its anchor names, as a cited anchor link does.
 #[derive(gpui::Action, Clone, Debug, PartialEq, Eq, serde::Deserialize)]
 #[action(namespace = tcode_markdown, no_json)]
 pub struct OpenThreadAnchor {
+    pub thread_id: String,
+    pub position: Option<u64>,
+}
+
+/// Open a thread of a named machine of the group at the entry its anchor
+/// names.
+#[derive(gpui::Action, Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = tcode_markdown, no_json)]
+pub struct OpenMachineThreadAnchor {
+    pub machine: String,
     pub thread_id: String,
     pub position: Option<u64>,
 }
@@ -38,6 +51,10 @@ impl LinkTarget {
                 Some(position) => format!("{}#{position}", anchor.thread_id),
                 None => anchor.thread_id.clone(),
             },
+            Self::MachineThread(anchor) => match anchor.position {
+                Some(position) => format!("{}@{}#{position}", anchor.thread_id, anchor.machine),
+                None => format!("{}@{}", anchor.thread_id, anchor.machine),
+            },
         }
     }
 
@@ -52,6 +69,7 @@ impl LinkTarget {
             Self::Web(url) => cx.open_url(&url),
             Self::Local(path) => crate::host_file::open(host, &path, window, cx),
             Self::Thread(anchor) => window.dispatch_action(Box::new(anchor), cx),
+            Self::MachineThread(anchor) => window.dispatch_action(Box::new(anchor), cx),
         }
     }
 }
@@ -63,6 +81,13 @@ pub(super) fn resolve_link(url: &str, base_dir: Option<&Path>, elsewhere: bool) 
             Some((id, position)) => (id, position.parse().ok()),
             None => (anchor, None),
         };
+        if let Some((thread_id, machine)) = thread_id.split_once('@') {
+            return LinkTarget::MachineThread(OpenMachineThreadAnchor {
+                machine: machine.to_owned(),
+                thread_id: thread_id.to_owned(),
+                position,
+            });
+        }
         return LinkTarget::Thread(OpenThreadAnchor {
             thread_id: thread_id.to_owned(),
             position,

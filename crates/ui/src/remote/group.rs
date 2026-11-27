@@ -11,14 +11,16 @@ use gpui::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 use gpui_base::v_flex;
-use tcode_protocol::{DeviceAccess, GroupAction, GroupInfo, GroupMachineInfo, HostingState};
+use tcode_protocol::{
+    DeviceAccess, GroupAction, GroupDeviceAccess, GroupInfo, GroupMachineInfo, HostingState,
+};
 
 use super::spaces::{Resolve, Spaces, SpacesObserver};
 use super::{Submit, report, submit_actions};
 use crate::icon::{Icon, IconName};
 use crate::material::{empty_row, group_row, notice, section_gap};
 use crate::overlay::{Notification, OverlayExt as _};
-use crate::settings_rows::{footnote, row_frame, settings_group};
+use crate::settings_rows::{SelectRowOption, ToggleRow, footnote, row_frame, settings_group};
 use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -35,6 +37,47 @@ pub(crate) struct GroupSection {
     store: Entity<WorkspaceStore>,
     resolve: Resolve,
     observer: SpacesObserver,
+    /// The section's size-class motion: the window draws it under another
+    /// parent when it turns compact or wide.
+    motion: crate::motion::owned::Owned,
+}
+
+/// How much of this machine the group's other devices reach.
+fn reach(access: GroupDeviceAccess) -> u8 {
+    match access {
+        GroupDeviceAccess::Operate => 2,
+        GroupDeviceAccess::View => 1,
+        GroupDeviceAccess::None => 0,
+    }
+}
+
+fn access_key(access: GroupDeviceAccess) -> &'static str {
+    match access {
+        GroupDeviceAccess::Operate => "machines.access.operate",
+        GroupDeviceAccess::View => "machines.access.view",
+        GroupDeviceAccess::None => "machines.access.none",
+    }
+}
+
+fn access_description_key(access: GroupDeviceAccess) -> &'static str {
+    match access {
+        GroupDeviceAccess::Operate => "machines.access.operate_description",
+        GroupDeviceAccess::View => "machines.access.view_description",
+        GroupDeviceAccess::None => "machines.access.none_description",
+    }
+}
+
+/// What another machine of the group says it takes.
+fn accepts_line(machine: &GroupMachineInfo) -> SharedString {
+    match (machine.accepts_threads, machine.accepts_projects) {
+        (Some(true), Some(true)) => crate::tr!("group.machines.accepts.both"),
+        (Some(true), Some(false)) => crate::tr!("group.machines.accepts.threads"),
+        (Some(false), Some(true)) => crate::tr!("group.machines.accepts.projects"),
+        (Some(false), Some(false)) => crate::tr!("group.machines.accepts.neither"),
+        _ => crate::tr!("group.machines.accepts.unknown"),
+    }
+    .into_owned()
+    .into()
 }
 
 impl GroupSection {
@@ -44,6 +87,7 @@ impl GroupSection {
             store,
             resolve,
             observer: SpacesObserver::default(),
+            motion: Default::default(),
         }
     }
 
@@ -81,7 +125,7 @@ impl GroupSection {
         };
         let id = machine.id.clone();
         super::confirm_destructive(
-            crate::tr!("group.machines.remove_title", name = machine.name.clone()).into_owned(),
+            crate::tr!("group.machines.remove_title", name = machine.title()).into_owned(),
             crate::tr!("group.machines.remove_description").into_owned(),
             crate::tr!("group.machines.remove").into_owned(),
             move |window, cx| {
@@ -93,6 +137,155 @@ impl GroupSection {
             window,
             cx,
         );
+    }
+
+    fn rename(&mut self, machine: &GroupMachineInfo, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(spaces) = self.spaces(cx) {
+            open_label(
+                spaces,
+                &machine.id,
+                &machine.name,
+                machine.label.as_deref(),
+                window,
+                cx,
+            );
+        }
+    }
+
+    /// Narrowing what the group's other devices may do disconnects them, so
+    /// it asks first; widening it does not.
+    fn set_access(
+        &mut self,
+        current: GroupDeviceAccess,
+        next: GroupDeviceAccess,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if next == current {
+            return;
+        }
+        if reach(next) > reach(current) {
+            self.act(GroupAction::SetDeviceAccess(next), window, cx);
+            return;
+        }
+        let Some(spaces) = self.spaces(cx) else {
+            return;
+        };
+        let (title, description) = match next {
+            GroupDeviceAccess::View => (
+                "machines.access.confirm_view_title",
+                "machines.access.confirm_view",
+            ),
+            _ => (
+                "machines.access.confirm_none_title",
+                "machines.access.confirm_none",
+            ),
+        };
+        super::confirm_destructive(
+            crate::tr!(title).into_owned(),
+            crate::tr!(description).into_owned(),
+            crate::tr!(access_key(next)).into_owned(),
+            move |window, cx| {
+                let task = spaces.update(cx, |spaces, cx| {
+                    spaces.act_group(GroupAction::SetDeviceAccess(next), cx)
+                });
+                report("group.failed", task, window, cx);
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// This machine's switches: what it takes from the group's other
+    /// machines, and what the group's other devices may do on it. The host
+    /// reports what the machine takes now, which is nothing below operate
+    /// whatever the switches hold, so they show off and do not move.
+    fn switch_rows(
+        &self,
+        group: &GroupInfo,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let operate = group.device_access == GroupDeviceAccess::Operate;
+        let accept = |id: &'static str,
+                      title: &'static str,
+                      description: &'static str,
+                      checked: bool,
+                      action: fn(bool) -> GroupAction| {
+            ToggleRow::new(
+                id,
+                crate::tr!(title),
+                checked,
+                compact,
+                cx.listener(move |section, checked: &bool, window, cx| {
+                    section.act(action(*checked), window, cx);
+                }),
+            )
+            .description(if operate {
+                crate::tr!(description)
+            } else {
+                crate::tr!("machines.access.follows")
+            })
+            .disabled(!operate)
+            .into_any_element()
+        };
+        let threads = accept(
+            "group-accept-threads",
+            "group.accept_threads.title",
+            "group.accept_threads.description",
+            group.accept_threads,
+            GroupAction::SetAcceptThreads,
+        );
+        let projects = accept(
+            "group-accept-projects",
+            "group.accept_projects.title",
+            "group.accept_projects.description",
+            group.accept_projects,
+            GroupAction::SetAcceptProjects,
+        );
+        let current = group.device_access;
+        let options = [
+            GroupDeviceAccess::Operate,
+            GroupDeviceAccess::View,
+            GroupDeviceAccess::None,
+        ]
+        .into_iter()
+        .map(|access| SelectRowOption {
+            value: access,
+            id: SharedString::from(match access {
+                GroupDeviceAccess::Operate => "group-device-access-operate",
+                GroupDeviceAccess::View => "group-device-access-view",
+                GroupDeviceAccess::None => "group-device-access-none",
+            }),
+            label: crate::tr!(access_key(access)).into_owned().into(),
+            description: None,
+            selected: access == current,
+        })
+        .collect();
+        let section = cx.entity().downgrade();
+        let access = crate::settings_rows::select_row(
+            "group-device-access",
+            "group-device-access-popover",
+            "group-device-access-menu",
+            200.,
+            crate::tr!("machines.access.title").into_owned().into(),
+            Some(
+                crate::tr!(access_description_key(current))
+                    .into_owned()
+                    .into(),
+            ),
+            crate::tr!(access_key(current)).into_owned().into(),
+            options,
+            None,
+            crate::settings_rows::flip_row(&self.motion, "group-device-access", compact),
+            move |next, window, cx| {
+                let _ = section.update(cx, |section, cx| {
+                    section.set_access(current, next, window, cx);
+                });
+            },
+            cx,
+        );
+        vec![threads, projects, access]
     }
 
     fn leave(&mut self, group: &GroupInfo, window: &mut Window, cx: &mut Context<Self>) {
@@ -178,20 +371,63 @@ impl GroupSection {
                 cx,
                 |_, machine, _, cx| {
                     let remove = machine.clone();
+                    let rename = machine.clone();
+                    let secondary = |text: SharedString| {
+                        div()
+                            .text_secondary(compact, cx)
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(text))
+                    };
+                    let id = machine.id.clone();
                     group_row(cx)
+                        .debug_selector(move || format!("group-machine-{id}"))
                         .child(
-                            div()
+                            v_flex()
                                 .flex_1()
                                 .min_w_0()
-                                .text_body(compact, cx)
-                                .overflow_hidden()
-                                .child(crate::widgets::fade_text(machine.name.clone())),
+                                .gap(cx.theme().tokens.spacing.xxs)
+                                .child(
+                                    div().text_body(compact, cx).overflow_hidden().child(
+                                        crate::widgets::fade_text(machine.title().to_owned()),
+                                    ),
+                                )
+                                .when(machine.label.is_some(), |column| {
+                                    column.child(secondary(
+                                        crate::tr!(
+                                            "machines.label.machine_name",
+                                            name = machine.name.clone()
+                                        )
+                                        .into_owned()
+                                        .into(),
+                                    ))
+                                })
+                                .when(!machine.this_machine, |column| {
+                                    column.child(secondary(accepts_line(machine)))
+                                }),
                         )
                         .when(machine.this_machine, |row| {
                             row.child(div().flex_none().text_secondary(compact, cx).child(
                                 crate::widgets::fade_text(crate::tr!("group.machines.this")),
                             ))
                         })
+                        .child(
+                            Button::new(SharedString::from(format!(
+                                "group-machine-rename-{}",
+                                machine.id
+                            )))
+                            .debug_selector({
+                                let id = machine.id.clone();
+                                move || format!("group-machine-rename-{id}")
+                            })
+                            .ghost()
+                            .compact()
+                            .label(crate::tr!("machines.label.rename"))
+                            .on_click(cx.listener(
+                                move |section, _, window, cx| {
+                                    section.rename(&rename, window, cx);
+                                },
+                            )),
+                        )
                         .when(!machine.this_machine, |row| {
                             row.child(
                                 Button::new(SharedString::from(format!(
@@ -359,14 +595,19 @@ impl GroupSection {
         v_flex()
             .w_full()
             .child(
-                settings_group(crate::tr!("group.section"), vec![name], cx).child(
-                    super::footnote_with_docs(
-                        crate::tr!("group.detail_note"),
-                        "machine-groups",
-                        compact,
-                        cx,
-                    ),
-                ),
+                settings_group(
+                    crate::tr!("group.section"),
+                    std::iter::once(name)
+                        .chain(self.switch_rows(group, compact, cx))
+                        .collect(),
+                    cx,
+                )
+                .child(super::footnote_with_docs(
+                    crate::tr!("group.detail_note"),
+                    "machine-groups",
+                    compact,
+                    cx,
+                )),
             )
             .child(
                 div()
@@ -612,6 +853,64 @@ fn open_join(spaces: Entity<Spaces>, window: &mut Window, cx: &mut App) {
     link.update(cx, |link, cx| link.focus(window, cx));
 }
 
+/// Give `machine` the label the whole group shows for it, through
+/// `spaces`, a machine of that group; an empty field clears it.
+pub(crate) fn open_label(
+    spaces: Entity<Spaces>,
+    id: &str,
+    name: &str,
+    label: Option<&str>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let field = cx.new(|cx| {
+        InputState::new(window, cx)
+            .placeholder(name.to_owned())
+            .default_value(label.unwrap_or_default().to_owned())
+    });
+    let id = id.to_owned();
+    let submit: Submit = Rc::new({
+        let field = field.clone();
+        move |window, cx| {
+            let typed = field.read(cx).value().trim().to_owned();
+            let action = GroupAction::SetLabel {
+                machine: id.clone(),
+                label: (!typed.is_empty()).then_some(typed),
+            };
+            let task = spaces.update(cx, |spaces, cx| spaces.act_group(action, cx));
+            report("group.failed", task, window, cx);
+            true
+        }
+    });
+    let title = crate::tr!("machines.label.title", name = label.unwrap_or(name)).into_owned();
+    let input = field.clone();
+    window.open_dialog(cx, move |dialog, _, _| {
+        let input = input.clone();
+        submit_actions(
+            dialog
+                .title(title.clone())
+                .content(move |content, window, cx| {
+                    let compact = crate::window_seam::window_is_compact(window, cx);
+                    content.child(
+                        v_flex()
+                            .gap_3()
+                            .debug_selector(|| "group-label-dialog".into())
+                            .child(Input::new(&input))
+                            .child(
+                                div()
+                                    .text_secondary(compact, cx)
+                                    .child(crate::tr!("machines.label.note")),
+                            ),
+                    )
+                }),
+            "group-label",
+            crate::tr!("machines.label.save").into_owned().into(),
+            submit.clone(),
+        )
+    });
+    field.update(cx, |field, cx| field.focus(window, cx));
+}
+
 /// Removing a group member removes it from every machine of the group, so
 /// the device lists ask first.
 pub(crate) fn confirm_group_removal(
@@ -639,4 +938,132 @@ pub(crate) fn invitation_note(group: &str, compact: bool, cx: &App) -> AnyElemen
         .debug_selector(|| "group-invitation-note".into())
         .child(crate::tr!("group.invitation_note", name = group.to_owned()).into_owned())
         .into_any_element()
+}
+
+#[cfg(all(test, feature = "remote-hosting"))]
+mod tests {
+    use super::*;
+    use gpui::{BorrowAppContext as _, Render, TestAppContext, VisualTestContext, px};
+    use tcode_protocol::HostingAction;
+    use tcode_traverse::HostMux;
+
+    struct Probe(Entity<GroupSection>);
+
+    impl Render for Probe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            v_flex().size_full().child(self.0.clone())
+        }
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        for _ in 0..2 {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                _ = window.draw(cx);
+            });
+        }
+    }
+
+    fn click(selector: &'static str, cx: &mut VisualTestContext) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"));
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        draw(cx);
+    }
+
+    fn group(cx: &mut VisualTestContext) -> GroupInfo {
+        cx.read(|cx| {
+            cx.global::<super::super::RemoteController>()
+                .hosting(HostingAction::State)
+                .unwrap()
+                .group
+                .unwrap()
+        })
+    }
+
+    /// Choose `option` in the devices' access row, confirming a narrowing.
+    fn choose_access(option: &'static str, cx: &mut VisualTestContext) {
+        click("group-device-access", cx);
+        click(option, cx);
+        if option != "group-device-access-operate" {
+            cx.simulate_keystrokes("enter");
+            draw(cx);
+        }
+    }
+
+    /// While the group's other devices may not operate this machine, it
+    /// takes nothing from the other machines whatever its switches hold:
+    /// the switches show off and a click on them changes nothing, until
+    /// the devices may operate it again.
+    #[gpui::test]
+    fn the_accept_switches_follow_what_other_devices_may_do(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(crate::test_client::init);
+        // The machine's host tells the window of hosting changes from its
+        // own threads, as it does in the app.
+        cx.executor().allow_parking();
+        let root = crate::store::tests::scratch_root("group-accept");
+        std::fs::create_dir_all(&root).unwrap();
+        let (to_host, _host_rx) = async_channel::unbounded::<String>();
+        let (_host_tx, from_host) = async_channel::unbounded::<String>();
+        let (attachments, _attachment_rx) = async_channel::unbounded();
+        let mut controller = super::super::RemoteController::new(
+            HostMux::new(attachments, from_host.clone()),
+            root.clone(),
+            None,
+            tcode_client::HostLink::new(to_host.clone(), from_host.clone()),
+            Default::default(),
+        );
+        controller
+            .start_hosting(
+                &tcode_core::settings::TraverseSetting {
+                    sources: Vec::new(),
+                },
+                "Studio".into(),
+            )
+            .unwrap();
+        controller
+            .hosting(HostingAction::Group(GroupAction::Create {
+                name: "Home".into(),
+            }))
+            .unwrap();
+        cx.update(|cx| cx.set_global(controller));
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let store = cx.new(|cx| {
+                WorkspaceStore::new_attached(
+                    tcode_client::HostLink::new(to_host, from_host),
+                    crate::store::WorkspaceAttachment::Local,
+                    None,
+                    None,
+                    cx,
+                )
+            });
+            let section = cx.new(|_| GroupSection::new(store, super::super::spaces::this_machine));
+            let probe = cx.new(|_| Probe(section));
+            gpui_base::Root::new(probe, window, cx)
+        });
+        cx.simulate_resize(gpui::size(px(900.), px(1400.)));
+        draw(cx);
+
+        choose_access("group-device-access-view", cx);
+        assert_eq!(group(cx).device_access, GroupDeviceAccess::View);
+        click("group-accept-projects", cx);
+        assert!(
+            !group(cx).accept_projects,
+            "a switch that follows the devices' access sends nothing"
+        );
+
+        choose_access("group-device-access-operate", cx);
+        click("group-accept-projects", cx);
+        assert!(group(cx).accept_projects, "the switch works again");
+
+        cx.update(|_, cx| {
+            cx.update_global::<super::super::RemoteController, _>(|controller, _| {
+                controller.stop_hosting()
+            });
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

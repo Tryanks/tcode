@@ -1,4 +1,5 @@
 use super::*;
+use tcode_core::control::RemoteParent;
 use tcode_core::notice::{
     CHILD_REPORT_REMINDER, ORCHESTRATE_APPROVAL_ID_PHRASE, ORCHESTRATE_APPROVAL_PHRASE,
     ORCHESTRATE_FALLBACK_LABEL, ORCHESTRATE_QUESTION_ID_PHRASE, ORCHESTRATE_QUESTION_PHRASE,
@@ -6,6 +7,22 @@ use tcode_core::notice::{
 };
 use tcode_core::project::ChildExpectation;
 use tcode_core::settlement::{AgentDelivery, AgentReport};
+
+/// The thread a child reports to: a thread here, or one on another machine of the group.
+pub(super) enum Lead {
+    Here(String),
+    Elsewhere(RemoteParent),
+}
+
+impl Lead {
+    pub(super) fn of(child: &SessionMeta) -> Option<Self> {
+        match (&child.remote_parent, &child.parent_session_id) {
+            (Some(parent), _) => Some(Self::Elsewhere(parent.clone())),
+            (None, Some(parent)) => Some(Self::Here(parent.clone())),
+            (None, None) => None,
+        }
+    }
+}
 
 /// Appended to every subagent's first message so the report contract reaches it
 /// regardless of what the thread that started it wrote.
@@ -155,11 +172,10 @@ impl AppState {
                 self.mcp.visualize_registrations.contains_key(id),
             ),
         ];
-        let control_instructions = self
-            .mcp
-            .control_registrations
-            .contains_key(id)
-            .then(|| control_mcp::instructions(meta.is_dispatched()));
+        let control_instructions = self.mcp.control_registrations.contains_key(id).then(|| {
+            let access = self.control_access(meta);
+            control_mcp::instructions(access.subagent, access.machines)
+        });
         servers
             .into_iter()
             .filter(|(_, _, registered)| *registered)
@@ -449,6 +465,7 @@ impl AppState {
                 });
             }
         }
+        self.settle_remote_children(parent_id, cx);
         result
     }
 
@@ -603,23 +620,24 @@ impl AppState {
     }
 
     /// The child meta and its lead, when the child still owes or has owed a
-    /// report and both sides are current.
-    fn expectant_child(&self, child_id: &str) -> Option<(SessionMeta, String, ChildExpectation)> {
+    /// report and both sides are current as far as this machine knows.
+    fn expectant_child(&self, child_id: &str) -> Option<(SessionMeta, Lead, ChildExpectation)> {
         let child = self
             .sessions
             .iter()
-            .find(|meta| meta.id == child_id && meta.parent_session_id.is_some())
+            .find(|meta| meta.id == child_id)
             .filter(|meta| meta.archived_at.is_none() && meta.cancelled_at.is_none())?
             .clone();
+        let lead = Lead::of(&child)?;
         let expectation = child.expectation.clone()?;
-        let parent_id = child.parent_session_id.clone()?;
-        if !self
-            .find_meta(&parent_id)
-            .is_some_and(|meta| meta.archived_at.is_none())
+        if let Lead::Here(parent_id) = &lead
+            && !self
+                .find_meta(parent_id)
+                .is_some_and(|meta| meta.archived_at.is_none())
         {
             return None;
         }
-        Some((child, parent_id, expectation))
+        Some((child, lead, expectation))
     }
 
     /// A child's turn ended (or its background work did): decide whether the
@@ -634,7 +652,7 @@ impl AppState {
         status: TurnStatus,
         cx: &mut HostCx,
     ) {
-        let Some((child, parent_id, mut expectation)) = self.expectant_child(child_id) else {
+        let Some((child, lead, mut expectation)) = self.expectant_child(child_id) else {
             return;
         };
         let Some(resident) = self.resident(child_id) else {
@@ -681,7 +699,7 @@ impl AppState {
             );
             expectation.state = AgentReport::Reported;
             expectation.delivered_item = Some(item);
-            self.deliver_report_to_parent(child_id, &parent_id, text, expectation, cx);
+            self.deliver_report_to_parent(child_id, &lead, text, expectation, cx);
             return;
         }
         if !expectation.state.pending() {
@@ -720,12 +738,12 @@ impl AppState {
             usage.as_ref(),
         );
         expectation.state = AgentReport::Unreported;
-        self.deliver_report_to_parent(child_id, &parent_id, text, expectation, cx);
+        self.deliver_report_to_parent(child_id, &lead, text, expectation, cx);
     }
 
     /// The child can no longer deliver what it owes: its lead hears why, once.
     pub(super) fn fail_child_expectation(&mut self, child_id: &str, error: &str, cx: &mut HostCx) {
-        let Some((child, parent_id, mut expectation)) = self.expectant_child(child_id) else {
+        let Some((child, lead, mut expectation)) = self.expectant_child(child_id) else {
             return;
         };
         if !expectation.state.pending() {
@@ -742,7 +760,7 @@ impl AppState {
             usage.as_ref(),
         );
         expectation.state = AgentReport::Failed;
-        self.deliver_report_to_parent(child_id, &parent_id, text, expectation, cx);
+        self.deliver_report_to_parent(child_id, &lead, text, expectation, cx);
     }
 
     pub(super) fn deliver_child_approval_callback(
@@ -751,11 +769,11 @@ impl AppState {
         request_id: &str,
         cx: &mut HostCx,
     ) {
-        let Some(child) = self
+        let Some((child, lead)) = self
             .sessions
             .iter()
-            .find(|meta| meta.id == child_id && meta.parent_session_id.is_some())
-            .cloned()
+            .find(|meta| meta.id == child_id)
+            .and_then(|meta| Some((meta.clone(), Lead::of(meta)?)))
         else {
             return;
         };
@@ -791,18 +809,21 @@ impl AppState {
         {
             return;
         }
-        let parent_id = child.parent_session_id.as_deref().unwrap();
         let options = request.options.iter().map(|option| {
             serde_json::json!({ "id": option.id, "label": option.label, "kind": option.kind })
         }).collect::<Vec<_>>();
-        let instruction = if self.settings.subagents.child_approval == ChildApprovalMode::Manual {
-            "The user answers it."
-        } else {
-            "You are the approver: answer with tcode_control respond_approval, passing this thread_id and approval_id with option: <exact id> or cancel: true; reject anything outside the brief's scope."
+        let instruction = match (self.settings.subagents.child_approval, &lead) {
+            (ChildApprovalMode::Manual, _) => "The user answers it.",
+            (_, Lead::Here(_)) => {
+                "You are the approver: answer with tcode_control respond_approval, passing this thread_id and approval_id with option: <exact id> or cancel: true; reject anything outside the brief's scope."
+            }
+            (_, Lead::Elsewhere(_)) => {
+                "You are the approver: answer with tcode_control respond_approval, passing this thread_id, the machine after its @ as machine, and approval_id with option: <exact id> or cancel: true; reject anything outside the brief's scope."
+            }
         };
         let text = format!(
             "{} {ORCHESTRATE_APPROVAL_PHRASE}{}{ORCHESTRATE_APPROVAL_ID_PHRASE}{}). Native options: {}. {}",
-            callback_header(child_id, &child.title),
+            callback_header(child_id, None, &child.title),
             approval_request_summary(&request),
             request.id,
             serde_json::to_string(&options).expect("approval options serialize"),
@@ -810,7 +831,7 @@ impl AppState {
         );
         let mut child_cx = cx.clone();
         child_cx.space = self.turn_space_of(child_id).or(child_cx.space);
-        self.deliver_orchestrate_callback_to_parent(parent_id, text, &mut child_cx);
+        self.deliver_to_lead(&child, &lead, text, &mut child_cx);
     }
 
     /// A child's question goes to its lead, as an approval does; in Manual
@@ -822,11 +843,11 @@ impl AppState {
         request_id: &str,
         cx: &mut HostCx,
     ) {
-        let Some(child) = self
+        let Some((child, lead)) = self
             .sessions
             .iter()
-            .find(|meta| meta.id == child_id && meta.parent_session_id.is_some())
-            .cloned()
+            .find(|meta| meta.id == child_id)
+            .and_then(|meta| Some((meta.clone(), Lead::of(meta)?)))
         else {
             return;
         };
@@ -844,26 +865,41 @@ impl AppState {
         {
             return;
         }
-        let parent_id = child.parent_session_id.as_deref().unwrap();
         let delivery = if pending.delivery.is_blocking() {
             "the child is blocked until it is answered"
         } else {
             "the child keeps working and reads the answer when it arrives; the question lapses when its turn ends"
         };
-        let instruction = if self.settings.subagents.child_approval == ChildApprovalMode::Manual {
-            "The user answers it."
-        } else {
-            "You are the decider: answer with tcode_control respond_input, passing this thread_id and question_id with answers keyed by question id, a string (an option label or free text) for a single-choice question and an array of strings for a multi_select one, deciding from the brief and the user's instructions."
+        let instruction = match (self.settings.subagents.child_approval, &lead) {
+            (ChildApprovalMode::Manual, _) => "The user answers it.",
+            (_, Lead::Here(_)) => {
+                "You are the decider: answer with tcode_control respond_input, passing this thread_id and question_id with answers keyed by question id, a string (an option label or free text) for a single-choice question and an array of strings for a multi_select one, deciding from the brief and the user's instructions."
+            }
+            (_, Lead::Elsewhere(_)) => {
+                "You are the decider: answer with tcode_control respond_input, passing this thread_id, the machine after its @ as machine, and question_id with answers keyed by question id, a string (an option label or free text) for a single-choice question and an array of strings for a multi_select one, deciding from the brief and the user's instructions."
+            }
         };
         let text = format!(
             "{} {ORCHESTRATE_QUESTION_PHRASE}{ORCHESTRATE_QUESTION_ID_PHRASE}{}; {delivery}{ORCHESTRATE_QUESTIONS_PHRASE}{}. {instruction}",
-            callback_header(child_id, &child.title),
+            callback_header(child_id, None, &child.title),
             pending.request_id,
             serde_json::to_string(&pending.questions).expect("questions serialize"),
         );
         let mut child_cx = cx.clone();
         child_cx.space = self.turn_space_of(child_id).or(child_cx.space);
-        self.deliver_orchestrate_callback_to_parent(parent_id, text, &mut child_cx);
+        self.deliver_to_lead(&child, &lead, text, &mut child_cx);
+    }
+
+    /// A child's approval or question for its lead, wherever that is. One on another
+    /// machine hears it once, when it can be reached: a request lives only as long as the
+    /// child's provider does.
+    fn deliver_to_lead(&mut self, child: &SessionMeta, lead: &Lead, text: String, cx: &mut HostCx) {
+        match lead {
+            Lead::Here(parent_id) => {
+                self.deliver_orchestrate_callback_to_parent(parent_id, text, cx)
+            }
+            Lead::Elsewhere(parent) => self.send_callback_to_lead(child, parent, text, cx),
+        }
     }
 
     /// Deliver a child result into the orchestrator's current reasoning turn.
@@ -887,14 +923,32 @@ impl AppState {
     fn deliver_report_to_parent(
         &mut self,
         child_id: &str,
-        parent_id: &str,
+        lead: &Lead,
         text: String,
         mut expectation: ChildExpectation,
         cx: &mut HostCx,
     ) {
         expectation.undelivered = Some(text.clone());
-        self.set_child_expectation(child_id, Some(expectation), cx);
-        self.deliver_callback(parent_id, text, Some(child_id), cx);
+        match lead {
+            Lead::Here(parent_id) => {
+                self.set_child_expectation(child_id, Some(expectation), cx);
+                self.deliver_callback(
+                    parent_id,
+                    text.clone(),
+                    Some(ReportHandover {
+                        child: child_id.to_owned(),
+                        text,
+                        remote: None,
+                    }),
+                    cx,
+                );
+            }
+            Lead::Elsewhere(_) => {
+                expectation.undelivered_id = Some(uuid::Uuid::new_v4().to_string());
+                self.set_child_expectation(child_id, Some(expectation), cx);
+                self.send_report_to_lead(child_id, cx);
+            }
+        }
     }
 
     /// A report the user dropped from the lead's queue: the next start owes
@@ -903,13 +957,44 @@ impl AppState {
         for meta in self.settle_reports(reports, cx.clock().unix_secs()) {
             self.persist_meta(&meta, cx);
         }
+        self.reports_taken(reports, cx);
     }
 
-    /// The metas of the children that owe `reports` no more, for the caller
-    /// to save.
+    /// The metas of the children that owe `reports` no more, and of the leads that took
+    /// reports of children on other machines, for the caller to save.
     pub(super) fn settle_reports(&self, reports: &[ReportHandover], now: u64) -> Vec<SessionMeta> {
         let mut settled: Vec<SessionMeta> = Vec::new();
         for report in reports {
+            if let Some((machine, id)) = &report.remote {
+                let holds = |meta: &SessionMeta| {
+                    meta.remote_children
+                        .iter()
+                        .any(|child| child.machine == *machine && child.thread_id == report.child)
+                };
+                let lead = match settled.iter().position(holds) {
+                    Some(index) => &mut settled[index],
+                    None => {
+                        let Some(meta) = self
+                            .sessions
+                            .iter()
+                            .find(|meta| holds(meta))
+                            .and_then(|meta| self.find_meta(&meta.id))
+                        else {
+                            continue;
+                        };
+                        settled.push(meta);
+                        settled.last_mut().unwrap()
+                    }
+                };
+                for child in &mut lead.remote_children {
+                    if child.machine == *machine && child.thread_id == report.child {
+                        child.report_taken = Some(id.clone());
+                        child.report_taken_unsent = true;
+                    }
+                }
+                lead.updated_at = now;
+                continue;
+            }
             if settled.iter().any(|meta| meta.id == report.child) {
                 continue;
             }
@@ -930,7 +1015,8 @@ impl AppState {
         settled
     }
 
-    /// After a restart: the reports a lead's queue held when the host stopped.
+    /// After a restart: the reports a lead's queue held when the host stopped, and what
+    /// this machine still owes the other machines of its group.
     pub fn resume_undelivered_reports(&mut self, cx: &mut HostCx) {
         let undelivered: Vec<_> = self
             .sessions
@@ -941,15 +1027,27 @@ impl AppState {
             })
             .collect();
         for (child, parent, text) in undelivered {
-            self.deliver_callback(&parent, text, Some(&child), cx);
+            self.deliver_callback(
+                &parent,
+                text.clone(),
+                Some(ReportHandover {
+                    child,
+                    text,
+                    remote: None,
+                }),
+                cx,
+            );
         }
+        self.start_machine_work(cx);
     }
 
-    fn deliver_callback(
+    /// Text for the lead `parent_id`, steered into its running turn or queued as its next;
+    /// `report` is the child's report the text carries.
+    pub(super) fn deliver_callback(
         &mut self,
         parent_id: &str,
         text: String,
-        report: Option<&str>,
+        report: Option<ReportHandover>,
         cx: &mut HostCx,
     ) {
         if !self
@@ -964,7 +1062,9 @@ impl AppState {
         // A report is the work of the turn that made it: the lead takes it up
         // under the space that turn ran for.
         callback_cx.space = report
-            .and_then(|child| self.turn_space_of(child))
+            .as_ref()
+            .filter(|report| report.remote.is_none())
+            .and_then(|report| self.turn_space_of(&report.child))
             .or(callback_cx.space);
         let cx = &mut callback_cx;
         let space = cx.space.clone();
@@ -974,13 +1074,7 @@ impl AppState {
         // A steered callback is already part of this turn, so persist it just
         // like a user-triggered steer before handing it to the provider. With
         // the provider channel gone it waits for the next start instead.
-        let reports: Vec<_> = report
-            .map(|child| ReportHandover {
-                child: child.to_owned(),
-                text: text.clone(),
-            })
-            .into_iter()
-            .collect();
+        let reports: Vec<_> = report.into_iter().collect();
         if can_steer && self.steer_host_message(parent_id, &text, reports.clone(), cx) {
             return;
         }
@@ -1197,6 +1291,6 @@ pub(super) fn assemble_report_callback(
     };
     format!(
         "{} {state}.{token_segment}\n{body}",
-        callback_header(child_id, title)
+        callback_header(child_id, None, title)
     )
 }

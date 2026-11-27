@@ -96,7 +96,11 @@ impl AppShell {
         }
     }
 
-    pub(super) fn reconcile_navigation_restore(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn reconcile_navigation_restore(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.withhold_arriving_thread(cx);
         let Some(pending) = &self.pending_navigation_restore else {
             return;
@@ -135,6 +139,15 @@ impl AppShell {
             }
             self.window_state
                 .update(cx, |state, cx| state.drop_thread_pages(cx));
+            // The thread last shown may have gone with its project.
+            self.find_moved_thread(
+                &store,
+                pending.thread.session_id,
+                None,
+                |_, _, _| {},
+                window,
+                cx,
+            );
             return;
         }
         if shown.is_none() {
@@ -322,6 +335,24 @@ impl AppShell {
     /// members. On a desktop viewing this machine alone, newly joining a group
     /// upgrades the view to that group once.
     pub(super) fn on_saved_hosts_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        self.machines
+            .update(cx, |machines, _| machines.reread(client.as_ref()));
+        if let Ok(saved) = self.client.load_hosts() {
+            for link in &self.links {
+                let Some(host) = link
+                    .store
+                    .read(cx)
+                    .remote_host_id()
+                    .and_then(|id| saved.iter().find(|host| host.host_id == id))
+                else {
+                    continue;
+                };
+                let title = host.title().to_owned();
+                link.store
+                    .update(cx, |store, cx| store.retitle_host(&title, cx));
+            }
+        }
         let current_local_group = self
             .client
             .local_machine_group()
@@ -903,6 +934,13 @@ impl AppShell {
     /// it is linked to now.
     pub(super) fn sync_hosts(&self, cx: &mut Context<Self>) {
         let stores: Vec<_> = self.links.iter().map(|link| link.store.clone()).collect();
+        let keyed = self
+            .links
+            .iter()
+            .map(|link| (link.key(), link.store.clone()))
+            .collect();
+        self.machines
+            .update(cx, |machines, _| machines.set_stores(keyed));
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.set_hosts(stores.clone(), cx));
         self.palette
@@ -978,7 +1016,7 @@ impl AppShell {
     ) -> Option<HostKey> {
         let name = match &target {
             AttachmentTarget::Local => crate::tr!("hosts.this_computer").into_owned(),
-            AttachmentTarget::Remote(host) => host.name.clone(),
+            AttachmentTarget::Remote(host) => host.title().to_owned(),
         };
         let open = match Attachment::open(target, local, self.client.clone(), cx) {
             Ok(open) => open?,
@@ -1011,6 +1049,13 @@ impl AppShell {
             cx.subscribe_in(&store, window, |this, store, shown: &ShowThread, w, cx| {
                 this.show_thread(store, shown, w, cx);
             }),
+            cx.subscribe_in(
+                &store,
+                window,
+                |this, store, ended: &tcode_protocol::EndedProjectMove, w, cx| {
+                    this.present_project_move_ended(store, ended, w, cx);
+                },
+            ),
             cx.subscribe_in(
                 &store,
                 window,
@@ -1306,6 +1351,7 @@ impl AppShell {
     pub(super) fn reconcile_panes(
         &mut self,
         store: &Entity<WorkspaceStore>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let compact = self.compact(cx);
@@ -1317,17 +1363,31 @@ impl AppShell {
         };
         let panes = column.panes(cx);
         let current_pane = column.current_pane.clone();
-        let mut closed: Vec<_> = panes
+        let (moved, closed): (Vec<_>, Vec<_>) = panes
             .iter()
-            .filter(|pane| {
-                let pane = pane.read(cx);
-                pane.store() == store
-                    && pane
-                        .session_id()
-                        .is_some_and(|session_id| !store.read(cx).is_thread_open(session_id))
+            .filter_map(|pane| {
+                let session_id = pane.read(cx).session_id()?.to_owned();
+                (pane.read(cx).store() == store && !store.read(cx).is_thread_open(&session_id))
+                    .then(|| {
+                        let machine = store
+                            .read(cx)
+                            .moved_thread_machine(&session_id)
+                            .map(str::to_owned);
+                        (pane.clone(), session_id, machine)
+                    })
             })
-            .cloned()
-            .collect();
+            .partition(|(_, _, machine)| machine.is_some());
+        // A pane whose thread went with its project follows it.
+        for (pane, session_id, machine) in moved {
+            if let Some(machine) = machine {
+                if store.read(cx).moved_draft(&session_id) {
+                    self.pane_draft_moved(&pane, machine, window, cx);
+                } else {
+                    self.pane_thread_moved(&pane, &session_id, machine, window, cx);
+                }
+            }
+        }
+        let mut closed: Vec<_> = closed.into_iter().map(|(pane, _, _)| pane).collect();
         // What stays is the pane in use, of those the store emptied.
         closed.sort_by_key(|pane| *pane == current_pane);
         let mut remaining = panes.len();
@@ -1489,10 +1549,10 @@ impl AppShell {
         };
         if column.current_pane.read(cx).store() != store
             || !store.read(cx).index_hydrated()
-            || column
-                .panes(cx)
-                .iter()
-                .any(|pane| pane.read(cx).session_id().is_some())
+            || column.panes(cx).iter().any(|pane| {
+                // A pane saying where its thread went keeps saying it.
+                pane.read(cx).session_id().is_some() || pane.read(cx).shows_moved_away()
+            })
         {
             return;
         }
@@ -1507,7 +1567,8 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         let host = store.read(cx).host_key();
-        self.reconcile_panes(store, cx);
+        self.reconcile_panes(store, window, cx);
+        self.reconcile_pending_moved(&host, window, cx);
         if let Some(link) = self.links.iter_mut().find(|link| link.key() == host)
             && link.attention.update(store, cx)
         {
@@ -1520,7 +1581,7 @@ impl AppShell {
         {
             self.stamp_connected(&host, cx);
         }
-        self.reconcile_navigation_restore(cx);
+        self.reconcile_navigation_restore(window, cx);
         self.schedule_navigation_save(cx);
         cx.notify();
     }
