@@ -63,6 +63,9 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                         .join("\n")
                 )
                 .into_owned(),
+                RuntimeError::MoveLeftBehind { error } => {
+                    crate::tr!("errors.move_left_behind", error = error).into_owned()
+                }
                 RuntimeError::DeleteSession { error } => {
                     crate::tr!("errors.delete_session", error = error).into_owned()
                 }

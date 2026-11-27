@@ -322,7 +322,8 @@ pub use wire::{
 // (record_withheld with row, OriginalTarget's record) and what a host could
 // not read (HostProblem's credentials_unreadable and cli_failed,
 // RuntimeError's file_unreadable, mcp_unavailable,
-// title_attachment_unreadable, orphan_sweep_skipped and orphans_left,
+// title_attachment_unreadable, orphan_sweep_skipped, orphans_left and
+// move_left_behind,
 // ProvidersStatus' secrets_unreadable, model_errors, model_problems and
 // login_shell_unread, the version lookups' errors, TokenCheck's unreadable,
 // GitStatusStatus' error, the unreadable lists of ExternalHistory,

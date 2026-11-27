@@ -1447,6 +1447,13 @@ pub enum RuntimeError {
     OrphansLeft {
         left: Vec<LeftOrphan>,
     },
+    /// What a project move left that could not be removed: its parts and
+    /// snapshot refs on the machine the project left, or its staging on the
+    /// machine it came to. `error` says what is left where, in the words of the
+    /// system or of git.
+    MoveLeftBehind {
+        error: String,
+    },
     DeleteSession {
         error: String,
     },

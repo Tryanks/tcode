@@ -429,15 +429,29 @@ fn write_threads(
 }
 
 /// Remove what a move left on the machine it leaves, whichever way it ended:
-/// its parts and the snapshot refs in the project's repository.
+/// its parts and the snapshot refs in the project's repository. What could not
+/// be removed is said as what is left where, each in the words of the system
+/// or of git.
 pub fn end_outgoing(data_dir: &Path, move_id: &str, root: &Path) -> Result<(), String> {
-    let refs = if is_git_project(root) {
-        git::remove_refs(root, &refs_prefix(move_id))
-    } else {
+    let mut left = Vec::new();
+    if is_git_project(root)
+        && let Err(error) = git::remove_refs(root, &refs_prefix(move_id))
+    {
+        left.push(format!(
+            "the refs under {}/ in {}: {error}",
+            refs_prefix(move_id),
+            root.display()
+        ));
+    }
+    let out = outgoing_dir(data_dir, move_id);
+    if let Err(error) = remove_dir(&out) {
+        left.push(format!("{}: {error}", out.display()));
+    }
+    if left.is_empty() {
         Ok(())
-    };
-    remove_dir(&outgoing_dir(data_dir, move_id)).map_err(|error| error.to_string())?;
-    refs
+    } else {
+        Err(left.join("; "))
+    }
 }
 
 /// What `MoveBegin` asked the machine a project goes to to stage.
@@ -554,6 +568,14 @@ pub struct Arrival<'a> {
     pub now_ms: u64,
 }
 
+/// The threads an arrival made, as they are here, and what it could not clear
+/// of the staging once they were made.
+pub struct Arrived {
+    pub threads: Vec<SessionMeta>,
+    /// The staging that is left, and why it could not be removed.
+    pub staging_left: Option<String>,
+}
+
 /// Paths of the machine a project leaves and where they are here, the most
 /// specific first.
 struct PathMap(Vec<(PathBuf, PathBuf)>);
@@ -620,7 +642,7 @@ impl Made {
 /// events and the move's record. Until that commits nothing is visible, and a
 /// failure takes back what was made on disk and keeps the staging. Answers
 /// the threads as they are here.
-pub fn arrive(store: &SessionStore, arrival: &Arrival<'_>) -> Result<Vec<SessionMeta>, String> {
+pub fn arrive(store: &SessionStore, arrival: &Arrival<'_>) -> Result<Arrived, String> {
     let data_dir = store.root().clone();
     let dir = staging_dir(&data_dir, arrival.move_id);
     let staged = staged(&data_dir, arrival.move_id)
@@ -638,14 +660,14 @@ pub fn arrive(store: &SessionStore, arrival: &Arrival<'_>) -> Result<Vec<Session
     let manifest: Manifest = read_json(&dir.join(MANIFEST)).map_err(|error| error.to_string())?;
     let mut made = Made::default();
     match place(store, arrival, &staged, &manifest, &dir, &mut made) {
-        Ok(metas) => {
-            if let Err(error) = discard_staging(&data_dir, arrival.move_id) {
-                log::warn!(
-                    "could not remove the staging of move {}: {error}",
-                    arrival.move_id
-                );
-            }
-            Ok(metas)
+        Ok(threads) => {
+            let staging_left = discard_staging(&data_dir, arrival.move_id)
+                .err()
+                .map(|error| format!("{}: {error}", dir.display()));
+            Ok(Arrived {
+                threads,
+                staging_left,
+            })
         }
         Err(error) => {
             let mut left = made.undo();

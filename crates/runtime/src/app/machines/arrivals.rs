@@ -278,7 +278,11 @@ impl AppState {
             };
             host.enqueue_and_wait(move |app, cx| {
                 app.moves.committing.remove(&move_id);
-                let metas = arrived.map_err(|message| refusal("move_failed", message))?;
+                let arrived = arrived.map_err(|message| refusal("move_failed", message))?;
+                if let Some(error) = arrived.staging_left {
+                    app.report_error(RuntimeError::MoveLeftBehind { error }, cx);
+                }
+                let metas = arrived.threads;
                 app.moves.arrived.insert(move_id, project.id.clone());
                 let project_id = project.id.clone();
                 app.projects.push(project);

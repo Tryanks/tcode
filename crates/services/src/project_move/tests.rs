@@ -201,7 +201,8 @@ fn a_moved_repository_reads_as_it_did_and_the_source_is_left_as_it_was() {
             now_ms: 0,
         },
     )
-    .unwrap();
+    .unwrap()
+    .threads;
 
     let branch_there = arrived
         .iter()

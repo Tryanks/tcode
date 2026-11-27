@@ -1489,6 +1489,7 @@ errors:
   worktree_remove: "ワークツリーを削除できませんでした：%{error}"
   orphan_sweep_skipped: "スレッドを読み込めなかったため、放置されたワークツリーを整理しませんでした：%{error}"
   orphans_left: "放置された次のワークツリーを削除できませんでした：\n%{worktrees}"
+  move_left_behind: "プロジェクトの移動が残したものを Tcode は削除できませんでした：%{error}"
   zed_cli_missing: "Zed CLI が見つかりません（`zed`、`zeditor`、`zed-cli` を試しました。Zed → Install CLI からインストールしてください）"
 editor:
   zed:

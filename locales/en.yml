@@ -1489,6 +1489,7 @@ errors:
   worktree_remove: "Failed to remove worktree: %{error}"
   orphan_sweep_skipped: "Tcode did not look for abandoned worktrees to remove: its threads could not be read: %{error}"
   orphans_left: "Tcode could not remove these abandoned worktrees:\n%{worktrees}"
+  move_left_behind: "A project move left something Tcode could not remove: %{error}"
   zed_cli_missing: "Zed CLI not found (tried `zed`, `zeditor`, `zed-cli`; install via Zed → Install CLI)"
 editor:
   zed:

@@ -587,19 +587,14 @@ impl AppState {
                 None => false,
             };
             let data_dir = store.root().clone();
-            let ended = {
+            let left = {
                 let journal = journal.clone();
                 host.unblock(move || {
                     disk::end_outgoing(&data_dir, &journal.move_id, &journal.project_root)
                 })
                 .await
+                .err()
             };
-            if let Err(error) = ended {
-                log::warn!(
-                    "could not clear what move {} left: {error}",
-                    journal.move_id
-                );
-            }
             let keep_trying = !aborted && !force && recorded.is_ok();
             if !keep_trying {
                 let (store, id) = (store.clone(), journal.move_id.clone());
@@ -611,6 +606,9 @@ impl AppState {
                 }
             }
             host.enqueue_and_wait(move |app, cx| {
+                if let Some(error) = left {
+                    app.report_error(RuntimeError::MoveLeftBehind { error }, cx);
+                }
                 app.moves.outgoing.remove(&project_id);
                 if keep_trying {
                     app.moves.aborting.insert(journal.move_id.clone(), journal);
@@ -1349,10 +1347,11 @@ impl Driver {
             })
             .await;
         if let Err(error) = ended {
-            log::warn!(
-                "moved project {} left something behind, cleared at the next start: {error}",
-                self.project_id
-            );
+            // The journal stays, so the next start finishes the move again and
+            // clears what is left.
+            self.host.enqueue(move |app, cx| {
+                app.report_error(RuntimeError::MoveLeftBehind { error }, cx)
+            });
         }
         let (project_id, run) = (self.project_id.clone(), self.run);
         self.host
