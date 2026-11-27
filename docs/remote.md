@@ -323,10 +323,11 @@ other machine must have **Accept threads other machines start here** on, must
 let the group's devices operate it and must have **Let threads use
 tcode_control** on.
 
-The thread never runs under a more permissive permission mode than the thread
-that started it: the class of the starting thread's own mode is the limit, or,
-where the other machine cannot tell what that is, the class of the Harness's
-default mode. A Harness with no mode as strict starts nothing.
+The thread runs as a thread this machine starts does: a subagent with the
+permissions **Who answers a subagent's approvals** gives subagents in
+**Settings → Control** on that machine, and its approvals answered as that
+setting says; a thread started without `subagent` with the project's own
+defaults there.
 
 Started without `subagent`, the thread is an ordinary thread of that machine.
 Started as a subagent, it is still an ordinary thread there, and its report,
@@ -403,12 +404,12 @@ do not move. While a project is moving, the item reads **Show move…**.
 
 The dialog **Move “‹project›” to a machine** has these parts:
 
-- **Machines**: the group's other machines. One is chosen by clicking it, and
-  only a machine that takes projects can be: another reads **Does not take
-  projects from the group now**, because **Accept projects other machines move
-  here** is off or its **Other devices of the group** is below **May operate**,
-  or **Has not said what it accepts; it may run an older Tcode**. A chosen one
-  reads **Can be moved to**.
+- **Machines**: the group's other machines, each with what it says of
+  projects: **Can be moved to**, **Does not take projects from the group
+  now** (its **Accept projects other machines move here** is off, or its
+  **Other devices of the group** is below **May operate**), or **Has not said
+  what it accepts; it may run an older Tcode**. One is chosen by clicking it;
+  the machine then says what stands in the way, under **Cannot move now**.
 - **Location**: the folder the project goes to, on the other machine. It is
   that machine's path (`~` is that machine's home), which must not exist yet
   or be empty, and must not be inside one of its projects. It starts as the
@@ -424,8 +425,11 @@ The dialog **Move “‹project›” to a machine** has these parts:
 - **Path**: **Goes through a relay; a large project will be slow.** when the
   other machine can be reached only through a relay; **Move** then asks
   **Move over a relay?** first.
-- **Cannot move now**: what is in the way. **Move** is available only when
-  nothing is. A reason is one of:
+- **Cannot move now**: what the machine holding the project and the chosen
+  machine say is in the way. **Move** is available once they have answered;
+  pressed while something is still in the way, it is refused with
+  **Something now stands in the way; see below.** and the list is asked for
+  again. A reason is one of:
   - **Quick chats stay with their machine.**
   - **The project's folder is inside a larger repository, which is not this
     project's to move.**
@@ -1274,8 +1278,8 @@ A group's trust is mutual. A member machine can start threads on another
 member, and the threads run there under the accounts, Harnesses and
 permissions of that machine's user, whenever that machine has **Accept threads
 other machines start here** on, which it has by default. Group only machines
-you would let act for each other. A thread started that way is held to no more
-permissive a permission mode than the thread that started it. On a machine that
+you would let act for each other. A thread started that way runs with the
+permissions that machine gives a thread it starts itself. On a machine that
 accepts threads, another member's threads can start threads, read and use the
 projects, providers and models, and read, message, interrupt, cancel, watch and
 answer questions only for threads their own machine started there. Every other
@@ -1353,8 +1357,8 @@ list in memory and writes it back.
 | A thread is not offered the tools to start a thread on another machine, or the other machine refuses it | Check that this machine is in a group and that **Let threads use tcode_control** and **Let threads start threads on other machines of the group** are on in **Settings → Control**. On the other machine check that **Accept threads other machines start here** is on, **Other devices of the group** is **May operate** and **Let threads use tcode_control** is on. |
 | A move stays paused | The line says why. **‹machine› cannot be reached; the move continues when it can**, **‹machine› no longer accepts projects; the move continues once it does** and **This machine reaches no group now; the move continues when it does** continue by themselves, trying again up to every two minutes; **Try again** retries at once. **Paused: ‹machine› runs a different Tcode version**, **Paused: ‹machine› is no longer in this machine's group** and **Paused: ‹reason›** wait: fix the cause and press **Try again** in **Show move…**, or **Cancel move**. The project stays read-only meanwhile. |
 | A project's composer reads **This project is moving to ‹machine›.** | The project is moving and stays read-only until the move ends or is cancelled. **Show move…** in the project's menu opens it. If it reads **‹machine› was told to finish and has not answered**, wait for the machine, or use **Continue here anyway** knowing the project may then exist on both. |
-| A machine cannot be chosen in **Move to machine…** | It reads **Does not take projects from the group now**: on that machine, in **Settings → Machine group**, switch on **Accept projects other machines move here** and set **Other devices of the group** to **May operate**. Under **Cannot move now** the dialog names anything else in the way. |
-| A machine reads **Has not said what it takes; it may run an older Tcode** | It has not reported its two switches, which an older Tcode does not report. Until it does, it cannot be chosen in **Move to machine…**. |
+| **Move to machine…** says a machine **does not take projects from the group now** | On that machine, in **Settings → Machine group**, switch on **Accept projects other machines move here** and set **Other devices of the group** to **May operate**. Under **Cannot move now** the dialog names anything else in the way. |
+| A machine reads **Has not said what it takes; it may run an older Tcode** | It has not reported its two switches, which an older Tcode does not report. Choose it in **Move to machine…** to have it answer for itself under **Cannot move now**. |
 
 **Syncing… / 同步中** means the workspace is waiting for its baseline: applied
 Index and Settings snapshots, plus SessionStatus and SessionEvents for the
