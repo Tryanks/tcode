@@ -208,7 +208,8 @@ impl AppShell {
     }
 
     /// `store` no longer has `thread_id`: ask it where the thread went, and
-    /// follow it there; `missing` runs when it went nowhere.
+    /// follow it there; `missing` runs when it went nowhere, and the host's
+    /// own words are shown when it could not say.
     pub(super) fn find_moved_thread(
         &mut self,
         store: &Entity<WorkspaceStore>,
@@ -220,9 +221,9 @@ impl AppShell {
     ) {
         let answer = store.update(cx, |store, cx| store.moved_thread(thread_id.clone(), cx));
         cx.spawn_in(window, async move |this, cx| {
-            let machine = answer.await.ok().flatten();
-            let _ = this.update_in(cx, |shell, window, cx| match machine {
-                Some(machine) => shell.follow_machine_thread(
+            let answer = answer.await;
+            let _ = this.update_in(cx, |shell, window, cx| match answer {
+                Ok(Some(machine)) => shell.follow_machine_thread(
                     MachineThread {
                         machine,
                         thread_id,
@@ -233,7 +234,10 @@ impl AppShell {
                     window,
                     cx,
                 ),
-                None => missing(shell, window, cx),
+                Ok(None) => missing(shell, window, cx),
+                Err(error) => {
+                    window.push_notification(Notification::warning(error.message), cx);
+                }
             });
         })
         .detach();
