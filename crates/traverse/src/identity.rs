@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use tcode_protocol::GroupDeviceAccess;
 
-use crate::group::{Declined, GroupRecord, Membership};
+use crate::group::{Declined, GroupRecord, MachineAccepts, Membership};
 
 /// One device allowed to open `tcode/1` connections.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,6 +289,17 @@ impl HostIdentity {
             self.device_access
         } else {
             GroupDeviceAccess::Operate
+        }
+    }
+
+    /// What this machine takes from the group's other machines now: its
+    /// switches, while the group's devices may operate it. Below that it
+    /// takes nothing, whatever the switches hold.
+    pub fn accepts(&self) -> MachineAccepts {
+        let operate = self.group_device_access() == GroupDeviceAccess::Operate;
+        MachineAccepts {
+            threads: operate && self.accept_threads,
+            projects: operate && self.accept_projects,
         }
     }
 

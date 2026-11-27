@@ -190,25 +190,27 @@ impl Shared {
         let state = self.state.lock().unwrap();
         let identity = &state.identity;
         let host = &identity.host_name;
-        let (switch, what) = match kind {
+        let accepts = identity.accepts();
+        let (taken, what) = match kind {
             MachineRequestKind::Ping | MachineRequestKind::Reply => return Ok(()),
-            MachineRequestKind::Thread => (identity.accept_threads, "Accept threads"),
-            MachineRequestKind::Project => (identity.accept_projects, "Accept projects"),
+            MachineRequestKind::Thread => (accepts.threads, "Accept threads"),
+            MachineRequestKind::Project => (accepts.projects, "Accept projects"),
         };
-        match identity.group_device_access() {
-            GroupDeviceAccess::Operate if switch => Ok(()),
-            GroupDeviceAccess::Operate => {
-                Err(error(MACHINE_REFUSES, format!("{what} is off on «{host}»")))
-            }
-            GroupDeviceAccess::View => Err(error(
-                MACHINE_REFUSES,
-                format!("«{host}» lets the group's other devices only view it"),
-            )),
-            GroupDeviceAccess::None => Err(error(
-                MACHINE_REFUSES,
-                format!("«{host}» is not open to the group's other devices"),
-            )),
+        if taken {
+            return Ok(());
         }
+        Err(error(
+            MACHINE_REFUSES,
+            match identity.group_device_access() {
+                GroupDeviceAccess::Operate => format!("{what} is off on «{host}»"),
+                GroupDeviceAccess::View => {
+                    format!("«{host}» lets the group's other devices only view it")
+                }
+                GroupDeviceAccess::None => {
+                    format!("«{host}» is not open to the group's other devices")
+                }
+            },
+        ))
     }
 
     /// Send `request` to `machine_id`, another member of this machine's

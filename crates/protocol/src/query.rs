@@ -548,7 +548,9 @@ pub struct GroupInfo {
     /// refused when they arrived.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub declined: Vec<HostedDevice>,
-    /// This machine's own switches.
+    /// What this machine takes from the group's other machines now: its
+    /// switch for each, while the group's devices may operate it, and
+    /// nothing below that.
     pub accept_threads: bool,
     pub accept_projects: bool,
     pub device_access: GroupDeviceAccess,

@@ -30,7 +30,7 @@ use tcode_protocol::{
 use crate::{
     group::{
         ALPN_GROUP, GroupLine, GroupMachine, GroupRecord, GroupRejection, GroupState,
-        JoiningDevice, JoiningMachine, MAX_GROUP_LINE, MachineAccepts, Membership, Roster,
+        JoiningDevice, JoiningMachine, MAX_GROUP_LINE, Membership, Roster,
     },
     identity::{
         DEVICE_FILE, DeviceGrant, DeviceRecord, HostIdentity, SpaceRecord, existing_device,
@@ -1753,12 +1753,8 @@ impl Shared {
     /// restarts. Members and devices get only addresses a connection to this
     /// machine actually selected.
     fn this_machine(&self, identity: &HostIdentity, addr: &EndpointAddrSnapshot) -> GroupMachine {
-        let operate = identity.group_device_access() == GroupDeviceAccess::Operate;
         GroupMachine {
-            accepts: Some(MachineAccepts {
-                threads: operate && identity.accept_threads,
-                projects: operate && identity.accept_projects,
-            }),
+            accepts: Some(identity.accepts()),
             ..GroupMachine::new(
                 addr.id.clone(),
                 identity.host_name.clone(),
@@ -1799,8 +1795,8 @@ impl Shared {
                     path: None,
                 })
                 .collect(),
-            accept_threads: state.identity.accept_threads,
-            accept_projects: state.identity.accept_projects,
+            accept_threads: state.identity.accepts().threads,
+            accept_projects: state.identity.accepts().projects,
             device_access: state.identity.device_access,
         })
     }

@@ -417,11 +417,21 @@ fn a_machine_s_switches_gate_threads_and_projects_and_replies_always_come_back()
 
     a.group(GroupAction::SetAcceptThreads(true));
     for access in [GroupDeviceAccess::View, GroupDeviceAccess::None] {
-        a.group(GroupAction::SetDeviceAccess(access));
+        let info = a.group(GroupAction::SetDeviceAccess(access)).group.unwrap();
+        assert_eq!(
+            (info.accept_threads, info.accept_projects),
+            (false, false),
+            "{access:?}"
+        );
         assert!(!passes(b.call(&to_a, thread())), "{access:?}");
         assert!(!passes(b.call(&to_a, project())), "{access:?}");
         assert!(passes(b.call(&to_a, reply())), "{access:?}");
     }
+    let info = a
+        .group(GroupAction::SetDeviceAccess(GroupDeviceAccess::Operate))
+        .group
+        .unwrap();
+    assert_eq!((info.accept_threads, info.accept_projects), (true, true));
 
     // What one member calls a machine, every member calls it.
     let to_b = b.id();
