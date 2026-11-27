@@ -170,7 +170,10 @@ members stay with their own machine.
    group side by side (see [Machines side by side](#machines-side-by-side)).
 
 While a machine is in a group, its invitation says so and names the group;
-the link carries the group's id.
+the link carries the group's id. Creating, joining or leaving a group, or being
+removed from one, replaces an invitation that was outstanding with a new one
+for the group the machine is now in, or for none; the earlier link stops
+working.
 
 ### Pair a device
 
@@ -453,10 +456,12 @@ sent. A move over a bad link continues from what the other machine already
 holds. A move is kept in the machine's store: it resumes after an
 interruption and after a restart of either machine.
 
-**Cancel move** stops it before the other machine finishes: nothing has been
-removed, the other machine discards what it received, and the project is as it
-was. If the other machine cannot be told then, it is told when it can be
-reached.
+**Cancel move** asks **Cancel moving ‹project›?** and stops the move before the
+other machine finishes: nothing has been removed, the other machine discards
+what it received, and the project is as it was. If the other machine cannot be
+told then, it is told when it can be reached. If the move finishes while that
+question is open, it closes; a cancel that arrives after the move finished
+reads **The move had already finished.**
 
 A paused move waits, and its line says why. Three reasons continue by
 themselves, trying again after five seconds at first and then at longer
@@ -467,7 +472,10 @@ does**. Three wait for you: **Paused: ‹machine› runs a different Tcode
 version**, **Paused: ‹machine› is no longer in this machine's group** and
 **Paused: ‹reason›** for any other failure. Press **Try again** to retry at
 once, or **Cancel move**. The line keeps its reason until the other machine
-answers. A machine that vanishes without closing its connection is noticed
+answers. On the project's row it is shortened (**‹machine› cannot be
+reached**, **‹machine› takes no projects now**, **No group reached**,
+**Paused: different Tcode version**, **Paused: not in the group**, or
+**Paused**); **Show move…** has the whole sentence. A machine that vanishes without closing its connection is noticed
 when the connection's idle limit of 30 seconds ends.
 
 When the other machine was told to finish and has not answered, the move reads
@@ -511,7 +519,8 @@ is no longer in Tcode there; the worktrees Tcode made for its threads go with
 the threads. A moved thread's old link, a pane showing it and the thread a
 window remembered follow it to the machine it is on when the window shows that
 machine. Otherwise the thread says **This thread moved to ‹machine›.** with
-**Open ‹machine›**. A project inside a larger repository, and quick chats,
+**Open ‹machine›**, and a new thread that was being started in the project
+says **This project moved to ‹machine›.** A project inside a larger repository, and quick chats,
 do not move.
 
 ## Use the desktop app as the machine
