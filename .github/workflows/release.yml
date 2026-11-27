@@ -777,7 +777,7 @@ jobs:
             "$HEADLESS_IMAGE:$VERSION-$ARCH" \
             "$PWD/target/debug/examples/pair_and_query" "$TRAVERSE_IMAGE:$VERSION-$ARCH"
 
-      - uses: anchore/sbom-action/download-syft@v0.24.3
+      - uses: anchore/sbom-action/download-syft@v0.24.4
         id: syft
 
       - name: Push verified architecture images
