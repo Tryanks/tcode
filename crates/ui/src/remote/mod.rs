@@ -1974,7 +1974,7 @@ impl RemotePanel {
         };
         // What the group says of the machine now, else what this device
         // last heard.
-        let machine = spaces
+        let (name, label) = spaces
             .read(cx)
             .group()
             .filter(|group| group.id == group_id)
@@ -1983,17 +1983,11 @@ impl RemotePanel {
                     .machines
                     .iter()
                     .find(|machine| machine.id == host.host_id)
-                    .cloned()
             })
-            .unwrap_or_else(|| tcode_protocol::GroupMachineInfo {
-                id: host.host_id.clone(),
-                name: host.name.clone(),
-                this_machine: false,
-                label: host.label.clone(),
-                accepts_threads: None,
-                accepts_projects: None,
+            .map_or((host.name.clone(), host.label.clone()), |machine| {
+                (machine.name.clone(), machine.label.clone())
             });
-        group::open_label(spaces, &machine, window, cx);
+        group::open_label(spaces, &host.host_id, &name, label.as_deref(), window, cx);
     }
 
     #[cfg(not(any(feature = "remote-hosting", target_family = "wasm")))]

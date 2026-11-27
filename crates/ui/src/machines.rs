@@ -96,14 +96,17 @@ pub(crate) fn own_name(store: &Entity<WorkspaceStore>, cx: &mut App) -> Option<S
         .into_iter()
         .find(|machine| machine.this_machine)
         .map(|machine| machine.title().to_owned())
-        .or_else(|| {
-            let store = store.read(cx);
-            match store.host_key() {
-                HostKey::Local => crate::remote::local_machine_name(cx),
-                HostKey::Remote(_) => store.remote_host_name().map(str::to_owned),
-            }
-        })
+        .or_else(|| named_by_store(store.read(cx), cx))
         .filter(|name| !name.trim().is_empty())
+}
+
+/// What `store`'s machine is called by the store itself: this process's own
+/// name for the local one, the name the window attached it under otherwise.
+fn named_by_store(store: &WorkspaceStore, cx: &App) -> Option<String> {
+    match store.host_key() {
+        HostKey::Local => crate::remote::local_machine_name(cx),
+        HostKey::Remote(_) => store.remote_host_name().map(str::to_owned),
+    }
 }
 
 /// [`WorkspaceStore::host_title`], with a machine of a group called by its
@@ -153,13 +156,9 @@ fn resolve(id: &str, group_title: Option<String>, cx: &App) -> Machine {
     let directory = directory.as_ref().map(|directory| directory.read(cx));
     let store = directory.and_then(|directory| directory.store_of(id));
     let saved = directory.and_then(|directory| directory.saved(id)).cloned();
-    let open_name = store.as_ref().and_then(|store| {
-        let store = store.read(cx);
-        match store.host_key() {
-            HostKey::Local => crate::remote::local_machine_name(cx),
-            HostKey::Remote(_) => store.remote_host_name().map(str::to_owned),
-        }
-    });
+    let open_name = store
+        .as_ref()
+        .and_then(|store| named_by_store(store.read(cx), cx));
     let name = group_title
         .or(open_name)
         .or_else(|| saved.as_ref().map(|saved| saved.title().to_owned()))

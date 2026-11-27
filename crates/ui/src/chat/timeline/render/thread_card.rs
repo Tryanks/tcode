@@ -236,7 +236,7 @@ impl TimelineView {
                     copy,
                 }
             }
-            Started::Thread(start) if start.machine.is_some() => self.machine_card(start, cx),
+            Started::Thread(start) if start.machine.is_some() => self.machine_card(start, cx)?,
             Started::Thread(start) => {
                 let store = self.workspace_store.read(cx);
                 let meta = start
@@ -333,9 +333,9 @@ impl TimelineView {
     /// machine's thread, read from that machine's store while this window
     /// is linked to it, and otherwise from what this thread's host keeps of
     /// it.
-    fn machine_card(&self, start: tools::threads::Start<'_>, cx: &App) -> ThreadCard {
+    fn machine_card(&self, start: tools::threads::Start<'_>, cx: &App) -> Option<ThreadCard> {
         let mut copy = Vec::new();
-        let machine = crate::machines::machine(start.machine.unwrap_or_default(), cx);
+        let machine = crate::machines::machine(start.machine?, cx);
         let there = machine.store.as_ref().map(|store| store.read(cx));
         let meta = there.and_then(|store| store.thread_meta(start.thread_id.as_deref()?));
         let requested = start.provider.and_then(provider_named);
@@ -401,7 +401,7 @@ impl TimelineView {
             tools::copy(&mut copy, "tools.copy_link", link);
         }
         let open = machine.store.is_some();
-        ThreadCard {
+        Some(ThreadCard {
             badge: start.subagent && mark != Mark::Bot,
             mark,
             title,
@@ -426,7 +426,7 @@ impl TimelineView {
             closed: (!open && start.thread_id.is_some())
                 .then(|| crate::machines::not_open(&machine.name)),
             copy,
-        }
+        })
     }
 
     /// `entry`'s card: a header of its tile, its task over who runs it, and

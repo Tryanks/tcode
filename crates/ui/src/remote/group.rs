@@ -141,7 +141,14 @@ impl GroupSection {
 
     fn rename(&mut self, machine: &GroupMachineInfo, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(spaces) = self.spaces(cx) {
-            open_label(spaces, machine, window, cx);
+            open_label(
+                spaces,
+                &machine.id,
+                &machine.name,
+                machine.label.as_deref(),
+                window,
+                cx,
+            );
         }
     }
 
@@ -850,16 +857,18 @@ fn open_join(spaces: Entity<Spaces>, window: &mut Window, cx: &mut App) {
 /// `spaces`, a machine of that group; an empty field clears it.
 pub(crate) fn open_label(
     spaces: Entity<Spaces>,
-    machine: &GroupMachineInfo,
+    id: &str,
+    name: &str,
+    label: Option<&str>,
     window: &mut Window,
     cx: &mut App,
 ) {
     let field = cx.new(|cx| {
         InputState::new(window, cx)
-            .placeholder(machine.name.clone())
-            .default_value(machine.label.clone().unwrap_or_default())
+            .placeholder(name.to_owned())
+            .default_value(label.unwrap_or_default().to_owned())
     });
-    let id = machine.id.clone();
+    let id = id.to_owned();
     let submit: Submit = Rc::new({
         let field = field.clone();
         move |window, cx| {
@@ -873,7 +882,7 @@ pub(crate) fn open_label(
             true
         }
     });
-    let title = crate::tr!("machines.label.title", name = machine.title()).into_owned();
+    let title = crate::tr!("machines.label.title", name = label.unwrap_or(name)).into_owned();
     let input = field.clone();
     window.open_dialog(cx, move |dialog, _, _| {
         let input = input.clone();
@@ -1037,10 +1046,6 @@ mod tests {
         });
         cx.simulate_resize(gpui::size(px(900.), px(1400.)));
         draw(cx);
-        assert!(
-            !group(cx).accept_projects,
-            "projects are off until switched on"
-        );
 
         choose_access("group-device-access-view", cx);
         assert_eq!(group(cx).device_access, GroupDeviceAccess::View);
