@@ -882,7 +882,8 @@ impl MoveProgress {
         confirming.set(true);
         window.open_alert_dialog(cx, move |alert, _, _| {
             let progress = progress.clone();
-            let (confirmed, closed) = (confirming.clone(), confirming.clone());
+            let (confirmed, kept, closed) =
+                (confirming.clone(), confirming.clone(), confirming.clone());
             alert
                 .title(title.clone())
                 .description(description.clone())
@@ -893,6 +894,12 @@ impl MoveProgress {
                         .cancel_text(crate::tr!("machines.move.keep_moving"))
                         .show_cancel(true),
                 )
+                // The footer's cancel button closes the alert without its
+                // on_close, so keeping the move clears the mark here too.
+                .on_cancel(move |_, _, _| {
+                    kept.set(false);
+                    true
+                })
                 .on_close(move |_, _, _| closed.set(false))
                 .on_ok(move |_, window, cx| {
                     confirmed.set(false);
