@@ -367,7 +367,8 @@ fn passes(result: Result<MachineResponse, ProtocolError>) -> bool {
 }
 
 #[test]
-fn a_machine_s_switches_gate_threads_and_projects_and_replies_always_come_back() {
+fn a_machine_s_switches_gate_threads_and_projects_replies_always_come_back_and_a_label_reaches_every_member()
+ {
     let a_dir = TestDir::new("gate-a");
     let b_dir = TestDir::new("gate-b");
     let a = Machine::start(&a_dir, "Desk");
