@@ -523,8 +523,6 @@ impl SessionsSidebar {
         let header_toggle = project.clone();
         let plus_cwd = group.project.root.clone();
         let plus_project_id = project.project_id.clone();
-        // The host starts nothing in a project that is moving.
-        let plus_moving = store.read(cx).project_move(&project.project_id).is_some();
         let menu_project = project.clone();
         // A machine that lets this device only view starts and changes
         // nothing of its projects.
@@ -630,7 +628,6 @@ impl SessionsSidebar {
                     .tooltip(new_thread_label)
                     // Opacity keeps the button a tab stop, as the settle button does.
                     .opacity(hover)
-                    .disabled(plus_moving)
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         let cwd = plus_cwd.clone();
@@ -662,7 +659,6 @@ impl SessionsSidebar {
         };
         let move_line =
             moving.map(|status| self.render_project_move(&store, &project, &name_id, &status, cx));
-        let moving = move_line.is_some();
         let header = header
             .context_menu(move |menu, _window, cx| {
                 let id = menu_project.clone();
@@ -709,16 +705,6 @@ impl SessionsSidebar {
                 })
                 .when_some(share.as_ref(), |menu, share| {
                     spaces::share_items(menu, share, false, cx)
-                })
-                // The host takes no change to a moving project.
-                .when(moving, |menu| {
-                    menu.disable_items_except(|action| {
-                        let action = action.as_any();
-                        action.is::<MoveProjectToMachine>()
-                            || action.is::<ProjectReveal>()
-                            || action.is::<spaces::ToggleShare>()
-                            || action.is::<spaces::NewSpaceAndShare>()
-                    })
                 })
             })
             .touch(false)

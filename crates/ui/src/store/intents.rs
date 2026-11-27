@@ -1092,11 +1092,6 @@ impl WorkspaceStore {
         beside: Option<(String, String)>,
         cx: &mut Context<Self>,
     ) {
-        // Every way to a new thread on a machine that lets this device
-        // only view is withdrawn; a key that still reaches here starts none.
-        if self.view_only {
-            return;
-        }
         self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
         let request_generation = self.creation_request_generation;
         let selection_generation = self.selection_generation;
