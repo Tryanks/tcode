@@ -16,7 +16,7 @@ use base64::Engine as _;
 use gpui::{Context, Hsla, Pixels, RenderImage, SharedString, Size, SvgRenderer, Task, px, size};
 
 use super::HtmlState;
-use super::color::hsla_to_css;
+use super::color::{hsla_to_css, parse_color_for_mode};
 use super::css::{Vars, number, resolve_vars_in_text};
 use super::raster::{self, Picture, Recent};
 
@@ -184,29 +184,91 @@ impl PreparedSvg {
     }
 }
 
-/// The page's stylesheets as an inline `<svg>` of an element with `vars` and
-/// `current_color` takes them, after a rule giving its text the page's font.
-/// A sheet that would not fit, or would end the section it is put in, is
-/// left out.
-pub(crate) fn page_css(
-    stylesheets: &[String],
-    current_color: Hsla,
-    vars: &Vars,
-    font_family: &str,
-) -> String {
-    let color = hsla_to_css(current_color);
-    let families = (!font_family.is_empty())
-        .then_some(font_family)
-        .into_iter()
-        .chain(crate::i18n::cjk_fallback_families().iter().copied())
-        .map(|family| format!("\"{family}\", "))
-        .collect::<String>();
-    let mut css = format!("text, tspan {{ font-family: {families}sans-serif; fill: {color}; }}");
+/// What of the page around it an inline `<svg>` is drawn with.
+pub(crate) struct SvgPage<'a> {
+    /// The text colour of the element, which `currentColor` is.
+    pub(crate) color: Hsla,
+    pub(crate) vars: &'a Vars,
+    pub(crate) dark: bool,
+    pub(crate) font_sans: &'a str,
+    pub(crate) font_mono: &'a str,
+}
+
+impl SvgPage<'_> {
+    /// The families `usvg` sets the page's text in: the theme's font names
+    /// a face of the system's that `usvg` finds by its fallbacks only.
+    fn sans(&self) -> String {
+        (!self.font_sans.is_empty())
+            .then_some(self.font_sans)
+            .into_iter()
+            .chain(crate::i18n::cjk_fallback_families().iter().copied())
+            .map(|family| format!("'{family}', "))
+            .collect::<String>()
+            + "sans-serif"
+    }
+
+    /// `text` as `usvg` reads it: the custom properties and `currentColor`
+    /// by their values, the theme's fonts as families it can look up, and a
+    /// colour only CSS writes as one SVG writes. `None` past `limit`.
+    fn resolve(&self, text: &str, limit: usize) -> Option<String> {
+        let mono = format!("'{}', monospace", self.font_mono);
+        let text = replace_ascii_case_insensitive(text, "var(--font-sans)", &self.sans());
+        let text = replace_ascii_case_insensitive(&text, "var(--font-mono)", &mono);
+        let text = resolve_vars_in_text(&text, self.vars, limit)?;
+        let color = hsla_to_css(self.color);
+        let text = replace_ascii_case_insensitive(&text, "currentcolor", &color);
+        Some(self.with_plain_colors(&text))
+    }
+
+    /// `color-mix()` and `light-dark()`, which `usvg` reads as no colour and
+    /// paints black, as the colours they come to.
+    fn with_plain_colors(&self, text: &str) -> String {
+        let bytes = text.as_bytes();
+        let mut out = String::with_capacity(text.len());
+        let mut copied = 0;
+        let mut at = 0;
+        while at < bytes.len() {
+            let function = [&b"color-mix("[..], b"light-dark("]
+                .into_iter()
+                .filter_map(|name| {
+                    find_ascii_case_insensitive(&bytes[at..], name).map(|found| at + found)
+                })
+                .min();
+            let Some(start) = function else {
+                break;
+            };
+            let mut depth = 0usize;
+            let end = bytes[start..].iter().position(|&b| {
+                match b {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                b == b')' && depth == 0
+            });
+            let Some(end) = end.map(|end| start + end + 1) else {
+                break;
+            };
+            at = end;
+            if let Some(color) = parse_color_for_mode(&text[start..end], self.dark) {
+                out.push_str(&text[copied..start]);
+                out.push_str(&hsla_to_css(color.resolve(self.color)));
+                copied = end;
+            }
+        }
+        out.push_str(&text[copied..]);
+        out
+    }
+}
+
+/// The page's stylesheets as an inline `<svg>` of `page` takes them. A sheet
+/// that would not fit, or would end the section it is put in, is left out.
+pub(crate) fn page_css(stylesheets: &[String], page: &SvgPage<'_>) -> String {
+    let mut css = String::new();
     for sheet in stylesheets {
-        let Some(resolved) = resolve_vars_in_text(sheet, vars, MAX_SVG_BYTES - css.len()) else {
+        let Some(resolved) = page.resolve(sheet, MAX_SVG_BYTES - css.len()) else {
             continue;
         };
-        let resolved = replace_ascii_case_insensitive(&resolved, "currentcolor", &color);
         if !resolved.contains("]]>") && css.len() + resolved.len() < MAX_SVG_BYTES {
             css.push('\n');
             css.push_str(&resolved);
@@ -215,25 +277,173 @@ pub(crate) fn page_css(
     css
 }
 
+/// Whether an `<svg>` is written to take no room: a sheet of `<symbol>`s
+/// other `<svg>`s draw from.
+pub(crate) fn draws_nothing(raw_svg: &str) -> bool {
+    let open = open_tag_end(raw_svg).map_or(raw_svg, |gt| &raw_svg[..gt]);
+    let zero = |name: &str| {
+        read_svg_attr(open, name).is_some_and(|value| {
+            let value = value.trim();
+            number(value.strip_suffix("px").unwrap_or(value)) == Some(0.0)
+        })
+    };
+    zero("width") || zero("height")
+}
+
+/// The `<symbol>`s of an `<svg>` that have a name, each with its text.
+pub(crate) fn symbols_of(raw_svg: &str) -> Vec<(String, String)> {
+    let bytes = raw_svg.as_bytes();
+    let mut symbols = Vec::new();
+    let mut at = 0;
+    while let Some(found) = find_ascii_case_insensitive(&bytes[at..], b"<symbol") {
+        let start = at + found;
+        let Some(open) = open_tag_end(&raw_svg[start..]) else {
+            break;
+        };
+        let Some(close) = find_ascii_case_insensitive(&bytes[start..], b"</symbol>") else {
+            break;
+        };
+        let end = start + close + "</symbol>".len();
+        if let Some(id) = read_svg_attr(&raw_svg[start..start + open], "id") {
+            symbols.push((id.to_owned(), raw_svg[start..end].to_owned()));
+        }
+        at = end;
+    }
+    symbols
+}
+
+/// An `<svg>` that draws a `<symbol>` of another `<svg>` of the page, with
+/// that symbol in it: `usvg` draws one `<svg>` and knows no other.
+pub(crate) fn with_symbols<'a>(raw_svg: &'a str, symbols: &[(String, String)]) -> Cow<'a, str> {
+    if symbols.is_empty() || !raw_svg.contains("href") {
+        return Cow::Borrowed(raw_svg);
+    }
+    let wanted: String = symbols
+        .iter()
+        .filter(|(id, _)| {
+            [format!("\"#{id}\""), format!("'#{id}'")]
+                .iter()
+                .any(|reference| raw_svg.contains(reference.as_str()))
+                && ![format!("id=\"{id}\""), format!("id='{id}'")]
+                    .iter()
+                    .any(|own| raw_svg.contains(own.as_str()))
+        })
+        .map(|(_, symbol)| symbol.as_str())
+        .collect();
+    match open_tag_end(raw_svg) {
+        Some(gt) if !wanted.is_empty() && raw_svg.as_bytes()[gt - 1] != b'/' => {
+            Cow::Owned(format!(
+                "{}<defs>{wanted}</defs>{}",
+                &raw_svg[..=gt],
+                &raw_svg[gt + 1..]
+            ))
+        }
+        _ => Cow::Borrowed(raw_svg),
+    }
+}
+
+/// An `<svg>` that names no size and no view box, with the size the
+/// page's styles give it: what it draws is then drawn to that size, as a
+/// browser draws it, and not to the size of an `<svg>` that has none.
+pub(crate) fn with_css_size<'a>(
+    raw_svg: &'a str,
+    width: Option<f32>,
+    height: Option<f32>,
+) -> Cow<'a, str> {
+    let (Some(width), Some(height)) = (width, height) else {
+        return Cow::Borrowed(raw_svg);
+    };
+    let Some(gt) = open_tag_end(raw_svg) else {
+        return Cow::Borrowed(raw_svg);
+    };
+    let open = &raw_svg[..gt];
+    let named = ["width", "height", "viewBox"]
+        .iter()
+        .any(|name| read_svg_attr(open, name).is_some());
+    if named || width < 1.0 || height < 1.0 {
+        return Cow::Borrowed(raw_svg);
+    }
+    let at = if open.ends_with('/') { gt - 1 } else { gt };
+    Cow::Owned(format!(
+        r#"{} width="{width}" height="{height}"{}"#,
+        &raw_svg[..at],
+        &raw_svg[at..]
+    ))
+}
+
+/// `xml` with `fill` on each `<text>` that neither has one nor is inside an
+/// element that has: text is the page's text colour where a browser would
+/// paint it black, which a dark theme could not show. An attribute, so that
+/// whatever the page says of the text's paint is said over it.
+fn with_text_fill(xml: &str, color: &str) -> String {
+    let bytes = xml.as_bytes();
+    let mut out = String::with_capacity(xml.len() + 64);
+    let mut copied = 0;
+    // For each element open here, whether it or one around it has a fill.
+    let mut filled: Vec<bool> = Vec::new();
+    let mut at = 0;
+    while let Some(found) = bytes[at..].iter().position(|&b| b == b'<') {
+        let start = at + found;
+        let rest = &xml[start..];
+        if rest.starts_with("<!--") {
+            at = rest.find("-->").map_or(bytes.len(), |end| start + end + 3);
+            continue;
+        }
+        if rest.starts_with("<![CDATA[") {
+            at = rest.find("]]>").map_or(bytes.len(), |end| start + end + 3);
+            continue;
+        }
+        let Some(gt) = open_tag_end(rest) else {
+            break;
+        };
+        let tag = &rest[..gt];
+        at = start + gt + 1;
+        if tag.starts_with("</") {
+            filled.pop();
+            continue;
+        }
+        if tag.starts_with("<!") || tag.starts_with("<?") {
+            continue;
+        }
+        let name_end = tag[1..]
+            .find(|c: char| c.is_ascii_whitespace() || c == '/')
+            .map_or(tag.len(), |end| end + 1);
+        let has_fill = read_svg_attr(tag, "fill").is_some()
+            || read_svg_attr(tag, "style").is_some_and(|style| style.contains("fill"));
+        let inside = filled.last().copied().unwrap_or(false);
+        if tag[1..name_end].eq_ignore_ascii_case("text") && !has_fill && !inside {
+            out.push_str(&xml[copied..start + name_end]);
+            out.push_str(&format!(r#" fill="{color}""#));
+            copied = start + name_end;
+        }
+        if !tag.ends_with('/') {
+            filled.push(inside || has_fill);
+        }
+    }
+    out.push_str(&xml[copied..]);
+    out
+}
+
 /// Preprocess an inline `<svg>` for `usvg`/`resvg`:
 /// - resolves `var(--...)` custom properties
 /// - replaces `currentColor` with the element's resolved foreground color
 /// - takes out references to anything outside the text itself
 /// - ensures `xmlns="http://www.w3.org/2000/svg"` is present
 /// - puts `css`, the [`page_css`], inside it so classes inside SVG work
+/// - puts `paint`, what the page's rules give the `<svg>` itself, on it
 /// - determines natural dimensions from `width`/`height`/`viewBox`
 ///
 /// `None` when the result would be longer than [`MAX_SVG_BYTES`].
 pub(crate) fn prepare_svg(
     raw_svg: &str,
-    current_color: Hsla,
-    vars: &Vars,
+    page: &SvgPage<'_>,
     css: &str,
+    paint: Option<&str>,
 ) -> Option<PreparedSvg> {
-    let xml = resolve_vars_in_text(raw_svg, vars, MAX_SVG_BYTES)?;
-    let cur_css = hsla_to_css(current_color);
-    let xml = replace_ascii_case_insensitive(&xml, "currentcolor", &cur_css);
-    let mut xml = without_external_references(&xml);
+    let xml = page.resolve(raw_svg, MAX_SVG_BYTES)?;
+    let cur_css = hsla_to_css(page.color);
+    let xml = without_external_references(&xml);
+    let mut xml = with_text_fill(&xml, &cur_css);
 
     let natural = extract_svg_dimensions(&xml);
 
@@ -247,6 +457,15 @@ pub(crate) fn prepare_svg(
         }
         if !open_tag.to_ascii_lowercase().contains("color=") {
             additions.push_str(&format!(r#" color="{cur_css}""#));
+        }
+        if read_svg_attr(open_tag, "font-family").is_none() {
+            additions.push_str(&format!(r#" font-family="{}""#, page.sans()));
+        }
+        let own_style = read_svg_attr(open_tag, "style").map(str::to_owned);
+        if let Some(paint) = paint
+            && own_style.is_none()
+        {
+            additions.push_str(&format!(r#" style="{paint}""#));
         }
         let width_is_pct =
             read_svg_attr(open_tag, "width").is_some_and(|w| w.trim().ends_with('%'));
@@ -608,6 +827,31 @@ mod tests {
         );
         let image = leased.take().unwrap().unwrap();
         image.as_bytes(0).unwrap().to_vec()
+    }
+
+    #[gpui::test]
+    fn an_svg_draws_a_symbol_of_another(cx: &mut TestAppContext) {
+        // A sheet of symbols that takes no room, and an icon drawn from it
+        // at the size the page's styles give it: one picture, the icon's.
+        let html = r##"<style>.i{width:8px;height:8px}</style>
+            <svg width="0" height="0" style="position:absolute"><symbol id="dot" viewBox="0 0 1 1"><rect width="1" height="1" fill="#ff0000"/></symbol></svg>
+            <svg class="i"><use href="#dot"/></svg>"##;
+        let drawn = pixels(html, cx);
+        assert!(drawn.chunks(4).all(|pixel| pixel[3] == 255), "{drawn:?}");
+    }
+
+    #[gpui::test]
+    fn an_svg_is_painted_in_a_colour_css_mixes(cx: &mut TestAppContext) {
+        let html = r##"<svg width="8" height="8"><rect width="8" height="8"
+            fill="color-mix(in srgb, #ffffff 50%, transparent)"/></svg>"##;
+        let drawn = pixels(html, cx);
+        // Half of white over nothing, and not the black an unread paint is.
+        assert!(
+            drawn
+                .chunks(4)
+                .all(|pixel| pixel[3] > 100 && pixel[3] < 155 && pixel[0] > 100),
+            "{drawn:?}"
+        );
     }
 
     #[gpui::test]

@@ -32,6 +32,8 @@ const MAX_FACTOR: f32 = 10_000.0;
 /// The most grid tracks a template or a placement may name; layout walks
 /// every track for every item.
 pub(crate) const MAX_GRID_TRACKS: u16 = 256;
+/// The most stops of a gradient that are read.
+const MAX_GRADIENT_STOPS: usize = 16;
 /// The most shadows one box is painted with.
 const MAX_SHADOWS: usize = 8;
 
@@ -111,6 +113,40 @@ pub(crate) enum ListStyleType {
     Circle,
     Square,
     Decimal,
+}
+
+/// Where an inline box sits on its line.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum VerticalAlign {
+    Baseline,
+    Top,
+    Middle,
+    Bottom,
+    /// Raised by this many pixels from the baseline.
+    Raised(f32),
+}
+
+/// A gradient of more stops than GPUI's two, along one axis of its box.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct StopGradient {
+    /// Along the box's width, else down its height.
+    pub(crate) horizontal: bool,
+    /// Each stop's colour and where along the axis it is, from 0 to 1 and
+    /// never before the stop it follows.
+    pub(crate) stops: Vec<(Hsla, f32)>,
+}
+
+/// How a box's four borders are drawn by GPUI, which draws one colour.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct BorderPlan {
+    /// The colour of the borders GPUI draws.
+    pub(crate) color: Option<Hsla>,
+    /// Top, right, bottom, left: a border not drawn as one keeps its room as
+    /// padding of this width.
+    pub(crate) padded: [f32; 4],
+    /// Borders of another colour than the box's, drawn as strips over the
+    /// room kept for them: the side, its width and its colour.
+    pub(crate) strips: Vec<(usize, f32, Hsla)>,
 }
 
 /// Complete resolved style for one DOM element.
@@ -210,6 +246,20 @@ pub(crate) struct ComputedStyle {
 
     // Pseudo-element static content
     pub(crate) content: Option<String>,
+
+    /// `box-sizing: border-box`: a size is the box's, not its content's.
+    pub(crate) border_box: bool,
+    pub(crate) justify_items: Option<AlignItems>,
+    pub(crate) line_clamp: Option<usize>,
+    /// `transform: translate()`, in pixels.
+    pub(crate) translate: (f32, f32),
+    pub(crate) vertical_align: VerticalAlign,
+    pub(crate) gradient: Option<Rc<StopGradient>>,
+    /// The paint an `<svg>` is styled with from outside itself, as
+    /// declarations.
+    pub(crate) svg_paint: Option<Rc<str>>,
+    /// `table-layout: fixed`: columns are not sized by what they hold.
+    pub(crate) table_fixed: bool,
 }
 
 impl ComputedStyle {
@@ -289,6 +339,14 @@ impl ComputedStyle {
             overflow_x: None,
             overflow_y: None,
             content: None,
+            border_box: false,
+            justify_items: None,
+            line_clamp: None,
+            translate: (0.0, 0.0),
+            vertical_align: VerticalAlign::Baseline,
+            gradient: None,
+            svg_paint: None,
+            table_fixed: false,
         }
     }
 
@@ -367,27 +425,63 @@ impl ComputedStyle {
             overflow_x: None,
             overflow_y: None,
             content: None,
+            border_box: false,
+            justify_items: None,
+            line_clamp: None,
+            translate: (0.0, 0.0),
+            vertical_align: VerticalAlign::Baseline,
+            gradient: None,
+            svg_paint: None,
+            table_fixed: false,
         }
     }
 
-    /// True when this element draws a box (padding, border, background, shadow,
-    /// or explicit size) that cannot be flattened into a plain `StyledText` run.
+    /// True when this inline element draws a box its line's text cannot
+    /// wrap inside: a border, room to its sides, a size, a shadow, or a
+    /// background that is no one colour. A background of one colour and
+    /// room above and below are drawn behind the text line by line.
     pub(crate) fn has_inline_box(&self) -> bool {
-        self.padding_top.is_some()
-            || self.padding_right.is_some()
-            || self.padding_bottom.is_some()
-            || self.padding_left.is_some()
-            || self.border_top_w.is_some()
-            || self.border_right_w.is_some()
-            || self.border_bottom_w.is_some()
-            || self.border_left_w.is_some()
-            || self.radius_tl.is_some()
+        let wide = |padding: Option<DefiniteLength>| {
+            padding.is_some_and(|padding| padding != DefiniteLength::from(px(0.0)))
+        };
+        let drawn = |border: Option<AbsoluteLength>| {
+            border.is_some_and(|border| border != AbsoluteLength::from(px(0.0)))
+        };
+        wide(self.padding_right)
+            || wide(self.padding_left)
+            || drawn(self.border_top_w)
+            || drawn(self.border_right_w)
+            || drawn(self.border_bottom_w)
+            || drawn(self.border_left_w)
             || self.width.is_some()
             || self.height.is_some()
             || !self.box_shadows.is_empty()
             || self.margin_left.is_some()
             || self.margin_right.is_some()
             || (self.background.is_some() && self.background_hsla.is_none())
+    }
+
+    /// The width the box is given, where it is given in pixels.
+    pub(crate) fn width_px(&self) -> Option<f32> {
+        definite_to_px(self.width.and_then(definite), self.font_size)
+    }
+
+    /// The height the box is given, where it is given in pixels.
+    pub(crate) fn height_px(&self) -> Option<f32> {
+        definite_to_px(self.height.and_then(definite), self.font_size)
+    }
+
+    /// The room below the box's content that is its own: padding and border.
+    pub(crate) fn chrome_below(&self) -> f32 {
+        let padding = match self.padding_bottom {
+            Some(DefiniteLength::Absolute(AbsoluteLength::Pixels(pixels))) => f32::from(pixels),
+            _ => 0.0,
+        };
+        let border = match self.border_bottom_w {
+            Some(AbsoluteLength::Pixels(pixels)) => f32::from(pixels),
+            _ => 0.0,
+        };
+        padding + border
     }
 
     /// Apply this computed style onto a GPUI `StyleRefinement`.
@@ -446,12 +540,8 @@ impl ComputedStyle {
                     });
                 }
             }
-            DisplayKind::InlineBlock => {
-                style.display = Some(Display::Flex);
-                style.flex_direction = Some(FlexDirection::Row);
-                style.align_items = Some(AlignItems::Center);
-            }
             DisplayKind::Block
+            | DisplayKind::InlineBlock
             | DisplayKind::ListItem
             | DisplayKind::Table
             | DisplayKind::TableRowGroup
@@ -509,23 +599,45 @@ impl ComputedStyle {
             style.inset.left = self.left;
         }
 
+        // GPUI sizes the border box; CSS sizes the content box unless told
+        // otherwise, so a length in pixels grows by the padding and border
+        // around it. A percentage is left as it is.
+        let (chrome_x, chrome_y) = if self.border_box {
+            (0.0, 0.0)
+        } else {
+            self.chrome()
+        };
+        let sized = |length: Option<Length>, chrome: f32| match length {
+            Some(Length::Definite(DefiniteLength::Absolute(AbsoluteLength::Pixels(pixels)))) => {
+                Some(Length::from(px(f32::from(pixels) + chrome)))
+            }
+            other => other,
+        };
         if self.width.is_some() {
-            style.size.width = self.width;
+            style.size.width = sized(self.width, chrome_x);
         }
         if self.height.is_some() {
-            style.size.height = self.height;
+            style.size.height = sized(self.height, chrome_y);
         }
         if self.min_width.is_some() {
-            style.min_size.width = self.min_width;
+            style.min_size.width = sized(self.min_width, chrome_x);
         }
         if self.min_height.is_some() {
-            style.min_size.height = self.min_height;
+            style.min_size.height = sized(self.min_height, chrome_y);
         }
         if self.max_width.is_some() {
-            style.max_size.width = self.max_width;
+            style.max_size.width = sized(self.max_width, chrome_x);
         }
         if self.max_height.is_some() {
-            style.max_size.height = self.max_height;
+            style.max_size.height = sized(self.max_height, chrome_y);
+        }
+        if self.translate != (0.0, 0.0) && self.position != Position::Absolute {
+            if self.left.is_none() && self.right.is_none() {
+                style.inset.left = Some(px(self.translate.0).into());
+            }
+            if self.top.is_none() && self.bottom.is_none() {
+                style.inset.top = Some(px(self.translate.1).into());
+            }
         }
         if self.aspect_ratio.is_some() {
             style.aspect_ratio = self.aspect_ratio;
@@ -561,34 +673,45 @@ impl ComputedStyle {
             style.padding.left = self.padding_left;
         }
 
-        if self.border_top_w.is_some() {
-            style.border_widths.top = self.border_top_w;
+        let plan = self.border_plan();
+        let widths = [
+            (
+                self.border_top_w,
+                &mut style.border_widths.top,
+                &mut style.padding.top,
+            ),
+            (
+                self.border_right_w,
+                &mut style.border_widths.right,
+                &mut style.padding.right,
+            ),
+            (
+                self.border_bottom_w,
+                &mut style.border_widths.bottom,
+                &mut style.padding.bottom,
+            ),
+            (
+                self.border_left_w,
+                &mut style.border_widths.left,
+                &mut style.padding.left,
+            ),
+        ];
+        for ((width, border, padding), padded) in widths.into_iter().zip(plan.padded) {
+            if padded > 0.0 {
+                *border = Some(px(0.0).into());
+                let inner = match *padding {
+                    Some(DefiniteLength::Absolute(AbsoluteLength::Pixels(pixels))) => {
+                        f32::from(pixels)
+                    }
+                    _ => 0.0,
+                };
+                *padding = Some(px(inner + padded).into());
+            } else if width.is_some() {
+                *border = width;
+            }
         }
-        if self.border_right_w.is_some() {
-            style.border_widths.right = self.border_right_w;
-        }
-        if self.border_bottom_w.is_some() {
-            style.border_widths.bottom = self.border_bottom_w;
-        }
-        if self.border_left_w.is_some() {
-            style.border_widths.left = self.border_left_w;
-        }
-        // A box is drawn in one border colour, as GPUI draws it: the one
-        // given for the whole box, else a side's.
-        if let Some(color) = self
-            .border_color
-            .or(self.border_left_color)
-            .or(self.border_top_color)
-            .or(self.border_bottom_color)
-            .or(self.border_right_color)
-        {
+        if let Some(color) = plan.color {
             style.border_color = Some(color);
-        } else if self.border_top_w.is_some()
-            || self.border_right_w.is_some()
-            || self.border_bottom_w.is_some()
-            || self.border_left_w.is_some()
-        {
-            style.border_color = Some(self.color);
         }
         if self.border_style != BorderStyle::Solid {
             style.border_style = Some(self.border_style);
@@ -623,7 +746,7 @@ impl ComputedStyle {
             style.grid_location = Some(loc.clone());
         }
 
-        if let Some(bg) = &self.background {
+        if let Some(bg) = self.background.as_ref().filter(|_| self.gradient.is_none()) {
             style.background = Some(bg.clone());
         }
         if !self.box_shadows.is_empty() {
@@ -642,7 +765,26 @@ impl ComputedStyle {
             style.overflow.y = Some(clip(oy));
         }
 
-        // Typography
+        self.apply_text_to(style);
+        if matches!(self.white_space, WhiteSpaceMode::NoWrap) {
+            style.text.white_space = Some(WhiteSpace::Nowrap);
+        }
+        if self.text_ellipsis
+            && matches!(self.white_space, WhiteSpaceMode::NoWrap)
+            && matches!(self.overflow_x, Some(Overflow::Hidden))
+        {
+            style.text.text_overflow = Some(gpui::TextOverflow::Truncate(SharedString::from("…")));
+        }
+        if let Some(lines) = self.line_clamp
+            && matches!(self.overflow_y, Some(Overflow::Hidden))
+        {
+            style.text.line_clamp = Some(lines);
+            style.text.text_overflow = Some(gpui::TextOverflow::Truncate(SharedString::from("…")));
+        }
+    }
+
+    /// The type the box's text is set in.
+    pub(crate) fn apply_text_to(&self, style: &mut StyleRefinement) {
         style.text.color = Some(self.color);
         style.text.font_size = Some(AbsoluteLength::Pixels(px(self.font_size)));
         style.text.font_weight = Some(self.font_weight);
@@ -667,15 +809,88 @@ impl ComputedStyle {
                 color: Some(self.color),
             });
         }
-        if matches!(self.white_space, WhiteSpaceMode::NoWrap) {
-            style.text.white_space = Some(WhiteSpace::Nowrap);
+    }
+
+    /// The width and the height the box's padding and borders take, where
+    /// they are given in pixels.
+    pub(crate) fn chrome(&self) -> (f32, f32) {
+        let padding = |length: Option<DefiniteLength>| match length {
+            Some(DefiniteLength::Absolute(AbsoluteLength::Pixels(pixels))) => f32::from(pixels),
+            _ => 0.0,
+        };
+        let border = |length: Option<AbsoluteLength>| match length {
+            Some(AbsoluteLength::Pixels(pixels)) => f32::from(pixels),
+            _ => 0.0,
+        };
+        (
+            padding(self.padding_left)
+                + padding(self.padding_right)
+                + border(self.border_left_w)
+                + border(self.border_right_w),
+            padding(self.padding_top)
+                + padding(self.padding_bottom)
+                + border(self.border_top_w)
+                + border(self.border_bottom_w),
+        )
+    }
+
+    /// GPUI draws a box's borders in one colour. The colour most of the
+    /// borders have is the box's; a transparent border keeps its room and is
+    /// not drawn, and on a box of square corners a border of another colour
+    /// is drawn as a strip.
+    pub(crate) fn border_plan(&self) -> BorderPlan {
+        let width = |length: Option<AbsoluteLength>| match length {
+            Some(AbsoluteLength::Pixels(pixels)) => f32::from(pixels),
+            Some(AbsoluteLength::Rems(rems)) => rems.0 * BASE_FONT_PX,
+            None => 0.0,
+        };
+        let sides = [
+            (width(self.border_top_w), self.border_top_color),
+            (width(self.border_right_w), self.border_right_color),
+            (width(self.border_bottom_w), self.border_bottom_color),
+            (width(self.border_left_w), self.border_left_color),
+        ]
+        .map(|(width, color)| (width, color.or(self.border_color).unwrap_or(self.color)));
+        let drawn = |(width, color): &(f32, Hsla)| *width > 0.0 && color.a > 0.0;
+        let mut plan = BorderPlan::default();
+        if !sides.iter().any(|(width, _)| *width > 0.0) {
+            return plan;
         }
-        if self.text_ellipsis
-            && matches!(self.white_space, WhiteSpaceMode::NoWrap)
-            && matches!(self.overflow_x, Some(Overflow::Hidden))
-        {
-            style.text.text_overflow = Some(gpui::TextOverflow::Truncate(SharedString::from("…")));
+        let votes = |color: Hsla| {
+            sides
+                .iter()
+                .filter(|side| drawn(side) && side.1 == color)
+                .count()
+        };
+        plan.color = sides
+            .iter()
+            .filter(|side| drawn(side))
+            .map(|side| side.1)
+            .reduce(|best, color| {
+                if votes(color) > votes(best) {
+                    color
+                } else {
+                    best
+                }
+            });
+        let Some(main) = plan.color else {
+            // Every border is transparent: each keeps its room.
+            plan.color = Some(Hsla::transparent_black());
+            return plan;
+        };
+        let square = self.radius_tl.is_none();
+        for (index, (width, color)) in sides.into_iter().enumerate() {
+            if width <= 0.0 || color == main {
+                continue;
+            }
+            if color.a <= 0.0 {
+                plan.padded[index] = width;
+            } else if square {
+                plan.padded[index] = width;
+                plan.strips.push((index, width, color));
+            }
         }
+        plan
     }
 }
 
@@ -737,8 +952,15 @@ impl Palette {
         }
     }
 
-    pub(crate) fn font_sans(&self) -> &str {
-        &self.font_sans
+    /// What of the page an `<svg>` styled `style` is drawn with.
+    pub(crate) fn svg_page<'a>(&'a self, style: &'a ComputedStyle) -> super::svg::SvgPage<'a> {
+        super::svg::SvgPage {
+            color: style.color,
+            vars: &style.vars,
+            dark: self.dark,
+            font_sans: &self.font_sans,
+            font_mono: &self.font_mono,
+        }
     }
 
     /// The custom properties `tcode_visualize` documents to the model.
@@ -870,7 +1092,8 @@ fn apply_ua_defaults(style: &mut ComputedStyle, el: &ElementData, theme: &Palett
     match el.tag.as_str() {
         "span" | "a" | "strong" | "b" | "em" | "i" | "u" | "s" | "del" | "strike" | "small"
         | "sub" | "sup" | "code" | "kbd" | "samp" | "mark" | "abbr" | "cite" | "time" | "q"
-        | "label" | "var" | "wbr" => {
+        | "label" | "var" | "wbr" | "ins" | "dfn" | "bdi" | "bdo" | "big" | "tt" | "font"
+        | "data" => {
             style.display = DisplayKind::Inline;
         }
         "button" | "badge" | "progress" | "meter" | "input" | "select" | "img" | "svg" => {
@@ -946,7 +1169,7 @@ fn apply_ua_defaults(style: &mut ComputedStyle, el: &ElementData, theme: &Palett
         "em" | "i" | "cite" => {
             style.font_style = FontStyle::Italic;
         }
-        "u" => {
+        "u" | "ins" => {
             style.underline = true;
         }
         "s" | "del" | "strike" => {
@@ -962,9 +1185,6 @@ fn apply_ua_defaults(style: &mut ComputedStyle, el: &ElementData, theme: &Palett
         "code" | "kbd" | "samp" => {
             style.font_family = theme.font_mono.clone();
             style.font_size = (style.font_size * 0.92).max(11.0);
-            let bg = theme.muted;
-            style.background_hsla = Some(bg);
-            style.background = Some(Fill::Color(bg.into()));
         }
         "pre" => {
             style.font_family = theme.font_mono.clone();
@@ -1239,6 +1459,10 @@ fn apply_declaration(
         "border-color" => {
             if let Some(c) = parse_color_for_mode(val, dark) {
                 style.border_color = Some(c.resolve(style.color));
+                style.border_top_color = None;
+                style.border_right_color = None;
+                style.border_bottom_color = None;
+                style.border_left_color = None;
             }
         }
         "border-top-color" => {
@@ -1343,9 +1567,43 @@ fn apply_declaration(
             let parts: Vec<&str> = val.split_whitespace().collect();
             if let Some(first) = parts.first() {
                 style.align_items = parse_align_items(first);
-                if let Some(jc) = parse_justify_content(parts.get(1).unwrap_or(first)) {
-                    style.justify_content = Some(jc);
-                }
+                style.justify_items = parse_align_items(parts.get(1).unwrap_or(first));
+            }
+        }
+        "justify-items" => style.justify_items = parse_align_items(val),
+        "table-layout" => style.table_fixed = val.eq_ignore_ascii_case("fixed"),
+        "box-sizing" => style.border_box = val.eq_ignore_ascii_case("border-box"),
+        "line-clamp" | "-webkit-line-clamp" => {
+            style.line_clamp = number(val)
+                .filter(|lines| *lines >= 1.0)
+                .map(|lines| lines.min(1000.0) as usize);
+        }
+        "transform" => style.translate = parse_translate(val, em),
+        "vertical-align" => {
+            style.vertical_align = match val.to_ascii_lowercase().as_str() {
+                "top" | "text-top" => VerticalAlign::Top,
+                "middle" => VerticalAlign::Middle,
+                "bottom" | "text-bottom" => VerticalAlign::Bottom,
+                "baseline" => VerticalAlign::Baseline,
+                _ => match parse_px_f32(val, em) {
+                    Some(raised) => VerticalAlign::Raised(bounded_px(raised)),
+                    None => style.vertical_align,
+                },
+            };
+        }
+        "fill" | "stroke" | "stroke-width" | "stroke-linecap" | "stroke-linejoin" => {
+            // Put into the `<svg>`'s own `style`, which nothing in it may end.
+            if !val.contains(['"', '<', '>', '&', ';', '{', '}']) {
+                let value = match parse_color_for_mode(val, dark) {
+                    Some(color) => hsla_to_css(color.resolve(style.color)),
+                    None => val.to_owned(),
+                };
+                let paint = format!(
+                    "{}{}:{value};",
+                    style.svg_paint.as_deref().unwrap_or_default(),
+                    decl.name
+                );
+                style.svg_paint = Some(paint.into());
             }
         }
         "place-content" => {
@@ -1393,12 +1651,14 @@ fn apply_declaration(
             }
         }
         "background" | "background-image" => {
+            style.gradient = None;
             if val.eq_ignore_ascii_case("none") {
                 style.background = None;
                 style.background_hsla = None;
-            } else if let Some(grad) = parse_linear_gradient(val, style.color, dark) {
+            } else if let Some((grad, stops)) = parse_linear_gradient(val, style.color, dark) {
                 style.background = Some(Fill::Color(grad));
                 style.background_hsla = None;
+                style.gradient = stops.map(Rc::new);
             } else if let Some(c) = parse_color_for_mode(val, dark) {
                 let resolved = c.resolve(style.color);
                 style.background_hsla = Some(resolved);
@@ -1932,6 +2192,13 @@ pub(crate) fn parse_px_f32(raw: &str, em: f32) -> Option<f32> {
     Some(bounded_px(value * unit))
 }
 
+fn definite(length: Length) -> Option<DefiniteLength> {
+    match length {
+        Length::Definite(length) => Some(length),
+        Length::Auto => None,
+    }
+}
+
 fn definite_to_px(len: Option<DefiniteLength>, em: f32) -> Option<f32> {
     match len? {
         DefiniteLength::Absolute(AbsoluteLength::Pixels(p)) => Some(f32::from(p)),
@@ -2237,7 +2504,14 @@ fn parse_grid_line_range(val: &str, clamped: &mut bool) -> Option<Range<GridPlac
     }
 }
 
-fn parse_linear_gradient(val: &str, current: Hsla, dark: bool) -> Option<Background> {
+/// A `linear-gradient()` as GPUI draws one, from its first stop to its
+/// last, and its stops where it has more than those two and runs along an
+/// axis of its box, which is then drawn stop by stop.
+fn parse_linear_gradient(
+    val: &str,
+    current: Hsla,
+    dark: bool,
+) -> Option<(Background, Option<StopGradient>)> {
     let lower = val.to_ascii_lowercase();
     let open = lower.find("linear-gradient(")?;
     let rest = &val[open + "linear-gradient(".len()..];
@@ -2269,20 +2543,110 @@ fn parse_linear_gradient(val: &str, current: Hsla, dark: bool) -> Option<Backgro
         start_idx = 1;
     }
 
-    let stops: Vec<(Hsla, Option<f32>)> = parts[start_idx..]
+    let mut stops: Vec<(Hsla, Option<f32>)> = parts[start_idx..]
         .iter()
+        .take(MAX_GRADIENT_STOPS)
         .filter_map(|part| parse_gradient_stop(part, current, dark))
         .collect();
     if stops.len() < 2 {
         return None;
     }
-    let first = stops.first()?;
-    let last = stops.last()?;
-    Some(linear_gradient(
+    // `transparent` fades the colour beside it out; it is not black.
+    for index in 0..stops.len() {
+        if stops[index].0.a <= 0.0 {
+            let beside = [index.checked_sub(1), Some(index + 1)]
+                .into_iter()
+                .flatten()
+                .filter_map(|other| stops.get(other))
+                .find(|other| other.0.a > 0.0)
+                .map(|other| other.0);
+            if let Some(beside) = beside {
+                stops[index].0 = beside.alpha(0.0);
+            }
+        }
+    }
+    let first = stops[0];
+    let last = stops[stops.len() - 1];
+    let background = linear_gradient(
         angle,
         linear_color_stop(first.0, first.1.unwrap_or(0.0)),
         linear_color_stop(last.0, last.1.unwrap_or(1.0)),
+    );
+    let quarter = (angle / 90.0).round();
+    if stops.len() == 2 || (angle - quarter * 90.0).abs() > 0.5 {
+        return Some((background, None));
+    }
+    // A stop with no place stands evenly between those placed around it,
+    // and no stop stands before the one it follows.
+    let count = stops.len();
+    stops[0].1.get_or_insert(0.0);
+    stops[count - 1].1.get_or_insert(1.0);
+    let mut placed: Vec<(Hsla, f32)> = Vec::with_capacity(count);
+    let mut index = 0;
+    while index < count {
+        let Some(at) = stops[index].1 else {
+            let before = placed.last().map_or(0.0, |stop| stop.1);
+            let next = (index..count)
+                .find(|&later| stops[later].1.is_some())
+                .unwrap_or(count - 1);
+            let after = stops[next].1.unwrap_or(1.0).max(before);
+            let steps = (next - index + 1) as f32;
+            for (step, stop) in stops[index..next].iter().enumerate() {
+                placed.push((
+                    stop.0,
+                    before + (after - before) * (step + 1) as f32 / steps,
+                ));
+            }
+            index = next;
+            continue;
+        };
+        placed.push((
+            stops[index].0,
+            at.max(placed.last().map_or(0.0, |stop| stop.1)),
+        ));
+        index += 1;
+    }
+    let quarter = quarter.rem_euclid(4.0) as u8;
+    if matches!(quarter, 0 | 3) {
+        // Up, or to the left: the same stops from the other end.
+        placed.reverse();
+        for stop in &mut placed {
+            stop.1 = 1.0 - stop.1;
+        }
+    }
+    Some((
+        background,
+        Some(StopGradient {
+            horizontal: matches!(quarter, 1 | 3),
+            stops: placed,
+        }),
     ))
+}
+
+/// `transform` as far as it moves a box by a length in pixels.
+fn parse_translate(val: &str, em: f32) -> (f32, f32) {
+    let lower = val.to_ascii_lowercase();
+    let mut moved = (0.0f32, 0.0f32);
+    let mut rest = lower.as_str();
+    while let Some(open) = rest.find('(') {
+        let name = rest[..open].trim();
+        let Some(close) = rest[open..].find(')') else {
+            break;
+        };
+        let args: Vec<f32> = rest[open + 1..open + close]
+            .split(',')
+            .map(|arg| parse_px_f32(arg.trim(), em).unwrap_or(0.0))
+            .collect();
+        let arg = |index: usize| bounded_px(args.get(index).copied().unwrap_or(0.0));
+        match name {
+            "translate" => moved = (moved.0 + arg(0), moved.1 + arg(1)),
+            "translatex" => moved.0 += arg(0),
+            "translatey" => moved.1 += arg(0),
+            _ => {}
+        }
+        rest = &rest[open + close + 1..];
+    }
+    moved
 }
 
 fn parse_gradient_direction(raw: &str) -> Option<f32> {
