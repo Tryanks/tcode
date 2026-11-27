@@ -511,7 +511,6 @@ fn a_machine_is_refused_what_lies_outside_what_machines_may_ask() {
     let caller = || MachineCaller {
         thread_id: "lead".into(),
         title: "Lead".into(),
-        permission_mode: None,
         request_id: None,
     };
     for (tool, args) in [

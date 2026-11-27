@@ -955,7 +955,6 @@ impl AppState {
         MachineCaller {
             thread_id: thread.to_owned(),
             title: meta.map(|meta| meta.title.clone()).unwrap_or_default(),
-            permission_mode: None,
             request_id,
         }
     }

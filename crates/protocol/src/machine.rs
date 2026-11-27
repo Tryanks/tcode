@@ -108,12 +108,6 @@ impl MachineRequest {
 pub struct MachineCaller {
     pub thread_id: String,
     pub title: String,
-    /// The class of the caller thread's permission mode, as an [`agent::ApprovalClass`]
-    /// names it (`manual`, `reviewed`, `unrestricted`); `None` where the calling machine
-    /// cannot tell, as for an ACP agent's mode. A thread it starts here never runs under a
-    /// more permissive one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
 }

@@ -379,7 +379,6 @@ fn a_machine_s_switches_gate_threads_and_projects_replies_always_come_back_and_a
         caller: MachineCaller {
             thread_id: "lead".into(),
             title: "Lead".into(),
-            permission_mode: None,
             request_id: None,
         },
         tool: "start_thread".into(),
