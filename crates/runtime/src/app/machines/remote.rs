@@ -29,15 +29,11 @@ pub(super) struct Callback {
 /// What a call answered from another machine, and the machine.
 type Forwarded = Result<serde_json::Value, ProtocolError>;
 
-fn machine_named(info: &MachineInfo) -> String {
-    info.label.clone().unwrap_or_else(|| info.name.clone())
-}
-
 /// The other machine's refusal or failure, as the calling thread reads it.
 fn from_machine(info: &MachineInfo, error: ProtocolError) -> String {
     format!(
         "machine \"{}\" ({}): {} ({})",
-        machine_named(info),
+        info.title(),
         info.id,
         error.message,
         error.code
@@ -46,7 +42,7 @@ fn from_machine(info: &MachineInfo, error: ProtocolError) -> String {
 
 /// `answer` with the machine that gave it named in it.
 fn naming_machine(answer: serde_json::Value, info: &MachineInfo) -> serde_json::Value {
-    let machine = serde_json::json!({ "id": info.id, "name": machine_named(info) });
+    let machine = serde_json::json!({ "id": info.id, "name": info.title() });
     match answer {
         serde_json::Value::Object(mut fields) => {
             fields.insert("machine".into(), machine);
@@ -421,7 +417,7 @@ impl AppState {
                     Outcome::Applied,
                     format!(
                         "queued: machine \"{}\" cannot be reached now; it is sent when it can be",
-                        machine_named(info)
+                        info.title()
                     ),
                 )
             }
@@ -446,7 +442,7 @@ impl AppState {
                 .map(|info| {
                     serde_json::json!({
                         "id": info.id,
-                        "name": machine_named(info),
+                        "name": info.title(),
                         "host_name": info.name,
                         "this_machine": info.this_machine,
                         "reachable": info.reachable,
@@ -573,9 +569,9 @@ impl AppState {
             .map(|child| child.title.clone())
             .unwrap_or_else(|| target.to_owned());
         let on = if target.is_empty() {
-            machine_named(info)
+            info.title().to_owned()
         } else {
-            format!("{target_title} — {}", machine_named(info))
+            format!("{target_title} — {}", info.title())
         };
         let action = tcode_core::control::ControlAction {
             actor_thread_id: lead.to_owned(),

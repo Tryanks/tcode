@@ -24,6 +24,13 @@ pub struct MachineInfo {
     pub relayed: Option<bool>,
 }
 
+impl MachineInfo {
+    /// What the group calls the machine: its label, else its own name.
+    pub fn title(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.name)
+    }
+}
+
 /// What the transport serving a [`MachineLink`] is asked.
 pub enum MachineCall {
     Request {
