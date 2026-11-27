@@ -417,29 +417,23 @@ pub use wire::{
 // Unreleased: the machines of a group talk over `tcode/1`: Principal gains
 // Machine (another machine of the group, which may send only Query::Machine
 // with its MachineRequest and MachineResponse) and Viewer (a full device
-// while the machine's group devices may only view); GroupAction gains
+// while the machine's group devices may only view). GroupAction gains
 // SetLabel, SetAcceptThreads, SetAcceptProjects and SetDeviceAccess
-// (GroupDeviceAccess), GroupInfo carries accept_threads, accept_projects and
-// device_access, and GroupMachineInfo label, accepts_threads and
-// accepts_projects. Project moves: the MoveProject and CancelProjectMove
-// commands, the ProjectMovePreview query, and the ProjectMoves topic with
-// ProjectMovesReplaced. ScopeSnapshot carries view_only. Thread metadata
-// carries remote_parent and remote_children, started_by its machine, and a
-// ControlAction its actor_machine; Settings' control carries machines, with
-// the ControlMachines patch. The agent event stream and the timeline gain
-// thread_moved. The native transport gains the machine stream (the machine
-// line and its machine_reply), the closed hello rejection and close code 5,
-// access changed. Moving projects: MachineRequest gains MovePreflight (with
-// MachineResponse::MovePreflight) and MoveBegin carries thread_ids for its
-// thread count; CancelProjectMove carries force; MoveBlocker gains QuickChat
-// and QueuedMessages; ProjectMoveStatus carries move_id, commit_unknown and
-// paused (MovePause); Query gains MovedThread; Command gains
-// ControlRemoteChild.
-// A machine's Callback carries its report's id, the child's
-// state and the watch it fires, and MachineCaller's permission_mode is the
-// class of its thread's mode; thread metadata carries remote_watches, a remote
-// child its taken report and the settled state, and a ControlWatch its
-// machine.
+// (GroupDeviceAccess); GroupInfo carries accept_threads and accept_projects,
+// what the machine takes now, and device_access; GroupMachineInfo carries
+// label, accepts_threads and accepts_projects; the group's roster carries each
+// machine's label, and the state the members exchange over `tcode/group/1`
+// each machine's label and what it accepts. Project moves: the MoveProject and
+// CancelProjectMove (with force) commands, the ProjectMovePreview and
+// MovedThread queries, and the ProjectMoves topic with ProjectMovesReplaced.
+// ScopeSnapshot carries view_only. Thread metadata carries remote_parent,
+// remote_children and remote_watches, and started_by its machine; a
+// ControlAction its actor_machine, and a ControlWatch its machine; Settings'
+// control carries machines, with the ControlMachines patch. The command
+// ControlRemoteChild reaches a thread's subagent on another machine. The agent
+// event stream and the timeline gain thread_moved. The native transport gains
+// the machine stream (the machine line and its machine_reply), the closed
+// hello rejection and close code 5, access changed.
 pub const PROTOCOL_VERSION: u32 = 33;
 
 #[cfg(test)]
