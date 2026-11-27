@@ -501,6 +501,7 @@ impl AppState {
                 | Command::MarkSessionUnread { .. }
                 | Command::DeleteProject { .. }
                 | Command::MoveProject { .. }
+                | Command::ResumeProjectMove { .. }
                 | Command::CancelProjectMove { .. }
                 | Command::CreateProject { .. }
                 | Command::CreateNewProject { .. }

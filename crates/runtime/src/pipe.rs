@@ -1104,6 +1104,12 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                 cx.spawn_background(async move { task.await.map(|()| CommandResponse::Unit) }),
             );
         }
+        Command::ResumeProjectMove { project_id } => {
+            let task = app.resume_project_move(&project_id, cx);
+            return CommandOutcome::Pending(
+                cx.spawn_background(async move { task.await.map(|()| CommandResponse::Unit) }),
+            );
+        }
         Command::CancelProjectMove { project_id, force } => {
             let task = app.cancel_project_move(&project_id, force, cx);
             return CommandOutcome::Pending(

@@ -535,11 +535,16 @@ pub enum Command {
     },
     /// Move the project and all its threads to another machine of the group,
     /// to `root` there; `include_ignored` takes the files git ignores along.
+    /// Refused while a move of the project is under way.
     MoveProject {
         project_id: String,
         machine: String,
         root: String,
         include_ignored: bool,
+    },
+    /// Try a project's paused move again now, where it stopped.
+    ResumeProjectMove {
+        project_id: String,
     },
     /// Stop a project's move before it is committed on the other machine.
     /// With `force` the move ends here whatever the other machine did with

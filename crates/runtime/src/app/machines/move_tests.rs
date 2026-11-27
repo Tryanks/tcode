@@ -413,7 +413,10 @@ fn a_move_tried_again_resumes_where_the_laptop_is() {
         .unwrap();
     std::fs::remove_dir_all(taken).unwrap();
 
-    move_to(&desk, &laptop, &root).unwrap();
+    desk.command(Command::ResumeProjectMove {
+        project_id: seeded.project.id.clone(),
+    })
+    .unwrap();
     let resumed = desk.moves_until(|moves| {
         moves
             .iter()

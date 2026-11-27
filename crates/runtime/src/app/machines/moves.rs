@@ -354,9 +354,9 @@ impl AppState {
         Ok((link, project))
     }
 
-    /// Start moving `project_id` to `machine`, at `root` there; or, for a
-    /// move of it that waits, try again now. Answers once the project is
-    /// frozen and its move journalled; the move goes on from there.
+    /// Start moving `project_id` to `machine`, at `root` there. Answers once
+    /// the project is frozen and its move journalled; the move goes on from
+    /// there.
     pub(crate) fn move_project(
         &mut self,
         project_id: &str,
@@ -365,20 +365,8 @@ impl AppState {
         include_ignored: bool,
         cx: &mut HostCx,
     ) -> HostTask<Result<(), ProtocolError>> {
-        if let Some(outgoing) = self.moves.outgoing.get(project_id) {
-            let result =
-                if outgoing.journal.machine == machine && outgoing.phase != MovePhase::Cancelling {
-                    if outgoing.phase == MovePhase::Paused && outgoing.driver.is_none() {
-                        self.start_move_driver(project_id, cx);
-                    }
-                    Ok(())
-                } else {
-                    Err(refusal(
-                        "move_in_progress",
-                        "This project is already moving to another machine.",
-                    ))
-                };
-            return cx.spawn_background(async move { result });
+        if self.project_moving(project_id) {
+            return cx.spawn_background(async move { Err(already_moving()) });
         }
         let prepared = self.move_target(project_id).and_then(|(link, project)| {
             let threads = self.moving_threads(project_id);
@@ -412,10 +400,7 @@ impl AppState {
             }
             host.enqueue_and_wait(move |app, cx| {
                 if app.project_moving(&project.id) {
-                    return Err(refusal(
-                        "move_in_progress",
-                        "This project is already moving to another machine.",
-                    ));
+                    return Err(already_moving());
                 }
                 let threads = app.moving_threads(&project.id);
                 blocked(app.local_blockers(&project, &threads))?;
@@ -438,6 +423,27 @@ impl AppState {
             .await
             .map_err(|()| host_stopped())?
         })
+    }
+
+    /// Try `project_id`'s move again now, where it waits.
+    pub(crate) fn resume_project_move(
+        &mut self,
+        project_id: &str,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<(), ProtocolError>> {
+        let result = match self.moves.outgoing.get(project_id) {
+            None => Err(refusal("no_project_move", "This project is not moving.")),
+            Some(outgoing) if outgoing.phase == MovePhase::Cancelling => {
+                Err(refusal("move_cancelling", "This move is being cancelled."))
+            }
+            Some(outgoing) => {
+                if outgoing.phase == MovePhase::Paused && outgoing.driver.is_none() {
+                    self.start_move_driver(project_id, cx);
+                }
+                Ok(())
+            }
+        };
+        cx.spawn_background(async move { result })
     }
 
     /// Stop the providers of threads that are about to move, so nothing works
@@ -821,6 +827,13 @@ fn moving() -> ProtocolError {
     refusal(
         PROJECT_MOVING,
         "This project is moving to another machine; wait for the move to end or cancel it.",
+    )
+}
+
+fn already_moving() -> ProtocolError {
+    refusal(
+        "move_in_progress",
+        "This project is already moving to another machine.",
     )
 }
 

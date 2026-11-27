@@ -850,21 +850,13 @@ impl MoveProgress {
         }
     }
 
-    /// Try a paused move again. The host resumes a move it holds for the
-    /// same machine whatever root and option are sent; this client may not
-    /// be the one that started it, so it sends what the host listed.
+    /// Try a paused move again.
     fn try_again(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(status) = self.status(cx) else {
-            return;
-        };
         self.error = None;
         let task = self.store.update(cx, |store, cx| {
             store.command(
-                Command::MoveProject {
-                    project_id: status.project_id.clone(),
-                    machine: status.machine.clone(),
-                    root: String::new(),
-                    include_ignored: false,
+                Command::ResumeProjectMove {
+                    project_id: self.project_id.clone(),
                 },
                 cx,
             )

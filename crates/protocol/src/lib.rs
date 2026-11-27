@@ -423,8 +423,8 @@ pub use wire::{
 // what the machine takes now, and device_access; GroupMachineInfo carries
 // label, accepts_threads and accepts_projects; the group's roster carries each
 // machine's label, and the state the members exchange over `tcode/group/1`
-// each machine's label and what it accepts. Project moves: the MoveProject and
-// CancelProjectMove (with force) commands, the ProjectMovePreview and
+// each machine's label and what it accepts. Project moves: the MoveProject,
+// ResumeProjectMove and CancelProjectMove (with force) commands, the ProjectMovePreview and
 // MovedThread queries, and the ProjectMoves topic with ProjectMovesReplaced.
 // ScopeSnapshot carries view_only. Thread metadata carries remote_parent,
 // remote_children and remote_watches, and started_by its machine; a
