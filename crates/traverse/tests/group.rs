@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use tcode_client::ConnectionState;
 use tcode_client::host::Transport;
-use tcode_client::pairing::{PairInvite, PairedHost, parse_pair_url};
+use tcode_client::pairing::{PairInvite, PairedHost, pair_url, parse_pair_url};
 use tcode_protocol::{GroupAction, HostingAction, HostingState};
 use tcode_traverse::{DeviceIdentity, HostConfig, HostMux, TraverseHost};
 
@@ -157,7 +157,9 @@ fn up(state: &ConnectionState) -> bool {
 /// invitation and brings its window, a phone pairs with the desktop's
 /// invitation and reaches the headless machine too; once the headless
 /// machine has left, the phone still reaches the desktop, and a new phone
-/// pairs with the desktop alone.
+/// pairs with the desktop alone. An invitation outstanding when the group
+/// is created gives way to one that names the group, which the desktop joins
+/// with; the earlier secret no longer admits anyone.
 #[test]
 fn a_device_paired_with_one_member_reaches_every_member_and_outlives_the_first() {
     let headless_dir = TestDir::new("headless");
@@ -168,6 +170,7 @@ fn a_device_paired_with_one_member_reaches_every_member_and_outlives_the_first()
     let early_dir = TestDir::new("early");
     let early = device(&early_dir, "Early phone");
     pair(&invitation(&headless), &early);
+    let outstanding = parse_pair_url(&invitation(&headless)).unwrap();
 
     let created = group(
         &headless,
@@ -178,8 +181,24 @@ fn a_device_paired_with_one_member_reaches_every_member_and_outlives_the_first()
     let home = created.group.unwrap();
     assert_eq!(home.machines.len(), 1);
     assert!(home.machines[0].this_machine);
-    let link = invitation(&headless);
-    assert_eq!(parse_pair_url(&link).unwrap().group, Some(home.id.clone()));
+    let link = headless.host.invitation().unwrap().0.url();
+    let offered = parse_pair_url(&link).unwrap();
+    assert_eq!(offered.group, Some(home.id.clone()));
+    assert_ne!(offered.secret, outstanding.secret);
+    let earlier = pair_url(&PairInvite {
+        group: Some(home.id.clone()),
+        ..outstanding
+    });
+    assert!(
+        desktop
+            .host
+            .hosting(HostingAction::Group(GroupAction::Join {
+                link: earlier,
+                address: Some("127.0.0.1".into()),
+            }))
+            .is_err(),
+        "the invitation minted before the group still admits"
+    );
     let saved_changes = tcode_traverse::hosts::watch(&desktop_dir.0);
     let joined = group(
         &desktop,

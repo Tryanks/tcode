@@ -131,6 +131,8 @@ struct State {
 }
 
 struct Shared {
+    /// Itself, for the timers it starts, which must not keep it alive.
+    this: std::sync::Weak<Shared>,
     endpoint: Endpoint,
     mux: HostMux,
     state: Mutex<State>,
@@ -273,7 +275,8 @@ impl TraverseHost {
                 None,
             );
             let advertisement = advertise(&endpoint, &identity.host_name);
-            let shared = Arc::new(Shared {
+            let shared = Arc::new_cyclic(|this| Shared {
+                this: this.clone(),
                 endpoint: endpoint.clone(),
                 mux,
                 state: Mutex::new(State {
@@ -792,11 +795,17 @@ impl Shared {
             .collect()
     }
 
-    fn mint(self: &Arc<Self>) -> Invitation {
-        let mut random = [0_u8; tcode_client::pairing::SECRET_BYTES];
-        getrandom::fill(&mut random).expect("the OS random source is available");
+    fn mint(&self) -> Invitation {
         let addr = self.snapshot();
         let mut state = self.state.lock().unwrap();
+        self.mint_in(&mut state, addr)
+    }
+
+    /// Replace the active invitation, under the state lock, with a new
+    /// secret naming the group this machine is in now.
+    fn mint_in(&self, state: &mut State, addr: EndpointAddrSnapshot) -> Invitation {
+        let mut random = [0_u8; tcode_client::pairing::SECRET_BYTES];
+        getrandom::fill(&mut random).expect("the OS random source is available");
         let invitation = Invitation {
             invite: PairInvite {
                 host_id: addr.id,
@@ -815,7 +824,7 @@ impl Shared {
         });
         // The timer holds no reference that would keep a stopped host alive,
         // and checks it is still ending the invitation it was set for.
-        let shared = Arc::downgrade(self);
+        let shared = self.this.clone();
         let secret = invitation.invite.secret.clone();
         let expires_at = invitation.expires_at + Duration::from_millis(10);
         let expiry = self.tasks.spawn(async move {
@@ -882,11 +891,9 @@ impl Shared {
             return None;
         }
         let invitation = Invitation {
-            // The group can change while an invitation is live.
             invite: PairInvite {
                 relay: addr.relay.clone(),
                 port: addr.port,
-                group: group_id(&state.identity),
                 ..active.invitation.invite.clone()
             },
             expires_at: active.invitation.expires_at,
@@ -1506,6 +1513,17 @@ impl Shared {
         }
         if state.identity.group.as_ref().map(|group| &group.state) != group_before.as_ref() {
             self.group_wake.notify_one();
+        }
+        // An invitation names the group it joins; one minted for another
+        // group, or none, would join nothing, so it gives way to a new one.
+        if group_id(&state.identity) != group_id(&previous)
+            && state
+                .invitation
+                .as_ref()
+                .is_some_and(|active| !active.invitation.remaining().is_zero())
+        {
+            let addr = self.snapshot();
+            self.mint_in(state, addr);
         }
         Ok(())
     }
