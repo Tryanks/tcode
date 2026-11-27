@@ -599,10 +599,10 @@ impl<'a> ActivityProjection<'a> {
         (running, unsettled)
     }
 
-    /// A dispatched orchestrate child's execution and delivery; `None` for
-    /// every other thread.
+    /// The execution and delivery of a child its lead started, here or on
+    /// another machine of the group; `None` for every other thread.
     pub(super) fn agent_status(&self, meta: &SessionMeta) -> Option<AgentStatus> {
-        if !meta.is_dispatched() {
+        if !meta.has_lead() {
             return None;
         }
         let resident = self.state.resident(&meta.id);
