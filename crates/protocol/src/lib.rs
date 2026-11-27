@@ -323,8 +323,7 @@ pub use wire::{
 // (record_withheld with row, OriginalTarget's record) and what a host could
 // not read (HostProblem's credentials_unreadable and cli_failed,
 // RuntimeError's file_unreadable, mcp_unavailable,
-// title_attachment_unreadable, orphan_sweep_skipped, orphans_left and
-// move_left_behind,
+// title_attachment_unreadable, orphan_sweep_skipped and orphans_left,
 // ProvidersStatus' secrets_unreadable, model_errors, model_problems and
 // login_shell_unread, the version lookups' errors, TokenCheck's unreadable,
 // GitStatusStatus' error, the unreadable lists of ExternalHistory,
@@ -426,10 +425,11 @@ pub use wire::{
 // label, accepts_threads and accepts_projects; the group's roster carries each
 // machine's label, and the state the members exchange over `tcode/group/1`
 // each machine's label and what it accepts. Project moves: the MoveProject,
-// ResumeProjectMove and CancelProjectMove (with force) commands, the ProjectMovePreview and
-// MovedThread queries, and the ProjectMoves topic with ProjectMovesReplaced,
-// which carries the moves under way (ProjectMoveStatus) and how each move that
-// ended in the host's run ended (EndedProjectMove with its MoveOutcome).
+// ResumeProjectMove and CancelProjectMove (with force) commands, the
+// ProjectMovePreview and MovedThread queries, the ProjectMoves topic with
+// ProjectMovesReplaced, which carries the moves under way (ProjectMoveStatus)
+// and how each move that ended in the host's run ended (EndedProjectMove with
+// its MoveOutcome), and RuntimeError's move_left_behind.
 // ScopeSnapshot carries view_only. Thread metadata carries remote_parent,
 // remote_children and remote_watches, and started_by its machine; a
 // ControlAction its actor_machine, and a ControlWatch its machine; Settings'
