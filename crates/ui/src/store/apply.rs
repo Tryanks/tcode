@@ -444,8 +444,8 @@ impl WorkspaceStore {
                 {
                     self.storage_migration.clone_from(migration);
                 }
-                (Topic::ProjectMoves, ServerEvent::ProjectMovesReplaced(list)) => {
-                    self.apply_project_moves(list, cx);
+                (Topic::ProjectMoves, ServerEvent::ProjectMovesReplaced(state)) => {
+                    self.apply_project_moves(state, cx);
                 }
                 (Topic::DiskUsage, ServerEvent::DiskUsageReplaced(usage))
                     if self.disk_usage_holds > 0 =>
@@ -568,7 +568,6 @@ impl WorkspaceStore {
                 .remember_known_index(&index_topic, self.cached_index_fingerprint());
             self.reconcile_destination(cx);
             self.removed_session = None;
-            self.resolve_departed_moves(cx);
             // A thread kept on screen (its failed send still offers Retry)
             // keeps its replicas until the user leaves it. So does a draft:
             // one holding nothing leaves the index as it leaves the screen,

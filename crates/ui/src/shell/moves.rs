@@ -5,9 +5,9 @@
 
 use super::*;
 use crate::panes::MovedAway;
-use crate::store::{HostKey, ProjectMoveEnded, ThreadKey};
+use crate::store::{HostKey, ThreadKey};
 use crate::toast::{ToastAction, ToastKind};
-use tcode_protocol::ProtocolError;
+use tcode_protocol::{EndedProjectMove, MoveOutcome, ProtocolError};
 
 /// A thread to show once the machine it moved to lists it.
 pub(super) struct PendingMoved {
@@ -50,19 +50,19 @@ impl AppShell {
     pub(super) fn present_project_move_ended(
         &mut self,
         store: &Entity<WorkspaceStore>,
-        ended: &ProjectMoveEnded,
+        ended: &EndedProjectMove,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // The open progress of the move says how it ended.
-        if ended.watched {
+        if store.read(cx).project_move_watched(&ended.project_id) {
             return;
         }
         let machine =
             crate::machines::machine_in_groups(std::slice::from_ref(store), &ended.machine, cx)
                 .name;
         let id = self.take_toast_id();
-        if !ended.moved {
+        if matches!(ended.outcome, MoveOutcome::Cancelled { .. }) {
             self.show_toast(
                 id,
                 ToastKind::Info,

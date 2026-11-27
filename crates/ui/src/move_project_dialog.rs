@@ -18,11 +18,11 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, v_flex};
 use tcode_protocol::{
-    Command, MoveBlocker, MovePause, MovePhase, ProjectMovePreview, ProjectMoveStatus,
-    ProtocolError,
+    Command, EndedProjectMove, MoveBlocker, MoveOutcome, MovePause, MovePhase, ProjectMovePreview,
+    ProjectMoveStatus, ProtocolError,
 };
 
-use crate::store::{ProjectMoveEnded, TopicKind, WorkspaceStore, observe_store_topics};
+use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 use crate::thread_export::format_size;
 
 /// How long a value drawn here takes to glide to a new one.
@@ -745,16 +745,16 @@ struct MoveProgress {
     store: Entity<WorkspaceStore>,
     project_id: String,
     project_name: String,
-    /// The last of the move this view saw, shown until the store knows how
-    /// it ended.
+    /// The last of the move this view saw, which names the move whose end it
+    /// waits for and is shown while the store has no status for it.
     last: Option<ProjectMoveStatus>,
-    /// Whether the move had ended when this view last drew.
+    /// Whether the host had said the move ended when this view last drew.
     ended: bool,
     /// The question this view is asking in place of the progress, if any:
     /// whether to cancel the move, `force` when its outcome is unknown.
     asking: Option<bool>,
     error: Option<String>,
-    _subscriptions: [gpui::Subscription; 2],
+    _subscription: gpui::Subscription,
 }
 
 /// Show the move of `project_id` on `store`'s machine.
@@ -781,10 +781,7 @@ pub(crate) fn open_progress(
         })
         .detach();
         MoveProgress {
-            _subscriptions: [
-                observe_store_topics(&store, &[TopicKind::ProjectMoves], cx),
-                cx.subscribe(&store, |_, _, _: &ProjectMoveEnded, cx| cx.notify()),
-            ],
+            _subscription: observe_store_topics(&store, &[TopicKind::ProjectMoves], cx),
             last: store.read(cx).project_move(&project_id).cloned(),
             ended: false,
             asking: None,
@@ -806,6 +803,17 @@ pub(crate) fn open_progress(
 impl MoveProgress {
     fn status(&self, cx: &App) -> Option<ProjectMoveStatus> {
         self.store.read(cx).project_move(&self.project_id).cloned()
+    }
+
+    /// How the host says this view's move ended, once it has. A view that has
+    /// not seen its move listed yet waits for it: an earlier move of the
+    /// project may have ended.
+    fn outcome(&self, cx: &App) -> Option<EndedProjectMove> {
+        let move_id = self
+            .status(cx)
+            .or_else(|| self.last.clone())
+            .map(|status| status.move_id)?;
+        self.store.read(cx).ended_project_move(&move_id).cloned()
     }
 
     fn report(
@@ -875,7 +883,8 @@ impl MoveProgress {
 impl Render for MoveProgress {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let status = self.status(cx);
-        let ended = status.is_none();
+        let outcome = self.outcome(cx);
+        let ended = outcome.is_some();
         if (status.is_some() && status != self.last) || ended != self.ended {
             // The footer's actions are drawn by the dialog frame.
             window.refresh();
@@ -885,24 +894,23 @@ impl Render for MoveProgress {
             // A move that has ended has nothing left to cancel.
             self.asking = None;
         }
-        if let Some(outcome) = self
-            .store
-            .read(cx)
-            .project_move_outcome(&self.project_id)
-            .cloned()
-        {
+        if let Some(outcome) = outcome {
             let machine = crate::machines::machine_in_groups(
                 std::slice::from_ref(&self.store),
                 &outcome.machine,
                 cx,
             )
             .name;
-            let line = if outcome.moved {
-                crate::tr!("machines.move.ended_moved", machine = machine)
-            } else if outcome.forced {
-                crate::tr!("machines.move.ended_forced", machine = machine)
-            } else {
-                crate::tr!("machines.move.ended_cancelled")
+            let line = match outcome.outcome {
+                MoveOutcome::Moved => {
+                    crate::tr!("machines.move.ended_moved", machine = machine)
+                }
+                MoveOutcome::Cancelled { forced: true } => {
+                    crate::tr!("machines.move.ended_forced", machine = machine)
+                }
+                MoveOutcome::Cancelled { forced: false } => {
+                    crate::tr!("machines.move.ended_cancelled")
+                }
             };
             return v_flex()
                 .gap_3()
@@ -924,7 +932,7 @@ impl Render for MoveProgress {
         if status.is_some() {
             self.last.clone_from(&status);
         }
-        // Until the store knows how it ended, the move reads as it last did.
+        // Until the host says how it ended, the move reads as it last did.
         let Some(status) = status.or_else(|| self.last.clone()) else {
             return div().into_any_element();
         };
@@ -1017,7 +1025,7 @@ fn render_progress_footer(progress: &Entity<MoveProgress>, cx: &App) -> AnyEleme
             s.phase == MovePhase::Cancelling,
         )
     });
-    let ended = status.is_none();
+    let ended = progress.read(cx).outcome(cx).is_some();
     if let Some(force) = progress.read(cx).asking.filter(|_| !ended) {
         let (keep, confirm) = (progress.clone(), progress.clone());
         return DialogActions::new()

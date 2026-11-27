@@ -81,8 +81,9 @@ pub enum Topic {
     /// device: answered on subscribe with the last measurement, and pushed
     /// when one starts or ends. The first subscription measures.
     DiskUsage,
-    /// The projects moving from this machine to another: answered on
-    /// subscribe and pushed after every change.
+    /// The projects moving from this machine to another, and how each move
+    /// that ended in the host's run ended: answered on subscribe and pushed
+    /// after every change.
     ProjectMoves,
 }
 
@@ -235,8 +236,8 @@ pub enum ServerEvent {
     /// A [`Topic::DiskUsage`]'s state: the answer to subscribing, and a push
     /// when a measurement starts or ends.
     DiskUsageReplaced(DiskUsageState),
-    /// A [`Topic::ProjectMoves`]'s whole list.
-    ProjectMovesReplaced(Vec<crate::ProjectMoveStatus>),
+    /// A [`Topic::ProjectMoves`]'s whole state.
+    ProjectMovesReplaced(crate::ProjectMovesState),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

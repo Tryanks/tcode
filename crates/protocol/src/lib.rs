@@ -10,8 +10,9 @@ mod index;
 pub use index::index_fingerprint;
 mod machine;
 pub use machine::{
-    MachineCaller, MachineRequest, MachineRequestKind, MachineResponse, MoveBlocker, MovePart,
-    MovePause, MovePhase, MoveState, ProjectMovePreview, ProjectMoveStatus,
+    EndedProjectMove, MachineCaller, MachineRequest, MachineRequestKind, MachineResponse,
+    MoveBlocker, MoveOutcome, MovePart, MovePause, MovePhase, MoveState, ProjectMovePreview,
+    ProjectMoveStatus, ProjectMovesState,
 };
 mod original;
 pub use original::{OriginalMetadata, OriginalReply, OriginalRequest, OriginalTarget};
@@ -426,7 +427,9 @@ pub use wire::{
 // machine's label, and the state the members exchange over `tcode/group/1`
 // each machine's label and what it accepts. Project moves: the MoveProject,
 // ResumeProjectMove and CancelProjectMove (with force) commands, the ProjectMovePreview and
-// MovedThread queries, and the ProjectMoves topic with ProjectMovesReplaced.
+// MovedThread queries, and the ProjectMoves topic with ProjectMovesReplaced,
+// which carries the moves under way (ProjectMoveStatus) and how each move that
+// ended in the host's run ended (EndedProjectMove with its MoveOutcome).
 // ScopeSnapshot carries view_only. Thread metadata carries remote_parent,
 // remote_children and remote_watches, and started_by its machine; a
 // ControlAction its actor_machine, and a ControlWatch its machine; Settings'

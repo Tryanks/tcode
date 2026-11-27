@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use agent::{AgentEvent, ProviderKind, TurnStatus};
 use tcode_core::project::{Project, SessionMeta, WorktreeInfo};
 use tcode_protocol::{
-    Command, CommandResponse, GroupAction, MachineRequest, MachineResponse, MoveBlocker, MovePart,
-    MovePause, MovePhase, ProjectMoveStatus, ProtocolError, Query, QueryResponse, ServerEvent,
-    Subscription, Topic,
+    Command, CommandResponse, EndedProjectMove, GroupAction, MachineRequest, MachineResponse,
+    MoveBlocker, MoveOutcome, MovePart, MovePause, MovePhase, ProjectMoveStatus, ProjectMovesState,
+    ProtocolError, Query, QueryResponse, ServerEvent, Subscription, Topic,
 };
 use tcode_services::store::SessionStore;
 
@@ -23,12 +23,42 @@ impl Machine {
                 .events
                 .recv_blocking()
                 .expect("the host stopped before the move did");
-            if let ServerEvent::ProjectMovesReplaced(moves) = envelope.event
-                && wanted(&moves)
+            if let ServerEvent::ProjectMovesReplaced(state) = envelope.event
+                && wanted(&state.moving)
             {
-                return moves;
+                return state.moving;
             }
         }
+    }
+
+    /// What a client that attaches now, and so saw none of the moves, is told
+    /// first when it subscribes to them.
+    fn moves_told_to_a_late_client(&self) -> ProjectMovesState {
+        let connection = self.mux.attach(
+            tcode_protocol::Principal::Full,
+            tcode_client::attachment::AttachmentPolicy::LOCAL,
+        );
+        let client = tcode_client::HostLink::new(connection.to_host, connection.from_host);
+        let pump = client.clone();
+        smol::spawn(async move { pump.pump().await }).detach();
+        let events = client.events();
+        client
+            .subscribe(Subscription {
+                known_index: None,
+                topic: Topic::ProjectMoves,
+                after: None,
+            })
+            .unwrap();
+        let state = loop {
+            let envelope = events
+                .recv_blocking()
+                .expect("the host stopped before it told the moves");
+            if let ServerEvent::ProjectMovesReplaced(state) = envelope.event {
+                break state;
+            }
+        };
+        client.close();
+        state
     }
 
     /// The projects and threads this machine lists, archived ones included.
@@ -294,6 +324,23 @@ fn a_project_moves_with_its_threads_and_the_desk_says_where_they_went() {
         seeded.project.root.join("bulk.bin").exists(),
         "the desk keeps the directory"
     );
+    let told = desk.moves_told_to_a_late_client();
+    assert_eq!(told.moving, []);
+    let mut thread_ids: Vec<_> = seeded.threads.iter().map(|meta| meta.id.clone()).collect();
+    thread_ids.sort();
+    let [mut ended] = told.ended.try_into().expect("one move ended");
+    ended.thread_ids.sort();
+    assert_eq!(
+        ended,
+        EndedProjectMove {
+            move_id: begun[0].move_id.clone(),
+            project_id: seeded.project.id.clone(),
+            project_name: "app".into(),
+            machine: laptop.id(),
+            thread_ids,
+            outcome: MoveOutcome::Moved,
+        }
+    );
     let first = seeded.threads[0].id.clone();
     assert_eq!(
         desk.query(Query::MovedThread {
@@ -381,6 +428,17 @@ fn a_cancelled_move_leaves_both_machines_as_they_were() {
     assert!(!staged.exists(), "the laptop keeps what it staged");
     assert!(laptop.listed().0.is_empty());
     desk.command(rename(&first)).unwrap();
+    let told = desk.moves_told_to_a_late_client();
+    assert_eq!(told.moving, []);
+    let [ended] = told.ended.try_into().expect("one move ended");
+    assert_eq!(
+        (ended.move_id, ended.project_id, ended.outcome),
+        (
+            waiting.move_id.clone(),
+            seeded.project.id.clone(),
+            MoveOutcome::Cancelled { forced: false }
+        )
+    );
 }
 
 /// A move tried again goes on from the bytes the laptop holds, not from the

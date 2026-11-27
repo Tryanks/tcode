@@ -56,7 +56,6 @@ pub(crate) use images::{
 use thread::{Part, ThreadReplica};
 mod moves;
 mod snapshots;
-pub(crate) use moves::ProjectMoveEnded;
 
 pub(crate) use snapshots::PanelState;
 pub use snapshots::{ComposerCheckoutState, ComposerQueue, ComposerState};
@@ -2789,7 +2788,7 @@ pub(crate) fn unexpected_pull_request_response() -> ProtocolError {
 impl EventEmitter<StoreChange> for WorkspaceStore {}
 impl EventEmitter<TerminalChange> for WorkspaceStore {}
 impl EventEmitter<ShowThread> for WorkspaceStore {}
-impl EventEmitter<ProjectMoveEnded> for WorkspaceStore {}
+impl EventEmitter<tcode_protocol::EndedProjectMove> for WorkspaceStore {}
 impl EventEmitter<PreviewReleased> for WorkspaceStore {}
 impl EventEmitter<ConnectionState> for WorkspaceStore {}
 impl EventEmitter<tcode_protocol::HostingState> for WorkspaceStore {}

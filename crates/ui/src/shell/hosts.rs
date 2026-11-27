@@ -1052,7 +1052,7 @@ impl AppShell {
             cx.subscribe_in(
                 &store,
                 window,
-                |this, store, ended: &crate::store::ProjectMoveEnded, w, cx| {
+                |this, store, ended: &tcode_protocol::EndedProjectMove, w, cx| {
                     this.present_project_move_ended(store, ended, w, cx);
                 },
             ),

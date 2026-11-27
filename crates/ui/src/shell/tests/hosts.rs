@@ -1834,16 +1834,19 @@ fn a_moving_projects_thread_cannot_send_and_another_hosts_still_does(cx: &mut Te
         &hosts[&key_a].host,
         vec![(
             Topic::ProjectMoves,
-            ServerEvent::ProjectMovesReplaced(vec![tcode_protocol::ProjectMoveStatus {
-                move_id: "move-1".into(),
-                project_id,
-                machine: "host-c".into(),
-                phase: tcode_protocol::MovePhase::SendingCode,
-                done: 1,
-                total: 4,
-                commit_unknown: false,
-                paused: None,
-            }]),
+            ServerEvent::ProjectMovesReplaced(tcode_protocol::ProjectMovesState {
+                moving: vec![tcode_protocol::ProjectMoveStatus {
+                    move_id: "move-1".into(),
+                    project_id,
+                    machine: "host-c".into(),
+                    phase: tcode_protocol::MovePhase::SendingCode,
+                    done: 1,
+                    total: 4,
+                    commit_unknown: false,
+                    paused: None,
+                }],
+                ended: Vec::new(),
+            }),
         )],
     );
     draw(cx);

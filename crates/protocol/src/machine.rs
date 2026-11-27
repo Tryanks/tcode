@@ -201,6 +201,43 @@ pub enum MoveBlocker {
     TargetVersion,
 }
 
+/// What [`crate::Topic::ProjectMoves`] holds: the moves under way, and how each
+/// move that ended in this host's run ended, so a client that attaches or
+/// reconnects late still learns it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectMovesState {
+    pub moving: Vec<ProjectMoveStatus>,
+    pub ended: Vec<EndedProjectMove>,
+}
+
+/// A move that ended on this machine. The host keeps it until it stops: a move
+/// is rare and the record is a few strings, so nothing counts or ages it out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndedProjectMove {
+    pub move_id: String,
+    pub project_id: String,
+    pub project_name: String,
+    /// The machine the project was moving to.
+    pub machine: String,
+    /// The threads that went with it, or would have gone.
+    pub thread_ids: Vec<String>,
+    pub outcome: MoveOutcome,
+}
+
+/// How a move ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum MoveOutcome {
+    /// The other machine has the project and its threads; this machine let go
+    /// of them, and is letting go of the rest of what the move left.
+    Moved,
+    Cancelled {
+        /// Cancelled once the commit had gone out with no answer, so the
+        /// project may be on both machines.
+        forced: bool,
+    },
+}
+
 /// One project moving away from this machine, as
 /// [`crate::Topic::ProjectMoves`] lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

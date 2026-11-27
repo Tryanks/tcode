@@ -18,8 +18,8 @@ use tcode_client::machines::{
 };
 use tcode_core::ui::ConversationDestination;
 use tcode_protocol::{
-    Command, MachineRequest, MachineResponse, MoveBlocker, MovePart, MovePause, MovePhase,
-    MoveState, ProjectMovePreview, ProjectMoveStatus,
+    Command, EndedProjectMove, MachineRequest, MachineResponse, MoveBlocker, MoveOutcome, MovePart,
+    MovePause, MovePhase, MoveState, ProjectMovePreview, ProjectMoveStatus, ProjectMovesState,
 };
 use tcode_services::project_move as disk;
 use tcode_services::store::Mutation;
@@ -58,6 +58,11 @@ pub(crate) struct Moves {
     pub(super) arrived: HashMap<String, String>,
     /// Moves being committed here now.
     pub(super) committing: HashSet<String>,
+    /// How each move that ended in this run ended, kept until the host stops:
+    /// a move is rare and a record is a few strings, so no count or timer
+    /// forgets one, and a client that attaches later reads from it how a move
+    /// it never saw ended.
+    ended: Vec<EndedProjectMove>,
     next_run: u64,
     /// The records of moves could not be read at start, so this machine does
     /// not know which projects are moving or which moves arrived: it begins and
@@ -108,6 +113,17 @@ enum Stage {
 }
 
 impl Journal {
+    fn ended(&self, outcome: MoveOutcome) -> EndedProjectMove {
+        EndedProjectMove {
+            move_id: self.move_id.clone(),
+            project_id: self.project_id.clone(),
+            project_name: self.project_name.clone(),
+            machine: self.machine.clone(),
+            thread_ids: self.thread_ids.clone(),
+            outcome,
+        }
+    }
+
     fn record(&self) -> Mutation {
         Mutation::put_move_record(
             &self.move_id,
@@ -603,6 +619,7 @@ impl AppState {
             }
             _ => {}
         }
+        let forced = outgoing.journal.stage == Stage::CommitSent;
         self.moves.next_run += 1;
         outgoing.run = self.moves.next_run;
         outgoing.phase = MovePhase::Cancelling;
@@ -610,6 +627,7 @@ impl AppState {
         let driver = outgoing.driver.take();
         let mut journal = outgoing.journal.clone();
         journal.stage = Stage::Aborting;
+        let ended = journal.ended(MoveOutcome::Cancelled { forced });
         self.publish_project_moves(cx);
         let link = self.machine_link().ok().cloned();
         let store = self.store.clone();
@@ -653,6 +671,7 @@ impl AppState {
                     app.report_error(RuntimeError::MoveLeftBehind { error }, cx);
                 }
                 app.moves.outgoing.remove(&project_id);
+                app.record_ended(ended);
                 if keep_trying {
                     app.moves.aborting.insert(journal.move_id.clone(), journal);
                     app.retry_aborts(0, cx);
@@ -787,23 +806,39 @@ impl AppState {
         })
     }
 
-    /// The projects moving from this machine, as [`tcode_protocol::Topic::ProjectMoves`]
-    /// answers.
-    pub(crate) fn project_moves_snapshot(&self) -> Vec<ProjectMoveStatus> {
-        self.moves
-            .outgoing
-            .values()
-            .map(|outgoing| ProjectMoveStatus {
-                move_id: outgoing.journal.move_id.clone(),
-                project_id: outgoing.journal.project_id.clone(),
-                machine: outgoing.journal.machine.clone(),
-                phase: outgoing.phase,
-                done: outgoing.done,
-                total: outgoing.total,
-                paused: outgoing.paused.clone(),
-                commit_unknown: outgoing.commit_unknown,
-            })
-            .collect()
+    /// The projects moving from this machine and how the moves that ended
+    /// went, as [`tcode_protocol::Topic::ProjectMoves`] answers.
+    pub(crate) fn project_moves_snapshot(&self) -> ProjectMovesState {
+        ProjectMovesState {
+            moving: self
+                .moves
+                .outgoing
+                .values()
+                .map(|outgoing| ProjectMoveStatus {
+                    move_id: outgoing.journal.move_id.clone(),
+                    project_id: outgoing.journal.project_id.clone(),
+                    machine: outgoing.journal.machine.clone(),
+                    phase: outgoing.phase,
+                    done: outgoing.done,
+                    total: outgoing.total,
+                    paused: outgoing.paused.clone(),
+                    commit_unknown: outgoing.commit_unknown,
+                })
+                .collect(),
+            ended: self.moves.ended.clone(),
+        }
+    }
+
+    /// Keep how a move ended, once.
+    fn record_ended(&mut self, ended: EndedProjectMove) {
+        if !self
+            .moves
+            .ended
+            .iter()
+            .any(|known| known.move_id == ended.move_id)
+        {
+            self.moves.ended.push(ended);
+        }
     }
 
     fn publish_project_moves(&self, cx: &mut HostCx) {
@@ -828,6 +863,10 @@ impl AppState {
                 .moved_threads
                 .insert(id.clone(), journal.machine.clone());
         }
+        // Said before the project and its threads leave the index, so a client
+        // that sees them go already knows where.
+        self.record_ended(journal.ended(MoveOutcome::Moved));
+        self.publish_project_moves(cx);
         let mut ids = journal.thread_ids.clone();
         for meta in self.moving_threads(&journal.project_id) {
             if !ids.contains(&meta.id) {

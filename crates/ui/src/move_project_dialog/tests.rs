@@ -277,7 +277,10 @@ fn a_move_is_cancelled_only_by_confirming_the_question_in_its_view(cx: &mut Test
         HostMessage::Event(EventEnvelope {
             request_id: None,
             topic: Topic::ProjectMoves,
-            event: ServerEvent::ProjectMovesReplaced(vec![moving()]),
+            event: ServerEvent::ProjectMovesReplaced(tcode_protocol::ProjectMovesState {
+                moving: vec![moving()],
+                ended: Vec::new(),
+            }),
         }),
         cx,
     );

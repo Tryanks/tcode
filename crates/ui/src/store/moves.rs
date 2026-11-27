@@ -1,13 +1,12 @@
-//! Projects moving from this host to another machine of its group, as the
-//! host's [`Topic::ProjectMoves`] lists them, and what became of each one
-//! that left the list.
+//! Projects moving from this host to another machine of its group, and how
+//! the moves that ended did, as the host's [`Topic::ProjectMoves`] says.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use gpui::{App, Context, Task};
 use tcode_protocol::{
-    Command, MovePhase, ProjectMovePreview, ProjectMoveStatus, ProtocolError, Query, QueryResponse,
-    Topic,
+    Command, EndedProjectMove, MoveOutcome, ProjectMovePreview, ProjectMoveStatus,
+    ProjectMovesState, ProtocolError, Query, QueryResponse, Topic,
 };
 
 use super::WorkspaceStore;
@@ -15,46 +14,17 @@ use super::WorkspaceStore;
 #[derive(Default)]
 pub(super) struct ProjectMoves {
     list: Vec<ProjectMoveStatus>,
-    /// Each listed project's name and threads, kept while it is listed: the
-    /// index may drop them before the list does.
-    listed: HashMap<String, (String, Vec<String>)>,
-    /// Moves that left the list whose outcome the index has yet to show.
-    departing: Vec<Departing>,
-    /// Projects whose move this client asked to stop.
-    cancelled_here: HashSet<String>,
-    /// Threads that went with a move that ended here, and the machine each
-    /// went to.
-    moved_threads: HashMap<String, String>,
-    /// Projects whose move a view of this window shows, and how many do.
-    watched: HashMap<String, usize>,
-    /// How the watched moves that ended did, for the views showing them.
-    outcomes: HashMap<String, ProjectMoveEnded>,
-    /// Drafts of a moving project: a new thread there was never written, so
-    /// none goes with the project.
-    drafts: HashSet<String>,
-}
-
-struct Departing {
-    status: ProjectMoveStatus,
-    project_name: String,
-    thread_ids: Vec<String>,
-}
-
-/// A move the host listed has ended: the project is on `machine` now, or the
-/// move was cancelled by someone other than this client or while a view of
-/// this window showed it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ProjectMoveEnded {
-    pub project_name: String,
-    pub machine: String,
-    /// The threads that went with it, which keep their ids there.
-    pub thread_ids: Vec<String>,
-    pub moved: bool,
-    /// Cancelled once the other machine may already have committed it, so
-    /// the project may be on both machines.
-    pub forced: bool,
-    /// A view of this window shows the move, and says how it ended.
-    pub watched: bool,
+    /// How the host says each move that ended in its run ended.
+    ended: Vec<EndedProjectMove>,
+    /// The host's state has come at least once: what it holds then is learned,
+    /// not announced.
+    synced: bool,
+    /// Projects whose move a progress view of this window shows, and how many
+    /// do: the view says how the move ended, so no notice does.
+    watching: HashMap<String, usize>,
+    /// Open drafts of a project that moved away, and the machine it went to:
+    /// a new thread there was never written, so none went with the project.
+    drafts: HashMap<String, String>,
 }
 
 impl WorkspaceStore {
@@ -84,65 +54,58 @@ impl WorkspaceStore {
         self.project_move(project_id)
     }
 
-    /// The machine `session_id` went to with its project, as far as the
-    /// moves this store followed say; a thread that left while this client
-    /// was away is the host's to answer ([`Self::moved_thread`]).
-    pub(crate) fn moved_thread_machine(&self, session_id: &str) -> Option<&str> {
-        let moves = &self.project_moves;
-        if let Some(machine) = moves.moved_threads.get(session_id) {
-            return Some(machine);
-        }
-        let holds = |ids: &[String]| ids.iter().any(|id| id == session_id);
-        moves
-            .departing
+    /// How the host says move `move_id` ended, once it has.
+    pub(crate) fn ended_project_move(&self, move_id: &str) -> Option<&EndedProjectMove> {
+        self.project_moves
+            .ended
             .iter()
-            .filter(|departing| departing.status.phase != MovePhase::Cancelling)
-            .find(|departing| holds(&departing.thread_ids))
-            .map(|departing| departing.status.machine.as_str())
-            .or_else(|| {
-                moves
-                    .list
-                    .iter()
-                    .filter(|status| status.phase != MovePhase::Cancelling)
-                    .find(|status| {
-                        moves
-                            .listed
-                            .get(&status.project_id)
-                            .is_some_and(|(_, ids)| holds(ids))
-                    })
-                    .map(|status| status.machine.as_str())
-            })
+            .find(|ended| ended.move_id == move_id)
     }
 
-    /// A view shows `project_id`'s move from now on, and is told how it ends.
+    /// The machine `session_id` went to with its project, as far as the
+    /// host's record of the moves that ended in its run says; a thread that
+    /// left before that is the host's to answer ([`Self::moved_thread`]).
+    pub(crate) fn moved_thread_machine(&self, session_id: &str) -> Option<&str> {
+        let moves = &self.project_moves;
+        moves
+            .ended
+            .iter()
+            .find(|ended| {
+                ended.outcome == MoveOutcome::Moved
+                    && ended.thread_ids.iter().any(|id| id == session_id)
+            })
+            .map(|ended| ended.machine.as_str())
+            .or_else(|| moves.drafts.get(session_id).map(String::as_str))
+    }
+
+    /// A progress view shows `project_id`'s move from now on.
     pub(crate) fn watch_project_move(&mut self, project_id: &str) {
         *self
             .project_moves
-            .watched
+            .watching
             .entry(project_id.to_owned())
             .or_default() += 1;
     }
 
-    /// A view that showed `project_id`'s move is gone.
+    /// A progress view that showed `project_id`'s move is gone.
     pub(crate) fn unwatch_project_move(&mut self, project_id: &str) {
-        let moves = &mut self.project_moves;
-        if let Some(count) = moves.watched.get_mut(project_id) {
+        let watching = &mut self.project_moves.watching;
+        if let Some(count) = watching.get_mut(project_id) {
             *count -= 1;
             if *count == 0 {
-                moves.watched.remove(project_id);
-                moves.outcomes.remove(project_id);
+                watching.remove(project_id);
             }
         }
     }
 
-    /// How `project_id`'s move ended, while a view that showed it is open.
-    pub(crate) fn project_move_outcome(&self, project_id: &str) -> Option<&ProjectMoveEnded> {
-        self.project_moves.outcomes.get(project_id)
+    /// Whether a progress view of this window shows `project_id`'s move.
+    pub(crate) fn project_move_watched(&self, project_id: &str) -> bool {
+        self.project_moves.watching.contains_key(project_id)
     }
 
     /// Whether `session_id` was a draft of a project that moved away.
     pub(crate) fn moved_draft(&self, session_id: &str) -> bool {
-        self.project_moves.drafts.contains(session_id)
+        self.project_moves.drafts.contains_key(session_id)
     }
 
     /// What moving `project_id` to `machine` would take.
@@ -191,131 +154,61 @@ impl WorkspaceStore {
         force: bool,
         cx: &mut App,
     ) -> Task<Result<tcode_protocol::CommandResponse, ProtocolError>> {
-        self.project_moves.cancelled_here.insert(project_id.clone());
         self.command(Command::CancelProjectMove { project_id, force }, cx)
     }
 
-    /// The host's whole list of moves: a move gone from it either ended in
-    /// the project leaving this host's index, or was cancelled.
+    /// The host's whole state of the moves. A move it now says ended, that
+    /// this store had not heard of, is announced, except what the first state
+    /// holds.
     pub(super) fn apply_project_moves(
         &mut self,
-        list: &[ProjectMoveStatus],
+        state: &ProjectMovesState,
         cx: &mut Context<Self>,
     ) {
         let moves = &mut self.project_moves;
-        for left in moves
-            .list
-            .iter()
-            .filter(|old| !list.iter().any(|new| new.move_id == old.move_id))
-        {
-            let (project_name, thread_ids) =
-                moves.listed.remove(&left.project_id).unwrap_or_default();
-            moves.departing.push(Departing {
-                status: left.clone(),
-                project_name,
-                thread_ids,
-            });
-        }
-        moves.departing.retain(|departing| {
-            !list
+        let fresh: Vec<EndedProjectMove> = if moves.synced {
+            state
+                .ended
                 .iter()
-                .any(|new| new.move_id == departing.status.move_id)
-        });
-        moves.list = list.to_vec();
-        let drafts: Vec<String> =
-            self.open_threads()
-                .into_iter()
-                .filter(|id| {
-                    self.session_status_for(Some(id), cx).is_some_and(|status| {
-                        status.draft
-                            && status.project_id.as_ref().is_some_and(|project| {
-                                list.iter().any(|m| &m.project_id == project)
-                            })
-                    })
+                .filter(|ended| {
+                    !moves
+                        .ended
+                        .iter()
+                        .any(|known| known.move_id == ended.move_id)
                 })
-                .collect();
-        let moves = &mut self.project_moves;
-        moves.drafts.extend(drafts);
-        let (sessions, projects) = &self.index_replica;
-        for status in &moves.list {
-            let Some(project) = projects.iter().find(|p| p.id == status.project_id) else {
-                continue;
-            };
-            let threads = sessions
-                .iter()
-                .filter(|meta| meta.project_id.as_deref() == Some(project.id.as_str()))
-                .map(|meta| meta.id.clone());
-            let entry = moves
-                .listed
-                .entry(status.project_id.clone())
-                .or_insert_with(|| (project.name.clone(), Vec::new()));
-            entry.0.clone_from(&project.name);
-            for id in threads {
-                if !entry.1.contains(&id) {
-                    entry.1.push(id);
-                }
-            }
-        }
-        self.resolve_departed_moves(cx);
-    }
-
-    /// Settle what the departed moves came to as far as the index shows it:
-    /// a cancelled move ends at once; one that went through ends once its
-    /// project has left the index.
-    pub(super) fn resolve_departed_moves(&mut self, cx: &mut Context<Self>) {
-        if self.project_moves.departing.is_empty() {
-            return;
-        }
-        let hydrated = self.index_hydrated;
-        let projects = &self.index_replica.1;
-        let mut ended = Vec::new();
-        self.project_moves.departing.retain(|departing| {
-            let cancelled = departing.status.phase == MovePhase::Cancelling;
-            let moved = !cancelled
-                && hydrated
-                && !projects
-                    .iter()
-                    .any(|project| project.id == departing.status.project_id);
-            if cancelled || moved {
-                ended.push((
-                    departing.status.project_id.clone(),
-                    ProjectMoveEnded {
-                        project_name: departing.project_name.clone(),
-                        machine: departing.status.machine.clone(),
-                        thread_ids: departing.thread_ids.clone(),
-                        moved,
-                        forced: cancelled && departing.status.commit_unknown,
-                        watched: false,
-                    },
-                ));
-            }
-            !(cancelled || moved)
-        });
-        for (project_id, mut event) in ended {
-            event.watched = self.project_moves.watched.contains_key(&project_id);
-            if event.watched {
-                self.project_moves
-                    .outcomes
-                    .insert(project_id.clone(), event.clone());
-            }
-            if event.moved {
-                for id in &event.thread_ids {
-                    self.project_moves
-                        .moved_threads
-                        .insert(id.clone(), event.machine.clone());
-                }
-            }
-            let asked_here = self.project_moves.cancelled_here.remove(&project_id);
-            if event.moved || !asked_here || event.watched {
-                cx.emit(event);
-            }
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        moves.list.clone_from(&state.moving);
+        moves.ended.clone_from(&state.ended);
+        moves.synced = true;
+        let drafts: Vec<(String, String)> = self
+            .open_threads()
+            .into_iter()
+            .filter_map(|id| {
+                let status = self.session_status_for(Some(&id), cx)?;
+                let project = status.project_id.as_deref().filter(|_| status.draft)?;
+                let moved = fresh.iter().find(|ended| {
+                    ended.outcome == MoveOutcome::Moved && ended.project_id == project
+                })?;
+                Some((id, moved.machine.clone()))
+            })
+            .collect();
+        self.project_moves.drafts.extend(drafts);
+        for ended in fresh {
+            cx.emit(ended);
         }
     }
 
-    /// The move the store had followed is no longer the host's to say: a
-    /// new scope or a new baseline lists it again.
+    /// What the store had learned of the moves is no longer the host's to say:
+    /// a new scope or a new baseline says it again.
     pub(super) fn forget_project_moves(&mut self) {
-        self.project_moves = ProjectMoves::default();
+        self.project_moves = ProjectMoves {
+            watching: std::mem::take(&mut self.project_moves.watching),
+            ..ProjectMoves::default()
+        };
     }
 
     /// Follow the moves of the host's projects; only a full workspace may.
