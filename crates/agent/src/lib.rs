@@ -3157,13 +3157,11 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_item_id: Option<String>,
     },
-    /// The thread came to this machine from `from_machine` of the group with its
-    /// project. Never emitted by an adapter; the runtime records it when the move
-    /// is committed here.
+    /// The thread came to this machine with its project from the machine of the
+    /// group called `from_machine_name`. Never emitted by an adapter; the runtime
+    /// records it when the move is committed here.
     ThreadMoved {
-        from_machine: String,
         from_machine_name: String,
-        to_machine: String,
     },
     /// The harness waits for the host to create or remove a git worktree, as
     /// Claude Code does through its `WorktreeCreate` and `WorktreeRemove` hooks

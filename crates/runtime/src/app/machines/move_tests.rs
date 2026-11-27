@@ -262,9 +262,7 @@ fn a_project_moves_with_its_threads_and_the_desk_says_where_they_went() {
         assert_eq!(
             moved.event,
             AgentEvent::ThreadMoved {
-                from_machine: desk.id(),
                 from_machine_name: "Desk".into(),
-                to_machine: laptop.id(),
             }
         );
     }

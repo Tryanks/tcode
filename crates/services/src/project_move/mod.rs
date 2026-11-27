@@ -521,9 +521,7 @@ pub struct Arrival<'a> {
     /// The project's root here: absent or an empty directory.
     pub root: &'a Path,
     pub project: Project,
-    pub from_machine: &'a str,
     pub from_machine_name: &'a str,
-    pub to_machine: &'a str,
     /// The profile a thread arriving with `meta` takes here.
     pub profile: &'a (dyn Fn(&SessionMeta) -> Option<String> + Sync),
     pub now_ms: u64,
@@ -774,9 +772,7 @@ fn place(
                 id,
                 arrival.now_ms,
                 &agent::AgentEvent::ThreadMoved {
-                    from_machine: arrival.from_machine.to_owned(),
                     from_machine_name: arrival.from_machine_name.to_owned(),
-                    to_machine: arrival.to_machine.to_owned(),
                 },
             )
             .map_err(error)?,

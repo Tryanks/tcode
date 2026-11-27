@@ -231,9 +231,9 @@ impl AppState {
             Ok(root) => root,
             Err(error) => return now(Err(error)),
         };
-        let Ok(link) = self.machine_link().cloned() else {
-            return now(Err(refusal("no_group", "This machine is in no group.")));
-        };
+        if let Err(error) = self.machine_link() {
+            return now(Err(error));
+        }
         self.moves.committing.insert(move_id.clone());
         let project = Project {
             id: uuid::Uuid::new_v4().to_string(),
@@ -250,13 +250,6 @@ impl AppState {
         let now_ms = cx.clock().unix_millis();
         let host = cx.clone();
         cx.spawn_background(async move {
-            let this_machine = link
-                .machines(false)
-                .await
-                .ok()
-                .and_then(|machines| machines.into_iter().find(|machine| machine.this_machine))
-                .map(|machine| machine.id)
-                .unwrap_or_default();
             let arrived = {
                 let (project, move_id) = (project.clone(), move_id.clone());
                 host.unblock(move || {
@@ -275,9 +268,7 @@ impl AppState {
                             move_id: &move_id,
                             root: &root,
                             project,
-                            from_machine: &peer.id,
                             from_machine_name: &peer.name,
-                            to_machine: &this_machine,
                             profile: &profile,
                             now_ms,
                         },
