@@ -132,10 +132,11 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
     crate::test_frames::draw_settled(cx);
 }
 
-/// Move goes to the machine that holds the project with the place typed and
-/// the ignored files as the box was left, to the machine chosen last.
-#[gpui::test]
-fn a_move_is_sent_to_the_holder_with_the_place_typed_and_the_box_as_left(cx: &mut TestAppContext) {
+/// A window over a store attached to the machine that holds the project
+/// "app".
+fn holder_window(
+    cx: &mut TestAppContext,
+) -> (Entity<WorkspaceStore>, Holder, &mut VisualTestContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
     cx.update(|cx| {
@@ -180,6 +181,14 @@ fn a_move_is_sent_to_the_holder_with_the_place_typed_and_the_box_as_left(cx: &mu
         }),
         cx,
     );
+    (store, holder, cx)
+}
+
+/// Move goes to the machine that holds the project with the place typed and
+/// the ignored files as the box was left, to the machine chosen last.
+#[gpui::test]
+fn a_move_is_sent_to_the_holder_with_the_place_typed_and_the_box_as_left(cx: &mut TestAppContext) {
+    let (store, holder, cx) = holder_window(cx);
     cx.update(|window, cx| open(store.clone(), "app".into(), window, cx));
     crate::test_frames::draw_settled(cx);
     holder.send(
@@ -242,6 +251,59 @@ fn a_move_is_sent_to_the_holder_with_the_place_typed_and_the_box_as_left(cx: &mu
             machine: "lab".into(),
             root: "/srv/app".into(),
             include_ignored: false,
+        }]
+    );
+}
+
+fn moving() -> tcode_protocol::ProjectMoveStatus {
+    tcode_protocol::ProjectMoveStatus {
+        move_id: "move".into(),
+        project_id: "app".into(),
+        machine: "lab".into(),
+        phase: tcode_protocol::MovePhase::SendingCode,
+        done: 1 << 20,
+        total: 4 << 20,
+        commit_unknown: false,
+        paused: None,
+    }
+}
+
+/// Cancelling a move asks first, inside the progress view; only the answer
+/// that confirms sends the cancel, and one that keeps the move sends nothing.
+#[gpui::test]
+fn a_move_is_cancelled_only_by_confirming_the_question_in_its_view(cx: &mut TestAppContext) {
+    let (store, holder, cx) = holder_window(cx);
+    holder.send(
+        HostMessage::Event(EventEnvelope {
+            request_id: None,
+            topic: Topic::ProjectMoves,
+            event: ServerEvent::ProjectMovesReplaced(vec![moving()]),
+        }),
+        cx,
+    );
+    cx.update(|window, cx| open(store.clone(), "app".into(), window, cx));
+    crate::test_frames::draw_settled(cx);
+    holder.commands();
+
+    click(cx, "move-progress-cancel");
+    assert!(
+        cx.debug_bounds("move-progress-cancel").is_none(),
+        "the view asks in place of its progress"
+    );
+    click(cx, "move-progress-keep");
+    assert_eq!(holder.commands(), []);
+    assert!(
+        cx.debug_bounds("move-progress-cancel").is_some(),
+        "keeping the move returns to its progress"
+    );
+
+    click(cx, "move-progress-cancel");
+    click(cx, "move-progress-confirm");
+    assert_eq!(
+        holder.commands(),
+        [Command::CancelProjectMove {
+            project_id: "app".into(),
+            force: false,
         }]
     );
 }

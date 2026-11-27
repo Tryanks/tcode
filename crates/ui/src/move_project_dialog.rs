@@ -3,14 +3,11 @@
 //! move would take, sends everything there and lets the project go only once
 //! the other machine has it; this client chooses, shows and can cancel.
 
-use std::cell::Cell;
-use std::rc::Rc;
-
 use crate::overlay::{DialogActions, DialogButtons, OverlayExt as _};
 use crate::scroll::AutoscrollTarget as _;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
-use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
+use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::checkbox::Checkbox;
 use crate::widgets::input::{Input, InputState};
 use crate::widgets::progress::Progress;
@@ -19,7 +16,7 @@ use gpui::{
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
     div, prelude::FluentBuilder as _,
 };
-use gpui_base::v_flex;
+use gpui_base::{StyledExt as _, v_flex};
 use tcode_protocol::{
     Command, MoveBlocker, MovePause, MovePhase, ProjectMovePreview, ProjectMoveStatus,
     ProtocolError,
@@ -188,8 +185,14 @@ pub(crate) fn open(
     });
     window.open_dialog(cx, move |builder, _, cx| {
         let content = dialog.clone();
+        // While the request is out the sheet cannot be closed: its answer
+        // closes the topmost dialog, which must still be this one.
+        let busy = dialog.read(cx).busy;
         builder
             .sheet()
+            .keyboard(!busy)
+            .close_button(!busy)
+            .overlay_closable(!busy)
             .title(title.clone())
             .content(move |body, _, _| body.child(content.clone()))
             .footer(render_footer(&dialog, cx))
@@ -655,6 +658,7 @@ fn render_footer(dialog: &Entity<MoveProjectDialog>, cx: &App) -> AnyElement {
     DialogActions::new()
         .child(
             Button::new("move-project-cancel")
+                .disabled(dialog.read(cx).busy)
                 .label(crate::tr!("sidebar.cancel"))
                 .on_click(|_, window, cx| window.close_dialog(cx)),
         )
@@ -739,9 +743,9 @@ struct MoveProgress {
     last: Option<ProjectMoveStatus>,
     /// Whether the move had ended when this view last drew.
     ended: bool,
-    /// A confirmation to cancel the move is open over this view: it closes
-    /// once the move it asks about has ended.
-    confirming: Rc<Cell<bool>>,
+    /// The question this view is asking in place of the progress, if any:
+    /// whether to cancel the move, `force` when its outcome is unknown.
+    asking: Option<bool>,
     error: Option<String>,
     _subscriptions: [gpui::Subscription; 2],
 }
@@ -776,7 +780,7 @@ pub(crate) fn open_progress(
             ],
             last: store.read(cx).project_move(&project_id).cloned(),
             ended: false,
-            confirming: Rc::default(),
+            asking: None,
             store,
             project_id,
             project_name,
@@ -824,77 +828,26 @@ impl MoveProgress {
         .detach();
     }
 
-    fn confirm_cancel(&mut self, force: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(status) = self.status(cx) else {
+    /// Turn this view into the question whether to cancel the move.
+    fn ask(&mut self, force: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.asking = Some(force);
+        cx.notify();
+        window.refresh();
+    }
+
+    /// Answer the question: send the cancel, or go on with the move.
+    fn answer(&mut self, cancel: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(force) = self.asking.take() else {
             return;
         };
-        let machine = crate::machines::machine_in_groups(
-            std::slice::from_ref(&self.store),
-            &status.machine,
-            cx,
-        )
-        .name;
-        let (title, description, ok, variant) = if force {
-            (
-                crate::tr!(
-                    "machines.move.force_title",
-                    project = self.project_name.clone()
-                ),
-                crate::tr!("machines.move.force_description", machine = machine),
-                crate::tr!("machines.move.force"),
-                ButtonVariant::Danger,
-            )
-        } else {
-            (
-                crate::tr!(
-                    "machines.move.cancel_title",
-                    project = self.project_name.clone()
-                ),
-                crate::tr!("machines.move.cancel_description", machine = machine),
-                crate::tr!("machines.move.cancel"),
-                ButtonVariant::Danger,
-            )
-        };
-        let (title, description, ok) = (
-            title.into_owned(),
-            description.into_owned(),
-            ok.into_owned(),
-        );
-        let progress = cx.entity();
-        let confirming = self.confirming.clone();
-        confirming.set(true);
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let progress = progress.clone();
-            let (confirmed, kept, closed) =
-                (confirming.clone(), confirming.clone(), confirming.clone());
-            alert
-                .title(title.clone())
-                .description(description.clone())
-                .button_props(
-                    DialogButtons::default()
-                        .ok_variant(variant)
-                        .ok_text(ok.clone())
-                        .cancel_text(crate::tr!("machines.move.keep_moving"))
-                        .show_cancel(true),
-                )
-                // The footer's cancel button closes the alert without its
-                // on_close, so keeping the move clears the mark here too.
-                .on_cancel(move |_, _, _| {
-                    kept.set(false);
-                    true
-                })
-                .on_close(move |_, _, _| closed.set(false))
-                .on_ok(move |_, window, cx| {
-                    confirmed.set(false);
-                    progress.update(cx, |progress, cx| {
-                        let task = progress.store.update(cx, |store, cx| {
-                            store.cancel_project_move(progress.project_id.clone(), force, cx)
-                        });
-                        progress.report(task, window, cx);
-                    });
-                    true
-                })
-        });
+        cx.notify();
+        window.refresh();
+        if cancel {
+            let task = self.store.update(cx, |store, cx| {
+                store.cancel_project_move(self.project_id.clone(), force, cx)
+            });
+            self.report(task, window, cx);
+        }
     }
 
     /// Try a paused move again. The host resumes a move it holds for the
@@ -929,9 +882,9 @@ impl Render for MoveProgress {
             window.refresh();
         }
         self.ended = ended;
-        if ended && self.confirming.replace(false) {
-            // The confirmation is the topmost dialog, over this one.
-            window.defer(cx, |window, cx| window.close_dialog(cx));
+        if ended {
+            // A move that has ended has nothing left to cancel.
+            self.asking = None;
         }
         if let Some(outcome) = self
             .store
@@ -982,6 +935,40 @@ impl Render for MoveProgress {
             cx,
         )
         .name;
+        if let Some(force) = self.asking {
+            let (title, description) = if force {
+                (
+                    crate::tr!(
+                        "machines.move.force_title",
+                        project = self.project_name.clone()
+                    ),
+                    crate::tr!("machines.move.force_description", machine = machine),
+                )
+            } else {
+                (
+                    crate::tr!(
+                        "machines.move.cancel_title",
+                        project = self.project_name.clone()
+                    ),
+                    crate::tr!("machines.move.cancel_description", machine = machine),
+                )
+            };
+            return v_flex()
+                .gap_3()
+                .py_2()
+                .child(
+                    div()
+                        .text_body(false, cx)
+                        .font_semibold()
+                        .child(title.into_owned()),
+                )
+                .child(
+                    div()
+                        .text_secondary(false, cx)
+                        .child(description.into_owned()),
+                )
+                .into_any_element();
+        }
         let bytes = (status.total > 0).then(|| {
             crate::tr!(
                 "machines.move.bytes",
@@ -1032,6 +1019,32 @@ fn render_progress_footer(progress: &Entity<MoveProgress>, cx: &App) -> AnyEleme
         )
     });
     let ended = status.is_none();
+    if let Some(force) = progress.read(cx).asking.filter(|_| !ended) {
+        let (keep, confirm) = (progress.clone(), progress.clone());
+        return DialogActions::new()
+            .child(
+                Button::new("move-progress-keep")
+                    .debug_selector(|| "move-progress-keep".into())
+                    .label(crate::tr!("machines.move.keep_moving"))
+                    .on_click(move |_, window, cx| {
+                        keep.update(cx, |progress, cx| progress.answer(false, window, cx));
+                    }),
+            )
+            .child(
+                Button::new("move-progress-confirm")
+                    .debug_selector(|| "move-progress-confirm".into())
+                    .danger()
+                    .label(if force {
+                        crate::tr!("machines.move.force")
+                    } else {
+                        crate::tr!("machines.move.cancel")
+                    })
+                    .on_click(move |_, window, cx| {
+                        confirm.update(cx, |progress, cx| progress.answer(true, window, cx));
+                    }),
+            )
+            .into_any_element();
+    }
     let cancel = progress.clone();
     let retry = progress.clone();
     let actions = DialogActions::new().child(
@@ -1058,16 +1071,15 @@ fn render_progress_footer(progress: &Entity<MoveProgress>, cx: &App) -> AnyEleme
                 .disabled(cancelling)
                 .label(crate::tr!("machines.move.force"))
                 .on_click(move |_, window, cx| {
-                    cancel.update(cx, |progress, cx| progress.confirm_cancel(true, window, cx));
+                    cancel.update(cx, |progress, cx| progress.ask(true, window, cx));
                 })
         } else {
             Button::new("move-progress-cancel")
+                .debug_selector(|| "move-progress-cancel".into())
                 .disabled(cancelling)
                 .label(crate::tr!("machines.move.cancel"))
                 .on_click(move |_, window, cx| {
-                    cancel.update(cx, |progress, cx| {
-                        progress.confirm_cancel(false, window, cx)
-                    });
+                    cancel.update(cx, |progress, cx| progress.ask(false, window, cx));
                 })
         })
         .into_any_element()
