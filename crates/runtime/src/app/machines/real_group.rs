@@ -35,10 +35,16 @@ impl Drop for TestDir {
 pub(super) struct Machine {
     pub(super) endpoint: Option<TraverseHost>,
     pub(super) runtime: Option<SpawnedHost>,
+    pub(super) mux: HostMux,
+    pub(super) dir: PathBuf,
+    pub(super) name: String,
     pub(super) client: HostLink,
     pub(super) events: async_channel::Receiver<EventEnvelope>,
     pub(super) link: MachineLink,
     pub(super) store: SessionStore,
+    /// The UDP port its endpoint last had, which it binds again when it
+    /// starts hosting again, as a machine on a fixed port does.
+    port: Option<u16>,
 }
 
 impl Machine {
@@ -66,10 +72,14 @@ impl Machine {
         Self {
             endpoint: Some(endpoint),
             runtime: Some(runtime),
+            mux,
+            dir: dir.to_path_buf(),
+            name: name.into(),
             client,
             events,
             link,
             store,
+            port: None,
         }
     }
 
@@ -102,13 +112,30 @@ impl Machine {
             })
             .unwrap();
     }
+
+    pub(super) fn stop_hosting(&mut self) {
+        if let Some(endpoint) = self.endpoint.take() {
+            self.port = endpoint
+                .direct_addrs()
+                .iter()
+                .find(|addr| addr.is_ipv4())
+                .map(|addr| addr.port());
+            endpoint.shutdown();
+        }
+    }
+
+    pub(super) fn start_hosting(&mut self) {
+        let config = HostConfig {
+            bind_port: self.port,
+            ..config(&self.dir, &self.name)
+        };
+        self.endpoint = Some(TraverseHost::start(self.mux.clone(), config).unwrap());
+    }
 }
 
 impl Drop for Machine {
     fn drop(&mut self) {
-        if let Some(endpoint) = self.endpoint.take() {
-            endpoint.shutdown();
-        }
+        self.stop_hosting();
         if let Some(runtime) = self.runtime.take() {
             smol::block_on(async {
                 let _ = self.client.shutdown().await;
