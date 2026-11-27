@@ -154,7 +154,7 @@ impl AppState {
                             .find_meta(&change.thread_id)
                             .is_some_and(|meta| self.own_subagent(caller, &meta))
                 });
-                if !own || params.dry_run == Some(true) {
+                if !own {
                     return not_for_machines();
                 }
                 Ok(ControlOp::UpdateThreads(params))
