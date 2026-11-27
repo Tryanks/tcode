@@ -1335,13 +1335,16 @@ impl TimelineView {
                         .entries
                         .iter()
                         .filter(|entry| {
-                            tools::threads::start(entry).is_some_and(|start| start.machine.is_some())
-                                || crate::chat::model::user_notice(&entry.content).is_some_and(|notice| {
-                                    matches!(notice, HostNotice::Orchestrate(callbacks)
+                            tools::threads::start(entry)
+                                .is_some_and(|start| start.machine.is_some())
+                                || crate::chat::model::user_notice(&entry.content).is_some_and(
+                                    |notice| {
+                                        matches!(notice, HostNotice::Orchestrate(callbacks)
                                         if callbacks.iter().any(|callback| {
-                                            crate::machines::elsewhere(&callback.child_id).1.is_some()
+                                            callback.machine.is_some()
                                         }))
-                                })
+                                    },
+                                )
                         })
                         .map(|entry| entry.turn)
                         .collect()

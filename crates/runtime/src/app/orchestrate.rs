@@ -823,7 +823,7 @@ impl AppState {
         };
         let text = format!(
             "{} {ORCHESTRATE_APPROVAL_PHRASE}{}{ORCHESTRATE_APPROVAL_ID_PHRASE}{}). Native options: {}. {}",
-            callback_header(child_id, &child.title),
+            callback_header(child_id, None, &child.title),
             approval_request_summary(&request),
             request.id,
             serde_json::to_string(&options).expect("approval options serialize"),
@@ -881,7 +881,7 @@ impl AppState {
         };
         let text = format!(
             "{} {ORCHESTRATE_QUESTION_PHRASE}{ORCHESTRATE_QUESTION_ID_PHRASE}{}; {delivery}{ORCHESTRATE_QUESTIONS_PHRASE}{}. {instruction}",
-            callback_header(child_id, &child.title),
+            callback_header(child_id, None, &child.title),
             pending.request_id,
             serde_json::to_string(&pending.questions).expect("questions serialize"),
         );
@@ -1291,6 +1291,6 @@ pub(super) fn assemble_report_callback(
     };
     format!(
         "{} {state}.{token_segment}\n{body}",
-        callback_header(child_id, title)
+        callback_header(child_id, None, title)
     )
 }

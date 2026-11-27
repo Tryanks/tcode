@@ -344,7 +344,7 @@ impl AppState {
         }
         let text = format!(
             "{CONTROL_CALLBACK_PREFIX}{} {}{}",
-            control_header(target_id, &target.title),
+            control_header(target_id, None, &target.title),
             wire_name(event),
             self.watch_event_detail(&target, event)
         );

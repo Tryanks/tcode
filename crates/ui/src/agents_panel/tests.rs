@@ -314,7 +314,7 @@ fn a_running_agents_activity_gives_way_to_its_result(cx: &mut TestAppContext) {
 
     let callback = format!(
         "{} reported.\nThe tests pass.",
-        tcode_core::notice::callback_header("worker", "worker")
+        tcode_core::notice::callback_header("worker", None, "worker")
     );
     for message in [
         line(

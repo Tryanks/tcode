@@ -1368,11 +1368,13 @@ impl TimelineView {
     ) -> AnyElement {
         let request = self.callback_request(turn, &key, callback, window, cx);
         let expanded = self.expanded.contains(&key);
-        let (child_id, machine) = crate::machines::elsewhere(&callback.child_id);
-        let child_id = child_id.to_owned();
+        let child_id = callback.child_id.clone();
         // A child on another machine of the group is that machine's thread,
         // known here while this window is linked to that machine.
-        let machine = machine.map(|machine| crate::machines::machine(machine, cx));
+        let machine = callback
+            .machine
+            .as_deref()
+            .map(|machine| crate::machines::machine(machine, cx));
         let child_store = match &machine {
             Some(machine) => machine.store.clone(),
             None => Some(self.workspace_store.clone()),
@@ -1499,7 +1501,8 @@ impl TimelineView {
         // A child on another machine of the group waits there, and no host
         // takes the answer for it from the lead's: it is answered in its own
         // thread. Its machine's store says whether it still waits.
-        if let (thread, Some(machine)) = crate::machines::elsewhere(&child_id) {
+        if let Some(machine) = callback.machine.as_deref() {
+            let thread = child_id.as_str();
             let machine = crate::machines::machine(machine, cx);
             let waits = machine
                 .store

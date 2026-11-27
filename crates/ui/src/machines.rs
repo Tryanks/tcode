@@ -179,15 +179,6 @@ fn resolve(id: &str, group_title: Option<String>, cx: &App) -> Machine {
     }
 }
 
-/// What a thread elsewhere is called in a message: `<thread>@<machine>`,
-/// split into the thread and, when it is another machine's, that machine.
-pub(crate) fn elsewhere(id: &str) -> (&str, Option<&str>) {
-    match id.split_once('@') {
-        Some((thread, machine)) if !machine.is_empty() => (thread, Some(machine)),
-        _ => (id, None),
-    }
-}
-
 /// The locale's words for "`actor` on `machine`", split around where the
 /// actor goes, so the actor can be drawn as a link of its own.
 pub(crate) fn on_machine_parts(machine: &str) -> (String, String) {

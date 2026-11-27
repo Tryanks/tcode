@@ -420,27 +420,31 @@ impl TimelineView {
         let sender = match notice {
             HostNotice::Control(messages) => {
                 let store = self.workspace_store.read(cx);
-                let mut threads: Vec<(String, String)> = Vec::new();
-                for (thread_id, title) in messages
+                let mut threads: Vec<(String, Option<String>, String)> = Vec::new();
+                for thread in messages
                     .iter()
                     .filter_map(|message| control_thread(message))
                 {
-                    if !threads.iter().any(|(id, _)| id == thread_id) {
-                        threads.push((thread_id.to_owned(), title));
+                    if !threads.iter().any(|(id, machine, _)| {
+                        id == thread.thread_id && machine.as_deref() == thread.machine
+                    }) {
+                        threads.push((
+                            thread.thread_id.to_owned(),
+                            thread.machine.map(str::to_owned),
+                            thread.title,
+                        ));
                     }
                 }
                 Sender::Threads(
                     threads
                         .into_iter()
-                        .map(|(named, title)| {
-                            let (thread_id, machine) = crate::machines::elsewhere(&named);
-                            let thread_id = thread_id.to_owned();
+                        .map(|(thread_id, machine, title)| {
                             let title = one_line(&title).into();
                             match machine {
                                 // Another machine's thread opens there, while
                                 // this window is linked to that machine.
                                 Some(machine) => {
-                                    let machine = crate::machines::machine(machine, cx);
+                                    let machine = crate::machines::machine(&machine, cx);
                                     let on_open = machine
                                         .store
                                         .is_some()

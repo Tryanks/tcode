@@ -98,7 +98,7 @@ fn steered_notices_render_as_the_hosts_not_bubbles(cx: &mut TestAppContext) {
                     format!(
                         "{}{} idle",
                         tcode_core::notice::CONTROL_CALLBACK_PREFIX,
-                        tcode_core::notice::control_header("worker", "Worker")
+                        tcode_core::notice::control_header("worker", None, "Worker")
                     ),
                     SteeringStatus::Pending,
                 ),

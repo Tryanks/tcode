@@ -433,7 +433,7 @@ impl Agents {
                     };
                     for callback in callbacks {
                         let report = compact(callback.report().unwrap_or_default());
-                        if !report.is_empty() {
+                        if !report.is_empty() && callback.machine.is_none() {
                             results.insert(callback.child_id, report);
                         }
                     }

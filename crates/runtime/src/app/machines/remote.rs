@@ -29,12 +29,6 @@ pub(super) struct Callback {
 /// What a call answered from another machine, and the machine.
 type Forwarded = Result<serde_json::Value, ProtocolError>;
 
-/// `thread_id` on `machine`, as a link and in a message: the form without a machine is
-/// this machine's.
-fn elsewhere(thread_id: &str, machine: &str) -> String {
-    format!("{thread_id}@{machine}")
-}
-
 fn machine_named(info: &MachineInfo) -> String {
     info.label.clone().unwrap_or_else(|| info.name.clone())
 }
@@ -515,7 +509,7 @@ impl AppState {
                 }
                 Ok(serde_json::json!({
                     "thread_id": started.thread_id,
-                    "link": format!("tcode-thread://{}", elsewhere(&started.thread_id, &info.id)),
+                    "link": format!("tcode-thread://{}", tcode_core::notice::thread_ref(&started.thread_id, Some(&info.id))),
                     "created": started.created,
                     "title": started.title,
                     "cwd": started.cwd,
@@ -992,11 +986,8 @@ impl AppState {
             .find(|child| child.machine == peer.id && child.thread_id == callback.from_thread_id)
             .cloned();
         // Its message names the thread as this machine names a thread there.
-        let text = callback.text.replacen(
-            &format!("thread {} (", callback.from_thread_id),
-            &format!("thread {} (", elsewhere(&callback.from_thread_id, &peer.id)),
-            1,
-        );
+        let text =
+            tcode_core::notice::on_machine(&callback.text, &callback.from_thread_id, &peer.id);
         if let Some(id) = &callback.watch {
             let watched = lead.control_watches.iter().any(|watch| {
                 watch.id == *id
