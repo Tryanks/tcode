@@ -1096,7 +1096,13 @@ fn evaluate_in_page(
 ) {
     #[cfg(target_os = "android")]
     view.read(cx).raw().evaluate_json(script, reply, cx);
-    #[cfg(not(target_os = "android"))]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    page_agent::evaluate(view.read(cx).raw(), script, move |result| {
+        let _ = reply.try_send(
+            result.map(|raw| PreviewResponse::Json(preview_mcp::page::parse_result(&raw))),
+        );
+    });
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
         let result = view.read(cx).raw().evaluate_script_with_callback(script, {
             let reply = reply.clone();
@@ -1224,8 +1230,9 @@ mod platform {
             lifecycle.record_unavailable(format!("WebKitGTK 4.1 could not be loaded: {error}"), cx);
             return Availability::Unavailable;
         }
-        // No first document: lb-wry holds evaluations back until a
-        // navigation commits, and the page's evaluations wait for its first
+        // No first document: an evaluation before one runs in the empty page
+        // on macOS and iOS, and on Linux is held back by lb-wry until a
+        // navigation commits; the page agent's calls wait for its first
         // document (`PageEvents`).
         let nonce = page_agent::nonce();
         let (page, events, receiver) = lifecycle.open_page(nonce.clone(), false);

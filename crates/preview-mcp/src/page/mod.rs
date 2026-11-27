@@ -140,7 +140,8 @@ pub fn evaluate(expression: &str) -> String {
 }
 
 /// Decode the JSON an engine's evaluation callback yields; anything that is
-/// not JSON, such as wry's empty string for `undefined`, is returned as text.
+/// not JSON, such as WebKit's empty string for `undefined`, is returned as
+/// text.
 pub fn parse_result(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
 }
