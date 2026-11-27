@@ -20,6 +20,7 @@ mod style;
 mod svg;
 mod text;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -51,7 +52,7 @@ pub(crate) const CONTEXT: &str = "HtmlView";
 /// repaints neither parse nor cascade.
 pub struct HtmlState {
     source: Arc<str>,
-    doc: Document,
+    doc: Rc<Document>,
     sheet: Stylesheet,
     media: MediaSlots,
     computed: Option<Rc<Computed>>,
@@ -67,7 +68,7 @@ pub struct HtmlState {
 impl HtmlState {
     pub fn new(html: impl Into<Arc<str>>) -> Self {
         let source: Arc<str> = html.into();
-        let doc = Document::parse(&source);
+        let doc = Rc::new(Document::parse(&source));
         let sheet = Stylesheet::parse_all(&doc.stylesheets);
         Self {
             source,
@@ -141,7 +142,7 @@ impl HtmlState {
             return;
         }
         self.source = Arc::from(html);
-        self.doc = Document::parse(&self.source);
+        self.doc = Rc::new(Document::parse(&self.source));
         self.sheet = Stylesheet::parse_all(&self.doc.stylesheets);
         self.media.clear();
         self.computed = None;
@@ -217,6 +218,11 @@ struct Computed {
     before: HashMap<NodeId, ComputedStyle>,
     after: HashMap<NodeId, ComputedStyle>,
     pictures: HashMap<NodeId, PictureOf>,
+    /// The `<symbol>`s of the page's `<svg>`s, which any of them may draw.
+    symbols: Vec<(String, String)>,
+    /// For a grid or a table, the width of the widest item of each of its
+    /// columns; `None` until [`render::measure`] has found them.
+    measures: RefCell<Option<HashMap<NodeId, Rc<[f32]>>>>,
     /// The cascade's [`Budget`] ran out, or a value was drawn at a limit.
     left_out: bool,
 }
@@ -244,7 +250,18 @@ impl Computed {
             before: HashMap::new(),
             after: HashMap::new(),
             pictures: HashMap::new(),
+            symbols: doc
+                .nodes
+                .iter()
+                .filter_map(|node| match &node.kind {
+                    dom::NodeKind::Element(el) => el.raw_svg.as_deref(),
+                    dom::NodeKind::Text(_) => None,
+                })
+                .filter(|raw| raw.contains("<symbol"))
+                .flat_map(svg::symbols_of)
+                .collect(),
             left_out: false,
+            measures: RefCell::new(None),
             root,
             theme: theme.clone(),
         };
@@ -274,17 +291,24 @@ impl Computed {
                 match el.tag.as_str() {
                     "svg" => {
                         let raw = el.raw_svg.as_deref().unwrap_or_default();
+                        if svg::draws_nothing(raw) {
+                            self.styles[id] = Some(style);
+                            continue;
+                        }
+                        let raw = svg::with_css_size(raw, style.width_px(), style.height_px());
+                        let raw = svg::with_symbols(&raw, &self.symbols);
                         let css = PageCss::of(page_css, doc, &style, &self.theme);
                         let cost = (raw.len() + css.len()) / 64;
                         if cascade.budget.spend(cost) {
-                            let picture =
-                                match svg::prepare_svg(raw, style.color, &style.vars, &css) {
-                                    Some(prepared) => PictureOf::Svg {
-                                        content: prepared.content(),
-                                        natural: prepared.natural,
-                                    },
-                                    None => PictureOf::SvgTooLong,
-                                };
+                            let page = self.theme.svg_page(&style);
+                            let paint = style.svg_paint.as_deref();
+                            let picture = match svg::prepare_svg(&raw, &page, &css, paint) {
+                                Some(prepared) => PictureOf::Svg {
+                                    content: prepared.content(),
+                                    natural: prepared.natural,
+                                },
+                                None => PictureOf::SvgTooLong,
+                            };
                             self.pictures.insert(id, picture);
                         }
                     }
@@ -329,6 +353,17 @@ impl Computed {
         self.after.get(&id)
     }
 
+    fn measured(&self, id: NodeId) -> Option<Rc<[f32]>> {
+        self.measures.borrow().as_ref()?.get(&id).cloned()
+    }
+
+    fn set_measured(&self, id: NodeId, widths: Vec<f32>) {
+        self.measures
+            .borrow_mut()
+            .get_or_insert_default()
+            .insert(id, widths.into());
+    }
+
     fn picture(&self, id: NodeId) -> Option<&PictureOf> {
         self.pictures.get(&id)
     }
@@ -339,8 +374,11 @@ impl Computed {
     fn prepare_svg(&self, doc: &Document, node: NodeId) -> Option<svg::PreparedSvg> {
         let style = self.style(node)?;
         let raw = doc.element(node)?.raw_svg.as_deref()?;
+        let raw = svg::with_css_size(raw, style.width_px(), style.height_px());
+        let raw = svg::with_symbols(&raw, &self.symbols);
         let css = PageCss::of(&mut Vec::new(), doc, style, &self.theme);
-        svg::prepare_svg(raw, style.color, &style.vars, &css)
+        let page = self.theme.svg_page(style);
+        svg::prepare_svg(&raw, &page, &css, style.svg_paint.as_deref())
     }
 }
 
@@ -366,13 +404,7 @@ impl PageCss {
         {
             return page.css.clone();
         }
-        let css: Rc<str> = svg::page_css(
-            &doc.stylesheets,
-            style.color,
-            &style.vars,
-            theme.font_sans(),
-        )
-        .into();
+        let css: Rc<str> = svg::page_css(&doc.stylesheets, &theme.svg_page(style)).into();
         known.push(Self {
             vars: style.vars.clone(),
             color: style.color,
@@ -411,6 +443,11 @@ impl RenderOnce for HtmlView {
         let theme = Palette::of(cx.theme());
         let env = media_env(&theme, self.viewport_width.unwrap_or(fallback_width));
         let computed = self.state.update(cx, |state, _| state.computed(theme, env));
+        if computed.measures.borrow().is_none() {
+            let doc = self.state.read(cx).doc.clone();
+            computed.measures.replace(Some(HashMap::new()));
+            render::measure(&doc, &computed, env.viewport_width, window, cx);
+        }
         let state = self.state.read(cx);
         let (element, mut frame) =
             render::render_document(state, &computed, env.viewport_width, cx);
@@ -734,6 +771,56 @@ pub(crate) mod tests {
         assert_eq!(word, line);
         // The same measure sees a line broken where it may be.
         assert!(drawn(&narrow("1 0 0 %"), cx).size.height > line);
+    }
+
+    /// Three boxes that fit on one line of a box 600 pixels wide and wrap in
+    /// a narrower one, so the height says which the box was.
+    const ROW: &str = r#"<div style="display:flex;flex-wrap:wrap"><i style="flex:none;width:200px;height:10px"></i><i style="flex:none;width:200px;height:10px"></i><i style="flex:none;width:200px;height:10px"></i></div>"#;
+
+    #[gpui::test]
+    fn an_auto_track_is_as_wide_as_what_it_holds(cx: &mut TestAppContext) {
+        let label = r#"<i style="display:block;width:20px;height:10px"></i>"#;
+        let html = format!(
+            r#"<div style="display:grid;grid-template-columns:auto 1fr">{label}{ROW}{label}<p style="margin:0;height:10px"></p></div>"#
+        );
+        // The view is 640 wide: a first track of the 20 pixels it holds
+        // leaves the row its 600, and both rows of the grid are one high.
+        assert_eq!(drawn(&html, cx).size.height, px(20.0));
+    }
+
+    #[gpui::test]
+    fn a_table_column_is_as_wide_in_every_row(cx: &mut TestAppContext) {
+        let html = format!(
+            r#"<style>td,th{{padding:0}}tr{{border-bottom:0}}</style>
+               <table style="width:100%"><tr><th style="width:20px"></th><th></th></tr>
+               <tr><td></td><td>{ROW}</td></tr></table>"#
+        );
+        // The width the head gives the first column is the second row's too.
+        assert_eq!(drawn(&html, cx).size.height, px(10.0));
+    }
+
+    #[gpui::test]
+    fn a_width_is_the_content_box_unless_the_page_says(cx: &mut TestAppContext) {
+        let boxed = |sizing: &str| {
+            format!(r#"<div style="width:600px;padding:0 20px;{sizing}">{ROW}</div>"#)
+        };
+        assert_eq!(drawn(&boxed(""), &mut cx.new_app()).size.height, px(10.0));
+        let border_box = drawn(&boxed("box-sizing:border-box"), cx);
+        assert_eq!(border_box.size.height, px(20.0));
+    }
+
+    #[gpui::test]
+    fn text_beside_a_box_wraps_in_its_line(cx: &mut TestAppContext) {
+        let words = "a ".repeat(40);
+        let line = drawn("<div>a</div>", &mut cx.new_app()).size.height;
+        // After an inline box, as a badge before its sentence is.
+        let badge = r#"<span style="display:inline-block;width:60px;height:10px"></span>"#;
+        let inline = format!(r#"<div style="width:100px">{badge} {words}</div>"#);
+        assert!(drawn(&inline, &mut cx.new_app()).size.height >= line * 3.0);
+        // As an item of a row, as a label beside its icon is.
+        let icon = r#"<i style="flex:none;width:60px;height:10px"></i>"#;
+        let item = format!(r#"<div style="display:flex;width:100px">{icon}{words}</div>"#);
+        assert!(drawn(&item, cx).size.height >= line * 3.0);
     }
 
     #[gpui::test]

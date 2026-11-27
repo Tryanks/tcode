@@ -26,8 +26,6 @@ use crate::markdown::selection::{
 enum Lead {
     #[default]
     Nothing,
-    /// White space the page had between the two boxes.
-    Space,
     /// A `<br>`.
     Break,
 }
@@ -85,7 +83,6 @@ impl EntryText for PageText {
                 text.push_str(if same(before.flow, segment.flow) {
                     match segment.lead {
                         Lead::Nothing => "",
-                        Lead::Space => " ",
                         Lead::Break => "\n",
                     }
                 } else if same(before.row, segment.row) && before.cell != segment.cell {
@@ -204,13 +201,6 @@ impl TextSink {
     pub(super) fn leave(&mut self, outer: Scope) {
         (self.row, self.cell, self.flow, self.link) =
             (outer.row, outer.cell, outer.flow, outer.link);
-    }
-
-    /// The page had white space between the box before and the next.
-    pub(super) fn space(&mut self) {
-        if self.lead == Lead::Nothing {
-            self.lead = Lead::Space;
-        }
     }
 
     /// The page breaks the line between the box before and the next.
