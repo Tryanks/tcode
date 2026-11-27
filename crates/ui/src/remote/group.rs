@@ -197,9 +197,9 @@ impl GroupSection {
     }
 
     /// This machine's switches: what it takes from the group's other
-    /// machines, and what the group's other devices may do on it. Below
-    /// operate the machine takes nothing from the others whatever the
-    /// switches hold, so they show off and do not move.
+    /// machines, and what the group's other devices may do on it. The host
+    /// reports what the machine takes now, which is nothing below operate
+    /// whatever the switches hold, so they show off and do not move.
     fn switch_rows(
         &self,
         group: &GroupInfo,
@@ -215,7 +215,7 @@ impl GroupSection {
             ToggleRow::new(
                 id,
                 crate::tr!(title),
-                operate && checked,
+                checked,
                 compact,
                 cx.listener(move |section, checked: &bool, window, cx| {
                     section.act(action(*checked), window, cx);
