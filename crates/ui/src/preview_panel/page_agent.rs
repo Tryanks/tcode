@@ -22,6 +22,8 @@ pub(super) fn nonce() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub(super) use imp::evaluate;
 #[cfg(not(target_os = "android"))]
 pub(super) use imp::install;
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
@@ -214,6 +216,57 @@ mod imp {
                 completionHandler: &*done
             ];
         }
+    }
+
+    /// Evaluate `expression` in the page's own world. `done` gets its value
+    /// as the JSON text the page made of it, empty for `undefined`, or what
+    /// WebKit said went wrong.
+    ///
+    /// Gap: lb-wry's evaluation callback gives WebKit's result object to
+    /// `NSJSONSerialization`, which raises on a value JSON has no form for (a
+    /// NaN, an infinity, a `Date`), and that exception ends the process; it
+    /// also drops the error WebKit reports. So the page makes the JSON, which
+    /// is what the other engines hand back, and only text crosses.
+    pub(crate) fn evaluate(
+        raw: &wry::WebView,
+        expression: &str,
+        done: impl Fn(Result<String, String>) + 'static,
+    ) {
+        let webview = raw.webview();
+        let done = block2::RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+            // SAFETY: WebKit passes a live error or nil, and a live value or nil.
+            let (value, error) = unsafe { (value.as_ref(), error.as_ref()) };
+            done(match (value, error) {
+                (_, Some(error)) => Err(script_error(error)),
+                (None, None) => Ok(String::new()),
+                // A page may have replaced `JSON.stringify`.
+                (Some(value), None) => value
+                    .downcast_ref::<NSString>()
+                    .map(NSString::to_string)
+                    .ok_or_else(|| "the page's JSON.stringify did not return text".to_owned()),
+            });
+        });
+        // objc2-web-kit declares WKWebView for macOS only.
+        unsafe {
+            let () = msg_send![
+                &*webview,
+                evaluateJavaScript: &*NSString::from_str(&format!("JSON.stringify({expression})")),
+                completionHandler: &*done
+            ];
+        }
+    }
+
+    /// The exception a script threw, where that is what failed.
+    fn script_error(error: &NSError) -> String {
+        let thrown = NSString::from_str("WKJavaScriptExceptionMessage");
+        error
+            .userInfo()
+            .objectForKey(&thrown)
+            .and_then(|message| message.downcast::<NSString>().ok())
+            .map_or_else(
+                || error.localizedDescription().to_string(),
+                |message| message.to_string(),
+            )
     }
 
     pub(crate) fn forget(raw: &wry::WebView) {
