@@ -435,7 +435,14 @@ impl MoveProjectDialog {
         let section = |caption: SharedString, body: AnyElement| {
             v_flex().gap_1().child(heading(caption, cx)).child(body)
         };
-        let placeholder = if preview.default_root.is_empty() {
+        // The machine suggests no folder when it could not be reached, and
+        // also when it answered and declined; only the first is "could not
+        // be asked", and the second says why under Cannot move now.
+        let unreachable = preview
+            .blockers
+            .iter()
+            .any(|blocker| matches!(blocker, MoveBlocker::TargetUnreachable));
+        let placeholder = if preview.default_root.is_empty() && unreachable {
             crate::tr!("machines.move.root_needed", machine = machine)
         } else {
             crate::tr!("machines.move.root_placeholder")

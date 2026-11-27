@@ -427,8 +427,9 @@ The dialog **Move “‹project›” to a machine** has these parts:
   **Move over a relay?** first.
 - **Cannot move now**: what the machine holding the project and the chosen
   machine say is in the way. **Move** is available once they have answered;
-  pressed while something is still in the way, it is refused with
-  **Something now stands in the way; see below.** and the list is asked for
+  pressed while something is still in the way, nothing starts and the
+  dialog says why: the chosen machine's own reason when it refuses, or
+  **Something now stands in the way; see below.** with the list asked for
   again. A reason is one of:
   - **Quick chats stay with their machine.**
   - **The project's folder is inside a larger repository, which is not this
