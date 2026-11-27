@@ -243,14 +243,11 @@ impl MoveProjectDialog {
         }
     }
 
-    /// Whether Move may be pressed: a machine is chosen, its preview names
-    /// nothing in the way, and nothing is in flight.
+    /// Whether Move may be pressed: a machine is chosen, its preview has
+    /// come, and nothing is in flight. What stands in the way is the host's
+    /// to refuse, and the dialog shows what it says.
     fn can_move(&self) -> bool {
-        !self.busy
-            && self.selected.is_some()
-            && self
-                .ready()
-                .is_some_and(|preview| preview.blockers.is_empty())
+        !self.busy && self.selected.is_some() && self.ready().is_some()
     }
 
     /// Move, after asking first when the move goes through a relay.
@@ -351,7 +348,6 @@ impl MoveProjectDialog {
             .filter(|machine| !machine.this_machine)
             .collect();
         let rows = machines.into_iter().map(|machine| {
-            let selectable = machine.accepts_projects == Some(true);
             let selected = self.selected.as_deref() == Some(machine.id.as_str());
             let title = machine.title().to_owned();
             let line = match machine.accepts_projects {
@@ -378,52 +374,39 @@ impl MoveProjectDialog {
                 .w_full()
                 .pt_0p5()
                 .child(
-                    crate::material::menu_item_frame(
-                        false,
-                        if selectable {
-                            crate::material::ItemFill::Hover
-                        } else {
-                            crate::material::ItemFill::Inert
-                        },
-                        cx,
-                    )
-                    .id(SharedString::from(format!(
-                        "move-project-machine-{}",
-                        machine.id
-                    )))
-                    .debug_selector({
-                        let id = machine.id.clone();
-                        move || format!("move-project-machine-{id}")
-                    })
-                    .role(gpui::Role::ListBoxOption)
-                    .aria_label(format!("{title}: {line}"))
-                    .aria_selected(selected)
-                    .w_full()
-                    .bg(fill)
-                    .when(selectable, |row| {
-                        row.cursor_pointer()
-                            .on_click(cx.listener(move |dialog, _, window, cx| {
-                                dialog.choose(id.clone(), window, cx);
-                            }))
-                    })
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_body(false, cx)
-                                    .when(!selectable, |title| {
-                                        title.text_color(cx.theme().muted_foreground)
-                                    })
-                                    .child(crate::widgets::fade_text(title.clone())),
-                            )
-                            .child(
-                                div()
-                                    .text_secondary(false, cx)
-                                    .child(crate::widgets::fade_text(line)),
-                            ),
-                    ),
+                    crate::material::menu_item_frame(false, crate::material::ItemFill::Hover, cx)
+                        .id(SharedString::from(format!(
+                            "move-project-machine-{}",
+                            machine.id
+                        )))
+                        .debug_selector({
+                            let id = machine.id.clone();
+                            move || format!("move-project-machine-{id}")
+                        })
+                        .role(gpui::Role::ListBoxOption)
+                        .aria_label(format!("{title}: {line}"))
+                        .aria_selected(selected)
+                        .w_full()
+                        .bg(fill)
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |dialog, _, window, cx| {
+                            dialog.choose(id.clone(), window, cx);
+                        }))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .text_body(false, cx)
+                                        .child(crate::widgets::fade_text(title.clone())),
+                                )
+                                .child(
+                                    div()
+                                        .text_secondary(false, cx)
+                                        .child(crate::widgets::fade_text(line)),
+                                ),
+                        ),
                 )
                 .into_any_element()
         });

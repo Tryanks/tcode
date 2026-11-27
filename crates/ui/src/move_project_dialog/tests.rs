@@ -132,11 +132,10 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
     crate::test_frames::draw_settled(cx);
 }
 
-/// A move goes to the machine that holds the project only once its preview
-/// names nothing in the way, with the place typed and the ignored files as
-/// the box was left.
+/// Move goes to the machine that holds the project with the place typed and
+/// the ignored files as the box was left, to the machine chosen last.
 #[gpui::test]
-fn a_move_is_sent_to_the_holder_only_when_nothing_stands_in_its_way(cx: &mut TestAppContext) {
+fn a_move_is_sent_to_the_holder_with_the_place_typed_and_the_box_as_left(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
     cx.update(|cx| {
@@ -220,19 +219,9 @@ fn a_move_is_sent_to_the_holder_only_when_nothing_stands_in_its_way(cx: &mut Tes
         "the machine that holds the project is not a destination"
     );
 
-    // A machine that takes no projects is listed and cannot be chosen.
-    click(cx, "move-project-machine-laptop");
-    assert!(holder.previews().is_empty());
-
-    // Something in the way: Move does nothing.
     click(cx, "move-project-machine-studio");
-    let [(id, machine)] = holder.previews().try_into().expect("one preview asked");
+    let [(_, machine)] = holder.previews().try_into().expect("one preview asked");
     assert_eq!(machine, "studio");
-    holder.answer_preview(id, preview(vec![MoveBlocker::ThreadsRunning(1)]), cx);
-    click(cx, "move-project-apply");
-    assert!(holder.commands().is_empty(), "a blocked move is not sent");
-
-    // Nothing in the way: Move sends the typed place and the box as left.
     click(cx, "move-project-machine-lab");
     let [(id, machine)] = holder.previews().try_into().expect("one preview asked");
     assert_eq!(machine, "lab");
