@@ -123,9 +123,7 @@ pub struct MovePart {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum MachineResponse {
-    Pong {
-        protocol_version: u32,
-    },
+    Pong,
     Control(serde_json::Value),
     Done,
     MovePreflight {

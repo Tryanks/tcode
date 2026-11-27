@@ -225,9 +225,7 @@ async fn machine_stream(
 
 fn pong() -> HostLine {
     HostLine::MachineReply {
-        result: Ok(MachineResponse::Pong {
-            protocol_version: PROTOCOL_VERSION,
-        }),
+        result: Ok(MachineResponse::Pong),
     }
 }
 
@@ -241,9 +239,7 @@ fn only_the_group_s_machines_open_machine_streams_and_they_open_nothing_else() {
 
     assert_eq!(
         b.call(&a.id(), MachineRequest::Ping),
-        Ok(MachineResponse::Pong {
-            protocol_version: PROTOCOL_VERSION
-        })
+        Ok(MachineResponse::Pong)
     );
     let outsider = iroh::SecretKey::generate().public().to_string();
     assert_eq!(code(b.call(&outsider, MachineRequest::Ping)), NOT_MEMBER);

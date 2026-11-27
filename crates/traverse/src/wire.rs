@@ -519,12 +519,10 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(HostLine::MachineReply {
-                result: Ok(tcode_protocol::MachineResponse::Pong {
-                    protocol_version: 33
-                })
+                result: Ok(tcode_protocol::MachineResponse::Pong)
             })
             .unwrap(),
-            serde_json::json!({"type":"machine_reply","result":{"Ok":{"type":"pong","content":{"protocol_version":33}}}})
+            serde_json::json!({"type":"machine_reply","result":{"Ok":{"type":"pong"}}})
         );
         assert!(valid_tunnel_target("::1", 80));
         assert!(!valid_tunnel_target("[::1]", 80));

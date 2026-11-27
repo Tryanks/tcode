@@ -87,11 +87,7 @@ impl AppState {
         }
         self.send_machine_work(Some(&peer.id), false, cx);
         match request {
-            MachineRequest::Ping => cx.spawn_background(async {
-                Ok(MachineResponse::Pong {
-                    protocol_version: tcode_protocol::PROTOCOL_VERSION,
-                })
-            }),
+            MachineRequest::Ping => cx.spawn_background(async { Ok(MachineResponse::Pong) }),
             MachineRequest::Control { caller, tool, args } => {
                 self.machine_control(peer, caller, tool, args, cx)
             }

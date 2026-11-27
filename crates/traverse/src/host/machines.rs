@@ -372,10 +372,9 @@ impl Shared {
                 continue;
             };
             let (reachable, protocol_ok) = match answer {
-                Ok(Ok(Ok(MachineResponse::Pong { protocol_version }))) => (
-                    true,
-                    Some(protocol_version == tcode_protocol::PROTOCOL_VERSION),
-                ),
+                // The other machine refuses a version that is not its own before it can
+                // answer, so an answer is a match.
+                Ok(Ok(Ok(MachineResponse::Pong))) => (true, Some(true)),
                 Ok(Ok(Err(refused))) if refused.code == PROTOCOL_MISMATCH => (true, Some(false)),
                 Ok(Ok(_)) => (true, None),
                 Ok(Err(_)) | Err(_) => (false, None),
