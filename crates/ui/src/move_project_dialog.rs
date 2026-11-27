@@ -3,6 +3,9 @@
 //! move would take, sends everything there and lets the project go only once
 //! the other machine has it; this client chooses, shows and can cancel.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use crate::overlay::{DialogActions, DialogButtons, OverlayExt as _};
 use crate::scroll::AutoscrollTarget as _;
 use crate::theme::ActiveTheme as _;
@@ -43,9 +46,32 @@ pub(crate) fn offers_move(store: &Entity<WorkspaceStore>, cx: &mut App) -> bool 
             .any(|machine| !machine.this_machine)
 }
 
+/// Where a move's line is drawn: the project's row in the sidebar has room
+/// for a few words, the progress dialog for the whole sentence.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LineForm {
+    Row,
+    Dialog,
+}
+
 /// How far a move is, in a line: the row under the project and the progress
-/// dialog say the same.
-pub(crate) fn status_line(status: &ProjectMoveStatus, machine: &str) -> String {
+/// dialog say the same, the row why a move waits in short.
+pub(crate) fn status_line(status: &ProjectMoveStatus, machine: &str, form: LineForm) -> String {
+    if form == LineForm::Row && status.phase == MovePhase::Paused {
+        return match &status.paused {
+            Some(MovePause::Unreachable) => {
+                crate::tr!("machines.move.paused_short.unreachable", machine = machine)
+            }
+            Some(MovePause::Refused) => {
+                crate::tr!("machines.move.paused_short.refused", machine = machine)
+            }
+            Some(MovePause::NoGroup) => crate::tr!("machines.move.paused_short.no_group"),
+            Some(MovePause::Version) => crate::tr!("machines.move.paused_short.version"),
+            Some(MovePause::NotMember) => crate::tr!("machines.move.paused_short.not_member"),
+            Some(MovePause::Failed { .. }) | None => crate::tr!("machines.move.status_paused_bare"),
+        }
+        .into_owned();
+    }
     match status.phase {
         MovePhase::Preparing => crate::tr!("machines.move.status_preparing", machine = machine),
         MovePhase::SendingCode | MovePhase::SendingThreads => crate::tr!(
@@ -730,6 +756,9 @@ struct MoveProgress {
     last: Option<ProjectMoveStatus>,
     /// Whether the move had ended when this view last drew.
     ended: bool,
+    /// A confirmation to cancel the move is open over this view: it closes
+    /// once the move it asks about has ended.
+    confirming: Rc<Cell<bool>>,
     error: Option<String>,
     _subscriptions: [gpui::Subscription; 2],
 }
@@ -764,6 +793,7 @@ pub(crate) fn open_progress(
             ],
             last: store.read(cx).project_move(&project_id).cloned(),
             ended: false,
+            confirming: Rc::default(),
             store,
             project_id,
             project_name,
@@ -794,8 +824,14 @@ impl MoveProgress {
             if let Err(error) = task.await {
                 let _ = this.update_in(cx, |progress, window, cx| {
                     progress.error = Some(
-                        crate::tr!("machines.move.refused.other", reason = error.message)
-                            .into_owned(),
+                        match error.code.as_str() {
+                            // The move ended before the cancel reached the host.
+                            "move_committed" | "no_project_move" => {
+                                crate::tr!("machines.move.already_ended")
+                            }
+                            _ => crate::tr!("machines.move.refused.other", reason = error.message),
+                        }
+                        .into_owned(),
                     );
                     cx.notify();
                     window.refresh();
@@ -842,8 +878,11 @@ impl MoveProgress {
             ok.into_owned(),
         );
         let progress = cx.entity();
+        let confirming = self.confirming.clone();
+        confirming.set(true);
         window.open_alert_dialog(cx, move |alert, _, _| {
             let progress = progress.clone();
+            let (confirmed, closed) = (confirming.clone(), confirming.clone());
             alert
                 .title(title.clone())
                 .description(description.clone())
@@ -854,7 +893,9 @@ impl MoveProgress {
                         .cancel_text(crate::tr!("machines.move.keep_moving"))
                         .show_cancel(true),
                 )
+                .on_close(move |_, _, _| closed.set(false))
                 .on_ok(move |_, window, cx| {
+                    confirmed.set(false);
                     progress.update(cx, |progress, cx| {
                         let task = progress.store.update(cx, |store, cx| {
                             store.cancel_project_move(progress.project_id.clone(), force, cx)
@@ -898,6 +939,10 @@ impl Render for MoveProgress {
             window.refresh();
         }
         self.ended = ended;
+        if ended && self.confirming.replace(false) {
+            // The confirmation is the topmost dialog, over this one.
+            window.defer(cx, |window, cx| window.close_dialog(cx));
+        }
         if let Some(outcome) = self
             .store
             .read(cx)
@@ -917,11 +962,21 @@ impl Render for MoveProgress {
             } else {
                 crate::tr!("machines.move.ended_cancelled")
             };
-            return div()
+            return v_flex()
+                .gap_3()
                 .py_2()
-                .text_body(false, cx)
-                .debug_selector(|| "move-project-status".into())
-                .child(line)
+                .child(
+                    div()
+                        .text_body(false, cx)
+                        .debug_selector(|| "move-project-status".into())
+                        .child(line),
+                )
+                .children(self.error.clone().map(|error| {
+                    div()
+                        .text_secondary(false, cx)
+                        .text_color(cx.theme().danger)
+                        .child(error)
+                }))
                 .into_any_element();
         }
         if status.is_some() {
@@ -952,7 +1007,7 @@ impl Render for MoveProgress {
                 div()
                     .text_body(false, cx)
                     .debug_selector(|| "move-project-status".into())
-                    .child(status_line(&status, &machine)),
+                    .child(status_line(&status, &machine, LineForm::Dialog)),
             )
             .child(status_bar("move-project-progress", &status, cx))
             .children(bytes.map(|bytes| div().text_secondary(false, cx).child(bytes)))

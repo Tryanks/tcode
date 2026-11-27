@@ -29,6 +29,9 @@ pub(super) struct ProjectMoves {
     watched: HashMap<String, usize>,
     /// How the watched moves that ended did, for the views showing them.
     outcomes: HashMap<String, ProjectMoveEnded>,
+    /// Drafts of a moving project: a new thread there was never written, so
+    /// none goes with the project.
+    drafts: HashSet<String>,
 }
 
 struct Departing {
@@ -137,6 +140,11 @@ impl WorkspaceStore {
         self.project_moves.outcomes.get(project_id)
     }
 
+    /// Whether `session_id` was a draft of a project that moved away.
+    pub(crate) fn moved_draft(&self, session_id: &str) -> bool {
+        self.project_moves.drafts.contains(session_id)
+    }
+
     /// What moving `project_id` to `machine` would take.
     pub(crate) fn project_move_preview(
         &self,
@@ -214,6 +222,20 @@ impl WorkspaceStore {
                 .any(|new| new.move_id == departing.status.move_id)
         });
         moves.list = list.to_vec();
+        let drafts: Vec<String> =
+            self.open_threads()
+                .into_iter()
+                .filter(|id| {
+                    self.session_status_for(Some(id), cx).is_some_and(|status| {
+                        status.draft
+                            && status.project_id.as_ref().is_some_and(|project| {
+                                list.iter().any(|m| &m.project_id == project)
+                            })
+                    })
+                })
+                .collect();
+        let moves = &mut self.project_moves;
+        moves.drafts.extend(drafts);
         let (sessions, projects) = &self.index_replica;
         for status in &moves.list {
             let Some(project) = projects.iter().find(|p| p.id == status.project_id) else {

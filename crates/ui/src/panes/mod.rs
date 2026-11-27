@@ -643,6 +643,8 @@ pub(crate) struct MovedAway {
     pub machine: String,
     /// Opening the machine in this window, when this client has it saved.
     pub open: Option<(String, OpenMachine)>,
+    /// What went was the pane's draft's project, not a thread.
+    pub project: bool,
 }
 
 impl ThreadPanel {
@@ -715,7 +717,11 @@ impl ThreadPanel {
                     .child(
                         crate::material::empty_state(
                             Icon::new(IconName::ArrowRightLeft),
-                            crate::tr!("machines.move.thread_moved", machine = moved.machine),
+                            if moved.project {
+                                crate::tr!("machines.move.project_moved", machine = moved.machine)
+                            } else {
+                                crate::tr!("machines.move.thread_moved", machine = moved.machine)
+                            },
                             "",
                             cx,
                         )

@@ -151,6 +151,62 @@ impl AppShell {
         );
     }
 
+    /// A pane whose draft `store` closed because its project went to
+    /// `machine`: no thread went with it, so the pane says where the project
+    /// is, with the way to that machine.
+    pub(super) fn pane_draft_moved(
+        &mut self,
+        pane: &Entity<ThreadPanel>,
+        machine: String,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, open) = self.machine_opener(&machine, cx);
+        pane.update(cx, |pane, cx| {
+            pane.show_moved_away(
+                MovedAway {
+                    machine: name,
+                    open,
+                    project: true,
+                },
+                cx,
+            )
+        });
+    }
+
+    /// What the group calls `machine`, and opening it in this window: its
+    /// section where the window shows it, else the machine this client saved.
+    fn machine_opener(
+        &mut self,
+        machine: &str,
+        cx: &mut Context<Self>,
+    ) -> (String, Option<(String, crate::panes::OpenMachine)>) {
+        let stores: Vec<_> = self.links.iter().map(|link| link.store.clone()).collect();
+        let name = crate::machines::machine_in_groups(&stores, machine, cx).name;
+        let label = crate::tr!("machines.move.open_machine", machine = name.clone()).into_owned();
+        let shell = cx.entity().downgrade();
+        if let Some(host) = self.machine_host(machine, cx) {
+            let open: crate::panes::OpenMachine = Rc::new(move |_, cx| {
+                let _ = shell.update(cx, |shell, cx| shell.show_host_section(&host, cx));
+            });
+            return (name, Some((label, open)));
+        }
+        let saved = self
+            .client
+            .load_hosts()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|saved| saved.host_id == machine && saved.space_id.is_none());
+        let open = saved.map(|saved| {
+            let open: crate::panes::OpenMachine = Rc::new(move |window, cx| {
+                let saved = saved.clone();
+                let _ = shell.update(cx, |shell, cx| shell.open_paired(saved, window, cx));
+            });
+            (label, open)
+        });
+        (name, open)
+    }
+
     /// `store` no longer has `thread_id`: ask it where the thread went, and
     /// follow it there; `missing` runs when it went nowhere.
     pub(super) fn find_moved_thread(
@@ -212,24 +268,7 @@ impl AppShell {
             }
             return;
         }
-        let stores: Vec<_> = self.links.iter().map(|link| link.store.clone()).collect();
-        let machine = crate::machines::machine_in_groups(&stores, &target.machine, cx).name;
-        let saved = self
-            .client
-            .load_hosts()
-            .unwrap_or_default()
-            .into_iter()
-            .find(|saved| saved.host_id == target.machine && saved.space_id.is_none());
-        let shell = cx.entity().downgrade();
-        let open = saved.map(|saved| {
-            let label =
-                crate::tr!("machines.move.open_machine", machine = machine.clone()).into_owned();
-            let open: crate::panes::OpenMachine = Rc::new(move |window, cx| {
-                let saved = saved.clone();
-                let _ = shell.update(cx, |shell, cx| shell.open_paired(saved, window, cx));
-            });
-            (label, open)
-        });
+        let (machine, open) = self.machine_opener(&target.machine, cx);
         // A link followed from a thread being read leaves that thread where
         // it is: the window says where the other one went instead.
         let pane = pane.or_else(|| {
@@ -241,7 +280,14 @@ impl AppShell {
         });
         match pane {
             Some(pane) => pane.update(cx, |pane, cx| {
-                pane.show_moved_away(MovedAway { machine, open }, cx)
+                pane.show_moved_away(
+                    MovedAway {
+                        machine,
+                        open,
+                        project: false,
+                    },
+                    cx,
+                )
             }),
             None => {
                 let text = crate::tr!("machines.move.thread_moved", machine = machine).into_owned();

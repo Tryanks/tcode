@@ -1380,7 +1380,11 @@ impl AppShell {
         // A pane whose thread went with its project follows it.
         for (pane, session_id, machine) in moved {
             if let Some(machine) = machine {
-                self.pane_thread_moved(&pane, &session_id, machine, window, cx);
+                if store.read(cx).moved_draft(&session_id) {
+                    self.pane_draft_moved(&pane, machine, window, cx);
+                } else {
+                    self.pane_thread_moved(&pane, &session_id, machine, window, cx);
+                }
             }
         }
         let mut closed: Vec<_> = closed.into_iter().map(|(pane, _, _)| pane).collect();
