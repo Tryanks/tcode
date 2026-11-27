@@ -3510,6 +3510,7 @@ machines:
       terminals: "%{count} terminals are open."
       terminals_one: "1 terminal is open."
       merge: "A merge or rebase is unfinished in %{path}."
+      checkout_missing: "The thread “%{thread}” works in %{path}, which is gone or is not part of this project's repository, so the move cannot take it along."
       refuses: "%{machine} does not take projects from the group now."
       unreachable: "%{machine} cannot be reached."
       version: "%{machine} runs a different Tcode version."

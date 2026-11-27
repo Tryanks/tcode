@@ -189,6 +189,13 @@ pub enum MoveBlocker {
     MergeInProgress {
         path: String,
     },
+    /// A thread works in `path`, which the move would not carry: a worktree
+    /// that is gone or no longer a checkout of this project's repository, or
+    /// a place outside the project. `thread` is its title.
+    MissingCheckout {
+        thread: String,
+        path: String,
+    },
     TargetRefuses,
     TargetUnreachable,
     TargetVersion,

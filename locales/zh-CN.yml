@@ -3503,6 +3503,7 @@ machines:
       terminals: "%{count} 个终端处于打开状态。"
       terminals_one: "1 个终端处于打开状态。"
       merge: "%{path} 中有未完成的合并或变基。"
+      checkout_missing: "线程“%{thread}”在 %{path} 中工作，该位置已不存在或不属于这个项目的仓库，迁移无法带上它。"
       refuses: "%{machine} 现在不接受组内移入的项目。"
       unreachable: "无法连接 %{machine}。"
       version: "%{machine} 运行的 Tcode 版本不同。"

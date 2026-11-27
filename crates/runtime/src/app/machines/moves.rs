@@ -863,8 +863,9 @@ fn blocked(blockers: Vec<MoveBlocker>) -> Result<(), ProtocolError> {
 }
 
 /// What stands in the way of moving the code at `root`: a root inside a
-/// larger repository, or checkouts of the project that are mid-merge or
-/// mid-rebase, or have unmerged entries.
+/// larger repository, a thread working where the move would not carry it, or
+/// checkouts of the project that are mid-merge or mid-rebase, or have unmerged
+/// entries.
 fn code_blockers(
     root: &std::path::Path,
     threads: &[SessionMeta],
@@ -872,10 +873,16 @@ fn code_blockers(
     if disk::inside_larger_repository(root)? {
         return Ok(vec![MoveBlocker::InsideRepository]);
     }
+    let mut blockers: Vec<MoveBlocker> = disk::uncarried_paths(root, threads)
+        .into_iter()
+        .map(|(thread, path)| MoveBlocker::MissingCheckout {
+            thread,
+            path: path.display().to_string(),
+        })
+        .collect();
     if !disk::is_git_project(root) {
-        return Ok(Vec::new());
+        return Ok(blockers);
     }
-    let mut blockers = Vec::new();
     for (_, path) in disk::checkouts(root, threads) {
         if disk::git::interrupted(&path)? {
             blockers.push(MoveBlocker::MergeInProgress {

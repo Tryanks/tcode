@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use agent::{AgentEvent, ProviderKind, TurnStatus};
 use tcode_core::project::{Project, SessionMeta, WorktreeInfo};
 use tcode_protocol::{
-    Command, CommandResponse, GroupAction, MachineRequest, MachineResponse, MovePart, MovePause,
-    MovePhase, ProjectMoveStatus, ProtocolError, Query, QueryResponse, ServerEvent, Subscription,
-    Topic,
+    Command, CommandResponse, GroupAction, MachineRequest, MachineResponse, MoveBlocker, MovePart,
+    MovePause, MovePhase, ProjectMoveStatus, ProtocolError, Query, QueryResponse, ServerEvent,
+    Subscription, Topic,
 };
 use tcode_services::store::SessionStore;
 
@@ -493,4 +493,29 @@ fn a_repeated_commit_makes_nothing_twice_and_a_known_thread_is_refused() {
             .join("another")
             .exists()
     );
+}
+
+/// A thread whose worktree is gone would have nowhere to continue on the
+/// laptop: the move is refused naming the thread and the path before the
+/// laptop is asked for anything, and the project stays unfrozen.
+#[test]
+fn a_thread_whose_worktree_is_gone_blocks_the_move_before_anything_is_sent() {
+    let (desk_dir, laptop_dir) = (TestDir::new("desk"), TestDir::new("laptop"));
+    let seeded = seed(&desk_dir.0, 1024);
+    let (desk, laptop) = desk_and_laptop(&desk_dir, &laptop_dir);
+    std::fs::remove_dir_all(&seeded.worktree).unwrap();
+
+    let refused = move_to(&desk, &laptop, &laptop_dir.0.join("app")).expect_err("the move began");
+
+    assert_eq!(refused.code, "move_blocked");
+    assert_eq!(
+        refused.message,
+        serde_json::to_string(&[MoveBlocker::MissingCheckout {
+            thread: "In a worktree".into(),
+            path: seeded.worktree.display().to_string(),
+        }])
+        .unwrap()
+    );
+    assert!(!laptop_dir.0.join("store").join("moves").exists());
+    desk.command(rename(&seeded.threads[0].id)).unwrap();
 }

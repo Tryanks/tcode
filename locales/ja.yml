@@ -3510,6 +3510,7 @@ machines:
       terminals: "%{count} 個のターミナルが開いています。"
       terminals_one: "1 個のターミナルが開いています。"
       merge: "%{path} でマージまたはリベースが完了していません。"
+      checkout_missing: "スレッド「%{thread}」は %{path} で作業していますが、そこは存在しないか、このプロジェクトのリポジトリの一部ではないため、移動では持っていけません。"
       refuses: "%{machine} は現在グループからのプロジェクトを受け入れていません。"
       unreachable: "%{machine} に接続できません。"
       version: "%{machine} は別のバージョンの Tcode を実行しています。"

@@ -687,6 +687,13 @@ fn blocker_sentence(blocker: &MoveBlocker, machine: &str) -> String {
         MoveBlocker::MergeInProgress { path } => {
             crate::tr!("machines.move.blocker.merge", path = path)
         }
+        MoveBlocker::MissingCheckout { thread, path } => {
+            crate::tr!(
+                "machines.move.blocker.checkout_missing",
+                thread = thread,
+                path = path
+            )
+        }
         MoveBlocker::TargetRefuses => {
             crate::tr!("machines.move.blocker.refuses", machine = machine)
         }

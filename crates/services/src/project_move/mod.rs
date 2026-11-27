@@ -207,6 +207,33 @@ pub fn checkouts(root: &Path, threads: &[SessionMeta]) -> Vec<(CheckoutKind, Pat
     checkouts
 }
 
+/// Where `threads` work that a move would not carry, as the thread's title and
+/// the path: a worktree that is gone or no longer a checkout of the project's
+/// repository, or any other place outside the project. Such a thread has
+/// nowhere to continue on the other machine.
+pub fn uncarried_paths(root: &Path, threads: &[SessionMeta]) -> Vec<(String, PathBuf)> {
+    let carried: Vec<PathBuf> = checkouts(root, threads)
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect();
+    let mut lost = Vec::new();
+    for meta in threads {
+        let mut paths = vec![&meta.cwd];
+        paths.extend(meta.worktree.iter().map(|info| &info.root_project_path));
+        for owned in &meta.other_worktrees {
+            paths.push(&owned.path);
+            paths.push(&owned.info.root_project_path);
+        }
+        for path in paths {
+            let entry = (meta.title.clone(), path.clone());
+            if !carried.iter().any(|from| path.starts_with(from)) && !lost.contains(&entry) {
+                lost.push(entry);
+            }
+        }
+    }
+    lost
+}
+
 /// Whether `root` goes as a Git repository: it is the top level of one.
 pub fn is_git_project(root: &Path) -> bool {
     git::is_checkout_root(root)
@@ -745,7 +772,7 @@ fn place(
         if &meta.id != id {
             return Err(format!("thread {id} carries the meta of {}", meta.id));
         }
-        let meta = arrived_meta(meta, &paths, arrival);
+        let meta = arrived_meta(meta, &paths, arrival)?;
         for (from, to) in [
             (thread.join("attachments"), attachment_dir(&data_dir, id)),
             (
@@ -790,32 +817,32 @@ fn place(
 /// A thread's meta as it arrives: in the new project, its paths where they
 /// are here, and its next turn starting a fresh session of its harness from
 /// the conversation so far, as a move to another directory does when the
-/// native session cannot go along — no native session travels.
-fn arrived_meta(mut meta: SessionMeta, paths: &PathMap, arrival: &Arrival<'_>) -> SessionMeta {
-    let root = arrival.root.to_path_buf();
+/// native session cannot go along — no native session travels. A path the
+/// move did not carry fails the arrival: [`uncarried_paths`] found it before
+/// the move began.
+fn arrived_meta(
+    mut meta: SessionMeta,
+    paths: &PathMap,
+    arrival: &Arrival<'_>,
+) -> Result<SessionMeta, String> {
+    let id = meta.id.clone();
+    let place = |path: &Path| {
+        paths.map(path).ok_or_else(|| {
+            format!(
+                "thread {id} works in {}, which the move did not carry",
+                path.display()
+            )
+        })
+    };
     let source_cwd = meta.cwd.clone();
-    let cwd = paths.map(&meta.cwd);
-    if cwd.is_none() {
-        // A worktree that did not go along: the thread continues at the root.
-        meta.worktree = None;
-    }
-    meta.cwd = cwd.unwrap_or_else(|| root.clone());
+    meta.cwd = place(&source_cwd)?;
     if let Some(worktree) = &mut meta.worktree {
-        worktree.root_project_path = paths
-            .map(&worktree.root_project_path)
-            .unwrap_or_else(|| root.clone());
+        worktree.root_project_path = place(&worktree.root_project_path)?;
     }
-    meta.other_worktrees
-        .retain_mut(|owned| match paths.map(&owned.path) {
-            Some(path) => {
-                owned.path = path;
-                owned.info.root_project_path = paths
-                    .map(&owned.info.root_project_path)
-                    .unwrap_or_else(|| root.clone());
-                true
-            }
-            _ => false,
-        });
+    for owned in &mut meta.other_worktrees {
+        owned.path = place(&owned.path)?;
+        owned.info.root_project_path = place(&owned.info.root_project_path)?;
+    }
     meta.project_id = Some(arrival.project.id.clone());
     // The transcript the next turn relays names paths where the thread last
     // had a native session, on the machine it left.
@@ -824,5 +851,5 @@ fn arrived_meta(mut meta: SessionMeta, paths: &PathMap, arrival: &Arrival<'_>) -
     meta.pending_fork = None;
     meta.session_transfer_from = None;
     meta.profile_id = (arrival.profile)(&meta);
-    meta
+    Ok(meta)
 }
