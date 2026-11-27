@@ -7,6 +7,7 @@ use super::*;
 use crate::panes::MovedAway;
 use crate::store::{HostKey, ProjectMoveEnded, ThreadKey};
 use crate::toast::{ToastAction, ToastKind};
+use tcode_protocol::ProtocolError;
 
 /// A thread to show once the machine it moved to lists it.
 pub(super) struct PendingMoved {
@@ -208,14 +209,15 @@ impl AppShell {
     }
 
     /// `store` no longer has `thread_id`: ask it where the thread went, and
-    /// follow it there; `missing` runs when it went nowhere, and the host's
-    /// own words are shown when it could not say.
+    /// follow it there; `unplaced` runs when it went nowhere (`None`) or the
+    /// host could not say, with its error: the caller knows whether the user
+    /// asked for the thread.
     pub(super) fn find_moved_thread(
         &mut self,
         store: &Entity<WorkspaceStore>,
         thread_id: String,
         position: Option<u64>,
-        missing: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        unplaced: impl FnOnce(Option<ProtocolError>, &mut Window, &mut Context<Self>) + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -234,10 +236,8 @@ impl AppShell {
                     window,
                     cx,
                 ),
-                Ok(None) => missing(shell, window, cx),
-                Err(error) => {
-                    window.push_notification(Notification::warning(error.message), cx);
-                }
+                Ok(None) => unplaced(None, window, cx),
+                Err(error) => unplaced(Some(error), window, cx),
             });
         })
         .detach();
