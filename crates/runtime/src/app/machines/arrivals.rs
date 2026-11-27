@@ -132,12 +132,14 @@ impl AppState {
                     return now(Ok(MachineResponse::MoveState(MoveState::Staging)));
                 }
                 cx.unblock(move || {
-                    Ok(MachineResponse::MoveState(
-                        match disk::staged(&data_dir, &move_id) {
-                            Some(_) => MoveState::Staging,
-                            None => MoveState::Unknown,
-                        },
-                    ))
+                    disk::staged(&data_dir, &move_id)
+                        .map(|staged| {
+                            MachineResponse::MoveState(match staged {
+                                Some(_) => MoveState::Staging,
+                                None => MoveState::Unknown,
+                            })
+                        })
+                        .map_err(io_refusal)
                 })
             }
             MachineRequest::MoveCommit { move_id } => self.commit_arrival(peer, move_id, cx),
@@ -212,11 +214,15 @@ impl AppState {
             )));
         }
         let data_dir = self.store.root().clone();
-        let Some(staged) = disk::staged(&data_dir, &move_id) else {
-            return now(Err(refusal(
-                "move_not_staged",
-                "Nothing of this move is staged here.",
-            )));
+        let staged = match disk::staged(&data_dir, &move_id) {
+            Ok(Some(staged)) => staged,
+            Ok(None) => {
+                return now(Err(refusal(
+                    "move_not_staged",
+                    "Nothing of this move is staged here.",
+                )));
+            }
+            Err(error) => return now(Err(io_refusal(error))),
         };
         let root = match self
             .arriving_threads(&staged.thread_ids)

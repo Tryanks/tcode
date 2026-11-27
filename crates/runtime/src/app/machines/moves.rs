@@ -394,7 +394,7 @@ impl AppState {
                 let (root, threads) = (project.root.clone(), threads.clone());
                 host.unblock(move || code_blockers(&root, &threads)).await
             };
-            blocked(checkouts)?;
+            blocked(checkouts.map_err(|message| refusal("move_preview_failed", message))?)?;
             let thread_ids: Vec<String> = threads.iter().map(|meta| meta.id.clone()).collect();
             match link
                 .call(
@@ -845,27 +845,32 @@ fn blocked(blockers: Vec<MoveBlocker>) -> Result<(), ProtocolError> {
     }
     Err(refusal(
         "move_blocked",
-        serde_json::to_string(&blockers).unwrap_or_default(),
+        serde_json::to_string(&blockers).expect("move blockers serialize"),
     ))
 }
 
 /// What stands in the way of moving the code at `root`: a root inside a
 /// larger repository, or checkouts of the project that are mid-merge or
 /// mid-rebase, or have unmerged entries.
-fn code_blockers(root: &std::path::Path, threads: &[SessionMeta]) -> Vec<MoveBlocker> {
-    if disk::inside_larger_repository(root) {
-        return vec![MoveBlocker::InsideRepository];
+fn code_blockers(
+    root: &std::path::Path,
+    threads: &[SessionMeta],
+) -> Result<Vec<MoveBlocker>, String> {
+    if disk::inside_larger_repository(root)? {
+        return Ok(vec![MoveBlocker::InsideRepository]);
     }
     if !disk::is_git_project(root) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    disk::checkouts(root, threads)
-        .into_iter()
-        .filter(|(_, path)| disk::git::interrupted(path).unwrap_or(false))
-        .map(|(_, path)| MoveBlocker::MergeInProgress {
-            path: path.display().to_string(),
-        })
-        .collect()
+    let mut blockers = Vec::new();
+    for (_, path) in disk::checkouts(root, threads) {
+        if disk::git::interrupted(&path)? {
+            blockers.push(MoveBlocker::MergeInProgress {
+                path: path.display().to_string(),
+            });
+        }
+    }
+    Ok(blockers)
 }
 
 #[derive(Default)]
@@ -884,8 +889,8 @@ struct CodePreview {
 fn code_preview(root: &std::path::Path, threads: &[SessionMeta]) -> Result<CodePreview, String> {
     if !disk::is_git_project(root) {
         return Ok(CodePreview {
-            bytes: directory_bytes(root),
-            blockers: code_blockers(root, threads),
+            bytes: directory_bytes(root).map_err(|error| format!("{}: {error}", root.display()))?,
+            blockers: code_blockers(root, threads)?,
             ..CodePreview::default()
         });
     }
@@ -894,7 +899,7 @@ fn code_preview(root: &std::path::Path, threads: &[SessionMeta]) -> Result<CodeP
         git: true,
         branches: disk::git::branch_count(root)?,
         bytes: disk::git::object_bytes(root)?,
-        blockers: code_blockers(root, threads),
+        blockers: code_blockers(root, threads)?,
         ..CodePreview::default()
     };
     for (_, path) in &checkouts {
@@ -913,24 +918,21 @@ fn code_preview(root: &std::path::Path, threads: &[SessionMeta]) -> Result<CodeP
     Ok(preview)
 }
 
-fn directory_bytes(root: &std::path::Path) -> u64 {
+fn directory_bytes(root: &std::path::Path) -> std::io::Result<u64> {
     let mut total = 0;
     let mut pending = vec![root.to_path_buf()];
     while let Some(dir) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            match entry.file_type() {
-                Ok(kind) if kind.is_dir() => pending.push(entry.path()),
-                Ok(kind) if kind.is_file() => {
-                    total += entry.metadata().map_or(0, |meta| meta.len());
-                }
-                _ => {}
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                total += entry.metadata()?.len();
             }
         }
     }
-    total
+    Ok(total)
 }
 
 /// Tell the other machine of `journal`'s move to discard what it staged;

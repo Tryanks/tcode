@@ -215,8 +215,8 @@ pub fn is_git_project(root: &Path) -> bool {
 /// Whether `root` lies inside a Git work tree without being its top level:
 /// its history and its threads' worktrees belong to a repository larger than
 /// the project, which a move does not take.
-pub fn inside_larger_repository(root: &Path) -> bool {
-    crate::git::is_git_repo(root).unwrap_or(false) && !git::is_checkout_root(root)
+pub fn inside_larger_repository(root: &Path) -> Result<bool, String> {
+    Ok(crate::git::is_git_repo(root)? && !git::is_checkout_root(root))
 }
 
 /// The files `.worktreeinclude` selects in each checkout, by checkout.
@@ -462,12 +462,17 @@ pub fn stage_begin(
     Ok(held)
 }
 
-/// What move `move_id` staged, if it is staging here.
-pub fn staged(data_dir: &Path, move_id: &str) -> Option<Staged> {
+/// What move `move_id` staged, if it is staging here; what is staged and
+/// cannot be read is an error.
+pub fn staged(data_dir: &Path, move_id: &str) -> io::Result<Option<Staged>> {
     if !safe_name(move_id) {
-        return None;
+        return Ok(None);
     }
-    read_json(&staging_dir(data_dir, move_id).join(BEGIN_FILE)).ok()
+    match read_json(&staging_dir(data_dir, move_id).join(BEGIN_FILE)) {
+        Ok(staged) => Ok(Some(staged)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// Append `bytes` to the staged `part` when they start at the bytes it holds,
@@ -480,7 +485,7 @@ pub fn stage_chunk(
     offset: u64,
     bytes: &[u8],
 ) -> io::Result<u64> {
-    let staged = staged(data_dir, move_id).ok_or_else(|| {
+    let staged = staged(data_dir, move_id)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             format!("move {move_id} is not staging here"),
@@ -544,24 +549,42 @@ struct Made {
 }
 
 impl Made {
-    fn undo(self) {
-        for dir in self.dirs {
-            let _ = fs::remove_dir_all(dir);
+    /// Take back what was made; what could not be, each as a sentence.
+    fn undo(self) -> Vec<String> {
+        let mut left = Vec::new();
+        let mut remove = |result: io::Result<()>, path: &Path| {
+            if let Err(error) = result
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                left.push(format!("{}: {error}", path.display()));
+            }
+        };
+        for dir in &self.dirs {
+            remove(fs::remove_dir_all(dir), dir);
         }
-        if let Some((root, created)) = self.root {
-            if created {
-                let _ = fs::remove_dir_all(&root);
-            } else if let Ok(entries) = fs::read_dir(&root) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let _ = if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                        fs::remove_dir_all(path)
-                    } else {
-                        fs::remove_file(path)
-                    };
+        if let Some((root, created)) = &self.root {
+            if *created {
+                remove(fs::remove_dir_all(root), root);
+            } else {
+                match fs::read_dir(root) {
+                    Ok(entries) => {
+                        for entry in entries {
+                            let result = entry.and_then(|entry| {
+                                let path = entry.path();
+                                if entry.file_type()?.is_dir() {
+                                    fs::remove_dir_all(path)
+                                } else {
+                                    fs::remove_file(path)
+                                }
+                            });
+                            remove(result, root);
+                        }
+                    }
+                    Err(error) => remove(Err(error), root),
                 }
             }
         }
+        left
     }
 }
 
@@ -576,6 +599,7 @@ pub fn arrive(store: &SessionStore, arrival: &Arrival<'_>) -> Result<Vec<Session
     let data_dir = store.root().clone();
     let dir = staging_dir(&data_dir, arrival.move_id);
     let staged = staged(&data_dir, arrival.move_id)
+        .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("move {} is not staging here", arrival.move_id))?;
     for part in &staged.parts {
         let (size, sha) = sha256_file(&dir.join(&part.name)).map_err(|error| error.to_string())?;
@@ -599,9 +623,15 @@ pub fn arrive(store: &SessionStore, arrival: &Arrival<'_>) -> Result<Vec<Session
             Ok(metas)
         }
         Err(error) => {
-            made.undo();
-            let _ = remove_dir(&dir.join("threads"));
-            Err(error)
+            let mut left = made.undo();
+            if let Err(cleanup) = remove_dir(&dir.join("threads")) {
+                left.push(format!("{}: {cleanup}", dir.join("threads").display()));
+            }
+            Err(if left.is_empty() {
+                error
+            } else {
+                format!("{error}; and could not take back {}", left.join(", "))
+            })
         }
     }
 }
