@@ -440,6 +440,9 @@ The dialog **Move “‹project›” to a machine** has these parts:
   - **‹n› threads have queued messages.**
   - **‹n› terminals are open.**
   - **A merge or rebase is unfinished in ‹path›.**
+  - **The thread “‹thread›” works in ‹path›, which is gone or is not part of
+    this project's repository, so the move cannot take it along.** A thread
+    is never moved to some other folder in its place.
   - **‹machine› does not take projects from the group now.**
   - **‹machine› cannot be reached.**
   - **‹machine› runs a different Tcode version.**
@@ -489,13 +492,22 @@ replaced by **Continue here anyway**, which asks **Continue with ‹project›
 here?** and warns: **If ‹machine› did finish, the project will exist on both
 machines.**
 
-When the move ends and its progress dialog is open, the dialog says how:
+The machine holding the project says how each move it ran ended, so a window
+that was away when a move ended still shows how. When the move ends and its
+progress dialog is open, the dialog says how:
 **Moved to ‹machine›.**, **The move was cancelled.** or, after **Continue here
 anyway**, **Continuing here. If ‹machine› finished, the project is on both
 machines.** With no such dialog open, a notice says **‹project› moved to
 ‹machine›**, with **Open** where the window has that machine open (a browser
 page shows one machine and has no **Open**), or **Move of ‹project› was
-cancelled**. A cancel you asked for in this window gives no notice.
+cancelled**.
+
+What a move could not clear away afterwards, on either machine (its parts, its
+temporary refs in the repository, what the other machine received), is
+reported as **A project move left something Tcode could not remove: ‹what and
+where›**. If the machine cannot read its own records of moves when it starts,
+it says so as for any file of its own it cannot read, and starts or takes no
+move until it can.
 
 What arrives on the other machine:
 
