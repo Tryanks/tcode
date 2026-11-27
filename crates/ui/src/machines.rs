@@ -6,7 +6,7 @@
 
 use gpui::{App, Context, Entity, SharedString, Subscription};
 use tcode_core::control::{RemoteChild, RemoteChildOp, RemoteChildState};
-use tcode_core::settlement::{AgentExecution, AgentReport};
+use tcode_core::settlement::AgentExecution;
 
 use crate::store::{HostKey, TopicKind, WorkspaceStore};
 
@@ -240,31 +240,6 @@ pub(crate) fn not_open(machine: &str) -> SharedString {
         .into()
 }
 
-/// How thread `id` runs, as its own machine's store reports it. A thread
-/// started from another machine is a root thread there, which the host
-/// reports no agent status for, so this reads the thread's own activity.
-/// `None` where the store does not know the thread.
-pub(crate) fn execution(store: &WorkspaceStore, id: &str) -> Option<AgentExecution> {
-    let meta = store.thread_meta(id)?;
-    let activity = store.activity(id);
-    let has = |test: fn(&tcode_protocol::SessionActivity) -> bool| activity.is_some_and(test);
-    Some(
-        if has(|activity| activity.waiting_for_approval || activity.waiting_for_input) {
-            AgentExecution::Waiting
-        } else if has(|activity| activity.working) {
-            AgentExecution::Working
-        } else if has(|activity| activity.background.tasks > 0 || activity.background.agents > 0) {
-            AgentExecution::Background
-        } else if meta.cancelled_at.is_some() {
-            AgentExecution::Cancelled
-        } else if has(|activity| activity.failed) || meta.report() == AgentReport::Failed {
-            AgentExecution::Failed
-        } else {
-            AgentExecution::Finished
-        },
-    )
-}
-
 /// How a thread a lead started on another machine stands, in a word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Standing {
@@ -283,9 +258,9 @@ pub(crate) fn standing(child: &RemoteChild, machine: &Machine, cx: &App) -> Stan
         && let Some(execution) = machine
             .store
             .as_ref()
-            .and_then(|store| execution(store.read(cx), &child.thread_id))
+            .and_then(|store| store.read(cx).agent_status(&child.thread_id))
     {
-        return Standing::Execution(execution);
+        return Standing::Execution(execution.execution);
     }
     match child.state {
         RemoteChildState::Running if !machine.connected => Standing::Unreachable,

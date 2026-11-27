@@ -111,8 +111,46 @@ fn an_agent_elsewhere_stands_as_its_machine_says_and_out_of_reach_once_unlinked(
         )
     };
     send_events(&hosts[&key_a].host, vec![index(vec![lead])]);
-    // Its own machine has it at rest: its turn ended.
-    send_events(&hosts[&key_b].host, vec![index(vec![thread("agent")])]);
+    // Its own machine has it at rest: its turn ended, and says so as the host
+    // does for a thread with a lead.
+    let at_rest = |execution| {
+        let mut summary = tcode_protocol::IndexSummary::default();
+        summary.activity.insert(
+            "agent".into(),
+            tcode_protocol::SessionActivity {
+                agent: Some(tcode_protocol::AgentStatus {
+                    execution,
+                    delivery: tcode_core::settlement::AgentDelivery::Running,
+                    report: tcode_core::settlement::AgentReport::Expected,
+                    run_started_at: None,
+                    run_completed_at: None,
+                }),
+                working: false,
+                turn_running: false,
+                background: Default::default(),
+                unsettled: 0,
+                wakes: Default::default(),
+                waiting_for_approval: false,
+                waiting_for_input: false,
+                asking: Vec::new(),
+                settle_blocked: false,
+                failed: false,
+                unread: false,
+                last_activity_at: None,
+                fork: tcode_protocol::ForkAvailability::Available,
+                latest_activity: None,
+            },
+        );
+        (
+            Topic::Index,
+            ServerEvent::IndexSnapshot(IndexSnapshot {
+                summary,
+                sessions: vec![thread("agent")],
+                projects: Vec::new(),
+            }),
+        )
+    };
+    send_events(&hosts[&key_b].host, vec![at_rest(AgentExecution::Finished)]);
     serve_status(&hosts[&key_a].host, "lead", false);
     send_events(
         &hosts[&key_a].host,
@@ -158,6 +196,22 @@ fn an_agent_elsewhere_stands_as_its_machine_says_and_out_of_reach_once_unlinked(
     assert!(
         cx.debug_bounds(format!("thread-card-notes-{START}").leak())
             .is_none()
+    );
+
+    // Its turn is interrupted on its machine, which the lead's record cannot
+    // tell from running.
+    send_events(
+        &hosts[&key_b].host,
+        vec![at_rest(AgentExecution::Interrupted)],
+    );
+    cx.run_until_parked();
+    crate::test_frames::draw_settled(cx);
+    assert_eq!(
+        standing(cx),
+        [(
+            "agent@host-b".to_owned(),
+            Some(AgentState::Execution(AgentExecution::Interrupted))
+        )]
     );
 
     hosts[&key_b]
