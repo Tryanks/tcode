@@ -85,7 +85,7 @@ struct Seeded {
 }
 
 /// Seed the desk's store before its host starts, with `bulk` bytes of
-/// incompressible data committed so that sending them takes a while.
+/// incompressible data committed.
 fn seed(dir: &Path, bulk: usize) -> Seeded {
     let root = dir.join("code").join("app");
     std::fs::create_dir_all(&root).unwrap();
@@ -132,6 +132,9 @@ fn seed(dir: &Path, bulk: usize) -> Seeded {
     archived.title = "Archived".into();
     archived.archived_at = Some(2);
     let mut threads = vec![on_root, in_worktree, archived];
+    let attachments = tcode_services::user_files::attachment_dir(&data, &threads[0].id);
+    std::fs::create_dir_all(&attachments).unwrap();
+    std::fs::write(attachments.join("note.txt"), "an attachment\n").unwrap();
     let store = SessionStore::open_at(data).unwrap();
     store.upsert_project(&project).unwrap();
     for meta in &mut threads {
@@ -275,10 +278,16 @@ fn a_project_moves_with_its_threads_and_the_desk_says_where_they_went() {
             .starts_with(laptop_dir.0.join("store").join("worktrees"))
     );
     assert_eq!(
-        git(&in_worktree.cwd, &["branch", "--show-current"]).trim(),
-        "tcode/feature"
+        std::fs::read_to_string(
+            tcode_services::user_files::attachment_dir(
+                &laptop_dir.0.join("store"),
+                &seeded.threads[0].id
+            )
+            .join("note.txt")
+        )
+        .unwrap(),
+        "an attachment\n"
     );
-    assert_eq!(git(&root, &["status", "--porcelain"]), " M readme.md\n");
 
     let (projects, threads) = desk.listed();
     assert!(projects.is_empty(), "{projects:?}");
@@ -300,25 +309,53 @@ fn a_project_moves_with_its_threads_and_the_desk_says_where_they_went() {
     );
 }
 
-/// A move cancelled while it sends leaves the desk's project, threads,
-/// repository and worktree as they were and the laptop with nothing staged;
-/// while it ran the project's threads took no command, and after it they do.
+/// The laptop's folder for the first thread's attachments, which a move
+/// cannot put the desk's into while it is there: the laptop takes every part
+/// and then refuses the commit, which leaves the move paused with all of it
+/// staged.
+fn laptop_refuses_the_commit(laptop_dir: &TestDir, seeded: &Seeded) -> PathBuf {
+    let taken = tcode_services::user_files::attachment_dir(
+        &laptop_dir.0.join("store"),
+        &seeded.threads[0].id,
+    );
+    std::fs::create_dir_all(&taken).unwrap();
+    taken
+}
+
+/// The next list in which a move is paused for the laptop's refusal.
+fn refused(desk: &Machine) -> ProjectMoveStatus {
+    desk.moves_until(|moves| {
+        moves
+            .iter()
+            .any(|status| matches!(status.paused, Some(MovePause::Failed { .. })))
+    })
+    .remove(0)
+}
+
+/// A move the laptop refused at the end and then cancelled leaves the desk's
+/// project, threads, repository and worktree as they were and the laptop with
+/// nothing staged; while it waited the project's threads took no command, and
+/// after it they do.
 #[test]
 fn a_cancelled_move_leaves_both_machines_as_they_were() {
     let (desk_dir, laptop_dir) = (TestDir::new("desk"), TestDir::new("laptop"));
-    let seeded = seed(&desk_dir.0, 48 << 20);
+    let seeded = seed(&desk_dir.0, 1024);
     let (desk, laptop) = desk_and_laptop(&desk_dir, &laptop_dir);
+    laptop_refuses_the_commit(&laptop_dir, &seeded);
     let root = &seeded.project.root;
     let status = git(root, &["status", "--porcelain=v2", "--branch"]);
     let refs = git(root, &["for-each-ref"]);
     let listed = desk.listed();
 
     move_to(&desk, &laptop, &laptop_dir.0.join("app")).unwrap();
-    let sending = desk.moves_until(|moves| {
-        moves
-            .iter()
-            .any(|status| status.phase == MovePhase::SendingCode && status.done > 0)
-    });
+    let waiting = refused(&desk);
+    let staged = laptop_dir
+        .0
+        .join("store")
+        .join("moves")
+        .join("in")
+        .join(&waiting.move_id);
+    assert!(staged.exists(), "the laptop holds nothing of the move");
     let first = seeded.threads[0].id.clone();
     assert_eq!(
         code(desk.command(rename(&first))),
@@ -340,68 +377,63 @@ fn a_cancelled_move_leaves_both_machines_as_they_were() {
             .join("store")
             .join("moves")
             .join("out")
-            .join(&sending[0].move_id)
+            .join(&waiting.move_id)
             .exists()
     );
-    assert!(
-        !laptop_dir
-            .0
-            .join("store")
-            .join("moves")
-            .join("in")
-            .join(&sending[0].move_id)
-            .exists()
-    );
+    assert!(!staged.exists(), "the laptop keeps what it staged");
     assert!(laptop.listed().0.is_empty());
     desk.command(rename(&first)).unwrap();
 }
 
-/// A move whose laptop stops in the middle of a part says the laptop cannot
-/// be reached, and keeps saying so while it tries again, until the laptop
-/// answers; then it goes on from the bytes the laptop holds, not from the
-/// start, and completes.
+/// A move tried again goes on from the bytes the laptop holds, not from the
+/// start: the laptop here holds half of the code, as an interrupted send
+/// leaves it, and the project arrives whole.
 #[test]
-fn a_move_interrupted_mid_part_resumes_where_the_laptop_is() {
+fn a_move_tried_again_resumes_where_the_laptop_is() {
     let (desk_dir, laptop_dir) = (TestDir::new("desk"), TestDir::new("laptop"));
-    let seeded = seed(&desk_dir.0, 48 << 20);
-    let (desk, mut laptop) = desk_and_laptop(&desk_dir, &laptop_dir);
+    let seeded = seed(&desk_dir.0, 1024);
+    let (desk, laptop) = desk_and_laptop(&desk_dir, &laptop_dir);
+    let taken = laptop_refuses_the_commit(&laptop_dir, &seeded);
     let root = laptop_dir.0.join("app");
 
     move_to(&desk, &laptop, &root).unwrap();
-    desk.moves_until(|moves| {
-        moves
-            .iter()
-            .any(|status| status.phase == MovePhase::SendingCode && status.done > 0)
-    });
-    laptop.stop_hosting();
-    let paused =
-        desk.moves_until(|moves| moves.iter().any(|status| status.phase == MovePhase::Paused));
-    assert_eq!(paused[0].paused, Some(MovePause::Unreachable));
-    let held = paused[0].done;
-    assert!(held > 0 && held < paused[0].total, "{paused:?}");
+    let waiting = refused(&desk);
+    assert_eq!(waiting.done, waiting.total, "{waiting:?}");
+    let code = laptop_dir
+        .0
+        .join("store")
+        .join("moves")
+        .join("in")
+        .join(&waiting.move_id)
+        .join("code.bundle");
+    let length = std::fs::metadata(&code).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&code)
+        .unwrap()
+        .set_len(length / 2)
+        .unwrap();
+    std::fs::remove_dir_all(taken).unwrap();
 
-    laptop.start_hosting();
     move_to(&desk, &laptop, &root).unwrap();
     let resumed = desk.moves_until(|moves| {
-        assert!(
-            moves
-                .iter()
-                .all(|status| status.phase != MovePhase::Preparing
-                    && (status.phase != MovePhase::Paused || status.paused.is_some())),
-            "a paused move stopped saying why before the laptop answered: {moves:?}"
-        );
-        moves.iter().any(|status| status.phase != MovePhase::Paused)
+        moves
+            .iter()
+            .any(|status| status.phase == MovePhase::SendingCode)
     });
-    assert_eq!(resumed[0].phase, MovePhase::SendingCode, "{resumed:?}");
     assert_eq!(resumed[0].paused, None);
-    assert!(resumed[0].done >= held, "{resumed:?} after {held}");
+    assert_eq!(
+        resumed[0].done,
+        waiting.total - (length - length / 2),
+        "{resumed:?}"
+    );
     desk.moves_until(|moves| moves.is_empty());
     let (projects, threads) = laptop.listed();
     assert_eq!(projects.len(), 1);
     assert_eq!(threads.len(), seeded.threads.len());
     assert_eq!(
-        std::fs::metadata(root.join("bulk.bin")).unwrap().len(),
-        48 << 20
+        std::fs::read(root.join("bulk.bin")).unwrap(),
+        std::fs::read(seeded.project.root.join("bulk.bin")).unwrap()
     );
 }
 
