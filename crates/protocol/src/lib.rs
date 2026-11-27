@@ -415,11 +415,11 @@ pub use wire::{
 // PendingUserInput gain parent_item_id. Settings loses sidebar_provider_marks,
 // and SettingsPatch its sidebar_provider_marks patch.
 //
-// Unreleased: the machines of a group talk over `tcode/1`: Principal gains
-// Machine (another machine of the group, which may send only Query::Machine
-// with its MachineRequest and MachineResponse) and Viewer (a full device
-// while the machine's group devices may only view). GroupAction gains
-// SetLabel, SetAcceptThreads, SetAcceptProjects and SetDeviceAccess
+// Version 34 (v0.5.2): the machines of a group talk over `tcode/1`: Principal
+// gains Machine (another machine of the group, which may send only
+// Query::Machine with its MachineRequest and MachineResponse) and Viewer (a
+// full device while the machine's group devices may only view). GroupAction
+// gains SetLabel, SetAcceptThreads, SetAcceptProjects and SetDeviceAccess
 // (GroupDeviceAccess); GroupInfo carries accept_threads and accept_projects,
 // what the machine takes now, and device_access; GroupMachineInfo carries
 // label, accepts_threads and accepts_projects; the group's roster carries each
@@ -429,16 +429,16 @@ pub use wire::{
 // ProjectMovePreview and MovedThread queries, the ProjectMoves topic with
 // ProjectMovesReplaced, which carries the moves under way (ProjectMoveStatus)
 // and how each move that ended in the host's run ended (EndedProjectMove with
-// its MoveOutcome), and RuntimeError's move_left_behind.
-// ScopeSnapshot carries view_only. Thread metadata carries remote_parent,
-// remote_children and remote_watches, and started_by its machine; a
-// ControlAction its actor_machine, and a ControlWatch its machine; Settings'
-// control carries machines, with the ControlMachines patch. The command
-// ControlRemoteChild reaches a thread's subagent on another machine. The agent
-// event stream and the timeline gain thread_moved. The native transport gains
-// the machine stream (the machine line and its machine_reply), the closed
-// hello rejection and close code 5, access changed.
-pub const PROTOCOL_VERSION: u32 = 33;
+// its MoveOutcome), and RuntimeError's move_left_behind. ScopeSnapshot carries
+// view_only. Thread metadata carries remote_parent, remote_children and
+// remote_watches, and started_by its machine; a ControlAction its
+// actor_machine, and a ControlWatch its machine; Settings' control carries
+// machines, with the ControlMachines patch. The command ControlRemoteChild
+// reaches a thread's subagent on another machine. The agent event stream and
+// the timeline gain thread_moved. The native transport gains the machine
+// stream (the machine line and its machine_reply), the closed hello rejection
+// and close code 5, access changed.
+pub const PROTOCOL_VERSION: u32 = 34;
 
 #[cfg(test)]
 mod tests;
