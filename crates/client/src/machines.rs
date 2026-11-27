@@ -4,11 +4,10 @@
 //! nothing, or is in no group, fails at once instead of waiting.
 use std::sync::{Arc, Mutex};
 
-use serde::{Deserialize, Serialize};
 use tcode_protocol::{MachineRequest, MachineResponse, ProtocolError};
 
 /// One machine of this machine's group, this one included.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineInfo {
     pub id: String,
     pub name: String,
