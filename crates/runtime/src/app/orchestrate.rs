@@ -786,14 +786,12 @@ impl AppState {
             return;
         };
         // Allowing everything a child asks would let a member's turn run
-        // unrestricted where their space does not allow it, and a child another
-        // machine's thread started run more permissively than that thread.
+        // unrestricted where their space does not allow it.
         let space_allows_everything = self
             .turn_policy(child_id)
             .is_none_or(|policy| policy.allows_class(agent::ApprovalClass::Unrestricted));
         if self.settings.subagents.child_approval == ChildApprovalMode::AlwaysAllow
             && space_allows_everything
-            && matches!(lead, Lead::Here(_))
             && let Some(option) = native_allow_option(&request)
         {
             match self.respond_session_approval(

@@ -60,10 +60,6 @@ impl AppState {
                 machine: Some(RemoteCaller {
                     peer: peer.clone(),
                     title: caller.title,
-                    approval: caller
-                        .permission_mode
-                        .as_deref()
-                        .and_then(super::approval_named),
                 }),
             };
             let op = self.machine_may_ask(&caller, op)?;

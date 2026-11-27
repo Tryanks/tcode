@@ -103,7 +103,6 @@ pub(in crate::app) struct Caller {
 pub(in crate::app) struct RemoteCaller {
     pub(in crate::app) peer: super::machines::MachinePeer,
     pub(in crate::app) title: String,
-    pub(in crate::app) approval: Option<agent::ApprovalClass>,
 }
 
 #[derive(Clone)]

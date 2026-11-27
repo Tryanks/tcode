@@ -11,7 +11,7 @@ use tcode_core::control::{
 };
 use tcode_protocol::{MachineCaller, MachineRequest, MachineResponse};
 
-use super::{MachinePeer, permission_mode_of};
+use super::MachinePeer;
 use crate::app::control::{Answer, Caller, finish_on_host};
 use crate::app::*;
 
@@ -955,14 +955,13 @@ impl AppState {
         self.call_machine(&machine, None, request, true, cx, |_, _, _| {});
     }
 
-    /// Thread `thread` here as the other machine is told of it. Its permission mode is the
-    /// one it runs under now, as a space's policy reads it.
+    /// Thread `thread` here as the other machine is told of it.
     fn machine_caller(&self, thread: &str, request_id: Option<String>) -> MachineCaller {
         let meta = self.current_meta(thread);
         MachineCaller {
             thread_id: thread.to_owned(),
             title: meta.map(|meta| meta.title.clone()).unwrap_or_default(),
-            permission_mode: meta.and_then(permission_mode_of),
+            permission_mode: None,
             request_id,
         }
     }

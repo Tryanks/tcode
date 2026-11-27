@@ -501,9 +501,6 @@ impl AppState {
             meta.option_selections
                 .extend(self.initial_permission_selection(Some(&project.id), provider, None));
         }
-        if let Some(remote) = &caller.machine {
-            crate::app::machines::cap_permission(&mut meta, remote.approval)?;
-        }
         if let Some(space) = &caller.space {
             self.fit_to_policy(&space.policy, &mut meta)
                 .map_err(refusal)?;

@@ -5,7 +5,7 @@
 //! what a thread asks. The transport's own admission is proven in `crates/traverse`.
 use std::sync::Mutex;
 
-use agent::{ApprovalClass, ItemContent, ItemStatus, SessionCommand, SessionOptions, ThreadItem};
+use agent::{ItemContent, ItemStatus, SessionCommand, SessionOptions, ThreadItem};
 use tcode_client::machines::{MACHINE_REFUSES, MACHINE_UNREACHABLE, MachineCall, MachineInfo};
 use tcode_core::control::RemoteChildOp;
 use tcode_protocol::{
@@ -874,22 +874,6 @@ fn a_client_reaches_a_subagent_on_another_machine_through_its_lead_s_host() {
             .first()
             .is_some_and(|kept| kept.state == RemoteChildState::Cancelled && kept.pending.is_none())
     });
-}
-
-/// A thread another machine's thread starts runs under no more permissive a mode than the
-/// thread that started it: the lead asks before it runs anything, and so does its subagent.
-#[test]
-fn a_thread_started_from_another_machine_runs_no_more_permissively_than_its_starter() {
-    let mut scene = scene("permission");
-    let lead = scene.desk.index.thread("lead", |_| true);
-    let lead_class = agent::session_approval_class(ProviderKind::Codex, &lead.option_selections);
-    assert_eq!(lead_class, ApprovalClass::Manual);
-    let started = start_subagent(&scene.tools, "build-1").unwrap();
-    let child = started["thread_id"].as_str().unwrap();
-    let there = scene.laptop.index.thread(child, |_| true);
-    assert!(
-        agent::session_approval_class(ProviderKind::Codex, &there.option_selections) <= lead_class
-    );
 }
 
 /// A machine of a real group over loopback, its host given `tcode_control` and a played
