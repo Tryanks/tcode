@@ -31,6 +31,13 @@ impl AppState {
         cx: &mut HostCx,
     ) -> HostTask<Result<MachineResponse, ProtocolError>> {
         let data_dir = self.store.root().clone();
+        if matches!(
+            request,
+            MachineRequest::MoveBegin { .. } | MachineRequest::MoveCommit { .. }
+        ) && let Some(error) = self.move_records_refusal(cx)
+        {
+            return cx.spawn_background(async move { Err(error) });
+        }
         let now = |result| cx.spawn_background(async move { result });
         match request {
             MachineRequest::MovePreflight {

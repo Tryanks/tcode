@@ -59,6 +59,10 @@ pub(crate) struct Moves {
     /// Moves being committed here now.
     pub(super) committing: HashSet<String>,
     next_run: u64,
+    /// The records of moves could not be read at start, so this machine does
+    /// not know which projects are moving or which moves arrived: it begins and
+    /// takes none, and says why.
+    unreadable: Option<UnreadableFile>,
 }
 
 struct Outgoing {
@@ -150,29 +154,47 @@ impl AppState {
     /// that ended, at host start. Read here rather than off the host so the
     /// freeze holds before the first command.
     pub(crate) fn resume_project_moves(&mut self, cx: &mut HostCx) {
-        match self.store.moved_threads() {
-            Ok(moved) => self.moves.moved_threads = moved,
-            Err(error) => log::warn!("could not read where moved threads went: {error}"),
-        }
-        match self.store.moves_in() {
-            Ok(arrived) => self.moves.arrived = arrived,
-            Err(error) => log::warn!("could not read the moves that arrived: {error}"),
-        }
-        let records = match self.store.project_moves() {
-            Ok(records) => records,
-            Err(error) => {
-                log::error!("could not read the projects moving away: {error}");
-                return;
+        let named = |what: &'static str| {
+            move |error: std::io::Error| {
+                std::io::Error::new(error.kind(), format!("{what}: {error}"))
             }
         };
+        let (moved, moved_unreadable) = UnreadableFile::read(
+            self.store
+                .moved_threads()
+                .map_err(named("where moved threads went")),
+        );
+        let (arrived, arrived_unreadable) = UnreadableFile::read(
+            self.store
+                .moves_in()
+                .map_err(named("the moves that arrived")),
+        );
+        let (records, records_unreadable) = UnreadableFile::read(
+            self.store
+                .project_moves()
+                .map_err(named("the projects moving away")),
+        );
+        let mut journals = Vec::new();
+        let mut journal_unreadable = None;
         for body in records {
-            let journal: Journal = match serde_json::from_slice(&body) {
-                Ok(journal) => journal,
+            match serde_json::from_slice::<Journal>(&body) {
+                Ok(journal) => journals.push(journal),
                 Err(error) => {
-                    log::error!("skipping a project move this build cannot read: {error}");
-                    continue;
+                    journal_unreadable = UnreadableFile::read::<()>(Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("a project move this build cannot read: {error}"),
+                    )))
+                    .1;
                 }
-            };
+            }
+        }
+        self.moves.moved_threads = moved;
+        self.moves.arrived = arrived;
+        self.moves.unreadable = moved_unreadable
+            .or(arrived_unreadable)
+            .or(records_unreadable)
+            .or(journal_unreadable);
+        for journal in journals {
             if journal.stage == Stage::Aborting {
                 self.moves.aborting.insert(journal.move_id.clone(), journal);
                 continue;
@@ -188,6 +210,24 @@ impl AppState {
         if !self.moves.aborting.is_empty() {
             self.retry_aborts(0, cx);
         }
+    }
+
+    /// Why no move may begin or arrive here while its records are unreadable.
+    /// The first refusal is also told to the user; each is the answer to the
+    /// one asking.
+    pub(super) fn move_records_refusal(&mut self, cx: &mut HostCx) -> Option<ProtocolError> {
+        let unreadable = self.moves.unreadable.as_mut()?;
+        let first = unreadable.first_refusal().is_some();
+        let error = unreadable.refusal();
+        if first {
+            self.report_error(
+                RuntimeError::FileUnreadable {
+                    error: error.clone(),
+                },
+                cx,
+            );
+        }
+        Some(refusal("move_records_unreadable", error))
     }
 
     fn insert_outgoing(&mut self, journal: Journal, phase: MovePhase) -> u64 {
@@ -365,6 +405,9 @@ impl AppState {
         include_ignored: bool,
         cx: &mut HostCx,
     ) -> HostTask<Result<(), ProtocolError>> {
+        if let Some(error) = self.move_records_refusal(cx) {
+            return cx.spawn_background(async move { Err(error) });
+        }
         if self.project_moving(project_id) {
             return cx.spawn_background(async move { Err(already_moving()) });
         }
