@@ -336,12 +336,21 @@ impl CommandPalette {
             if let Some(debounce) = debounce {
                 cx.background_executor().timer(debounce).await;
             }
-            let (host, hits) = store.update(cx, |store, cx| {
+            let (host, titles, hits) = store.update(cx, |store, cx| {
                 (
                     store.host_key(),
+                    store.find_settled(query.clone(), cx),
                     store.search_session_content(query, limit, cx),
                 )
             });
+            // The titles the host finds are listed when they come, whether
+            // or not its messages have.
+            let listed = this.clone();
+            cx.spawn(async move |cx| {
+                titles.await;
+                let _ = listed.update(cx, |palette, cx| palette.invalidate_results(false, cx));
+            })
+            .detach();
             let hits = hits.await;
             let _ = this.update(cx, |palette, cx| {
                 palette.apply_content_hits(host, hits, cx);

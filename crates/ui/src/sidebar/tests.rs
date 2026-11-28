@@ -1328,14 +1328,12 @@ fn agents_are_not_listed(cx: &mut TestAppContext) {
 fn settled_shelf_pages_without_expanding_for_selection_and_navigation_matches_rows(
     cx: &mut TestAppContext,
 ) {
-    use tcode_protocol::{
-        EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic, encode_line,
-    };
+    use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic, encode_line};
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
     cx.update(crate::test_client::init);
     cx.update(|cx| cx.set_reduce_motion(true));
-    let (to_host, _outgoing) = async_channel::unbounded();
+    let (to_host, outgoing) = async_channel::unbounded();
     let (incoming, from_host) = async_channel::unbounded();
     let send = |topic, event| {
         incoming
@@ -1370,14 +1368,14 @@ fn settled_shelf_pages_without_expanding_for_selection_and_navigation_matches_ro
         Topic::Settings,
         ServerEvent::SettingsSnapshot(Default::default()),
     );
-    send(
-        Topic::Index,
-        ServerEvent::IndexSnapshot(IndexSnapshot {
-            sessions,
-            projects: vec![project, Project::from_root(PathBuf::from("/other-sample"))],
-            summary: Default::default(),
-        }),
+    let (index, outside) = crate::store::tests::host_index(
+        sessions,
+        vec![project, Project::from_root(PathBuf::from("/other-sample"))],
+        Default::default(),
     );
+    send(Topic::Index, ServerEvent::IndexSnapshot(index));
+    let _outside =
+        crate::store::tests::answer_outside_index(cx, outgoing, incoming.clone(), outside.clone());
     let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
     let link = tcode_client::HostLink::new(to_host, from_host);
     let pump_link = link.clone();
@@ -1395,7 +1393,12 @@ fn settled_shelf_pages_without_expanding_for_selection_and_navigation_matches_ro
     });
     crate::shell::tests::shell_behind(&store, cx);
     crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-    store.update(cx, |store, cx| store.show_thread("settled-39".into(), cx));
+    // The shell behind shows the thread from a store of its own; this one
+    // opens it as the pane showing it would, which reads it from the host.
+    store.update(cx, |store, cx| {
+        store.show_thread("settled-39".into(), cx);
+        store.open_thread("settled-39", cx);
+    });
     let window_state = cx.new(|_| WindowState::default());
     let (sidebar, cx) = cx.add_window_view(|_, cx| {
         SessionsSidebar::new(vec![store.clone()], window_state.clone(), cx)
@@ -1449,9 +1452,13 @@ fn settled_shelf_pages_without_expanding_for_selection_and_navigation_matches_ro
                 previous = Some(bounds.top());
             }
         };
+        // A shelf's rows are the ones its host says it holds: the click
+        // asks, and the answer is drawn.
         let click = |cx: &mut VisualTestContext, selector: &'static str| {
             let bounds = cx.debug_bounds(selector).unwrap();
             cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            draw(cx);
+            cx.run_until_parked();
             draw(cx);
         };
         verify(cx, 0);
@@ -1506,7 +1513,7 @@ fn the_threads_list_keeps_its_offset_across_the_shelf_and_selection(cx: &mut Tes
     crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
     cx.update(crate::test_client::init);
     cx.update(|cx| cx.set_reduce_motion(true));
-    let (to_host, _outgoing) = async_channel::unbounded();
+    let (to_host, outgoing) = async_channel::unbounded();
     let (incoming, from_host) = async_channel::unbounded();
     let send = |topic, event| {
         incoming
@@ -1540,14 +1547,11 @@ fn the_threads_list_keeps_its_offset_across_the_shelf_and_selection(cx: &mut Tes
         Topic::Settings,
         ServerEvent::SettingsSnapshot(Default::default()),
     );
-    send(
-        Topic::Index,
-        ServerEvent::IndexSnapshot(IndexSnapshot {
-            sessions,
-            projects: vec![project],
-            summary: Default::default(),
-        }),
-    );
+    let (index, outside) =
+        crate::store::tests::host_index(sessions, vec![project], Default::default());
+    send(Topic::Index, ServerEvent::IndexSnapshot(index));
+    let _outside =
+        crate::store::tests::answer_outside_index(cx, outgoing, incoming.clone(), outside.clone());
     let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
     let link = tcode_client::HostLink::new(to_host, from_host);
     let pump_link = link.clone();
@@ -1669,14 +1673,12 @@ fn the_threads_list_keeps_its_offset_across_the_shelf_and_selection(cx: &mut Tes
 /// its shelf holds.
 #[gpui::test]
 fn the_project_view_keeps_a_settled_shelf_per_project(cx: &mut TestAppContext) {
-    use tcode_protocol::{
-        EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic, encode_line,
-    };
+    use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic, encode_line};
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
     cx.update(crate::test_client::init);
     cx.update(|cx| cx.set_reduce_motion(true));
-    let (to_host, _outgoing) = async_channel::unbounded();
+    let (to_host, outgoing) = async_channel::unbounded();
     let (incoming, from_host) = async_channel::unbounded();
     let send = |topic, event| {
         incoming
@@ -1732,14 +1734,11 @@ fn the_project_view_keeps_a_settled_shelf_per_project(cx: &mut TestAppContext) {
         Topic::Settings,
         ServerEvent::SettingsSnapshot(Default::default()),
     );
-    send(
-        Topic::Index,
-        ServerEvent::IndexSnapshot(IndexSnapshot {
-            sessions,
-            projects: projects.to_vec(),
-            summary: Default::default(),
-        }),
-    );
+    let (index, outside) =
+        crate::store::tests::host_index(sessions, projects.to_vec(), Default::default());
+    send(Topic::Index, ServerEvent::IndexSnapshot(index));
+    let _outside =
+        crate::store::tests::answer_outside_index(cx, outgoing, incoming.clone(), outside.clone());
     let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
     let link = tcode_client::HostLink::new(to_host, from_host);
     let pump_link = link.clone();
@@ -1792,9 +1791,13 @@ fn the_project_view_keeps_a_settled_shelf_per_project(cx: &mut TestAppContext) {
             .chain(many(shown, many_open))
             .collect::<Vec<_>>()
     };
+    // A shelf's rows are the ones its host says it holds: the click asks,
+    // and the answer is drawn.
     let click = |cx: &mut VisualTestContext, selector: &'static str| {
         let bounds = cx.debug_bounds(selector).unwrap();
         cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        crate::test_frames::draw_settled(cx);
+        cx.run_until_parked();
         crate::test_frames::draw_settled(cx);
     };
     for compact in [false, true] {
@@ -1909,10 +1912,17 @@ fn the_project_view_keeps_a_settled_shelf_per_project(cx: &mut TestAppContext) {
         }
         click(cx, "settled-lead");
         verify(cx, expected(shown, false, false));
+        // The shell behind shows the thread from a store of its own; this
+        // one opens it as the pane showing it would, which reads it from
+        // the host, and its shelf opens on what the host says it holds.
         store.update(cx, |store, cx| {
             store.show_thread("many-settled-1".into(), cx);
+            store.open_thread("many-settled-1", cx);
         });
-        crate::test_frames::draw_settled(cx);
+        for _ in 0..2 {
+            cx.run_until_parked();
+            crate::test_frames::draw_settled(cx);
+        }
         verify(cx, expected(shown, false, true));
 
         send(

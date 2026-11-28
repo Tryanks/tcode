@@ -728,6 +728,14 @@ impl WorkspaceStore {
         self.follow_preview(session_id, cx);
         self.sync_terminal_topics(cx);
         self.sync_conversation_ui(session_id);
+        // The index carries neither a thread settled or started under one
+        // nor what such a thread started.
+        if self
+            .thread_meta(session_id)
+            .is_none_or(|meta| !self.in_index(meta))
+        {
+            self.load_family(session_id, cx);
+        }
     }
     /// The user moved to another pane, which a reply in flight no longer
     /// lands in.

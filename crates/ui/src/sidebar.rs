@@ -35,14 +35,14 @@ use tcode_core::thread_sort::{
     Standing, ThreadSection, ThreadSections, merge_hosts, partition_threads, shown_timestamp,
     thread_rank,
 };
-use tcode_protocol::{Command, ThreadExportFormat};
+use tcode_protocol::{Command, SettledScope, ThreadExportFormat};
 
 use tcode_core::{
     project::{ProjectGroup, SessionMeta},
     settings::SidebarLayout,
 };
 
-use crate::store::{HostKey, StoreChange, ThreadKey, TopicKind, WorkspaceStore};
+use crate::store::{HostKey, SettledHeld, StoreChange, ThreadKey, TopicKind, WorkspaceStore};
 use crate::time::{humanize_ago, now_secs};
 use crate::typography::TextRole as _;
 use crate::window_drag_area;
@@ -554,28 +554,59 @@ fn keeps_going(state: &ThreadRowState) -> Option<String> {
 /// The rows a list shows by section, narrowed to one project when a filter is set.
 /// The threads view's threads: `project`'s, or without one every thread
 /// outside the `hidden` projects.
+/// The settled threads a shelf over `project`, or over every project but
+/// the `hidden` ones, shows.
+fn settled_scope(project: Option<&str>, hidden: &HashSet<String>) -> SettledScope {
+    let mut except_projects: Vec<String> = match project {
+        Some(_) => Vec::new(),
+        None => hidden.iter().cloned().collect(),
+    };
+    except_projects.sort_unstable();
+    SettledScope {
+        project_id: project.map(str::to_owned),
+        except_projects,
+    }
+}
+
+/// `project`'s threads by section, or every project's but the `hidden`
+/// ones: of the settled ones, those the pages `held` of them reach, and the
+/// `selected` one.
 fn project_threads<'a>(
     sessions: &'a [SessionMeta],
     project: Option<&str>,
     hidden: &HashSet<String>,
+    held: &SettledHeld,
+    selected: Option<&str>,
 ) -> ThreadSections<&'a SessionMeta> {
-    partition_threads(sessions.iter().filter(|meta| {
+    let mut sections = partition_threads(sessions.iter().filter(|meta| {
         let of = meta.project_id.as_deref();
         match project {
             Some(id) => of == Some(id),
             None => of.is_none_or(|id| !hidden.contains(id)),
         }
-    }))
+    }));
+    let scope = settled_scope(project, hidden);
+    sections
+        .settled
+        .retain(|meta| held.reached(&scope, meta) || selected == Some(meta.id.as_str()));
+    sections
 }
 
 /// A project's threads in the project view: the active ones (pinned
 /// included) in the order the store gives them, and its Settled shelf newest
-/// settled first.
-fn project_group_threads(sessions: &[SessionMeta]) -> (Vec<&SessionMeta>, Vec<&SessionMeta>) {
+/// settled first: those the pages `held` of the project's reach and the
+/// `selected` one, and how many the host lists.
+fn project_group_threads<'a>(
+    group: &'a ProjectGroup,
+    held: &SettledHeld,
+    selected: Option<&str>,
+) -> (Vec<&'a SessionMeta>, Vec<&'a SessionMeta>, usize) {
+    let scope = settled_scope(Some(&group.project.id), &HashSet::new());
     let (mut settled, active): (Vec<_>, Vec<_>) =
-        sessions.iter().partition(|meta| meta.is_settled());
+        group.sessions.iter().partition(|meta| meta.is_settled());
+    settled.retain(|meta| held.reached(&scope, meta) || selected == Some(meta.id.as_str()));
     settled.sort_by_key(|meta| (thread_rank(meta, Standing::default()), &meta.id));
-    (active, settled)
+    (active, settled, held.count(&scope))
 }
 
 /// The time a project-view row shows: its last update, or when it settled
@@ -1049,6 +1080,7 @@ struct HostLists {
     down: bool,
     groups: Rc<Vec<ProjectGroup>>,
     flat: Rc<Vec<SessionMeta>>,
+    settled: Rc<SettledHeld>,
     flags: Rc<HashMap<String, ThreadFlags>>,
     /// The host's projects a space hides from the threads view, when this
     /// client manages its spaces; the project view still lists them.
@@ -1619,6 +1651,7 @@ impl Render for SessionsSidebar {
             return div().into_any_element();
         };
         self.reveal_selected_settled(cx);
+        self.want_settled(cx);
         self.sample_folds(window, cx);
         self.clear_finished_drag(cx);
         for host in &mut self.hosts {

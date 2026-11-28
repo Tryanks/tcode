@@ -1,6 +1,35 @@
 use super::*;
 
 impl SessionsSidebar {
+    /// Ask each host for the settled threads the open shelves show: as many
+    /// rows as each shows, which its pages may not reach yet.
+    pub(super) fn want_settled(&mut self, cx: &mut Context<Self>) {
+        if self.expanded_settled.is_empty() {
+            return;
+        }
+        let lists = self.thread_lists(cx);
+        let filter = self.project_filter.clone();
+        for shelf in &self.expanded_settled {
+            let rows = self.settled_limits.get(shelf).copied().unwrap_or(10);
+            for lists in lists.iter().filter(|lists| !lists.down) {
+                let project = match shelf {
+                    Shelf::Recent => match host_scope(filter.as_ref(), &lists.host) {
+                        Some(project) => project,
+                        None => continue,
+                    },
+                    Shelf::Project(project) if project.host == lists.host => {
+                        Some(project.project_id.as_str())
+                    }
+                    Shelf::Project(_) => continue,
+                };
+                let scope = settled_scope(project, &lists.hidden);
+                if let Some(store) = self.store_of(&lists.host) {
+                    store.update(cx, |store, cx| store.want_settled(&scope, rows, cx));
+                }
+            }
+        }
+    }
+
     pub(super) fn thread_lists(&mut self, cx: &App) -> ThreadLists {
         let cached = self.thread_lists.take().unwrap_or_default();
         let sectioned = self.sectioned();
@@ -43,6 +72,7 @@ impl SessionsSidebar {
                             down: true,
                             groups: Rc::default(),
                             flat: Rc::default(),
+                            settled: Rc::default(),
                             flags: Rc::default(),
                             hidden: Rc::default(),
                         };
@@ -53,6 +83,7 @@ impl SessionsSidebar {
                         down: false,
                         groups: Rc::new(store.grouped_sessions()),
                         flat: Rc::new(store.flat_sessions()),
+                        settled: Rc::new(store.settled_held()),
                         flags: Rc::new(session_flags(store.sidebar_sessions(), store)),
                         hidden: Rc::new(hidden(host)),
                     }
@@ -114,6 +145,14 @@ impl SessionsSidebar {
         }
     }
 
+    /// The thread of `host` the window shows.
+    pub(super) fn selected_on(&self, host: &HostKey) -> Option<&str> {
+        self.last_selected
+            .as_ref()
+            .filter(|selected| selected.host == *host)
+            .map(|selected| selected.session_id.as_str())
+    }
+
     pub(super) fn is_selected(&self, host: &HostKey, id: &str) -> bool {
         self.last_selected
             .as_ref()
@@ -128,11 +167,19 @@ impl SessionsSidebar {
         scope: Option<&ProjectKey>,
         shelf: &Shelf,
     ) -> ThreadRows<'a> {
+        let mut settled_count = 0;
         let hosts = lists
             .iter()
             .filter_map(|lists| {
                 let project = host_scope(scope, &lists.host)?;
-                let threads = project_threads(&lists.flat, project, &lists.hidden);
+                settled_count += lists.settled.count(&settled_scope(project, &lists.hidden));
+                let threads = project_threads(
+                    &lists.flat,
+                    project,
+                    &lists.hidden,
+                    &lists.settled,
+                    self.selected_on(&lists.host),
+                );
                 let host = self.arranged(&lists.host, scope, threads);
                 Some(tagged_sections(&lists.host, host))
             })
@@ -142,7 +189,8 @@ impl SessionsSidebar {
             active,
             mut settled,
         } = merged(hosts, lists);
-        let settled_count = settled.len();
+        // A drag out of Settled leaves the host's count one behind its rows.
+        let settled_count = settled_count.max(settled.len());
         self.limit_settled_rows(shelf, &mut settled);
         ThreadRows {
             pinned,
@@ -213,7 +261,8 @@ impl SessionsSidebar {
                     continue;
                 }
                 let start = rows.len();
-                let (active, settled) = project_group_threads(&project.sessions);
+                let (active, settled, count) =
+                    project_group_threads(project, &of.settled, self.selected_on(&of.host));
                 let expanded = self.expanded_groups.contains(&key);
                 let more_key = fold_key(Fold::More, &name);
                 let shown = if self.fold_shown(&more_key, expanded) {
@@ -242,8 +291,8 @@ impl SessionsSidebar {
                         1.,
                     ));
                 }
-                if !settled.is_empty() {
-                    let count = settled.len();
+                let count = count.max(settled.len());
+                if count > 0 {
                     rows.push((GroupedListRow::Settled { host, group, count }, 1.));
                     let shelf = Shelf::Project(key);
                     let mut listed: Vec<Listed> = tagged(&of.host, settled).collect();

@@ -16,6 +16,39 @@ pub fn in_roster(meta: &SessionMeta) -> bool {
     meta.archived_at.is_none() && !meta.is_subagent() && meta.draft_text.as_deref() != Some("")
 }
 
+/// The thread nobody started that `meta` descends from, or the last one
+/// `by_id` knows on the way there.
+pub fn lead<'a>(
+    meta: &'a SessionMeta,
+    by_id: impl Fn(&str) -> Option<&'a SessionMeta>,
+) -> &'a SessionMeta {
+    let mut lead = meta;
+    // A stored parent cycle ends at its depth rather than never.
+    for _ in 0..64 {
+        match lead.parent_session_id.as_deref().and_then(&by_id) {
+            Some(parent) => lead = parent,
+            None => break,
+        }
+    }
+    lead
+}
+
+/// Whether a host's index carries the thread: it descends from no settled
+/// thread and is none itself. A settled thread and what it started are read
+/// a page or a family at a time instead.
+pub fn in_index<'a>(
+    meta: &'a SessionMeta,
+    by_id: impl Fn(&str) -> Option<&'a SessionMeta>,
+) -> bool {
+    !lead(meta, by_id).is_settled()
+}
+
+/// Where a settled thread stands among settled threads, the newest settled
+/// first: what a page of them is cut by.
+pub fn settled_rank(meta: &SessionMeta) -> (std::cmp::Reverse<u64>, &str) {
+    (std::cmp::Reverse(settled_timestamp(meta)), &meta.id)
+}
+
 pub fn thread_section(meta: &SessionMeta) -> ThreadSection {
     if meta.is_settled() {
         ThreadSection::Settled

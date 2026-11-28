@@ -558,10 +558,13 @@ pub struct ProjectGroup {
 
 /// Group `sessions` under their `projects` and order projects using `sort`.
 /// Callers choose the row order for their lifecycle or archive surface.
+/// `elsewhere` is the latest change among a project's threads that
+/// `sessions` leaves out, which dates the project all the same.
 pub fn group_sessions<'a>(
     projects: &[Project],
     sessions: impl IntoIterator<Item = &'a SessionMeta> + Clone,
     sort: ProjectSort,
+    elsewhere: impl Fn(&Project) -> Option<u64>,
 ) -> Vec<ProjectGroup> {
     let mut groups: Vec<ProjectGroup> = projects
         .iter()
@@ -586,6 +589,7 @@ pub fn group_sessions<'a>(
                 g.sessions
                     .iter()
                     .map(|s| s.updated_at)
+                    .chain(elsewhere(&g.project))
                     .max()
                     .unwrap_or(g.project.created_at)
             };
@@ -748,7 +752,7 @@ mod tests {
             session_in("p-old", 20),
         ];
 
-        let groups = group_sessions(&projects, &sessions, ProjectSort::RecentActivity);
+        let groups = group_sessions(&projects, &sessions, ProjectSort::RecentActivity, |_| None);
         // p-new (activity 100), p-old (activity 20), p-empty (created_at 15, no sessions).
         assert_eq!(groups[0].project.id, "p-new");
         assert_eq!(groups[1].project.id, "p-old");
@@ -756,7 +760,7 @@ mod tests {
         assert!(groups[2].sessions.is_empty());
 
         // Name A-Z ordering ignores activity: Empty, New, Old (case-insensitive).
-        let by_name = group_sessions(&projects, &sessions, ProjectSort::NameAsc);
+        let by_name = group_sessions(&projects, &sessions, ProjectSort::NameAsc, |_| None);
         assert_eq!(by_name[0].project.name, "Empty");
         assert_eq!(by_name[1].project.name, "New");
         assert_eq!(by_name[2].project.name, "Old");

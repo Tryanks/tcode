@@ -191,6 +191,25 @@ pub enum Query {
     },
     /// Every archived thread, most recently archived first.
     ArchivedSessions,
+    /// The settled threads a client lists, most recently settled first: at
+    /// most `limit` of `scope`'s after `before`.
+    SettledSessions {
+        scope: crate::SettledScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<crate::SettledCursor>,
+        limit: u32,
+    },
+    /// The settled threads whose titles match `query`
+    /// ([`tcode_core::fuzzy::fuzzy_score`]), the best `limit` of them.
+    FindSettledSessions {
+        query: String,
+        limit: u32,
+    },
+    /// The thread nobody started that `session_id` descends from and every
+    /// unarchived thread that descends from it.
+    ThreadFamily {
+        session_id: String,
+    },
     /// The latest `tcode_control` writes across every thread, newest first.
     ControlActivity {
         limit: u32,
@@ -286,6 +305,8 @@ pub enum QueryResponse {
     ThreadAnchorTurn(Option<usize>),
     ThreadTurnMarks(Vec<tcode_core::turn_marks::TurnMark>),
     ArchivedSessions(crate::ArchivedSessions),
+    SettledSessions(crate::SessionPage),
+    ThreadFamily(crate::SessionPage),
     ControlActivity(ControlActivityPage),
     CollaborationTemplates(tcode_core::collaboration::Templates),
     NativeMcpServers(Vec<agent::NativeMcpServer>),

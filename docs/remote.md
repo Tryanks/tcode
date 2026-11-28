@@ -1378,6 +1378,16 @@ Index and Settings snapshots, plus SessionStatus and SessionEvents for the
 selected thread. A newly opened machine shows neutral loading rows until
 these arrive; it never labels an unknown list as empty. Cached lists and thread
 content remain visible during reconnect, with Syncing until replay completes.
+
+The Index snapshot carries every project and the threads that are not settled,
+with what they started. A settled thread, and what it started, is not in it:
+each project's count of settled threads is, and a **Settled** shelf reads its
+threads from the machine as it shows them, ten when it opens and twenty-five
+more for each **Show more**. Opening a thread that is not in the snapshot
+reads that thread and what it started. The command palette and the composer's
+`@` menu ask the machine for the settled threads a title names. After a
+reconnect the open shelves and open threads are read again; what they held is
+shown meanwhile.
 **Reconnecting · attempt N** appears immediately when a connection is lost,
 with its failure reason. Retry delays grow exponentially from one to thirty
 seconds with ±20% jitter (and a final 30 s cap). Only a connection stable for
@@ -1472,7 +1482,8 @@ with **Pair again**; protocol mismatches stop with **Update the app**.
 
 ## History replay limits
 
-Opening a conversation subscribes to its latest 200 event records. A session
+Opening a conversation subscribes to its latest 400 event records, from the
+start of the turn the earliest of them is in. A session
 snapshot includes the absolute `from` offset and `total` record count; the client
 can request older records with `SessionHistoryPage { session_id, before, limit }`.
 The exclusive `before` cursor pages backwards; replies are always chronological

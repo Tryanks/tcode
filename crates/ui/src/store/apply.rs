@@ -337,11 +337,16 @@ impl WorkspaceStore {
                         }
                     }
                     snapshot.sessions.iter_mut().for_each(title_draft);
+                    let unvouched = self.keep_outside_index(&mut snapshot.sessions);
                     self.index_replica = (
                         std::mem::take(&mut snapshot.sessions),
                         std::mem::take(&mut snapshot.projects),
                     );
                     self.reindex_sessions();
+                    self.settled_shelves_stale();
+                    for session_id in unvouched {
+                        self.load_family(&session_id, cx);
+                    }
                     self.close_unshown_pull_requests();
                     // Client state for a conversation the index no longer lists has
                     // nothing left to return to: a deleted project takes its draft's
@@ -374,6 +379,7 @@ impl WorkspaceStore {
                 ) => {
                     if self.cached_index_fingerprint().as_ref() == Some(fingerprint) {
                         self.index_summary.archived_revision = *archived_revision;
+                        self.settled_shelves_stale();
                         if self.baseline_topics.insert(index_topic.clone()) {
                             for project in &self.index_replica.1 {
                                 images::invalidate_project_icon(
@@ -698,7 +704,7 @@ impl WorkspaceStore {
 
 /// A draft has no title of its own: the lists name it by the first line of
 /// what its composer holds, or as the new thread it is while that is nothing.
-fn title_draft(meta: &mut SessionMeta) {
+pub(super) fn title_draft(meta: &mut SessionMeta) {
     const SHOWN: usize = 120;
     if let Some(text) = &meta.draft_text {
         meta.title = match text.lines().map(str::trim).find(|line| !line.is_empty()) {

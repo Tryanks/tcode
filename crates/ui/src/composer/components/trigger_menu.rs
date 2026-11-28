@@ -36,8 +36,19 @@ impl Composer {
             self.menu_dismissed = false;
             self.menu_last_key = key;
         }
-        if matches!(trigger.as_ref().map(|t| t.kind), Some(TriggerKind::Path)) {
+        if let Some(trigger) = trigger.as_ref().filter(|t| t.kind == TriggerKind::Path) {
             self.ensure_workspace(cx);
+            // The menu's threads are the ones held; the settled ones the
+            // query names are not until the host is asked.
+            if !trigger.query.is_empty()
+                && self.active_trigger.as_ref() != Some(trigger)
+                && self.reads_threads(cx)
+            {
+                let query = trigger.query.clone();
+                self.workspace_store
+                    .update(cx, |store, cx| store.find_settled(query, cx))
+                    .detach();
+            }
         }
         self.active_trigger = trigger;
     }
@@ -189,6 +200,18 @@ impl Composer {
         }
     }
 
+    /// Whether the thread's model is given `tcode_control`, which is what
+    /// reads a linked thread.
+    fn reads_threads(&self, cx: &App) -> bool {
+        self.session_id.as_deref().is_some_and(|session_id| {
+            self.workspace_store
+                .read(cx)
+                .session_status_for(Some(session_id), cx)
+                .and_then(|status| status.control.as_ref())
+                .is_some_and(|control| control.tools_offered)
+        })
+    }
+
     /// Sidebar threads whose title matches an `@` query, for the "Threads"
     /// group: offered once the query names something, to a thread whose
     /// model is given `tcode_control`, which is what reads a linked thread.
@@ -197,11 +220,7 @@ impl Composer {
         let Some(session_id) = self.session_id.as_deref() else {
             return Vec::new();
         };
-        let reads_threads = store
-            .session_status_for(Some(session_id), cx)
-            .and_then(|status| status.control.as_ref())
-            .is_some_and(|control| control.tools_offered);
-        if !reads_threads || query.is_empty() {
+        if !self.reads_threads(cx) || query.is_empty() {
             return Vec::new();
         }
         let mut scored: Vec<_> = store

@@ -1221,8 +1221,13 @@ pub struct QueuedMessageStatus {
     pub space_held: bool,
 }
 
-/// The unarchived threads and every project. Archived threads are read on
-/// demand with [`crate::Query::ArchivedSessions`].
+/// Every project, and the unarchived threads that descend from no settled
+/// thread and are none themselves ([`tcode_core::thread_sort::in_index`]).
+/// Settled threads are read a page at a time with
+/// [`crate::Query::SettledSessions`], a thread outside the index and what it
+/// started with [`crate::Query::ThreadFamily`], and archived threads with
+/// [`crate::Query::ArchivedSessions`]. After the snapshot the topic carries
+/// every unarchived thread's changes, in the index or not.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexSnapshot {
     #[serde(flatten)]
@@ -1234,14 +1239,58 @@ pub struct IndexSnapshot {
 /// Index facts that are not one thread's metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexSummary {
-    /// Host-authored activity for every unarchived stored session.
+    /// Host-authored activity for each thread of the index.
     pub activity: HashMap<String, SessionActivity>,
     /// Background title requests, including threads with no live provider.
     pub title_generating: HashSet<String>,
     /// Archived threads per project id.
     pub archived_counts: HashMap<String, usize>,
+    /// Settled threads per project id, as many as
+    /// [`crate::Query::SettledSessions`] pages through.
+    pub settled_counts: HashMap<String, usize>,
+    /// The latest change, in Unix seconds, among each project's threads the
+    /// index leaves out, by project id.
+    pub outside_updated_at: HashMap<String, u64>,
     pub worktree_shared: HashSet<String>,
     pub archived_revision: u64,
+}
+
+/// Threads outside the index, with what the index's summary says of those
+/// it carries.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SessionPage {
+    pub sessions: Vec<SessionMeta>,
+    pub activity: HashMap<String, SessionActivity>,
+    pub worktree_shared: HashSet<String>,
+}
+
+/// The settled threads one list shows: a project's, or every project's but
+/// those it leaves out.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SettledScope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// Projects left out of every project's threads, in id order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub except_projects: Vec<String>,
+}
+
+impl SettledScope {
+    pub fn holds(&self, project_id: Option<&str>) -> bool {
+        match (&self.project_id, project_id) {
+            (Some(scope), of) => of == Some(scope),
+            (None, Some(of)) => !self.except_projects.iter().any(|id| id == of),
+            (None, None) => true,
+        }
+    }
+}
+
+/// The settled thread a page of settled threads continues after.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettledCursor {
+    /// When it settled, in Unix seconds.
+    pub at: u64,
+    pub id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
