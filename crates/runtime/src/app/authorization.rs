@@ -565,9 +565,12 @@ impl AppState {
                 | Command::StopPluginListing { .. } => Err(refusal("command")),
             },
             ClientPayload::Query(query) => match query {
-                Query::Ping | Query::SearchSessionContent { .. } | Query::ArchivedSessions => {
-                    Ok(())
-                }
+                Query::Ping
+                | Query::SearchSessionContent { .. }
+                | Query::ArchivedSessions
+                | Query::SettledSessions { .. }
+                | Query::FindSettledSessions { .. }
+                | Query::ThreadFamily { .. } => Ok(()),
                 Query::SessionHistoryPage { session_id, .. }
                 | Query::ListActiveWorkspace { session_id }
                 | Query::RenderThreadExport { session_id, .. }
@@ -751,6 +754,9 @@ fn authorize_viewer(payload: &ClientPayload) -> Result<(), ProtocolError> {
             | Query::ReadItemImage { .. }
             | Query::ReadItemImagePreview { .. }
             | Query::ArchivedSessions
+            | Query::SettledSessions { .. }
+            | Query::FindSettledSessions { .. }
+            | Query::ThreadFamily { .. }
             | Query::ControlActivity { .. }
             | Query::CollaborationTemplates
             | Query::NativeMcpServers { .. }

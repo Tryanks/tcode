@@ -81,7 +81,22 @@ impl Machine {
         else {
             panic!("no archived threads");
         };
+        let Ok(QueryResponse::SettledSessions(settled)) = self.query(Query::SettledSessions {
+            scope: Default::default(),
+            before: None,
+            limit: u32::MAX,
+        }) else {
+            panic!("no settled threads");
+        };
         let mut sessions = index.sessions;
+        for meta in settled.sessions {
+            let Ok(QueryResponse::ThreadFamily(family)) = self.query(Query::ThreadFamily {
+                session_id: meta.id,
+            }) else {
+                panic!("no family of a settled thread");
+            };
+            sessions.extend(family.sessions);
+        }
         sessions.extend(archived.sessions);
         (index.projects, sessions)
     }

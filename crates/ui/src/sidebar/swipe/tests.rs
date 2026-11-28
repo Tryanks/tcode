@@ -394,8 +394,11 @@ fn a_settled_row_swipes_back_to_active(cx: &mut TestAppContext) {
         .expect("the settled shelf");
     let tap = Finger::down(cx, 1, shelf.center());
     tap.send(cx, TouchPhase::Ended);
+    // The shelf's rows are the ones its host says it holds.
+    phone.until(cx, "the shelf's rows", |phone, cx| {
+        phone.try_row(cx, 3).is_some()
+    });
     draw_settled(cx);
-    assert!(phone.try_row(cx, 3).is_some(), "the shelf has opened");
 
     swipe_away(cx, &phone, 3);
     phone.until(cx, "the thread to return", |phone, cx| {

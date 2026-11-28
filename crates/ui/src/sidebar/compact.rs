@@ -162,11 +162,25 @@ impl SessionsSidebar {
                         .iter()
                         .zip(lists.iter())
                         .map(|((host, sessions, _), lists)| {
-                            tagged_sections(host, project_threads(sessions, None, &lists.hidden))
+                            tagged_sections(
+                                host,
+                                project_threads(
+                                    sessions,
+                                    None,
+                                    &lists.hidden,
+                                    &lists.settled,
+                                    self.selected_on(host),
+                                ),
+                            )
                         })
                         .collect(),
                     &lists,
                 );
+                let count = lists
+                    .iter()
+                    .map(|lists| lists.settled.count(&settled_scope(None, &lists.hidden)))
+                    .sum::<usize>()
+                    .max(settled.len());
                 let pinned_and_active_empty = pinned.is_empty() && active.is_empty();
                 // A phone has no hover to reveal section labels, so they stay.
                 if !pinned.is_empty() {
@@ -183,18 +197,17 @@ impl SessionsSidebar {
                     }
                 }
                 rows.extend(thread_rows(active, true));
-                if pinned_and_active_empty && !settled.is_empty() {
+                if pinned_and_active_empty && count > 0 {
                     rows.push(CompactListRow::Empty {
                         key: format!("{key}-empty"),
                     });
                 }
-                if !settled.is_empty() {
+                if count > 0 {
                     rows.push(CompactListRow::Settled {
                         key: key.into(),
                         shelf: shelf.clone(),
-                        count: settled.len(),
+                        count,
                     });
-                    let count = settled.len();
                     let mut visible = settled;
                     self.limit_settled_rows(&shelf, &mut visible);
                     let hidden = count - visible.len();
@@ -214,7 +227,7 @@ impl SessionsSidebar {
                     }
                 }
             } else {
-                for (host, _, groups) in &hosts {
+                for ((host, _, groups), of) in hosts.iter().zip(lists.iter()) {
                     let host_collapsed = DevicePreferences::host_collapsed(host, cx);
                     let host_key = fold_key(Fold::Host, host.name());
                     if sectioned {
@@ -233,17 +246,24 @@ impl SessionsSidebar {
                         };
                         let name = self.name(host, &group.project.id).into_owned();
                         let key = name.as_str();
-                        let count = group.sessions.len();
+                        let count = group
+                            .sessions
+                            .iter()
+                            .filter(|meta| !meta.is_settled())
+                            .count()
+                            + of.settled
+                                .count(&settled_scope(Some(&group.project.id), &HashSet::new()));
                         let has_header = sectioned || group_count > 1 || group.project.quick_chat;
                         let collapsed = has_header && collapsed_projects.contains(&project);
                         let start = rows.len();
                         let project_key = fold_key(Fold::Project, key);
                         if self.fold_shown(&project_key, !collapsed) {
                             folds.resize(rows.len(), 1.);
-                            let (active, settled) = project_group_threads(&group.sessions);
+                            let (active, settled, count) =
+                                project_group_threads(group, &of.settled, self.selected_on(host));
+                            let count = count.max(settled.len());
                             rows.extend(thread_rows(tagged(host, active).collect(), false));
-                            if !settled.is_empty() {
-                                let count = settled.len();
+                            if count > 0 {
                                 let shelf = Shelf::Project(project.clone());
                                 rows.push(CompactListRow::Settled {
                                     key: key.into(),

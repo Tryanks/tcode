@@ -56,9 +56,9 @@ pub use event::{
     ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus,
     QueuedMessageStatus, RewindBlocked, RewindStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
     RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice,
-    ServerEvent, SessionActivity, SessionPlan, SessionStatus, StorageMigration, SubagentAsking,
-    TcodeDiskUsage, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
-    ThreadWakes, Topic,
+    ServerEvent, SessionActivity, SessionPage, SessionPlan, SessionStatus, SettledCursor,
+    SettledScope, StorageMigration, SubagentAsking, TcodeDiskUsage, TcodeUpdateStatus,
+    TerminalContextStatus, TerminalSplitStatus, TerminalStatus, ThreadWakes, Topic,
 };
 pub use query::{
     AgentAccess, AgentGrant, AgentScope, ControlActivityFilter, ControlActivityPage,
@@ -438,6 +438,12 @@ pub use wire::{
 // the timeline gain thread_moved. The native transport gains the machine
 // stream (the machine line and its machine_reply), the closed hello rejection
 // and close code 5, access changed.
+//
+// Unreleased: the index snapshot carries only the threads that descend from
+// no settled thread; IndexSummary gains settled_counts and outside_updated_at,
+// and the
+// SettledSessions, FindSettledSessions and ThreadFamily queries read the rest
+// as a SessionPage.
 pub const PROTOCOL_VERSION: u32 = 34;
 
 #[cfg(test)]

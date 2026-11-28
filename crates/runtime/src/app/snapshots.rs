@@ -85,7 +85,9 @@ impl DomainDiff {
                 if self.index.projects != state.projects || !lists(&self.index.sessions, &|_| true)
                 {
                     let index = state.index_snapshot();
-                    for event in index_changes(&self.index, &index) {
+                    for event in index_changes(&self.index, &index, |summary| {
+                        state.baseline_summary(summary)
+                    }) {
                         emit_replacement(Topic::Index, event, cx);
                     }
                     self.index = index;
@@ -93,7 +95,9 @@ impl DomainDiff {
                     || (residents_touched && !self.update_touched_activity(state, cx))
                 {
                     let summary = state.build_index_summary();
-                    for event in index_summary_changes(&self.index.summary, &summary) {
+                    for event in index_summary_changes(&self.index.summary, &summary, |summary| {
+                        state.baseline_summary(summary)
+                    }) {
                         emit_replacement(Topic::Index, event, cx);
                     }
                     self.index.summary = summary;
@@ -154,7 +158,9 @@ impl DomainDiff {
                             .map_or(0, |archive| archive.revision)
                 {
                     let summary = state.space_index_summary(id, &old.projects);
-                    for event in index_summary_changes(&old.summary, &summary) {
+                    for event in index_summary_changes(&old.summary, &summary, |summary| {
+                        state.baseline_summary(summary)
+                    }) {
                         emit_replacement(topic.clone(), event, cx);
                     }
                     old.summary = summary;
@@ -170,7 +176,7 @@ impl DomainDiff {
             }
             let index = state.space_index_snapshot(id, projects);
             if let Some(old) = self.space_indexes.get(id) {
-                for event in index_changes(old, &index) {
+                for event in index_changes(old, &index, |summary| state.baseline_summary(summary)) {
                     emit_replacement(topic.clone(), event, cx);
                 }
             }
@@ -426,7 +432,11 @@ fn running_model(session: &ActiveSession) -> (Option<String>, bool) {
     }
 }
 
-fn index_changes(old: &IndexSnapshot, new: &IndexSnapshot) -> Vec<ServerEvent> {
+fn index_changes(
+    old: &IndexSnapshot,
+    new: &IndexSnapshot,
+    baseline: impl FnOnce(IndexSummary) -> IndexSummary,
+) -> Vec<ServerEvent> {
     let mut events = Vec::new();
     let old_projects: HashMap<_, _> = old.projects.iter().map(|p| (p.id.as_str(), p)).collect();
     let new_projects: HashSet<_> = new.projects.iter().map(|p| p.id.as_str()).collect();
@@ -459,41 +469,53 @@ fn index_changes(old: &IndexSnapshot, new: &IndexSnapshot) -> Vec<ServerEvent> {
             });
         }
     }
-    events.extend(index_summary_changes(&old.summary, &new.summary));
+    events.extend(index_summary_changes(&old.summary, &new.summary, baseline));
     events
 }
 
-fn index_summary_changes(old: &IndexSummary, new: &IndexSummary) -> Vec<ServerEvent> {
+/// What tells a subscriber of the change from `old` to `new`, both of every
+/// unarchived thread. Activity goes thread by thread, whichever threads the
+/// subscriber holds; the rest of a summary goes whole, as `baseline` cuts it
+/// to the index.
+fn index_summary_changes(
+    old: &IndexSummary,
+    new: &IndexSummary,
+    baseline: impl FnOnce(IndexSummary) -> IndexSummary,
+) -> Vec<ServerEvent> {
     let mut events = Vec::new();
-    if old != new {
-        let IndexSummary {
-            activity,
-            title_generating,
-            archived_counts,
-            worktree_shared,
-            archived_revision,
-        } = new;
-        if old.title_generating == *title_generating
-            && old.archived_counts == *archived_counts
-            && old.worktree_shared == *worktree_shared
-            && old.archived_revision == *archived_revision
-        {
-            events.push(ServerEvent::IndexActivitiesChanged {
-                upserts: activity
-                    .iter()
-                    .filter(|(id, value)| old.activity.get(*id) != Some(*value))
-                    .map(|(id, value)| (id.clone(), value.clone()))
-                    .collect(),
-                removed: old
-                    .activity
-                    .keys()
-                    .filter(|id| !activity.contains_key(*id))
-                    .cloned()
-                    .collect(),
-            });
-        } else {
-            events.push(ServerEvent::IndexSummaryReplaced(new.clone()));
-        }
+    if old.activity != new.activity {
+        events.push(ServerEvent::IndexActivitiesChanged {
+            upserts: new
+                .activity
+                .iter()
+                .filter(|(id, value)| old.activity.get(*id) != Some(*value))
+                .map(|(id, value)| (id.clone(), value.clone()))
+                .collect(),
+            removed: old
+                .activity
+                .keys()
+                .filter(|id| !new.activity.contains_key(*id))
+                .cloned()
+                .collect(),
+        });
+    }
+    let IndexSummary {
+        activity: _,
+        title_generating,
+        archived_counts,
+        settled_counts,
+        outside_updated_at,
+        worktree_shared,
+        archived_revision,
+    } = new;
+    if old.title_generating != *title_generating
+        || old.archived_counts != *archived_counts
+        || old.settled_counts != *settled_counts
+        || old.outside_updated_at != *outside_updated_at
+        || old.worktree_shared != *worktree_shared
+        || old.archived_revision != *archived_revision
+    {
+        events.push(ServerEvent::IndexSummaryReplaced(baseline(new.clone())));
     }
     events
 }
@@ -780,8 +802,165 @@ impl AppState {
         ]
     }
 
+    /// Every unarchived thread with its summary: what the index topic's
+    /// changes are told from.
     pub fn index_snapshot(&self) -> IndexSnapshot {
         self.index_snapshot_with_summary(self.build_index_summary())
+    }
+
+    /// Whether the index carries the thread
+    /// ([`tcode_core::thread_sort::in_index`]).
+    fn in_index(&self, meta: &SessionMeta) -> bool {
+        tcode_core::thread_sort::in_index(meta, |id| self.sessions.by_id(id))
+    }
+
+    /// `snapshot` as a subscriber's baseline: the threads of the index, and
+    /// of the summary what is theirs.
+    fn index_baseline(&self, mut snapshot: IndexSnapshot) -> IndexSnapshot {
+        snapshot.sessions.retain(|meta| self.in_index(meta));
+        snapshot.summary = self.baseline_summary(snapshot.summary);
+        snapshot
+    }
+
+    /// Date `meta`'s project by it when the index leaves the thread out.
+    fn note_outside_index(&self, summary: &mut IndexSummary, meta: &SessionMeta) {
+        if let Some(project_id) = &meta.project_id
+            && !self.in_index(meta)
+        {
+            let latest = summary
+                .outside_updated_at
+                .entry(project_id.clone())
+                .or_default();
+            *latest = (*latest).max(meta.updated_at);
+        }
+    }
+
+    /// `summary` as the index carries it: of each thread, what is said of
+    /// the ones the index lists.
+    fn baseline_summary(&self, mut summary: IndexSummary) -> IndexSummary {
+        let drafts: HashSet<&str> = self.listed_drafts().map(|meta| meta.id.as_str()).collect();
+        let carried = |id: &String| match self.sessions.by_id(id) {
+            Some(meta) => self.in_index(meta),
+            None => drafts.contains(id.as_str()),
+        };
+        summary.activity.retain(|id, _| carried(id));
+        summary.worktree_shared.retain(carried);
+        summary
+    }
+
+    /// Settled threads after `before`, the most recently settled first, with
+    /// what the index's summary would say of them.
+    pub(crate) fn settled_sessions(
+        &self,
+        principal: &tcode_protocol::Principal,
+        scope: &tcode_protocol::SettledScope,
+        before: Option<&tcode_protocol::SettledCursor>,
+        limit: usize,
+    ) -> tcode_protocol::SessionPage {
+        use tcode_core::thread_sort::settled_rank;
+        let before = before.map(|cursor| (std::cmp::Reverse(cursor.at), cursor.id.as_str()));
+        let mut settled: Vec<_> = self
+            .settled_roster(principal)
+            .filter(|meta| scope.holds(meta.project_id.as_deref()))
+            .filter(|meta| before.is_none_or(|before| settled_rank(meta) > before))
+            .collect();
+        settled.sort_unstable_by_key(|meta| settled_rank(meta));
+        settled.truncate(limit);
+        self.session_page(settled)
+    }
+
+    /// The settled threads `principal` lists.
+    fn settled_roster<'a>(
+        &'a self,
+        principal: &'a tcode_protocol::Principal,
+    ) -> impl Iterator<Item = &'a SessionMeta> {
+        let allowed = Self::principal_projects(principal);
+        self.sessions
+            .iter()
+            .filter(|meta| tcode_core::thread_sort::in_roster(meta) && meta.is_settled())
+            .filter(move |meta| {
+                allowed.is_none_or(|projects| {
+                    meta.project_id
+                        .as_ref()
+                        .is_some_and(|id| projects.contains(id))
+                })
+            })
+    }
+
+    /// The settled threads whose titles match `query`, the best first.
+    pub(crate) fn find_settled_sessions(
+        &self,
+        principal: &tcode_protocol::Principal,
+        query: &str,
+        limit: usize,
+    ) -> tcode_protocol::SessionPage {
+        use tcode_core::thread_sort::settled_rank;
+        let mut found: Vec<_> = self
+            .settled_roster(principal)
+            .filter_map(|meta| Some((tcode_core::fuzzy::fuzzy_score(query, &meta.title)?, meta)))
+            .collect();
+        found.sort_unstable_by_key(|(score, meta)| (std::cmp::Reverse(*score), settled_rank(meta)));
+        found.truncate(limit);
+        self.session_page(found.into_iter().map(|(_, meta)| meta).collect())
+    }
+
+    /// The thread nobody started that `session_id` descends from, and every
+    /// unarchived thread that descends from it.
+    pub(crate) fn thread_family(
+        &self,
+        principal: &tcode_protocol::Principal,
+        session_id: &str,
+    ) -> Option<tcode_protocol::SessionPage> {
+        let meta = self.sessions.by_id(session_id)?;
+        let lead = tcode_core::thread_sort::lead(meta, |id| self.sessions.by_id(id));
+        if lead.archived_at.is_some()
+            || Self::principal_projects(principal).is_some_and(|projects| {
+                !lead
+                    .project_id
+                    .as_ref()
+                    .is_some_and(|id| projects.contains(id))
+            })
+        {
+            return None;
+        }
+        let children = self.sessions.children();
+        let mut family = vec![lead];
+        let mut next = 0;
+        while let Some(parent) = family.get(next) {
+            next += 1;
+            let started = children.get(&parent.id).into_iter().flatten();
+            family.extend(started.map(|index| &self.sessions[*index]));
+        }
+        Some(self.session_page(family))
+    }
+
+    /// The projects a principal is confined to; `None` is every project.
+    fn principal_projects(principal: &tcode_protocol::Principal) -> Option<&Vec<String>> {
+        match principal {
+            tcode_protocol::Principal::Space { project_ids, .. } => Some(project_ids),
+            _ => None,
+        }
+    }
+
+    fn session_page(&self, sessions: Vec<&SessionMeta>) -> tcode_protocol::SessionPage {
+        let projection = ActivityProjection::new(self);
+        let sharing = std::cell::OnceCell::new();
+        let mut page = tcode_protocol::SessionPage::default();
+        for meta in sessions {
+            let resident = self.resident(&meta.id);
+            let meta = resident.map_or(meta, |session| &session.meta);
+            page.activity
+                .insert(meta.id.clone(), projection.session_activity(meta, resident));
+            if meta.worktree.is_some()
+                && sharing
+                    .get_or_init(|| self.worktree_sharing())
+                    .is_shared(meta)
+            {
+                page.worktree_shared.insert(meta.id.clone());
+            }
+            page.sessions.push(meta.clone());
+        }
+        page
     }
 
     fn index_snapshot_with_summary(&self, summary: IndexSummary) -> IndexSnapshot {
@@ -808,6 +987,16 @@ impl AppState {
         let sharing = std::cell::OnceCell::new();
         for meta in &self.sessions {
             if meta.archived_at.is_none() {
+                self.note_outside_index(&mut summary, meta);
+                if meta.is_settled()
+                    && tcode_core::thread_sort::in_roster(meta)
+                    && let Some(project_id) = &meta.project_id
+                {
+                    *summary
+                        .settled_counts
+                        .entry(project_id.clone())
+                        .or_default() += 1;
+                }
                 let resident = self.resident(&meta.id);
                 summary.activity.insert(
                     meta.id.clone(),
@@ -900,12 +1089,19 @@ impl AppState {
         let sharing = std::cell::OnceCell::new();
         let mut summary = IndexSummary::default();
         for meta in &metas {
-            if meta.archived_at.is_some() {
-                *summary
-                    .archived_counts
-                    .entry(meta.project_id.clone().expect("scoped project"))
-                    .or_default() += 1;
+            if meta.archived_at.is_none() {
+                self.note_outside_index(&mut summary, meta);
             }
+            let counts = if meta.archived_at.is_some() {
+                &mut summary.archived_counts
+            } else if meta.is_settled() && tcode_core::thread_sort::in_roster(meta) {
+                &mut summary.settled_counts
+            } else {
+                continue;
+            };
+            *counts
+                .entry(meta.project_id.clone().expect("scoped project"))
+                .or_default() += 1;
         }
         for meta in metas
             .iter()
@@ -1193,12 +1389,12 @@ impl AppState {
                 view_only: matches!(principal, tcode_protocol::Principal::Viewer { .. }),
             },
             Topic::SpaceIndex { space_id } => {
-                ServerEvent::IndexSnapshot(self.space_index_snapshot(
+                ServerEvent::IndexSnapshot(self.index_baseline(self.space_index_snapshot(
                     space_id,
                     self.space_scopes.get(space_id).unwrap_or(&BTreeSet::new()),
-                ))
+                )))
             }
-            Topic::Index => ServerEvent::IndexSnapshot(self.index_snapshot()),
+            Topic::Index => ServerEvent::IndexSnapshot(self.index_baseline(self.index_snapshot())),
             Topic::Settings => ServerEvent::SettingsSnapshot(self.settings_snapshot()),
             Topic::Providers => ServerEvent::ProvidersReplaced(self.providers_status_snapshot()),
             Topic::GitStatus { session_id } => {

@@ -119,7 +119,15 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     .unwrap();
     loop {
         if let ServerEvent::IndexSnapshot(snapshot) = next_host_event(&events).event {
-            let find = |id: &str| snapshot.sessions.iter().find(|meta| meta.id == id).unwrap();
+            let settled = settled_threads(&link);
+            let find = |id: &str| {
+                snapshot
+                    .sessions
+                    .iter()
+                    .chain(&settled.sessions)
+                    .find(|meta| meta.id == id)
+                    .unwrap()
+            };
             assert_eq!(
                 find("legacy").settled_override,
                 Some(tcode_core::project::SettledOverride::Settled)
@@ -151,6 +159,104 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     link.shutdown_blocking().unwrap();
     restarted.to_host.close();
     restarted.stopped.recv_blocking().unwrap();
+}
+
+/// The settled threads a client reads beside the index, all of them.
+fn settled_threads(link: &tcode_client::HostLink) -> tcode_protocol::SessionPage {
+    let settled = smol::block_on(link.query(tcode_protocol::Query::SettledSessions {
+        scope: Default::default(),
+        before: None,
+        limit: u32::MAX,
+    }));
+    match settled {
+        Ok(tcode_protocol::QueryResponse::SettledSessions(page)) => page,
+        other => panic!("the settled threads could not be read: {other:?}"),
+    }
+}
+
+/// A subscriber's index carries the threads that are not settled, with
+/// what they started, and counts the settled ones. Those are read a page at
+/// a time, the latest settled first, and a thread outside the index with
+/// the thread it descends from and everything that one started.
+#[test]
+fn the_index_leaves_settled_threads_to_pages_and_families() {
+    use tcode_protocol::{Query, QueryResponse, SettledCursor, SettledScope};
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("index-settled-pages");
+    let thread = |id: &str, settled: Option<u64>, parent: Option<&str>| {
+        stored_thread(&store, id, ProviderKind::Codex, store.root(), |meta| {
+            meta.project_id = Some("project".into());
+            meta.settled_at = settled;
+            meta.settled_override = settled.map(|_| tcode_core::project::SettledOverride::Settled);
+            meta.parent_session_id = parent.map(str::to_owned);
+        });
+    };
+    thread("active", None, None);
+    thread("active-child", Some(5), Some("active"));
+    thread("old", Some(10), None);
+    thread("old-child", None, Some("old"));
+    thread("older", Some(5), None);
+    thread("newest", Some(20), None);
+    let (state, _providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+
+    let ids = |sessions: &[SessionMeta]| -> Vec<String> {
+        sessions.iter().map(|meta| meta.id.clone()).collect()
+    };
+    let snapshot = cx
+        .drain_outgoing()
+        .into_iter()
+        .find_map(|message| match message {
+            HostMessage::Event(EventEnvelope {
+                event: ServerEvent::IndexSnapshot(snapshot),
+                ..
+            }) => Some(snapshot),
+            _ => None,
+        })
+        .expect("the subscriber's index");
+    let mut listed = ids(&snapshot.sessions);
+    listed.sort();
+    assert_eq!(listed, ["active", "active-child"]);
+    let mut active: Vec<_> = snapshot.summary.activity.keys().cloned().collect();
+    active.sort();
+    assert_eq!(active, listed);
+    assert_eq!(snapshot.summary.settled_counts["project"], 3);
+
+    let page = |cx: &mut TestAppContext, before: Option<SettledCursor>| {
+        let query = Query::SettledSessions {
+            scope: SettledScope::default(),
+            before,
+            limit: 2,
+        };
+        match state.query(cx, query).unwrap() {
+            QueryResponse::SettledSessions(page) => page,
+            other => panic!("unexpected response: {other:?}"),
+        }
+    };
+    let first = page(cx, None);
+    assert_eq!(ids(&first.sessions), ["newest", "old"]);
+    assert!(first.activity.contains_key("old"));
+    let rest = page(
+        cx,
+        Some(SettledCursor {
+            at: 10,
+            id: "old".into(),
+        }),
+    );
+    assert_eq!(ids(&rest.sessions), ["older"]);
+
+    let family = state.query(
+        cx,
+        Query::ThreadFamily {
+            session_id: "old-child".into(),
+        },
+    );
+    match family.unwrap() {
+        QueryResponse::ThreadFamily(family) => {
+            assert_eq!(ids(&family.sessions), ["old", "old-child"])
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
 }
 
 #[test]
@@ -1359,7 +1465,7 @@ fn an_old_profiles_activity_backfills_and_updates_the_index() {
     loop {
         match next_host_event(&events).event {
             ServerEvent::IndexSnapshot(snapshot) => activity = snapshot.summary.activity,
-            ServerEvent::IndexSummaryReplaced(summary) => activity = summary.activity,
+            ServerEvent::IndexSummaryReplaced(summary) => activity.extend(summary.activity),
             ServerEvent::IndexActivitiesChanged { upserts, removed } => {
                 activity.extend(upserts);
                 for id in removed {
@@ -1368,8 +1474,11 @@ fn an_old_profiles_activity_backfills_and_updates_the_index() {
             }
             _ => continue,
         }
+        // A thread this old settles, and the index leaves a settled thread
+        // to the page a client reads it by.
+        let mut activity = activity.clone();
+        activity.extend(settled_threads(&link).activity);
         if activity.len() == metas.len() && activity.values().all(|activity| activity.failed) {
-            assert_eq!(activity.len(), metas.len());
             break;
         }
     }
@@ -1391,14 +1500,10 @@ fn an_old_profiles_activity_backfills_and_updates_the_index() {
     .unwrap();
     loop {
         if let ServerEvent::IndexSnapshot(snapshot) = next_host_event(&events).event {
-            assert_eq!(snapshot.summary.activity.len(), metas.len());
-            assert!(
-                snapshot
-                    .summary
-                    .activity
-                    .values()
-                    .all(|activity| activity.failed)
-            );
+            let mut activity = snapshot.summary.activity;
+            activity.extend(settled_threads(&link).activity);
+            assert_eq!(activity.len(), metas.len());
+            assert!(activity.values().all(|activity| activity.failed));
             break;
         }
     }

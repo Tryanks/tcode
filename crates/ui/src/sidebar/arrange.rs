@@ -322,12 +322,18 @@ impl SessionsSidebar {
         scope: Option<&ProjectKey>,
         cx: &App,
     ) -> ThreadSections<(SessionMeta, bool)> {
-        let sessions = self
+        let (sessions, held) = self
             .store_of(host)
-            .map(|store| store.read(cx).flat_sessions())
+            .map(|store| {
+                let store = store.read(cx);
+                (store.flat_sessions(), store.settled_held())
+            })
             .unwrap_or_default();
-        let sections = partition_threads(&sessions);
+        let mut sections = partition_threads(&sessions);
         let project = host_scope(scope, host);
+        // Settled holds what the list's shelf has read.
+        let shelf = settled_scope(project.flatten(), &HashSet::new());
+        sections.settled.retain(|meta| held.reached(&shelf, meta));
         let scoped = |rows: &Vec<&SessionMeta>| {
             rows.iter()
                 .map(|meta| {
@@ -570,7 +576,7 @@ impl SessionsSidebar {
         let landing = self.landing.as_ref().expect("checked above");
         let (section, index) = landing.gap;
         let listed = host_scope(landing.scope.as_ref(), &host).is_some_and(|project| {
-            project_threads(&of.flat, project, &of.hidden)
+            project_threads(&of.flat, project, &of.hidden, &of.settled, None)
                 .section(section)
                 .iter()
                 .position(|meta| meta.id == landing.thread.session_id)
@@ -1157,7 +1163,7 @@ impl SessionsSidebar {
                     let host = self.arranged(
                         &lists.host,
                         scope.as_ref(),
-                        project_threads(&lists.flat, project, &lists.hidden),
+                        project_threads(&lists.flat, project, &lists.hidden, &lists.settled, None),
                     );
                     Some(tagged_sections(&lists.host, host))
                 })

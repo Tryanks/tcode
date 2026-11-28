@@ -4,6 +4,7 @@ pub mod acp;
 pub mod attachments;
 pub mod collaboration;
 pub mod control;
+pub mod fuzzy;
 pub mod git;
 pub mod notice;
 pub mod permissions;

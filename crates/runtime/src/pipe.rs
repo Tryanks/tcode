@@ -1675,6 +1675,27 @@ fn dispatch_query(
             let archived = app.scoped_archived_sessions(&cx.principal);
             cx.spawn_background(async move { Ok(QueryResponse::ArchivedSessions(archived)) })
         }
+        Query::SettledSessions {
+            scope,
+            before,
+            limit,
+        } => {
+            let page = app.settled_sessions(&cx.principal, &scope, before.as_ref(), limit as usize);
+            cx.spawn_background(async move { Ok(QueryResponse::SettledSessions(page)) })
+        }
+        Query::FindSettledSessions { query, limit } => {
+            let page = app.find_settled_sessions(&cx.principal, &query, limit as usize);
+            cx.spawn_background(async move { Ok(QueryResponse::SettledSessions(page)) })
+        }
+        Query::ThreadFamily { session_id } => {
+            let family = app
+                .thread_family(&cx.principal, &session_id)
+                .ok_or_else(|| ProtocolError {
+                    code: "thread_not_found".into(),
+                    message: format!("no thread {session_id} to read"),
+                });
+            cx.spawn_background(async move { family.map(QueryResponse::ThreadFamily) })
+        }
         Query::ControlActivity { limit, filter } => {
             let activity = app.control_activity(&filter, limit as usize);
             cx.spawn_background(async move { Ok(QueryResponse::ControlActivity(activity)) })

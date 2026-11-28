@@ -11,6 +11,130 @@ use tcode_services::store::SessionStore;
 
 use super::{ConversationDestination, WorkspaceAttachment, WorkspaceStore, history::HeldHistory};
 
+/// What a scripted host's index carries of `sessions`, and the threads it
+/// leaves to [`answer_outside_index`].
+pub(crate) fn host_index(
+    sessions: Vec<SessionMeta>,
+    projects: Vec<tcode_core::project::Project>,
+    mut summary: tcode_protocol::IndexSummary,
+) -> (tcode_protocol::IndexSnapshot, Vec<SessionMeta>) {
+    use tcode_core::thread_sort::{in_index, in_roster};
+    let by_id = |id: &str| sessions.iter().find(|meta| meta.id == id);
+    let (carried, outside): (Vec<&SessionMeta>, Vec<&SessionMeta>) =
+        sessions.iter().partition(|meta| in_index(meta, by_id));
+    let carried: Vec<SessionMeta> = carried.into_iter().cloned().collect();
+    let outside: Vec<SessionMeta> = outside.into_iter().cloned().collect();
+    for meta in &outside {
+        if in_roster(meta)
+            && meta.is_settled()
+            && let Some(project) = &meta.project_id
+        {
+            *summary.settled_counts.entry(project.clone()).or_default() += 1;
+        }
+        if let Some(project) = &meta.project_id {
+            let latest = summary
+                .outside_updated_at
+                .entry(project.clone())
+                .or_default();
+            *latest = (*latest).max(meta.updated_at);
+        }
+    }
+    (
+        tcode_protocol::IndexSnapshot {
+            summary,
+            sessions: carried,
+            projects,
+        },
+        outside,
+    )
+}
+
+/// Play a scripted host's part for the threads its index leaves out: read
+/// what the client sends on `requests` and answer its settled pages, title
+/// searches and families from `outside`. Everything else it sends is dropped.
+pub(crate) fn answer_outside_index(
+    cx: &mut TestAppContext,
+    requests: async_channel::Receiver<String>,
+    replies: async_channel::Sender<String>,
+    outside: Vec<SessionMeta>,
+) -> gpui::Task<()> {
+    use tcode_core::thread_sort::{in_roster, lead, settled_rank};
+    use tcode_protocol::{ClientPayload, HostMessage, Query, QueryResponse, SessionPage};
+    let page = |sessions: Vec<SessionMeta>| SessionPage {
+        sessions,
+        ..Default::default()
+    };
+    cx.background_executor.spawn(async move {
+        while let Ok(line) = requests.recv().await {
+            let message = tcode_protocol::decode_client_line(&line).unwrap();
+            let ClientPayload::Query(query) = message.payload else {
+                continue;
+            };
+            let mut settled: Vec<_> = outside
+                .iter()
+                .filter(|meta| in_roster(meta) && meta.is_settled())
+                .collect();
+            settled.sort_by_key(|meta| settled_rank(meta));
+            let result = match query {
+                Query::SettledSessions {
+                    scope,
+                    before,
+                    limit,
+                } => Ok(QueryResponse::SettledSessions(page(
+                    settled
+                        .into_iter()
+                        .filter(|meta| scope.holds(meta.project_id.as_deref()))
+                        .filter(|meta| {
+                            before.as_ref().is_none_or(|before| {
+                                settled_rank(meta) > (std::cmp::Reverse(before.at), &before.id)
+                            })
+                        })
+                        .take(limit as usize)
+                        .cloned()
+                        .collect(),
+                ))),
+                Query::FindSettledSessions { query, limit } => {
+                    Ok(QueryResponse::SettledSessions(page(
+                        settled
+                            .into_iter()
+                            .filter(|meta| {
+                                tcode_core::fuzzy::fuzzy_score(&query, &meta.title).is_some()
+                            })
+                            .take(limit as usize)
+                            .cloned()
+                            .collect(),
+                    )))
+                }
+                Query::ThreadFamily { session_id } => {
+                    let by_id = |id: &str| outside.iter().find(|meta| meta.id == id);
+                    match by_id(&session_id) {
+                        Some(meta) => {
+                            let family = lead(meta, by_id).id.clone();
+                            Ok(QueryResponse::ThreadFamily(page(
+                                outside
+                                    .iter()
+                                    .filter(|meta| lead(meta, by_id).id == family)
+                                    .cloned()
+                                    .collect(),
+                            )))
+                        }
+                        None => Err(tcode_protocol::ProtocolError {
+                            code: "thread_not_found".into(),
+                            message: format!("no thread {session_id} to read"),
+                        }),
+                    }
+                }
+                _ => continue,
+            };
+            let reply = HostMessage::QueryResult {
+                id: message.id,
+                result,
+            };
+            let _ = replies.try_send(tcode_protocol::encode_line(&reply).unwrap());
+        }
+    })
+}
+
 pub(crate) fn seed_full_scope(
     store: &gpui::Entity<WorkspaceStore>,
     incoming: &async_channel::Sender<String>,
@@ -3226,6 +3350,108 @@ fn a_settings_change_before_the_scope_arrives_is_queued(cx: &mut TestAppContext)
             patch: tcode_protocol::SettingsPatch::WordWrapDiffs(true)
         }
     )));
+    link.close();
+}
+
+/// A client holds the settled threads a shelf read beside the host's index:
+/// the fingerprint it reconnects with is still that index's, so the host
+/// answers that nothing changed, and a new index keeps what the shelf held.
+#[gpui::test]
+fn settled_pages_are_held_beside_the_index(cx: &mut TestAppContext) {
+    let (to_host, requests) = async_channel::unbounded();
+    let (replies, from_host) = async_channel::unbounded();
+    let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+    let link = tcode_client::HostLink::new(to_host, from_host);
+    let store = cx.new(|cx| {
+        WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, None, cx)
+    });
+    crate::store::tests::seed_full_scope(&store, &replies, deferred, cx);
+    let mut pump = std::pin::pin!(link.pump());
+    let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let root = std::path::Path::new("/project");
+    let carried = tcode_protocol::IndexSnapshot {
+        summary: tcode_protocol::IndexSummary {
+            settled_counts: [("p".to_owned(), 2)].into(),
+            ..Default::default()
+        },
+        sessions: vec![thread(root, "active", "p", None)],
+        projects: Vec::new(),
+    };
+    let index = || carried.clone();
+    let receive_index = |cx: &mut TestAppContext| {
+        store.update(cx, |store, cx| {
+            store.receive(
+                EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Index,
+                    event: ServerEvent::IndexSnapshot(index()),
+                },
+                cx,
+            );
+        });
+    };
+    receive_index(cx);
+    let fingerprint =
+        tcode_protocol::index_fingerprint(&carried.summary, &carried.sessions, &carried.projects)
+            .unwrap();
+
+    let scope = tcode_protocol::SettledScope {
+        project_id: Some("p".into()),
+        except_projects: Vec::new(),
+    };
+    store.update(cx, |store, cx| store.want_settled(&scope, 1, cx));
+    cx.run_until_parked();
+    let query = std::iter::from_fn(|| requests.try_recv().ok())
+        .map(|line| tcode_protocol::decode_client_line(&line).unwrap())
+        .find(|message| {
+            message.payload
+                == tcode_protocol::ClientPayload::Query(tcode_protocol::Query::SettledSessions {
+                    scope: scope.clone(),
+                    before: None,
+                    limit: 1,
+                })
+        })
+        .expect("the shelf asks for its first row");
+    let settled = |id: &str, at: u64| {
+        let mut meta = thread(root, id, "p", None);
+        meta.settled_at = Some(at);
+        meta.settled_override = Some(tcode_core::project::SettledOverride::Settled);
+        meta
+    };
+    replies
+        .try_send(
+            tcode_protocol::encode_line(&tcode_protocol::HostMessage::QueryResult {
+                id: query.id,
+                result: Ok(tcode_protocol::QueryResponse::SettledSessions(
+                    tcode_protocol::SessionPage {
+                        sessions: vec![settled("done", 20)],
+                        ..Default::default()
+                    },
+                )),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+    cx.run_until_parked();
+
+    let held = |cx: &mut TestAppContext| {
+        store.read_with(cx, |store, _| {
+            let held = store.settled_held();
+            (
+                held.count(&scope),
+                held.reached(&scope, &settled("done", 20)),
+                // One settled before the page's last row is not read yet.
+                held.reached(&scope, &settled("earlier", 10)),
+                store.thread_meta("done").is_some(),
+                store.cached_index_fingerprint(),
+            )
+        })
+    };
+    let expected = (2, true, false, true, Some(fingerprint));
+    assert_eq!(held(cx), expected);
+    receive_index(cx);
+    assert_eq!(held(cx), expected);
     link.close();
 }
 

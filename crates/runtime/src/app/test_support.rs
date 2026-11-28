@@ -78,7 +78,7 @@ impl ClientView {
                 self.sessions.remove(&session_id);
             }
             (Topic::Index, ServerEvent::IndexSummaryReplaced(summary)) => {
-                self.activity = summary.activity;
+                self.activity.extend(summary.activity);
                 self.title_generating = summary.title_generating;
                 self.worktree_shared = summary.worktree_shared;
             }
@@ -106,6 +106,17 @@ impl ClientView {
             (_, ServerEvent::Runtime(notification)) => self.notifications.push(notification),
             _ => {}
         }
+    }
+
+    /// Keep the threads of a page read from outside the index.
+    fn hold(&mut self, page: tcode_protocol::SessionPage) {
+        self.activity.extend(page.activity);
+        self.worktree_shared.extend(page.worktree_shared);
+        self.sessions.extend(
+            page.sessions
+                .into_iter()
+                .map(|meta| (meta.id.clone(), meta)),
+        );
     }
 
     /// The thread's status as its status topic last gave it.
@@ -664,9 +675,12 @@ impl TestEntity {
         cx.view.answers.remove(&id).unwrap()
     }
 
-    /// Hold `topic`, as a client showing what it carries does.
+    /// Hold `topic`, as a client showing what it carries does. One that
+    /// holds the index reads what the index leaves out as well, as a client
+    /// does that opens every Settled shelf and every thread on them.
     pub(super) fn subscribe(&self, cx: &mut TestAppContext, topic: Topic) {
         let id = cx.request_id();
+        let index = topic == Topic::Index;
         self.deliver(
             cx,
             id,
@@ -677,6 +691,31 @@ impl TestEntity {
             }),
         );
         cx.run_until_parked();
+        if index {
+            let settled = self.query(
+                cx,
+                Query::SettledSessions {
+                    scope: Default::default(),
+                    before: None,
+                    limit: u32::MAX,
+                },
+            );
+            let Ok(QueryResponse::SettledSessions(settled)) = settled else {
+                panic!("the settled threads could not be read: {settled:?}");
+            };
+            for meta in &settled.sessions {
+                let family = self.query(
+                    cx,
+                    Query::ThreadFamily {
+                        session_id: meta.id.clone(),
+                    },
+                );
+                let Ok(QueryResponse::ThreadFamily(family)) = family else {
+                    panic!("the family of {} could not be read: {family:?}", meta.id);
+                };
+                cx.view.hold(family);
+            }
+        }
     }
 
     /// Let `topic` go.

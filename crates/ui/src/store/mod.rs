@@ -47,7 +47,9 @@ pub(crate) mod images;
 mod intents;
 mod preview;
 mod right_panel;
+mod settled;
 pub(crate) use preview::{PreviewPlace, PreviewReleased};
+pub use settled::SettledHeld;
 mod thread;
 pub(crate) use images::{
     ImageHost, MAX_PREVIEW_PIXELS, MediaState, image_preview, item_image_preview,
@@ -297,6 +299,14 @@ pub struct WorkspaceStore {
     archived_failure: Option<(u64, String)>,
     archived_holds: usize,
     archived_task: Option<Task<()>>,
+    /// The pages read of the settled threads each shelf shows.
+    settled_shelves: HashMap<tcode_protocol::SettledScope, settled::SettledShelf>,
+    /// The families being read, by the thread each was asked for.
+    family_tasks: HashMap<String, Task<()>>,
+    /// Threads asked for by family whose host has not answered: one the
+    /// index does not carry is not gone until it says so.
+    family_unread: HashSet<String>,
+    this: gpui::WeakEntity<Self>,
     /// The thread the index event being applied removed, so the destination
     /// can still follow it to its parent.
     removed_session: Option<SessionMeta>,
@@ -518,6 +528,10 @@ impl WorkspaceStore {
             archived_failure: None,
             archived_holds: 0,
             archived_task: None,
+            settled_shelves: HashMap::new(),
+            family_tasks: HashMap::new(),
+            family_unread: HashSet::new(),
+            this: cx.weak_entity(),
             storage_migration: None,
             storage_migration_holds: 0,
             disk_usage: DiskUsageState::default(),
@@ -860,6 +874,9 @@ impl WorkspaceStore {
             self.index_replica = Default::default();
             self.reindex_sessions();
             self.index_summary = Default::default();
+            self.settled_shelves.clear();
+            self.family_tasks.clear();
+            self.family_unread.clear();
             self.draft_fallback_pending = false;
         }
         if needs_baseline {
@@ -1468,7 +1485,11 @@ impl WorkspaceStore {
                         .any(|project| project.id == *project_id)
                 });
         }
-        !self.session_visible(&status.session_id)
+        // A thread not held that the host was asked for is not gone until
+        // the host says so.
+        let unread = self.thread_meta(&status.session_id).is_none()
+            && self.family_unread.contains(&status.session_id);
+        !self.session_visible(&status.session_id) && !unread
     }
 
     /// Every open thread that left the visible index — archived (alone or
@@ -1549,7 +1570,8 @@ impl WorkspaceStore {
                     })
             {
                 self.reopen_thread(&session_id, cx);
-            } else if !visible && !self.scope.is_full() {
+            } else if !visible && !self.scope.is_full() && !self.family_unread.contains(&session_id)
+            {
                 self.close_thread(&session_id, cx);
             }
         }
@@ -1780,6 +1802,12 @@ impl WorkspaceStore {
                 .iter()
                 .filter(|meta| meta.archived_at.is_none()),
             self.settings_replica.project_sort,
+            |project| {
+                self.index_summary
+                    .outside_updated_at
+                    .get(&project.id)
+                    .copied()
+            },
         );
         for group in &mut groups {
             group.sessions.retain(tcode_core::thread_sort::in_roster);
@@ -1807,21 +1835,44 @@ impl WorkspaceStore {
         self.index_summary.title_generating.contains(session_id)
     }
 
+    /// The fingerprint of what the host's index carries of what is held
+    /// here, which leaves out the threads read by page and by family.
     fn cached_index_fingerprint(&self) -> Option<String> {
-        self.index_hydrated
-            .then(|| {
-                tcode_protocol::index_fingerprint(
-                    &self.index_summary,
-                    &self.index_replica.0,
-                    &self.index_replica.1,
-                )
-                .ok()
-            })
-            .flatten()
+        if !self.index_hydrated {
+            return None;
+        }
+        let sessions: Vec<SessionMeta> = self
+            .index_replica
+            .0
+            .iter()
+            .filter(|meta| self.in_index(meta))
+            .cloned()
+            .collect();
+        let listed: HashSet<&str> = sessions.iter().map(|meta| meta.id.as_str()).collect();
+        let mut summary = self.index_summary.clone();
+        summary
+            .activity
+            .retain(|id, _| listed.contains(id.as_str()));
+        summary
+            .worktree_shared
+            .retain(|id| listed.contains(id.as_str()));
+        tcode_protocol::index_fingerprint(&summary, &sessions, &self.index_replica.1).ok()
     }
 
+    /// Take the host's summary of its index, keeping what was last said of
+    /// the threads held from outside it.
     fn apply_index_summary(&mut self, summary: &IndexSummary, cx: &mut Context<Self>) {
-        self.index_summary = summary.clone();
+        let old = std::mem::replace(&mut self.index_summary, summary.clone());
+        for (id, activity) in old.activity {
+            if self.outside_index(&id) {
+                self.index_summary.activity.entry(id).or_insert(activity);
+            }
+        }
+        for id in old.worktree_shared {
+            if self.outside_index(&id) {
+                self.index_summary.worktree_shared.insert(id);
+            }
+        }
         if self.archived_holds > 0
             && self
                 .archived_replica
@@ -1976,6 +2027,7 @@ impl WorkspaceStore {
             &self.index_replica.1,
             archived,
             self.settings_replica.project_sort,
+            |_| None,
         );
         for group in &mut groups {
             group
